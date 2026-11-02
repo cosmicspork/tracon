@@ -1241,7 +1241,13 @@ async fn opening_an_approval_claims_it_and_leaving_releases_it() {
         v["locked_fields"],
         json!(["key", "project", "repo", "number", "iid"])
     );
-    assert_eq!(v["input_schema"]["required"][0], "project");
+    // Required of a single issue and of each item of a set alike, which
+    // the handler checks: the schema can only say it of the items.
+    assert_eq!(
+        v["input_schema"]["properties"]["issues"]["items"]["required"][0],
+        "project"
+    );
+    assert_eq!(v["item_list"], "issues");
     assert!(v["approval"]["claimed_ms"].is_i64(), "{v}");
     assert!(v["claimed_before_ms"].is_null(), "{v}");
     assert!(v["options"]

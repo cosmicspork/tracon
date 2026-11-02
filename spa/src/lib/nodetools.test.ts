@@ -47,6 +47,10 @@ test('forge calls name the change, run or pipeline', () => {
   expect(nodeCallText('pr_comment', { number: 439, body: 'b' })).toBe('Comment on #439')
   expect(nodeCallText('github_issue_comment', { number: 593, body: 'b' })).toBe('Comment on issue #593')
   expect(nodeCallText('pr_for_branch', { branch: 'fix/x' })).toBe('Pull request for fix/x')
+  expect(nodeCallText('issue_create', { summary: 'Rotate keys' })).toBe('Create an issue · Rotate keys')
+  expect(nodeCallText('issue_create', { issues: [{ summary: 'Port the feed' }, { summary: 'Read it' }] })).toBe(
+    'Create 2 issues · Port the feed',
+  )
   expect(nodeCallText('pr_merge', { number: 12, head_sha: 'abc', operation_id: 'o' })).toBe('Merge #12')
   expect(nodeCallText('pr_ready', { number: 595 })).toBe('Mark ready #595')
   expect(nodeCallText('pr_ready', { number: 595, ready: false })).toBe('Back to draft #595')

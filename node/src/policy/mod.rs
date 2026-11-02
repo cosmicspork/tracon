@@ -428,7 +428,13 @@ fn prose_fields(action: &str) -> &'static [&'static str] {
         review::SUBMIT_REPORT => &["title", "body"],
         // A work item describes work, which may well be a push or a merge.
         work::WORK_DISCOVER | work::WORK_UPDATE => &["title", "body"],
-        jira::ISSUE_CREATE | jira::ISSUE_UPDATE => &["summary", "description"],
+        jira::ISSUE_UPDATE => &["summary", "description"],
+        jira::ISSUE_CREATE => &[
+            "summary",
+            "description",
+            "issues.summary",
+            "issues.description",
+        ],
         jira::ISSUE_COMMENT
         | github::PR_COMMENT
         | github::ISSUE_COMMENT
@@ -441,7 +447,15 @@ fn prose_fields(action: &str) -> &'static [&'static str] {
     }
 }
 
+/// Remove the field at `path` (`a.b`), from every item where a step of the
+/// path is a list.
 fn strip(value: &mut serde_json::Value, path: &str) {
+    if let Some(items) = value.as_array_mut() {
+        for item in items {
+            strip(item, path);
+        }
+        return;
+    }
     let Some(fields) = value.as_object_mut() else {
         return;
     };
@@ -1005,6 +1019,13 @@ mod tests {
                 serde_json::json!({ "project": "WRK", "type": "Task", "summary": "x", "description": body }),
             ),
             (
+                "issue_create",
+                serde_json::json!({ "issues": [
+                    { "project": "WRK", "type": "Epic", "summary": "gh pr merge" },
+                    { "project": "WRK", "type": "Task", "summary": "x", "description": body },
+                ] }),
+            ),
+            (
                 "pr_comment",
                 serde_json::json!({ "repo": "o/r", "number": 1, "body": body }),
             ),
@@ -1041,6 +1062,13 @@ mod tests {
             (
                 "issue_create",
                 serde_json::json!({ "project": "git push", "summary": "x" }),
+            ),
+            (
+                "issue_create",
+                serde_json::json!({ "issues": [
+                    { "project": "WRK", "summary": "x" },
+                    { "project": "git push", "summary": "x" },
+                ] }),
             ),
             (
                 "mr_comment",

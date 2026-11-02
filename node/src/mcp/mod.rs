@@ -1426,6 +1426,9 @@ impl Tools {
             // The card names the direction, so a `ready` it cannot read is
             // refused before it is shown.
             github::PR_READY | gitlab::MR_READY => github::ready_arg(args).err(),
+            // A set whose items do not fit together, such as a parent named
+            // after its child, is refused before the operator reads it.
+            jira::ISSUE_CREATE if args.get("issues").is_some() => jira::create_plan(args).err(),
             _ => None,
         }
     }
@@ -2610,10 +2613,13 @@ fn prose_title(name: &str, args: &Value) -> Option<String> {
         }
     };
     Some(match name {
-        jira::ISSUE_CREATE => with(
-            format!("{name} {} {}", id("project"), id("type")),
-            text("summary"),
-        ),
+        jira::ISSUE_CREATE => match args.get("issues").and_then(Value::as_array) {
+            Some(issues) => issue_set_title(name, issues),
+            None => with(
+                format!("{name} {} {}", id("project"), id("type")),
+                text("summary"),
+            ),
+        },
         jira::ISSUE_UPDATE => {
             let fields: Vec<&str> = ["summary", "description", "priority", "labels", "parent"]
                 .into_iter()
@@ -2768,6 +2774,39 @@ fn prose_title(name: &str, args: &Value) -> Option<String> {
     })
 }
 
+/// An `issue_create` of several issues: how many, in which projects, and
+/// their summaries in the order they are created.
+fn issue_set_title(name: &str, issues: &[Value]) -> String {
+    let field = |key: &'static str| {
+        issues
+            .iter()
+            .filter_map(move |i| i.get(key).and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+    };
+    let mut projects: Vec<&str> = Vec::new();
+    for p in field("project") {
+        if !projects.contains(&p) {
+            projects.push(p);
+        }
+    }
+    let count = match issues.len() {
+        1 => "1 issue".to_string(),
+        n => format!("{n} issues"),
+    };
+    let head = if projects.is_empty() {
+        format!("{name} {count}")
+    } else {
+        format!("{name} {count} in {}", projects.join(", "))
+    };
+    let summaries: Vec<&str> = field("summary").collect();
+    if summaries.is_empty() {
+        head
+    } else {
+        format!("{head}: {}", summaries.join(", "))
+    }
+}
+
 /// What a `pr_ready` or `mr_ready` call asks for, in words: ready unless it
 /// says `ready: false`.
 fn ready_or_draft(args: &Value) -> &'static str {
@@ -2796,6 +2835,15 @@ mod tests {
         assert_eq!(
             summarize(jira::ISSUE_CREATE, &create),
             "issue_create WRK Task: Rotate keys"
+        );
+        let set = json!({ "issues": [
+            { "project": "WRK", "type": "Epic", "summary": "Port the feed" },
+            { "project": "WRK", "type": "Story", "summary": " Read it ", "parent": "#0" },
+            { "project": "OPS", "type": "Task", "summary": "Open the port" },
+        ] });
+        assert_eq!(
+            summarize(jira::ISSUE_CREATE, &set),
+            "issue_create 3 issues in WRK, OPS: Port the feed, Read it, Open the port"
         );
         let update = json!({ "key": "WRK-2", "description": "d", "labels": ["a"] });
         assert_eq!(

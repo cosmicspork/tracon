@@ -9,6 +9,7 @@
     editProblems,
     grantsAccess,
     issueChanges,
+    itemSections,
     outcome,
     problemsByField,
     amendsNothing,
@@ -121,6 +122,8 @@
       (k) => typeof shown[k] === 'string' && shown[k] !== '' && k !== replacing?.key,
     ),
   )
+  /** Each item of a call that carries a list of them, as it would run; the list is edited below as JSON. */
+  const sections = $derived(itemSections(schema, shown, details?.item_list, details?.prose_fields ?? []))
   const settledChanges = $derived(
     !pending && details?.edited_arguments ? diffArguments(original, asArguments(details.edited_arguments)) : [],
   )
@@ -356,6 +359,41 @@
       {:else}
         <article class="md">{@html html(String(shown[key]))}</article>
       {/if}
+    </section>
+  {/each}
+
+  {#each sections as item (item.index)}
+    {@const list = details.item_list ?? ''}
+    <section class="doc item">
+      <div class="dochead">
+        <span>{list}[{item.index}] · #{item.index}</span>
+      </div>
+      {#if item.rows.length}
+        <dl class="kv">
+          {#each item.rows as row (row.key)}
+            <dt>{row.key}</dt>
+            <dd class:m={!row.value.includes(' ')}>{row.value}</dd>
+          {/each}
+        </dl>
+      {/if}
+      {#each item.prose as p (p.key)}
+        {@const at = `${list}[${item.index}].${p.key}`}
+        <div class="dochead sub">
+          <span>{p.key}</span>
+          {#if source}
+            <span>source · runs only in the preview</span>
+          {:else}
+            <button class="lnk" type="button" onclick={() => (raw[at] = !raw[at])}>
+              {raw[at] ? 'Rendered' : 'Raw source'}
+            </button>
+          {/if}
+        </div>
+        {#if raw[at] || source}
+          <pre class="src">{p.text}</pre>
+        {:else}
+          <article class="md">{@html html(p.text)}</article>
+        {/if}
+      {/each}
     </section>
   {/each}
 
@@ -608,6 +646,12 @@
     text-transform: uppercase;
     color: var(--dim);
     margin-bottom: 6px;
+  }
+  .item .kv {
+    margin-bottom: 10px;
+  }
+  .dochead.sub {
+    margin-top: 4px;
   }
   .dochead .lnk {
     text-transform: none;
