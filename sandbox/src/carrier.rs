@@ -1,5 +1,11 @@
-//! What carries the TLS connection: a TCP connection, or a unix socket the
-//! node mounts into the sandbox.
+//! What carries the TLS connection: a TCP connection, a unix socket the
+//! node mounts into the sandbox, or a unix socket the sandbox listens on for
+//! the node to connect in.
+//!
+//! The last is for a provider that relays a socket from the sandbox out to
+//! the host and nothing the other way (Apple's `container --publish-socket`).
+//! Only the carrier is reversed: the sandbox is still the TLS client, proves
+//! the same token, and trusts only the pinned certificate.
 //!
 //! A unix socket is the carrier for a container with no network at all. Under
 //! SELinux a confined container (`container_t`) may not connect to a socket
@@ -21,17 +27,22 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Io for T {}
 
 pub type BoxedIo = Box<dyn Io>;
 
-/// Where the sandbox dials.
+/// Where the sandbox dials, or listens for the node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dial {
     /// `host:port`.
     Tcp(String),
     Unix(PathBuf),
+    /// Listen on this unix socket and take the first connection.
+    Listen(PathBuf),
 }
 
 impl Dial {
+    /// The node's stream: dialled once, or for [`Dial::Listen`] the first
+    /// connection to arrive.
     pub async fn connect(&self) -> io::Result<BoxedIo> {
         match self {
+            Dial::Listen(path) => accept_once(path).await,
             Dial::Tcp(addr) => {
                 let stream = TcpStream::connect(addr).await?;
                 stream.set_nodelay(true)?;
@@ -47,8 +58,35 @@ impl std::fmt::Display for Dial {
         match self {
             Dial::Tcp(addr) => write!(f, "tcp {addr}"),
             Dial::Unix(path) => write!(f, "unix {}", path.display()),
+            Dial::Listen(path) => write!(f, "listening on unix {}", path.display()),
         }
     }
+}
+
+/// Bind `path`, take one connection, and stop listening, so nothing else
+/// can connect in afterwards. A socket file left by an earlier run of this
+/// sandbox is replaced; anything else at `path` is an error.
+async fn accept_once(path: &Path) -> io::Result<BoxedIo> {
+    use std::os::unix::fs::FileTypeExt as _;
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_socket() => std::fs::remove_file(path)?,
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{} exists and is not a socket", path.display()),
+            ))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let listener = UnixListener::bind(path)?;
+    let accepted = listener.accept().await;
+    drop(listener);
+    let _ = std::fs::remove_file(path);
+    Ok(Box::new(accepted?.0))
 }
 
 /// The node's end: whichever listener the provider's carrier needs.
@@ -231,6 +269,42 @@ mod tests {
             bind_unix_labelled(&path, None).is_err(),
             "path already bound"
         );
+    }
+
+    #[tokio::test]
+    async fn a_listening_sandbox_takes_one_connection_then_stops_listening() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run").join("node.sock");
+        // A socket left by an earlier run is replaced.
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+        let listen = Dial::Listen(path.clone());
+        let accepted = tokio::spawn(async move { listen.connect().await });
+        let node = loop {
+            match UnixStream::connect(&path).await {
+                Ok(stream) => break stream,
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(5)).await,
+            }
+        };
+        let mut sandbox = accepted.await.unwrap().unwrap();
+        let mut node = node;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        node.write_all(b"hi").await.unwrap();
+        let mut got = [0u8; 2];
+        sandbox.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"hi");
+        assert!(!path.exists(), "the listener is gone once taken");
+        assert!(UnixStream::connect(&path).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_listening_sandbox_will_not_replace_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.sock");
+        std::fs::write(&path, b"not a socket").unwrap();
+        let refused = Dial::Listen(path.clone()).connect().await.err().unwrap();
+        assert_eq!(refused.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&path).unwrap(), b"not a socket");
     }
 
     #[test]

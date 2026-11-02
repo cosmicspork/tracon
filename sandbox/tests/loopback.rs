@@ -734,3 +734,73 @@ async fn the_unix_carrier_carries_the_same_protocol() {
     assert_eq!(output.stdout, b"over unix\n");
     assert!(sandbox.finish().await.success());
 }
+
+#[tokio::test]
+async fn a_listening_sandbox_takes_the_node_connecting_in() {
+    let node = support::Node::new(Carrier::Tcp, ServerOptions::default()).await;
+    let token = node.server.tokens().issue("run");
+    let socket = node.dir.path().join("sb.sock");
+    let mut command = node.command(node.identity.pin(), &token);
+    command
+        .env_remove("TRACON_SANDBOX_ADDR")
+        .env("TRACON_SANDBOX_LISTEN", &socket);
+    let mut child = command.spawn().unwrap();
+    // Started before the sandbox listens: the node keeps trying.
+    let conn = node
+        .server
+        .connect_to(&socket, Duration::from_secs(10))
+        .await
+        .unwrap();
+    assert_eq!(conn.run(), "run");
+    let output = conn
+        .spawn(sh("echo connected in"))
+        .await
+        .unwrap()
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(output.stdout, b"connected in\n");
+    assert!(
+        !socket.exists(),
+        "nothing else can connect once the node has"
+    );
+    conn.shutdown().await.unwrap();
+    assert!(child.wait().await.unwrap().success());
+}
+
+#[tokio::test]
+async fn a_listening_sandbox_still_refuses_a_bad_token() {
+    let node = support::Node::new(Carrier::Tcp, ServerOptions::default()).await;
+    let socket = node.dir.path().join("sb.sock");
+    let mut command = node.command(node.identity.pin(), "not-a-token");
+    command
+        .env_remove("TRACON_SANDBOX_ADDR")
+        .env("TRACON_SANDBOX_LISTEN", &socket);
+    let mut child = command.spawn().unwrap();
+    let refused = node
+        .server
+        .connect_to(&socket, Duration::from_secs(10))
+        .await;
+    assert!(
+        matches!(refused, Err(SandboxError::BadToken)),
+        "{:?}",
+        refused.err()
+    );
+    assert_eq!(child.wait().await.unwrap().code(), Some(1));
+}
+
+#[tokio::test]
+async fn a_sandbox_nobody_connects_to_gives_up() {
+    let node = support::Node::new(Carrier::Tcp, ServerOptions::default()).await;
+    let token = node.server.tokens().issue("run");
+    let mut command = node.command(node.identity.pin(), &token);
+    command
+        .env_remove("TRACON_SANDBOX_ADDR")
+        .env("TRACON_SANDBOX_LISTEN", node.dir.path().join("sb.sock"))
+        .env("TRACON_SANDBOX_CONNECT_TIMEOUT_MS", "200");
+    let status = tokio::time::timeout(Duration::from_secs(5), command.status())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.code(), Some(1));
+}

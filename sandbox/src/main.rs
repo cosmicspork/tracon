@@ -6,13 +6,14 @@
 //! | Variable | Meaning |
 //! |---|---|
 //! | `TRACON_SANDBOX_ADDR` | the node as `host:port` (TCP), or |
-//! | `TRACON_SANDBOX_SOCKET` | the node's unix socket |
+//! | `TRACON_SANDBOX_SOCKET` | the node's unix socket, or |
+//! | `TRACON_SANDBOX_LISTEN` | a unix socket to listen on for the node to connect to |
 //! | `TRACON_SANDBOX_PIN` | SHA-256 of the node's certificate (`sha256:<hex>`) |
 //! | `TRACON_SANDBOX_TOKEN` | this run's one-time token, or |
 //! | `TRACON_SANDBOX_TOKEN_FILE` | a file holding it |
 //! | `TRACON_SANDBOX_SERVER_NAME` | SNI to send (default `tracon-node`) |
 //! | `TRACON_SANDBOX_KEEPALIVE_MS` | HTTP/2 ping interval (default 20000) |
-//! | `TRACON_SANDBOX_CONNECT_TIMEOUT_MS` | how long to keep dialling (default 30000) |
+//! | `TRACON_SANDBOX_CONNECT_TIMEOUT_MS` | how long to keep dialling, or to wait for the node (default 30000) |
 //! | `TRACON_SANDBOX_LOG` | log filter (default `info`), to stderr |
 //!
 //! As PID 1 it is the namespace's init: it reaps every orphan and turns
@@ -47,10 +48,20 @@ fn millis(name: &str, default: u64) -> Result<Duration, String> {
 }
 
 fn config_from_env() -> Result<Config, String> {
-    let dial = match (var("TRACON_SANDBOX_ADDR"), var("TRACON_SANDBOX_SOCKET")) {
-        (Some(addr), None) => Dial::Tcp(addr),
-        (None, Some(path)) => Dial::Unix(path.into()),
-        _ => return Err("set exactly one of TRACON_SANDBOX_ADDR and TRACON_SANDBOX_SOCKET".into()),
+    let dial = match (
+        var("TRACON_SANDBOX_ADDR"),
+        var("TRACON_SANDBOX_SOCKET"),
+        var("TRACON_SANDBOX_LISTEN"),
+    ) {
+        (Some(addr), None, None) => Dial::Tcp(addr),
+        (None, Some(path), None) => Dial::Unix(path.into()),
+        (None, None, Some(path)) => Dial::Listen(path.into()),
+        _ => {
+            return Err(
+                "set exactly one of TRACON_SANDBOX_ADDR, TRACON_SANDBOX_SOCKET and TRACON_SANDBOX_LISTEN"
+                    .into(),
+            )
+        }
     };
     let pin = CertPin::parse(&var("TRACON_SANDBOX_PIN").ok_or("TRACON_SANDBOX_PIN is not set")?)
         .map_err(|e| format!("TRACON_SANDBOX_PIN: {e}"))?;

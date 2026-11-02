@@ -32,7 +32,8 @@ pub struct Config {
     /// Sent as SNI; see [`DEFAULT_SERVER_NAME`].
     pub server_name: String,
     pub keepalive: Duration,
-    /// How long to keep dialling a node that is not answering yet.
+    /// How long to keep dialling a node that is not answering yet, or to
+    /// wait for it to connect to a listening sandbox.
     pub connect_timeout: Duration,
     /// How long processes get between SIGTERM and SIGKILL at teardown.
     pub stop_grace: Duration,
@@ -90,6 +91,16 @@ pub fn become_subreaper() {
 }
 
 async fn dial(config: &Config) -> Result<crate::carrier::BoxedIo, RunError> {
+    if let Dial::Listen(_) = config.dial {
+        return match tokio::time::timeout(config.connect_timeout, config.dial.connect()).await {
+            Ok(Ok(io)) => Ok(io),
+            Ok(Err(error)) => Err(RunError::Dial(config.dial.to_string(), error)),
+            Err(_) => Err(RunError::Dial(
+                config.dial.to_string(),
+                io::Error::new(io::ErrorKind::TimedOut, "the node did not connect"),
+            )),
+        };
+    }
     let deadline = tokio::time::Instant::now() + config.connect_timeout;
     let mut delay = Duration::from_millis(50);
     loop {

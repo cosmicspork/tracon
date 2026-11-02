@@ -221,7 +221,15 @@ impl Spawner {
 
 fn open_pty(size: WinSize) -> io::Result<(OwnedFd, OwnedFd)> {
     use rustix::pty::{grantpt, openpt, ptsname, unlockpt, OpenptFlags};
+    #[cfg(target_os = "linux")]
     let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC)?;
+    // macOS's posix_openpt takes no O_CLOEXEC; set it right after instead.
+    #[cfg(not(target_os = "linux"))]
+    let master = {
+        let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY)?;
+        rustix::io::fcntl_setfd(&master, rustix::io::FdFlags::CLOEXEC)?;
+        master
+    };
     grantpt(&master)?;
     unlockpt(&master)?;
     let name = ptsname(&master, Vec::new())?;

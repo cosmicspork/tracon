@@ -30,6 +30,9 @@ anyhow.workspace = true
 tracon-proto.workspace = true
 tracon-sync.workspace = true
 tracon-acp.workspace = true
+# The node's side of the sandbox protocol: what the probe and the providers
+# connect with.
+tracon-sandbox = { path = "../sandbox" }
 async-trait.workspace = true
 axum.workspace = true
 clap.workspace = true
