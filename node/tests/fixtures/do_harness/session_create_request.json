@@ -1,0 +1,11 @@
+{
+  "name": "tracon-spike-l1",
+  "harness": "none",
+  "size": "mars-1vcpu-1gb",
+  "keep_warm": true,
+  "egress": {
+    "allow_ips": [
+      "192.0.2.10"
+    ]
+  }
+}

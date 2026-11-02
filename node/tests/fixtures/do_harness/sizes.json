@@ -1,0 +1,39 @@
+{
+  "sizes": [
+    {
+      "slug": "mars-1vcpu-1gb",
+      "vcpus": 1,
+      "memory_mb": 1024,
+      "price_per_hour_usd": 0.0535,
+      "price_per_month_usd": 39.804
+    },
+    {
+      "slug": "mars-2vcpu-2gb",
+      "vcpus": 2,
+      "memory_mb": 2048,
+      "price_per_hour_usd": 0.107,
+      "price_per_month_usd": 79.608
+    },
+    {
+      "slug": "mars-2vcpu-4gb",
+      "vcpus": 2,
+      "memory_mb": 4096,
+      "price_per_hour_usd": 0.126,
+      "price_per_month_usd": 93.744
+    },
+    {
+      "slug": "mars-4vcpu-8gb",
+      "vcpus": 4,
+      "memory_mb": 8192,
+      "price_per_hour_usd": 0.252,
+      "price_per_month_usd": 187.488
+    },
+    {
+      "slug": "mars-16vcpu-32gb",
+      "vcpus": 16,
+      "memory_mb": 32768,
+      "price_per_hour_usd": 1.008,
+      "price_per_month_usd": 749.952
+    }
+  ]
+}

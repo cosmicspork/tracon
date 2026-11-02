@@ -1,0 +1,12 @@
+{
+  "config": {
+    "id": "0190c0de-0000-7000-8000-0000000000a5",
+    "name": "tracon-prepared",
+    "agentspec_schema_version": "agents.digitalocean.com/flat.v1",
+    "manifest": {"harness": "none", "name": "tracon-prepared", "size": "mars-2vcpu-4gb"},
+    "content_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "created_by": "00000000-0000-4000-8000-000000000000",
+    "created_at": "2026-11-02T05:20:00Z",
+    "updated_at": "2026-11-02T05:20:00Z"
+  }
+}
