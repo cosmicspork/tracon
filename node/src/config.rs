@@ -973,6 +973,12 @@ pub struct PodmanRuntime {
     /// `runner::sandbox_files::SYNC_EVERY` during a turn, and at exit. Needs
     /// `sandbox_protocol`.
     pub sandbox_files: bool,
+    /// With `sandbox_protocol`: each sandbox runs with `--network none`, and
+    /// its only route is the protocol's socket. The MCP and model gateway,
+    /// the allowlist proxy and the per-client egress proxy are tunnels over
+    /// that connection to the node, which serves the allowlist proxy itself;
+    /// no gateway container or internal network is made for them.
+    pub sandbox_tunnels: bool,
 }
 
 /// The `[[repo]]` table a running node resolves against, once the operator
@@ -2737,6 +2743,17 @@ impl Config {
         match &*self.live_repo.0.read() {
             Some(live) => live.clone(),
             None => std::sync::Arc::new(self.repo.clone()),
+        }
+    }
+
+    /// Where the node serves the allowlist proxy (`[gateway] allow_hosts`)
+    /// for sandboxes that reach it through a tunnel rather than through the
+    /// gateway container's tinyproxy: a socket beside the harness socket, so
+    /// a scratch node keeps its own.
+    pub fn allow_proxy_socket(&self) -> PathBuf {
+        match &self.gateway.harness_listen {
+            HarnessListen::Unix(path) => path.with_file_name("allow.sock"),
+            HarnessListen::Tcp(_) => Self::runtime_dir().join("allow.sock"),
         }
     }
 

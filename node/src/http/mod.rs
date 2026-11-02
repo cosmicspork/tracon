@@ -861,6 +861,22 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         ));
         tracing::info!(port, "connect proxy listening");
     }
+    // Sandboxes with no network reach the allowlist proxy through a tunnel,
+    // so the node serves it where the gateway container's tinyproxy would.
+    if cfg.runtime.kind == crate::config::RuntimeKind::Podman
+        && crate::boundary::podman::uses_sandbox_tunnels(&cfg)
+    {
+        let allow = crate::gateway::proxy::Allowlist::new(&cfg.gateway.allow_hosts)
+            .map_err(|e| anyhow::anyhow!("allowlist: {e}"))?;
+        let path = cfg.allow_proxy_socket();
+        let l = bind_unix_exclusive(&path)?;
+        tokio::spawn(crate::gateway::proxy::run_unix_refusing(
+            l,
+            allow,
+            backend.egress_refusal(),
+        ));
+        tracing::info!(socket = %path.display(), "allowlist proxy listening for sandbox tunnels");
+    }
     // Where a gateway container does carry the harness proxy, the node still
     // serves the per-client one behind the gateway's second forward: who may
     // reach what is decided here, by the grant each client presents. A pod

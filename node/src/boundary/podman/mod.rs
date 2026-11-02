@@ -379,10 +379,31 @@ pub fn uses_sandbox_files(cfg: &Config) -> bool {
     true
 }
 
+/// Whether this node's sandboxes have no network of their own, reaching
+/// the node's gateways through tunnels over the sandbox protocol. Needs the
+/// protocol; asked for without it, the setting is ignored and the gateway
+/// container serves as before.
+pub fn uses_sandbox_tunnels(cfg: &Config) -> bool {
+    if !cfg.runtime.podman.sandbox_tunnels {
+        return false;
+    }
+    if !cfg.runtime.podman.sandbox_protocol {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                "[runtime.podman] sandbox_tunnels needs sandbox_protocol; the gateway container serves as before"
+            )
+        });
+        return false;
+    }
+    uses_sandbox_protocol(cfg)
+}
+
 /// A sandbox per command, made by the Podman provider around `spec`. The
 /// provider takes the boundary; the runner keeps `spec`'s mounts, image and
 /// working directory, and hands image identity and services on to a plain
-/// `PodmanRunner`.
+/// `PodmanRunner`. With `sandbox_tunnels`, each sandbox also gets the
+/// gateway's tunnels.
 pub fn protocol_runner(cfg: &Config, spec: RunSpec) -> Arc<dyn Runner> {
     let mounts = spec.extra_mounts.clone();
     let image = spec.image.clone();
@@ -396,6 +417,9 @@ pub fn protocol_runner(cfg: &Config, spec: RunSpec) -> Arc<dyn Runner> {
         .with_delegate(Arc::new(PodmanRunner::new(spec)));
     if uses_sandbox_files(cfg) {
         runner = runner.with_files(crate::runner::sandbox_files::FilesStore::for_node());
+    }
+    if uses_sandbox_tunnels(cfg) {
+        runner = runner.with_tunnels(crate::runner::tunnels::gateway_tunnels(cfg));
     }
     Arc::new(runner)
 }
@@ -423,6 +447,10 @@ impl Backend for PodmanBackend {
     }
 
     async fn recover(&self, cfg: &Config) {
+        // No gateway to bring back: the node is its sandboxes' gateway.
+        if uses_sandbox_tunnels(cfg) {
+            return;
+        }
         match setup::recover_gateway(cfg).await {
             Ok(setup::Recovery::Running) => {}
             Ok(setup::Recovery::Started) => tracing::info!(
@@ -1001,7 +1029,7 @@ pub async fn selinux_enabled() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{machine_state_from, resolve_podman, MachineState};
+    use super::{machine_state_from, resolve_podman, MachineState, RunSpec};
     use serde_json::json;
     use std::path::Path;
 
@@ -1087,6 +1115,45 @@ mod tests {
             )
             .join(" ");
         assert!(local.contains("--mount type=volume,dst=/work,U=true"));
+    }
+
+    #[test]
+    fn tunnels_are_off_unless_asked_and_need_the_protocol() {
+        let default = crate::config::Config::default();
+        assert!(!default.runtime.podman.sandbox_tunnels);
+        assert!(!super::uses_sandbox_tunnels(&default));
+        // Off, the gateway is built, the sandbox joins the internal network
+        // and the runner opens no tunnels: as before.
+        assert!(super::setup::images(&default)
+            .iter()
+            .any(|(_, dir)| *dir == "gateway"));
+        let spec = RunSpec::from_config(&default, true);
+        assert!(!spec.node_only);
+
+        let alone: crate::config::Config =
+            toml::from_str("[runtime.podman]\nsandbox_tunnels = true\n").unwrap();
+        assert!(
+            !super::uses_sandbox_tunnels(&alone),
+            "needs sandbox_protocol"
+        );
+        assert!(!RunSpec::from_config(&alone, true).node_only);
+
+        let mut on: crate::config::Config =
+            toml::from_str("[runtime.podman]\nsandbox_protocol = true\nsandbox_tunnels = true\n")
+                .unwrap();
+        on.gateway.harness_listen =
+            crate::config::HarnessListen::Unix("/tmp/n1/harness.sock".into());
+        let linux = cfg!(target_os = "linux");
+        assert_eq!(super::uses_sandbox_tunnels(&on), linux);
+        assert_eq!(RunSpec::from_config(&on, true).node_only, linux);
+        assert_eq!(
+            super::setup::images(&on)
+                .iter()
+                .any(|(_, dir)| *dir == "gateway"),
+            !linux,
+            "no gateway image when there is no gateway"
+        );
+        assert_eq!(on.allow_proxy_socket(), Path::new("/tmp/n1/allow.sock"));
     }
 
     #[test]

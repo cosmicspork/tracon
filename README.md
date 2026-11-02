@@ -1308,6 +1308,11 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node
                                     # protocol (exports live; the session's own state at each turn
                                     # end, every 60 s in a turn, at exit). A lost sandbox loses only
                                     # what changed since its last sync
+# sandbox_tunnels = false           # with sandbox_protocol: each sandbox runs --network none, its
+                                    # only route the protocol's socket; the MCP and model gateway,
+                                    # the allowlist proxy (served by the node) and the per-client
+                                    # egress proxy are tunnels to the node on the gateway's ports.
+                                    # No gateway container or internal network is made
 # [sandbox]
 # bundle = "/path/to/<version>/amd64" # the harness bundle (scripts/harness-bundle.sh --sandbox)
                                     # holding bin/tracon-sandbox, mounted read-only at /opt/tracon;

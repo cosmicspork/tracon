@@ -44,7 +44,8 @@ pub async fn check_all(cfg: &Config, selinux: bool, deep: bool) -> BoundaryRepor
     checks.extend(probe_checks(cfg, &spec, &probe).await);
 
     if deep {
-        checks.push(check_egress(cfg, selinux).await);
+        checks
+            .push(check_egress(cfg, selinux, &crate::config::resource_name("egress-probe")).await);
     }
     BoundaryReport { checks }
 }
@@ -114,8 +115,12 @@ async fn check_runtime(cfg: &Config) -> CheckResult {
         return CheckResult::ok(
             CheckId::Runtime,
             format!(
-                "podman {version}, rootless, images present; commands run over the sandbox protocol from {}",
-                bundle.display()
+                "podman {version}, rootless, images present; commands run over the sandbox protocol from {}{}",
+                bundle.display(),
+                match super::uses_sandbox_tunnels(cfg) {
+                    true => ", reaching the node through tunnels with no gateway container",
+                    false => "",
+                }
             ),
         );
     }
@@ -300,6 +305,9 @@ fn check_no_runtime_socket(c: &serde_json::Value) -> CheckResult {
 }
 
 async fn check_network(cfg: &Config, c: &serde_json::Value) -> CheckResult {
+    if super::uses_sandbox_tunnels(cfg) {
+        return check_node_only(cfg, c);
+    }
     let net = match podman_json(&[
         "network",
         "inspect",
@@ -393,17 +401,134 @@ async fn check_network(cfg: &Config, c: &serde_json::Value) -> CheckResult {
     )
 }
 
+/// `network_isolated` for a sandbox whose only route is the node, read back
+/// from `podman inspect`: no network but Podman's `none`, no host path
+/// mounted but the bundle and the socket directory, no resolver, and the
+/// gateway's name on loopback, where the tunnels listen. No gateway
+/// container or internal network is involved.
+fn check_node_only(cfg: &Config, c: &serde_json::Value) -> CheckResult {
+    let hc = &c["HostConfig"];
+    let mode = hc["NetworkMode"].as_str().unwrap_or("");
+    let nets: Vec<String> = c["NetworkSettings"]["Networks"]
+        .as_object()
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
+    if mode != "none" || nets.iter().any(|n| n != "none") {
+        return CheckResult::fail(
+            CheckId::NetworkIsolated,
+            format!(
+                "the sandbox has network {mode:?} ({nets:?}); with sandbox_tunnels it must have none"
+            ),
+        );
+    }
+    let binds = crate::provider::podman::other_binds(c);
+    if !binds.is_empty() {
+        return CheckResult::fail(
+            CheckId::NetworkIsolated,
+            format!(
+                "host paths are bind-mounted into the sandbox at {}; only the bundle and the socket directory may be",
+                binds.join(", ")
+            ),
+        );
+    }
+    let socket_dir = c["Mounts"].as_array().and_then(|mounts| {
+        mounts
+            .iter()
+            .find(|m| m["Destination"].as_str() == Some(crate::runner::podman::SOCKET_DIR_TARGET))
+    });
+    match socket_dir {
+        Some(m) if m["RW"].as_bool() == Some(false) => {}
+        Some(_) => {
+            return CheckResult::fail(
+                CheckId::NetworkIsolated,
+                "the socket directory is mounted writable",
+            )
+        }
+        None => {
+            return CheckResult::fail(
+                CheckId::NetworkIsolated,
+                "the sandbox has no socket directory: it could not reach the node",
+            )
+        }
+    }
+    if hc["Dns"].as_array().is_some_and(|d| !d.is_empty()) {
+        return CheckResult::fail(CheckId::NetworkIsolated, "the sandbox is given a resolver");
+    }
+    let gateway = &cfg.boundary.gateway_container;
+    let loopback = format!("{gateway}:127.0.0.1");
+    let hosts: Vec<&str> = hc["ExtraHosts"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|h| h.as_str()).collect())
+        .unwrap_or_default();
+    if !hosts.contains(&loopback.as_str()) {
+        return CheckResult::fail(
+            CheckId::NetworkIsolated,
+            format!("{gateway} is not the sandbox's loopback ({hosts:?}): the harness would not find the tunnels"),
+        );
+    }
+    CheckResult::ok(
+        CheckId::NetworkIsolated,
+        format!(
+            "route: node-only, dns: none. No network (podman `none`): the one way out is the node's \
+             socket, mounted read-only at {}; {gateway} is loopback, where the MCP and model gateway \
+             and both proxies are tunnels to the node; no gateway container or internal network",
+            crate::runner::podman::SOCKET_DIR_TARGET
+        ),
+    )
+}
+
 const ANONYMOUS_GRANT: &str = "GRANT_ANONYMOUS_OK";
 
+/// What only a sandbox with no network must also show from inside: no name
+/// resolves, and the internal network's gateway address, where a harness
+/// container would have found tinyproxy, is not there.
+fn node_only_script(cfg: &Config) -> String {
+    format!(
+        "getent hosts example.com >/dev/null 2>&1 && echo DIRECT_DNS_OK; \
+         curl -s -o /dev/null -m 5 --noproxy '*' http://{}:{}/ && echo DIRECT_GATEWAY_OK; ",
+        cfg.boundary.gateway_ip, cfg.gateway.proxy_port
+    )
+}
+
+/// The verdict for a node-only sandbox: what `egress_verdict` asks of every
+/// boundary, and then that nothing resolved and the old gateway was not
+/// there.
+fn node_only_verdict(out: &str) -> CheckResult {
+    if out.contains("DIRECT_DNS_OK") {
+        return CheckResult::fail(CheckId::Egress, "a name resolved inside the sandbox");
+    }
+    if out.contains("DIRECT_GATEWAY_OK") {
+        return CheckResult::fail(
+            CheckId::Egress,
+            "the sandbox reached the internal network's gateway address",
+        );
+    }
+    let verdict = egress_verdict(out, Denial::Rejects);
+    match verdict.ok {
+        true => CheckResult::ok(
+            CheckId::Egress,
+            format!(
+                "{}; from inside, no name resolves and nothing answers but the tunnels: \
+                 the node answered through the gateway tunnel and the allowlist proxy's",
+                verdict.detail
+            ),
+        ),
+        false => verdict,
+    }
+}
+
 /// Actively prove the boundary from inside it: no direct egress, allowlisted
-/// hosts reachable through the proxy, unlisted hosts refused.
-async fn check_egress(cfg: &Config, selinux: bool) -> CheckResult {
+/// hosts reachable through the proxy, unlisted hosts refused. `probe` names
+/// the container it runs in.
+pub async fn check_egress(cfg: &Config, selinux: bool, probe: &str) -> CheckResult {
     let spec = RunSpec::from_config(cfg, selinux);
+    let node_only = super::uses_sandbox_tunnels(cfg);
     // The per-client proxy must serve nobody who presents no grant. A node
     // that is not running answers nothing at all, which proves the same. Asked
     // first: the script's last command is what decides its exit status.
     let script = format!(
-        "curl -s -o /dev/null -m 10 -x http://{}:{} https://example.com/ && echo {ANONYMOUS_GRANT}; {}",
+        "{}curl -s -o /dev/null -m 10 -x http://{}:{} https://example.com/ && echo {ANONYMOUS_GRANT}; {}",
+        if node_only { node_only_script(cfg) } else { String::new() },
         cfg.boundary.gateway_container,
         cfg.gateway.qa_proxy_port,
         egress_script(&cfg.boundary.gateway_container, cfg.gateway.forward_port),
@@ -414,24 +539,25 @@ async fn check_egress(cfg: &Config, selinux: bool) -> CheckResult {
     };
     // Clear a leftover of the same name from a crashed prior `--deep` run, or
     // this run fails with a name conflict instead of re-probing.
-    let probe = crate::config::resource_name("egress-probe");
-    let _ = podman(&["rm", "-f", "-i", &probe]).await;
+    let _ = podman(&["rm", "-f", "-i", probe]).await;
     if super::uses_sandbox_protocol(cfg) {
-        // Run as everything else runs: in a sandbox, over the protocol.
+        // Run as everything else runs: in a sandbox, over the protocol, and
+        // with sandbox_tunnels through the tunnels a session gets.
         let runner = super::protocol_runner(cfg, spec);
         let cmd = RunnerCommand {
-            name: probe.clone(),
+            name: probe.into(),
             ..cmd
         };
         return match runner.run_capture(cmd).await {
             Ok(out) if out.status.success() => {
                 let out = String::from_utf8_lossy(&out.stdout);
-                match out.contains(ANONYMOUS_GRANT) {
-                    true => CheckResult::fail(
+                match (out.contains(ANONYMOUS_GRANT), node_only) {
+                    (true, _) => CheckResult::fail(
                         CheckId::Egress,
                         "the per-client egress proxy served a request that presented no grant",
                     ),
-                    false => egress_verdict(&out, Denial::Rejects),
+                    (false, true) => node_only_verdict(&out),
+                    (false, false) => egress_verdict(&out, Denial::Rejects),
                 }
             }
             Ok(out) => CheckResult::fail(
@@ -444,7 +570,7 @@ async fn check_egress(cfg: &Config, selinux: bool) -> CheckResult {
             Err(e) => CheckResult::fail(CheckId::Egress, format!("probe failed: {e}")),
         };
     }
-    let args = spec.podman_args(&probe, &cmd, false);
+    let args = spec.podman_args(probe, &cmd, false);
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
     match podman(&argv).await {
         // The internal network has no route out at all, so a denied
@@ -499,6 +625,79 @@ mod tests {
     fn a_clean_probe_passes() {
         assert!(check_unprivileged(&good_probe()).ok);
         assert!(check_no_runtime_socket(&good_probe()).ok);
+    }
+
+    fn node_only_probe() -> serde_json::Value {
+        json!({
+            "HostConfig": {"Privileged": false, "CapAdd": [], "SecurityOpt": ["no-new-privileges"],
+                "NetworkMode": "none", "Dns": [], "ExtraHosts": ["tracon-gw:127.0.0.1"]},
+            "EffectiveCaps": [],
+            "Mounts": [
+                {"Type": "bind", "Source": "/b", "Destination": "/opt/tracon", "RW": false},
+                {"Type": "bind", "Source": "/run/user/1/tracon/sandbox/ab", "Destination": "/run/tracon", "RW": false},
+                {"Type": "volume", "Source": "/v", "Destination": "/root/.claude", "RW": true},
+            ],
+            "NetworkSettings": {"Networks": {"none": {"IPAddress": ""}}}
+        })
+    }
+
+    #[test]
+    fn a_node_only_sandbox_passes_on_its_single_route_and_nothing_else() {
+        let cfg = Config::default();
+        let ok = check_node_only(&cfg, &node_only_probe());
+        assert!(ok.ok, "{}", ok.detail);
+        assert!(
+            ok.detail.starts_with("route: node-only, dns: none"),
+            "{}",
+            ok.detail
+        );
+
+        let cases: [(&str, serde_json::Value, &str); 6] = [
+            ("/HostConfig/NetworkMode", json!("bridge"), "must have none"),
+            (
+                "/NetworkSettings/Networks",
+                json!({"tracon-int": {}}),
+                "must have none",
+            ),
+            ("/Mounts/0/Destination", json!("/srv"), "bind-mounted"),
+            ("/Mounts/1/RW", json!(true), "writable"),
+            ("/HostConfig/Dns", json!(["1.1.1.1"]), "resolver"),
+            (
+                "/HostConfig/ExtraHosts",
+                json!(["tracon-gw:10.89.0.2"]),
+                "loopback",
+            ),
+        ];
+        for (pointer, value, expect) in cases {
+            let mut c = node_only_probe();
+            *c.pointer_mut(pointer).unwrap() = value;
+            let r = check_node_only(&cfg, &c);
+            assert!(!r.ok, "{pointer}");
+            assert!(r.detail.contains(expect), "{pointer}: {}", r.detail);
+        }
+        let mut c = node_only_probe();
+        c["Mounts"].as_array_mut().unwrap().remove(1);
+        assert!(check_node_only(&cfg, &c)
+            .detail
+            .contains("no socket directory"));
+    }
+
+    #[test]
+    fn from_inside_a_node_only_sandbox_a_name_or_the_old_gateway_fails_the_egress_check() {
+        let good = "DIRECT_NAME_SECONDS=0\nDIRECT_ADDR_SECONDS=0\nPROXY_ALLOWED\npong";
+        let r = node_only_verdict(good);
+        assert!(r.ok, "{}", r.detail);
+        assert!(r.detail.contains("no name resolves"), "{}", r.detail);
+        for marker in ["DIRECT_DNS_OK", "DIRECT_GATEWAY_OK", "PROXY_UNLISTED"] {
+            assert!(
+                !node_only_verdict(&format!("{marker}\n{good}")).ok,
+                "{marker}"
+            );
+        }
+        // Without the tunnels nothing answers, and that is no pass either.
+        assert!(!node_only_verdict("DIRECT_NAME_SECONDS=0\nDIRECT_ADDR_SECONDS=0").ok);
+        let script = node_only_script(&Config::default());
+        assert!(script.contains("getent hosts"), "{script}");
     }
 
     #[test]

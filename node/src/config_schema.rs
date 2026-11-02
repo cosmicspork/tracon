@@ -236,6 +236,7 @@ pub const KEYS: &[KeySpec] = &[
     restart("runtime.podman.sandbox_protocol"),
     restart("runtime.podman.sandbox_init"),
     restart("runtime.podman.sandbox_files"),
+    restart("runtime.podman.sandbox_tunnels"),
     restart("runtime.kubernetes.namespace"),
     restart("runtime.kubernetes.harness_image").host_only(),
     restart("runtime.kubernetes.state_claim"),
