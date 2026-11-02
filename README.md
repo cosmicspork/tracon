@@ -1351,6 +1351,11 @@ command_timeout_secs = 15
 # admin_peers = ["<node id>"]       # peers that may read and edit this node.toml and sign its providers in,
                                     # each action confirmed with a passkey there; changed here, never by a peer
 
+[mesh.sandbox_relay]                # reached by remote sandboxes through the hub; off unless enabled
+# enabled = true
+# target = "127.0.0.1:7443"         # the local sandbox listener the hub's relayed TLS is bridged to
+# max_streams = 16
+
 [memory]
 promote_at = "02:00"                # the nightly promotion batch
 
@@ -1580,6 +1585,7 @@ configured by environment:
 | `TRACON_HUB_PROMOTE_AT` | `03:00` | the hub-side promotion batch |
 | `TRACON_HUB_SNAPSHOT_ENDPOINT`, `_BUCKET`, `_ACCESS_KEY`, `_SECRET_KEY`, `_PREFIX`, `_EVERY_HOURS`, `_KEEP`, `_PUBKEY` | off; when on, every 24 hours, 14 kept | encrypted snapshots to S3-compatible storage; `tracon-hub snapshot-key` makes the key |
 | `TRACON_HUB_RESTORE_SEED` | — | for `tracon-hub restore` |
+| `TRACON_HUB_RELAY_ADDR`, `TRACON_HUB_RELAY_DOMAIN`, `TRACON_HUB_RELAY_MAX_STREAMS` | off; —; 16 per node | the sandbox relay: a TLS listener the hub does not terminate, routing `<node label>.<domain>` by SNI to a node that serves it over a connection it dialled out. Publish it on 443 at a public address with a wildcard DNS record for the domain; it cannot sit behind a proxy that terminates TLS |
 
 ### As a Kubernetes pod
 

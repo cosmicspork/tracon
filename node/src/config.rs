@@ -1455,6 +1455,33 @@ pub struct Mesh {
     /// default, means none. An admin key itself: it is changed at this node,
     /// or remotely with this node's own passkey, never over the mesh.
     pub admin_peers: Vec<String>,
+    /// Serve the hub's sandbox relay, so a sandbox that can only dial a
+    /// public address reaches this node through the hub.
+    pub sandbox_relay: SandboxRelay,
+}
+
+/// `[mesh.sandbox_relay]`: while on, the node holds a listen stream to the
+/// hub and bridges each connection the hub relays for it to `target`. The
+/// TLS inside is the sandbox's to this node; the hub only reads its SNI.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SandboxRelay {
+    pub enabled: bool,
+    /// The node's local sandbox listener, `host:port`.
+    pub target: String,
+    /// Relayed connections bridged at once. An offer past this is left to
+    /// time out at the hub, which closes it unanswered.
+    pub max_streams: usize,
+}
+
+impl Default for SandboxRelay {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            target: String::new(),
+            max_streams: 16,
+        }
+    }
 }
 
 impl Mesh {
@@ -1495,6 +1522,7 @@ impl Default for Mesh {
             stream_max_concurrent: 16,
             renew_credentials: false,
             admin_peers: Vec::new(),
+            sandbox_relay: SandboxRelay::default(),
         }
     }
 }

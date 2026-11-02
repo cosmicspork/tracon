@@ -943,6 +943,57 @@
       "apply": "restart",
       "editable": true,
       "editable_at_node": true,
+      "editable_by_peer": false,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mesh.sandbox_relay.enabled",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": false
+      },
+      "why_not_by_peer": "decides who may reach or administer this node, so it is changed at the node or with its own passkey, never by a peer"
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": false,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mesh.sandbox_relay.target",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      },
+      "why_not_by_peer": "decides who may reach or administer this node, so it is changed at the node or with its own passkey, never by a peer"
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": false,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "mesh.sandbox_relay.max_streams",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      },
+      "why_not_by_peer": "decides who may reach or administer this node, so it is changed at the node or with its own passkey, never by a peer"
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
       "editable_by_peer": true,
       "exec_path": false,
       "fs_path": false,
@@ -2790,6 +2841,11 @@
       "heartbeat_secs": 60,
       "poll_secs": 30,
       "renew_credentials": false,
+      "sandbox_relay": {
+        "enabled": false,
+        "max_streams": 16,
+        "target": ""
+      },
       "stream_idle_secs": 120,
       "stream_max_body_bytes": 8388608,
       "stream_max_concurrent": 16,

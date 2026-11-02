@@ -12,6 +12,7 @@ pub mod nonce;
 pub mod pokes;
 pub mod replica;
 pub mod routes;
+pub mod sandbox_relay;
 pub mod snapshot;
 pub mod store;
 
@@ -63,6 +64,8 @@ pub struct AppState {
     pub limiter: Arc<RateLimit>,
     /// The replica half, when the hub has an identity and a data directory.
     pub replica: Option<Arc<replica::Replica>>,
+    /// The sandbox relay, when the hub has a relay listener.
+    pub relay: Option<Arc<sandbox_relay::SandboxRelay>>,
 }
 
 /// Admit the bootstrap keys (`TRACON_HUB_ADMIT`) into `@mesh` if absent.
@@ -123,6 +126,7 @@ pub fn state_for(
         claims: Arc::new(Claims::new()),
         limiter: Arc::new(RateLimit::new()),
         replica,
+        relay: None,
     }
 }
 
@@ -173,6 +177,8 @@ pub fn app_with_state(state: AppState) -> Router {
                 .delete(routes::cancel_enroll),
         )
         .route("/v0/claims", post(routes::claim))
+        .route("/v0/relay/listen", get(sandbox_relay::listen))
+        .route("/v0/relay/streams/{id}", get(sandbox_relay::stream))
         .route("/v0/admit", post(routes::admit))
         .route("/v0/admit/{node_id}", delete(routes::remove_member))
         .route(

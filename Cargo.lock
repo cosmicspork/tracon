@@ -3587,6 +3587,7 @@ dependencies = [
  "rusqlite",
  "rust-embed",
  "rustix",
+ "rustls",
  "serde",
  "serde_json",
  "sha1",
@@ -3597,6 +3598,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tokio-tungstenite",
  "tokio-util",
@@ -3663,6 +3665,7 @@ version = "0.44.0"
 dependencies = [
  "axum",
  "clap",
+ "futures-util",
  "hex",
  "hmac",
  "rand_core 0.6.4",

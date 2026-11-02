@@ -1445,6 +1445,30 @@ source text, so the vector index never replicates: each node embeds its own repl
 and searches locally. A hub outage costs the other nodes' writes, not the ability to
 search meaningfully. The index is derived state — delete it and it rebuilds.
 
+### Sandbox relay
+
+A sandbox on a remote provider can dial only a public, allowlisted address, and a
+laptop node has none. When the hub runs a relay listener (`TRACON_HUB_RELAY_ADDR`,
+443 behind a public address in production) and a node turns on
+`[mesh.sandbox_relay]`, the sandbox dials the hub instead, naming the node in SNI as
+`<label>.<domain>`: `label` is the first 32 hex characters of the node id (a whole
+id is longer than a DNS label), derived rather than chosen so no member can register
+another's name, and `domain` is `TRACON_HUB_RELAY_DOMAIN`, under a wildcard record
+pointing at the hub. The hub reads the ClientHello only as far as that name, then
+forwards every byte it read, unchanged, onto a WebSocket the node dialled out to it
+for that one connection, answering an `open` on the signed listen stream the node
+holds (`GET /v0/relay/listen`). The node bridges the WebSocket to its local sandbox
+listener. TLS is the sandbox's to the node, pinned to the node's certificate; the hub
+holds no key for it, so it relays ciphertext it cannot read or answer.
+
+The mesh's own connection is signed requests and an SSE stream of pokes, which
+cannot carry a byte stream, so each relayed connection is its own dial-back rather
+than a stream multiplexed inside one: no framing of our own, and each connection
+keeps TCP's flow control instead of sharing one window across sandboxes. Only a
+node member holding the listen stream is a target; a name nobody serves, a hello
+without SNI, a node at its stream limit (`TRACON_HUB_RELAY_MAX_STREAMS`, 16), or one
+that does not dial back in 15 seconds is closed without a byte written.
+
 ### Mesh frames
 
 The wire contract is `spec/README.md`, pinned by `proto/` with test vectors. A frame

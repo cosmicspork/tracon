@@ -266,6 +266,11 @@ impl MeshClient {
         &self.identity
     }
 
+    /// The identity, shared, for a task that signs hub requests of its own.
+    pub fn identity_shared(&self) -> Arc<Identity> {
+        self.identity.clone()
+    }
+
     pub fn state(&self) -> watch::Receiver<MeshState> {
         self.state.subscribe()
     }

@@ -239,6 +239,12 @@ See `hub/` and `docs/ARCHITECTURE.md` (Mesh frames). Summary:
 | `GET /v0/enroll/{code}` | slot creator | fetch and delete |
 | `POST /v0/claims` | member | `{key, version, ttl_secs}`: first member to claim a version of an opaque key wins (`201`); others get `409 {holder, version}` until it lapses, and `409 {version}` for an older version |
 | `POST /v0/admit`, `DELETE /v0/admit/{id}`, `DELETE /v0/admit/{id}/channels/{channel}` | member; writing a sealing key needs the target's `binding_sig` | membership |
+| `GET /v0/relay/listen` | node member; `404` without a relay listener | SSE: `ready {host}`, then `open {id}` per relayed connection (`relay.rs`) |
+| `GET /v0/relay/streams/{id}` | the node the connection was offered to, once | WebSocket carrying its raw bytes; an empty binary message ends a direction |
+
+The relay listener itself (`TRACON_HUB_RELAY_ADDR`) is not HTTP: it reads a TLS
+ClientHello's SNI, `<first 32 hex of node id>.<relay domain>`, and forwards the
+connection's bytes unchanged. `GET /v0/info` reports `sandbox_relay: {domain}`.
 
 ## Vectors
 
