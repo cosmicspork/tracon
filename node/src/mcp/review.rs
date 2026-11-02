@@ -2139,6 +2139,131 @@ pub(crate) fn record_change_ready(
     });
 }
 
+/// Whether the change `r` publishes to is a draft, as the node last knew it,
+/// and why, for the review page; `None` for a review with no change on the
+/// forge. The node's own last mark (by the agent, the reviewer, the operator
+/// or the node), kept by review, says whether it is a draft and why. The
+/// follower's last look at the forge, an event on the review's session,
+/// overrules it only when it came later and disagrees: a change marked by
+/// hand on the forge is seen at the next look, while a look that only sees
+/// what the mark did, or a CI status change, leaves the mark's reason
+/// standing. A review an external harness submitted has no session and no
+/// look, and its marks say it all.
+///
+/// A revision whose checks are running is not on the review yet:
+/// `submit_review` holds it in the node's running checks until they pass, so
+/// those are read too, as the revision in flight.
+pub(crate) fn change_draft_view(store: &Store, manager: &Manager, r: &ReviewRow) -> Option<Value> {
+    let change = serde_json::from_str::<Target>(&r.target).ok()?.change?;
+    let revisions = store
+        .review_revisions(&r.id)
+        .map(|revisions| revisions.len())
+        .unwrap_or_default();
+    let checking = manager
+        .checking()
+        .get(&r.id)
+        .filter(|entry| entry.outcome().is_none());
+    let opened = store
+        .publications_for_review(&r.id)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|row| row.state == "opened");
+    let mark = store.change_mark(&r.id).ok().flatten();
+    let look = r
+        .session_id
+        .as_deref()
+        .zip(opened.as_ref())
+        .and_then(|(s, publication)| {
+            store
+                .latest_event_at(s, ek::FORGE_FOLLOW, &publication.id)
+                .ok()
+                .flatten()
+        });
+    let (draft, marked) = draft_state(mark.as_ref(), look.as_ref());
+    // A revision on the review newer than the one published is waiting on
+    // the operator.
+    let waiting = opened
+        .as_ref()
+        .zip(store.latest_review_revision(&r.id).ok().flatten())
+        .filter(|(publication, latest)| publication.revision_id.as_ref() != Some(&latest.id))
+        .filter(|_| matches!(r.state.as_str(), "new" | "claimed"))
+        .map(|_| revisions);
+    let why = draft
+        .unwrap_or(false)
+        .then(|| draft_why(checking.as_ref().map(|_| revisions + 1), marked, waiting))
+        .flatten();
+    Some(json!({
+        "number": change.number,
+        "url": change.url,
+        "state": look
+            .as_ref()
+            .and_then(|(_, look)| look["snapshot"]["state"].as_str().map(str::to_string))
+            .unwrap_or_else(|| "open".into()),
+        "draft": draft,
+        "why": why,
+        "by": marked.and_then(|mark| mark["by"].as_str()),
+        "in_flight": checking.map(|entry| json!({
+            "revision": revisions + 1,
+            "started_ms": entry.started_ms,
+        })),
+    }))
+}
+
+/// Whether a change is a draft, and the mark that explains it, from the
+/// node's last mark (`at_ms`, `ready`) and the follower's last look (when it
+/// was recorded, and its snapshot). A later look overrules the mark only
+/// when it disagrees with it: someone flipped the change on the forge by
+/// hand. One that agrees saw what the mark did, or only a CI status change,
+/// and the mark still says why.
+fn draft_state<'a>(
+    mark: Option<&'a Value>,
+    look: Option<&(i64, Value)>,
+) -> (Option<bool>, Option<&'a Value>) {
+    let seen = look.and_then(|(_, look)| look["snapshot"]["draft"].as_bool());
+    match (mark, look) {
+        (Some(mark), Some((seen_at, _)))
+            if mark["at_ms"]
+                .as_i64()
+                .is_none_or(|marked_at| *seen_at > marked_at)
+                && seen.is_some_and(|draft| draft != (mark["ready"] == false)) =>
+        {
+            (seen, None)
+        }
+        (Some(mark), _) => (Some(mark["ready"] == false), Some(mark)),
+        (None, _) => (seen, None),
+    }
+}
+
+/// Why a change is a draft, in the review page's words: a revision checking
+/// on its way, then who marked it and why, then a revision waiting on the
+/// operator. The node's own mark says only what it drafted for, which the
+/// revision it drafted for says better once it is on the review.
+fn draft_why(
+    checking: Option<usize>,
+    mark: Option<&Value>,
+    waiting: Option<usize>,
+) -> Option<String> {
+    if let Some(revision) = checking {
+        return Some(format!("revision {revision} is checking"));
+    }
+    let reason = mark
+        .and_then(|mark| mark["reason"].as_str())
+        .map(|reason| format!(": {reason}"))
+        .unwrap_or_default();
+    let by = mark.and_then(|mark| mark["by"].as_str());
+    match by {
+        Some("agent") => return Some(format!("the agent marked it not ready{reason}")),
+        Some("reviewer") => return Some(format!("the reviewer marked it not ready{reason}")),
+        Some("operator") => return Some("you turned it back into a draft".into()),
+        _ => {}
+    }
+    if let Some(revision) = waiting {
+        return Some(format!("revision {revision} is waiting for approval"));
+    }
+    mark.and_then(|mark| mark["reason"].as_str())
+        .map(str::to_string)
+}
+
 /// Whether a review of a repository with nothing on the forge yet can be
 /// published: only by pushing its base as the repository's first commit,
 /// since a change needs a base that exists to merge into. Where the forge can
@@ -4519,6 +4644,40 @@ mod tests {
             message.contains("resubmit with the same review_id"),
             "{message}"
         );
+    }
+
+    /// A draft says what it waits on: the revision checking first, then
+    /// whoever marked it and why, then a revision waiting on the operator.
+    #[test]
+    fn a_draft_says_what_it_is_waiting_on() {
+        let agent = json!({ "ready": false, "by": "agent", "reason": "addressing nits" });
+        let node = json!({ "ready": false, "by": "node", "reason": "revision 2 is on its way" });
+        assert_eq!(
+            draft_why(Some(2), Some(&agent), Some(1)).as_deref(),
+            Some("revision 2 is checking")
+        );
+        assert_eq!(
+            draft_why(None, Some(&agent), Some(2)).as_deref(),
+            Some("the agent marked it not ready: addressing nits")
+        );
+        assert_eq!(
+            draft_why(
+                None,
+                Some(&json!({ "ready": false, "by": "reviewer" })),
+                None
+            )
+            .as_deref(),
+            Some("the reviewer marked it not ready")
+        );
+        assert_eq!(
+            draft_why(None, Some(&node), Some(2)).as_deref(),
+            Some("revision 2 is waiting for approval")
+        );
+        assert_eq!(
+            draft_why(None, Some(&node), None).as_deref(),
+            Some("revision 2 is on its way")
+        );
+        assert_eq!(draft_why(None, None, None), None);
     }
 
     /// A run of an external candidate's checks under way is attached to, and

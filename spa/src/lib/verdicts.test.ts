@@ -4,6 +4,7 @@ import {
   basisLabel,
   checksState,
   composerLabel,
+  draftControl,
   publishedChange,
   requestName,
   publishedLabel,
@@ -79,6 +80,40 @@ describe('the published change in the review header', () => {
     expect(publishedLabel('github', { number: 149 }, { state: 'open', draft: true })).toBe('PR #149 · open · draft')
     expect(publishedLabel('gitlab', { number: 7 }, { state: 'closed', draft: false })).toBe('MR !7 · closed')
     expect(publishedLabel('gitlab', { number: null }, undefined)).toBe('MR')
+  })
+})
+
+describe('the draft state of a review\'s change', () => {
+  const change = {
+    number: 153,
+    url: 'https://github.test/pull/153',
+    state: 'open' as const,
+    draft: true as boolean | null,
+    why: 'revision 2 is checking' as string | null,
+    by: 'node' as string | null,
+    in_flight: null as { revision: number; started_ms: number } | null,
+  }
+  test('a draft says what it waits on and offers Mark ready', () => {
+    expect(draftControl(change, false)).toEqual({
+      note: 'draft: revision 2 is checking',
+      actions: [{ label: 'Mark ready', ready: true }],
+    })
+    expect(draftControl({ ...change, why: null }, true)?.note).toBe('draft · the agent is mid-turn')
+  })
+  test('a ready change offers Back to draft, and says a revision is checking', () => {
+    const ready = { ...change, draft: false, why: null, in_flight: { revision: 2, started_ms: 1 } }
+    expect(draftControl(ready, false)).toEqual({
+      note: 'revision 2 is checking',
+      actions: [{ label: 'Back to draft', ready: false }],
+    })
+  })
+  test('unknown offers both, and a merged or missing change offers nothing', () => {
+    expect(draftControl({ ...change, draft: null, why: null }, false)?.actions.map((a) => a.label)).toEqual([
+      'Mark ready',
+      'Back to draft',
+    ])
+    expect(draftControl({ ...change, state: 'merged' }, false)).toBeNull()
+    expect(draftControl(null, true)).toBeNull()
   })
 })
 

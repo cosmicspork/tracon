@@ -825,6 +825,19 @@ pub async fn publish_review(
                     serde_json::json!({ "url": published, "review_id": review.id }),
                 );
             }
+            // An approval of an update leaves its change ready (`Publication::
+            // ready`), whatever drafted it while the revision was on its way,
+            // unless a newer revision is checking; the review page reads that
+            // from here before the forge is next looked at.
+            if operator && !newer_revision_checking && target.change.is_some() {
+                crate::mcp::review::record_change_ready(
+                    ctx.manager,
+                    review,
+                    true,
+                    "operator",
+                    None,
+                );
+            }
             // Publishing is not finishing: the item stays open through CI
             // and review until the operator closes it, and the session goes
             // on, suspended once it sits idle, so a CI failure or a comment

@@ -666,6 +666,11 @@ export interface ReviewDetails {
    * that predates it.
    */
   forge_state?: ForgeState | null
+  /**
+   * Whether the change it updates is a draft and why. Null with no change on
+   * the forge; absent from a node that predates it.
+   */
+  change_draft?: ChangeDraft | null
 }
 
 export interface ForgeIdentity {
@@ -686,6 +691,23 @@ export interface ReviewAuthorship {
 export interface ForgeState {
   state: 'open' | 'merged' | 'closed'
   draft: boolean
+}
+
+/**
+ * Whether the change a review updates is a draft, as its node last knew it,
+ * and why. `draft` is null before anything marked it or the forge was read.
+ */
+export interface ChangeDraft {
+  number: number
+  url: string
+  state: 'open' | 'merged' | 'closed'
+  draft: boolean | null
+  /** What the draft waits on: a revision checking, who marked it and why. */
+  why: string | null
+  /** Who marked it last: agent, reviewer, operator or node. */
+  by: string | null
+  /** A revision whose checks are running, before it is saved to the review. */
+  in_flight: { revision: number; started_ms: number } | null
 }
 
 export interface ReviewPublication {

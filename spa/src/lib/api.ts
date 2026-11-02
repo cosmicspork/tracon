@@ -2,6 +2,7 @@
 // interface can say what the node said, not "request failed".
 
 import type {
+  ChangeDraft,
   Askable,
   Continuation,
   SessionExhaustion,
@@ -547,6 +548,9 @@ export const api = {
       change,
     }),
   releaseReview: (id: string) => call<void>('POST', `/api/reviews/${id}/release`),
+  /** Mark the change a review updates ready for review, or turn it back into a draft. */
+  markReviewReady: (id: string, ready: boolean) =>
+    call<{ change_draft: ChangeDraft | null }>('POST', `/api/reviews/${id}/ready`, { ready }),
   /** Start a fresh review session on a review: an admin action. On a peer's
    * review, the node that owns it starts one, refused once it holds a newer
    * revision than `revisionId`, the one the operator was reading. */
