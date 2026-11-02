@@ -23,7 +23,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{AttachParams, DeleteParams, LogParams};
 use kube::{Api, Client};
 
-use super::{Mount, Runner, RunnerCommand, RunnerError, Spawned};
+use super::{Mount, RunLabels, Runner, RunnerCommand, RunnerError, Spawned};
 use crate::config::{Config, KubeResources, PodSizing};
 
 mod secret;
@@ -32,6 +32,14 @@ pub use secret::{secret_name, SecretRights, PID_LABEL, RUN_LABEL, SWEEP_GRACE};
 pub const ROLE_LABEL: &str = "tracon.dev/role";
 pub const SESSION_LABEL: &str = "tracon.dev/session";
 pub const PROBE_GATE: &str = "tracon.dev/probe";
+/// What the pod is for: `RunKind`, else its sizing.
+pub const KIND_LABEL: &str = "tracon.dev/kind";
+/// Which `[runtime.kubernetes.resources.*]` table sized the pod.
+pub const SIZING_LABEL: &str = "tracon.dev/sizing";
+pub const REPO_LABEL: &str = "tracon.dev/repo";
+pub const CHANNEL_LABEL: &str = "tracon.dev/channel";
+pub const HARNESS_LABEL: &str = "tracon.dev/harness";
+pub const PHASE_LABEL: &str = "tracon.dev/phase";
 pub const STATE_VOLUME: &str = "state";
 pub const SHM_VOLUME: &str = "shm";
 pub const SCRATCH_VOLUME: &str = "scratch";
@@ -80,6 +88,96 @@ impl PodEnv {
                 .ok_or("TRACON_NODE_NAME unset (downward API spec.nodeName)")?,
         })
     }
+}
+
+/// Which of `KubeResources`' sizings a pod was rendered with. Each is one
+/// `[runtime.kubernetes.resources.*]` table, so the `tracon.dev/sizing` label
+/// names the knob a change to that pod's size turns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sizing {
+    /// `resources.session`: a session's harness, and the boundary's probe pod.
+    Session,
+    /// `resources.command`: a captured command, a check or a preparation.
+    Command,
+    /// `resources.probe`.
+    Probe,
+}
+
+impl Sizing {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Session => "session",
+            Self::Command => "command",
+            Self::Probe => "probe",
+        }
+    }
+
+    fn sized(self, resources: &KubeResources) -> PodSizing {
+        match self {
+            Self::Session => resources.session(),
+            Self::Command => resources.command(),
+            Self::Probe => resources.probe(),
+        }
+    }
+}
+
+/// `value` as a Kubernetes label value, or `None` when nothing of it is left:
+/// at most 63 characters, alphanumeric at both ends, `[-_.A-Za-z0-9]` between.
+/// Lowercased, with any other character (`/`, `@`, a space, anything not
+/// ASCII) made a `-` and runs of `-` collapsed. Two long names that differ only
+/// past the 63rd character share a value, which a label can live with.
+pub fn label_value(value: &str) -> Option<String> {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        let c = c.to_ascii_lowercase();
+        let c = if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+            c
+        } else {
+            '-'
+        };
+        if c == '-' && out.ends_with('-') {
+            continue;
+        }
+        out.push(c);
+    }
+    out.truncate(63);
+    let trimmed = out.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// The labels a harness pod carries: the two every selector reads (`role`,
+/// `session`), then what it is for. A value with nothing left once sanitized
+/// is left out rather than rendered empty.
+fn pod_labels(
+    name: &str,
+    labels: &RunLabels,
+    sizing: Sizing,
+) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    out.insert(ROLE_LABEL.to_string(), "harness".to_string());
+    out.insert(SESSION_LABEL.to_string(), name.to_string());
+    out.insert(
+        KIND_LABEL.to_string(),
+        labels
+            .kind
+            .map(super::RunKind::as_str)
+            .unwrap_or(sizing.as_str())
+            .to_string(),
+    );
+    out.insert(SIZING_LABEL.to_string(), sizing.as_str().to_string());
+    if let Some(phase) = labels.phase {
+        out.insert(PHASE_LABEL.to_string(), phase.to_string());
+    }
+    for (key, value) in [
+        (REPO_LABEL, &labels.repo),
+        (CHANNEL_LABEL, &labels.channel),
+        (HARNESS_LABEL, &labels.harness),
+    ] {
+        if let Some(value) = value.as_deref().and_then(label_value) {
+            out.insert(key.to_string(), value);
+        }
+    }
+    out
 }
 
 /// Everything that puts a harness inside a pod behind the boundary.
@@ -288,11 +386,19 @@ impl KubeSpec {
     /// The pod for a command run to completion (`Runner::run_capture`): no
     /// stdin, and sized as a command rather than a session.
     pub fn capture_pod(&self, name: &str, cmd: &RunnerCommand) -> Result<Pod, RunnerError> {
-        let mut pod = self.pod(name, cmd, false)?;
+        self.captured_pod(name, cmd, Sizing::Command)
+    }
+
+    fn captured_pod(
+        &self,
+        name: &str,
+        cmd: &RunnerCommand,
+        sizing: Sizing,
+    ) -> Result<Pod, RunnerError> {
+        let mut pod = self.render(name, cmd, false, sizing)?;
         if let Some(c) = pod.spec.as_mut().and_then(|s| s.containers.first_mut()) {
             c.stdin = None;
             c.stdin_once = None;
-            c.resources = Some(Self::requirements(&self.resources.command()));
         }
         Ok(pod)
     }
@@ -301,13 +407,12 @@ impl KubeSpec {
     /// and without the memory-backed `/dev/shm`, which only a browser needs
     /// and which would count against the probe's small limit.
     pub fn probe_pod(&self, name: &str, cmd: &RunnerCommand) -> Result<Pod, RunnerError> {
-        let mut pod = self.capture_pod(name, cmd)?;
+        let mut pod = self.captured_pod(name, cmd, Sizing::Probe)?;
         if let Some(spec) = pod.spec.as_mut() {
             if let Some(volumes) = spec.volumes.as_mut() {
                 volumes.retain(|v| v.name != SHM_VOLUME);
             }
             if let Some(c) = spec.containers.first_mut() {
-                c.resources = Some(Self::requirements(&self.resources.probe()));
                 if let Some(mounts) = c.volume_mounts.as_mut() {
                     mounts.retain(|m| m.name != SHM_VOLUME);
                 }
@@ -320,6 +425,17 @@ impl KubeSpec {
     /// (and therefore mutated by whatever admission the cluster runs) but never
     /// scheduled: the boundary checks read the result and delete it.
     pub fn pod(&self, name: &str, cmd: &RunnerCommand, gated: bool) -> Result<Pod, RunnerError> {
+        self.render(name, cmd, gated, Sizing::Session)
+    }
+
+    /// `pod`, sized (and labelled) as `sizing`.
+    fn render(
+        &self,
+        name: &str,
+        cmd: &RunnerCommand,
+        gated: bool,
+        sizing: Sizing,
+    ) -> Result<Pod, RunnerError> {
         let proxy = format!("http://{}:{}", self.gateway_host, self.proxy_port);
         let state = format!("{}/{}", self.home, self.state_dir);
         let mut env = vec![
@@ -350,9 +466,7 @@ impl KubeSpec {
         // Secret environment is named, never rendered: see `secret`.
         cmd.secret_env.validate()?;
         env.extend(secret::env_refs(name, cmd));
-        let mut labels = std::collections::BTreeMap::new();
-        labels.insert(ROLE_LABEL.to_string(), "harness".to_string());
-        labels.insert(SESSION_LABEL.to_string(), name.to_string());
+        let labels = pod_labels(name, &cmd.labels, sizing);
         let workdir = cmd.workdir.clone().unwrap_or_else(|| self.workdir.clone());
         let image = cmd.image.clone().unwrap_or_else(|| self.image.clone());
         // Only the spec's own image (a session image with the harness layered
@@ -439,7 +553,7 @@ impl KubeSpec {
                     volume_mounts: Some(
                         [self.volume_mounts(cmd)?, Self::scratch_mounts().into()].concat(),
                     ),
-                    resources: Some(Self::requirements(&self.resources.session())),
+                    resources: Some(Self::requirements(&sizing.sized(&self.resources))),
                     // The gate: no capabilities, no way to gain any.
                     security_context: Some(SecurityContext {
                         privileged: Some(false),
@@ -1432,6 +1546,111 @@ mod tests {
             "not scheduled: Unschedulable: 0/1 nodes are available"
         );
         assert_eq!(pending_reason(&PodStatus::default()), "phase Pending");
+    }
+
+    /// Every value fits a Kubernetes label: at most 63 characters,
+    /// alphanumeric at both ends, `[-_.A-Za-z0-9]` between.
+    #[test]
+    fn label_values_are_sanitized_to_what_kubernetes_accepts() {
+        let valid = |value: &str| {
+            value.len() <= 63
+                && value.starts_with(|c: char| c.is_ascii_alphanumeric())
+                && value.ends_with(|c: char| c.is_ascii_alphanumeric())
+                && value
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        };
+        assert_eq!(label_value("personal").as_deref(), Some("personal"));
+        assert_eq!(label_value("@ops").as_deref(), Some("ops"));
+        assert_eq!(
+            label_value("Cosmic Spork/Repo").as_deref(),
+            Some("cosmic-spork-repo")
+        );
+        assert_eq!(label_value("café au lait").as_deref(), Some("caf-au-lait"));
+        let long = label_value(&format!("{}-{}", "a".repeat(62), "b".repeat(37))).unwrap();
+        assert!(long.len() <= 63, "{long}");
+        assert!(
+            long.ends_with(|c: char| c.is_ascii_alphanumeric()),
+            "{long}"
+        );
+        assert_eq!(label_value("---"), None);
+        assert_eq!(label_value(""), None);
+        for input in [
+            "personal",
+            "@ops",
+            "Cosmic Spork/Repo",
+            "café",
+            "a.b_c-d",
+            "_x_",
+            &"z/".repeat(80),
+        ] {
+            if let Some(value) = label_value(input) {
+                assert!(valid(&value), "{input:?} -> {value:?}");
+            }
+        }
+    }
+
+    fn labelled(pod: &Pod) -> std::collections::BTreeMap<String, String> {
+        pod.metadata.labels.clone().unwrap_or_default()
+    }
+
+    /// A metrics stack tells a session from a check by what the pod says it
+    /// is, and which `[runtime.kubernetes.resources.*]` table sized it; the
+    /// labels every selector reads stay as they were.
+    #[test]
+    fn every_pod_says_what_it_is_for_and_how_it_was_sized() {
+        let spec = spec();
+        let mut session = cmd();
+        session.labels = RunLabels {
+            kind: Some(crate::runner::RunKind::Session),
+            repo: Some("Cosmic Spork/Repo".into()),
+            channel: Some("@ops".into()),
+            harness: Some("claude".into()),
+            phase: Some("plan"),
+        };
+        let labels = labelled(&spec.pod("tracon-h-1", &session, false).unwrap());
+        assert_eq!(labels[ROLE_LABEL], "harness");
+        assert_eq!(labels[SESSION_LABEL], "tracon-h-1");
+        assert_eq!(labels[KIND_LABEL], "session");
+        assert_eq!(labels[SIZING_LABEL], "session");
+        assert_eq!(labels[REPO_LABEL], "cosmic-spork-repo");
+        assert_eq!(labels[CHANNEL_LABEL], "ops");
+        assert_eq!(labels[HARNESS_LABEL], "claude");
+        assert_eq!(labels[PHASE_LABEL], "plan");
+
+        let mut check = cmd();
+        check.labels = RunLabels {
+            repo: Some("tracon".into()),
+            channel: Some("---".into()),
+            ..RunLabels::of(crate::runner::RunKind::Check)
+        };
+        let labels = labelled(&spec.capture_pod("tracon-c-1", &check).unwrap());
+        assert_eq!(labels[ROLE_LABEL], "harness");
+        assert_eq!(labels[SESSION_LABEL], "tracon-c-1");
+        assert_eq!(labels[KIND_LABEL], "check");
+        assert_eq!(labels[SIZING_LABEL], "command");
+        assert_eq!(labels[REPO_LABEL], "tracon");
+        // Nothing left once sanitized, and nothing given: both left out.
+        for absent in [CHANNEL_LABEL, HARNESS_LABEL, PHASE_LABEL] {
+            assert!(!labels.contains_key(absent), "{absent} in {labels:?}");
+        }
+
+        let mut probe = cmd();
+        probe.labels = RunLabels::of(crate::runner::RunKind::Probe);
+        let labels = labelled(&spec.probe_pod("tracon-probe-1", &probe).unwrap());
+        assert_eq!(labels[KIND_LABEL], "probe");
+        assert_eq!(labels[SIZING_LABEL], "probe");
+        assert!(!labels.contains_key(REPO_LABEL));
+
+        // The boundary's gated probe is rendered as a session and says so.
+        let labels = labelled(&spec.pod("probe", &probe, true).unwrap());
+        assert_eq!(labels[KIND_LABEL], "probe");
+        assert_eq!(labels[SIZING_LABEL], "session");
+
+        // A caller that named no kind still leaves no pod unlabelled.
+        let labels = labelled(&spec.capture_pod("tracon-x-1", &cmd()).unwrap());
+        assert_eq!(labels[KIND_LABEL], "command");
+        assert_eq!(labels[SIZING_LABEL], "command");
     }
 
     #[test]

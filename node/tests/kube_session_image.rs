@@ -214,6 +214,7 @@ async fn a_native_session_pod_runs_the_layered_image_with_its_secrets_hidden() {
                 secret_env,
                 system_prompt_file: None,
                 resume: None,
+                labels: Default::default(),
             },
         )
         .await;
@@ -345,6 +346,7 @@ async fn a_kubernetes_sessions_workspace_is_prepared_through_its_grant() {
         egress: vec!["repo.packagist.org".into()],
         session_egress: Vec::new(),
         cache_volume: "tracon-cache-base-app".into(),
+        repo: None,
     };
 
     let done = tracon::session::prepare_session_workspace(

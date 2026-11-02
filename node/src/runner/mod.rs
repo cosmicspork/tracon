@@ -133,6 +133,84 @@ impl Extend<(String, String)> for SecretEnv {
     }
 }
 
+/// What a run is for, as a label on the pod it runs in. Set by each caller,
+/// because a runner is made fresh per call and cannot know.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunKind {
+    /// A session's harness.
+    Session,
+    /// A check command: a review's required checks, a repository setup
+    /// trial's, an environment verification.
+    Check,
+    /// A preparation step: a candidate's, a session workspace's, the base
+    /// cache warm-up, a trial's.
+    Prepare,
+    /// A short probe that runs nothing a repository brings: `--version`, a
+    /// conversation lookup, an image's self-check, the boundary's probe pod.
+    Probe,
+}
+
+impl RunKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Session => "session",
+            Self::Check => "check",
+            Self::Prepare => "prepare",
+            Self::Probe => "probe",
+        }
+    }
+}
+
+/// What a run means to someone reading the cluster: its kind, and the
+/// repository, channel, harness and phase it was run for. Rendered as pod
+/// labels on Kubernetes (`runner::kube`), where a metrics stack joins them to
+/// a pod's CPU and memory. Values are the raw names; the runtime sanitizes
+/// them. Nothing here may be a secret, a branch, a path or a prompt: labels
+/// are readable by anyone with `get pods`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunLabels {
+    /// Unset, the runtime falls back to how the run is sized; every call site
+    /// sets it.
+    pub kind: Option<RunKind>,
+    /// The repository's short name (`corpus::project::identify`'s `name`).
+    pub repo: Option<String>,
+    pub channel: Option<String>,
+    /// The adapter id: session harnesses and harness probes only.
+    pub harness: Option<String>,
+    /// `session::Phase::as_str`: session harnesses only.
+    pub phase: Option<&'static str>,
+}
+
+impl RunLabels {
+    pub fn of(kind: RunKind) -> Self {
+        Self {
+            kind: Some(kind),
+            ..Default::default()
+        }
+    }
+
+    /// `self` with `repo` named by its directory, the short name a project's
+    /// identity uses. A `workspace://<session>` path names a session, not a
+    /// repository, and is left unnamed: callers pass the origin repository
+    /// (`environment::origin_repo`) a continued session leads back to.
+    pub fn repo_dir(mut self, repo: Option<&std::path::Path>) -> Self {
+        self.repo = repo_name(repo);
+        self
+    }
+}
+
+/// A repository's short name, its directory's, for a label or a metric
+/// series. `None` for a `workspace://` path, whose last segment is a session
+/// id: a value that identifies one session and never recurs.
+pub fn repo_name(repo: Option<&std::path::Path>) -> Option<String> {
+    let repo = repo?;
+    if repo.to_string_lossy().starts_with("workspace://") {
+        return None;
+    }
+    repo.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RunnerCommand {
     pub argv: Vec<String>,
@@ -152,6 +230,8 @@ pub struct RunnerCommand {
     /// bounded command. Long-lived harnesses leave this unset.
     pub image: Option<String>,
     pub name: String,
+    /// What the run is for, for whoever reads the runtime: see `RunLabels`.
+    pub labels: RunLabels,
 }
 
 impl RunnerCommand {
@@ -655,5 +735,18 @@ mod tests {
         let plain: Vec<_> = cmd.plain_env().map(|(k, _)| k.as_str()).collect();
         assert_eq!(plain, vec!["KEEP"]);
         assert!(cmd.sets("HTTPS_PROXY") && cmd.sets("KEEP") && !cmd.sets("OTHER"));
+    }
+
+    /// A continued session's `workspace://<uuid>` path never names the
+    /// repository: its last segment is a session id.
+    #[test]
+    fn a_workspace_path_never_reaches_the_repo_label() {
+        let labels = |repo: &str| RunLabels::of(RunKind::Session).repo_dir(Some(repo.as_ref()));
+        assert_eq!(labels("/src/app").repo.as_deref(), Some("app"));
+        assert_eq!(
+            labels("workspace://0b7c2d4e-9f1a-4c3b-8e2d-5a6f7b8c9d0e").repo,
+            None
+        );
+        assert_eq!(RunLabels::of(RunKind::Session).repo_dir(None).repo, None);
     }
 }

@@ -981,6 +981,11 @@ async fn build_session(
                 .to_vec(),
             image: Some(built.image.clone()),
             name: format!("tracon-probe-{}", uuid::Uuid::now_v7().simple()),
+            labels: crate::runner::RunLabels {
+                harness: Some(harness.id.to_string()),
+                ..crate::runner::RunLabels::of(crate::runner::RunKind::Probe)
+            }
+            .repo_dir(Some(repo)),
             ..Default::default()
         })
         .await;
@@ -1670,6 +1675,7 @@ async fn missing_tools(runner: &dyn Runner, image: &str, commands: &[String]) ->
             argv,
             image: Some(image.to_string()),
             name: format!("tracon-probe-{}", uuid::Uuid::now_v7().simple()),
+            labels: crate::runner::RunLabels::of(crate::runner::RunKind::Probe),
             ..Default::default()
         })
         .await;

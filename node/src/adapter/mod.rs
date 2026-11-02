@@ -423,6 +423,10 @@ pub struct LaunchSpec {
     /// node relaunches a harness whose process died (`restorable`), or
     /// reopens a session's conversation for the operator (`reopens`).
     pub resume: Option<Resume>,
+    /// What the harness's pod is labelled with: the repository, channel and
+    /// phase it runs for. The adapter adds the kind and its own id. Kept on
+    /// the spec so a relaunch (`supervisor::Relaunch`) carries them too.
+    pub labels: crate::runner::RunLabels,
 }
 
 /// Where a relaunched harness picks its session up.

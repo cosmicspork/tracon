@@ -743,6 +743,22 @@ carries anything the node did not put there, so the boundary's volume check hold
 none and the namespace's default service account supplies its own, which is how a
 registry integration that patches that account keeps working.
 
+**A harness pod says what it is for.** Beside `tracon.dev/role=harness` and
+`tracon.dev/session=<pod name>`, which the NetworkPolicies and the boundary checks
+select on and which are unchanged, every pod carries `tracon.dev/kind` (`session`,
+`check`, `prepare` or `probe`, set by each caller on `RunnerCommand::labels`, since a
+runner is made fresh per call), `tracon.dev/sizing` (`session`, `command` or `probe`:
+the `[runtime.kubernetes.resources.*]` table that sized it, the knob a downsizing
+turns), and where they apply `tracon.dev/repo` (the repository's short name),
+`tracon.dev/channel`, `tracon.dev/harness` (the adapter id, on session pods and harness
+probes) and `tracon.dev/phase` (on session pods). A cluster's metrics stack joins its
+per-pod CPU and memory to these through `kube_pod_labels` rather than parsing pod-name
+prefixes, which are not a contract. Values are sanitized to what a label allows
+(`runner::kube::label_value`: lowercased, other characters made `-`, at most 63) and
+left out when nothing is left. Labels are readable by anyone with `get pods`, so none
+is ever a credential, a branch, a prompt or a path; the owner of a repository is left
+out too. A session's labels live on its `LaunchSpec`, so a relaunch keeps them.
+
 **The checks verify what runs.** They render the same run specification a session
 uses onto a probe that is created but never started, so a mutating admission webhook
 that adds privilege fails the check rather than passing the rendering, and a second

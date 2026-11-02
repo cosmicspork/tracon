@@ -297,6 +297,7 @@ async fn create_probe(runner: &crate::runner::kube::KubeRunner) -> Result<Pod, S
     let cmd = RunnerCommand {
         argv: vec!["true".into()],
         name: PROBE.into(),
+        labels: crate::runner::RunLabels::of(crate::runner::RunKind::Probe),
         ..Default::default()
     };
     let pod = runner
@@ -778,6 +779,7 @@ async fn check_egress(
     let cmd = RunnerCommand {
         argv: vec!["sh".into(), "-c".into(), script],
         name: "tracon-egress-probe".into(),
+        labels: crate::runner::RunLabels::of(crate::runner::RunKind::Probe),
         ..Default::default()
     };
     match runner.run_probe(cmd).await {
