@@ -544,6 +544,10 @@ export function eventLine(e: Event): EventLine | null {
       switch (str(p.outcome)) {
         case 'prepared':
           return line('mark', ['workspace prepared', commands.join(' · '), took])
+        case 'from_snapshot': {
+          const commit = str(p.commit)
+          return line('mark', ['workspace prepared', commit ? `from the snapshot of ${commit.slice(0, 8)}` : 'from the snapshot', took])
+        }
         case 'failed':
           return line('crit', ['workspace not prepared', 'preparation failed', 'the session started without it', took])
         case 'timed_out': {

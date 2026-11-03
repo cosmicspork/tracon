@@ -390,6 +390,7 @@ test("a workspace's preparation reads as what it did and what it cost the start"
   const commands = ['cargo fetch --locked', 'cd spa && bun install --frozen-lockfile']
   const lines: [Record<string, unknown>, string, string][] = [
     [{ outcome: 'prepared', commands, ms: 11_200 }, 'workspace prepared · cargo fetch --locked · cd spa && bun install --frozen-lockfile · 11s', 'mark'],
+    [{ outcome: 'from_snapshot', commands, ms: 0, commit: 'd8e2d1ec4f0a' }, 'workspace prepared · from the snapshot of d8e2d1ec · 0s', 'mark'],
     [{ outcome: 'failed', commands, ms: 4_000, detail: 'preparation `cargo fetch --locked` failed (exit 101)' }, 'workspace not prepared · preparation failed · the session started without it · 4s', 'crit'],
     [{ outcome: 'timed_out', commands, ms: 2_400_000, timeout_secs: 2400 }, 'workspace not prepared · timed out after 40m · the session started without it', 'crit'],
     [{ outcome: 'cancelled', commands, ms: 900, reason: 'the session was stopped' }, 'workspace preparation stopped · the session was stopped', 'mark'],

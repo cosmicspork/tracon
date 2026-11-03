@@ -484,7 +484,9 @@ checks = ["just check"]
   changes or you ask (`tracon repo build`).
 - **`prepare`** then runs as uid 65532 on the default branch, in a sandbox from that
   image, which is snapshotted for the repository's sessions and checks as for any
-  repository on the base.
+  repository on the base. The snapshot keeps what `prepare` left in `/work`
+  (`node_modules`, `vendor/`) and `/cache`, without the branch's tracked files, and
+  records the commit it was prepared from.
 - **Egress.** The steps reach only the entry's `egress`, through a grant of their own on
   the node's egress proxy. On Podman the build has no network but one loopback port to
   that proxy (`pasta --splice-only`), and no DNS: a step gets `HTTPS_PROXY` and nothing
@@ -762,6 +764,20 @@ in the session's log and told to the agent in its orientation, and the session s
 anyway. A session in the harness's own image has no cache to prepare against and is told
 the commands were not run, and why: on a Kubernetes node without a builder, that is every
 session.
+
+A session that starts from its repository's prepared snapshot (`sandbox_images`, or an
+Apple node) skips `prepare` when its workspace is at the very commit the snapshot was
+prepared from: its tree is sent over the snapshot's `/work`, which already holds what
+`prepare` installed, and its log says *workspace prepared from the snapshot*. This needs
+a workspace sent over the image rather than mounted in its place: Apple, or Podman with
+`sandbox_files`. At any other commit, or for a resumed workspace, `prepare` runs again,
+every step in one sandbox from the snapshot on its warm `/work` and `/cache`, and the
+workspace comes back once at the end. The snapshot is keyed on lockfiles, not commits, so
+it stays current as the default branch moves, and sessions on a later commit prepare
+again on top of it. A session's sandbox from a snapshot is never sent the node's copy of
+its cache: the snapshot's `/cache` is the warm one. A candidate's preparation before its
+checks always runs, since it prepares a tree under review rather than a commit the
+snapshot was made from.
 You approve, reject with a reason, or — on a desktop — edit the diff and send it back as
 a request for changes. Approval publishes exactly the reviewed tree with the brokered
 credential; if the branch moved since submit, approval is refused and the changed files
@@ -2174,8 +2190,9 @@ once. Without that flag, starting it prompts for a kernel and fails when there i
   `localhost/<prefix>-snapshot-<repo>`. Its sessions and checks start from that image.
   The commit keeps the preparation's environment, so the node builds it over once more
   with the base's configuration, the preparation's token emptied and the snapshot's
-  labels. A commit is one flattened layer, so each snapshot costs about the base's size
-  on disk. `tracon gc` removes snapshots that a newer one superseded.
+  labels, among them the commit it was prepared from. A session at that commit skips
+  `prepare`. A commit is one flattened layer, so each snapshot costs about the base's
+  size on disk. `tracon gc` removes snapshots that a newer one superseded.
 - **Placement.** The node reports its sandboxes as tier `microvm`, so work that
   requires one (`tier = ["microvm"]`) stays on the Mac.
 

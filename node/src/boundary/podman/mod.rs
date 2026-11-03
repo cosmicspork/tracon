@@ -533,7 +533,9 @@ impl Backend for PodmanBackend {
                 cfg,
                 crate::runner::podman::RunSpec::from_config(cfg, false),
             )),
-            files: uses_sandbox_files(cfg).then(crate::runner::sandbox_files::FilesStore::for_node),
+            // Always: a preparation's tree goes over the files channel into
+            // the sandbox's own filesystem, so its commit carries it.
+            files: Some(crate::runner::sandbox_files::FilesStore::for_node()),
             tunnels: match uses_sandbox_tunnels(cfg) {
                 true => crate::runner::tunnels::gateway_tunnels(cfg),
                 false => Vec::new(),
@@ -696,6 +698,12 @@ impl Backend for PodmanBackend {
             Err(BoundaryError::Podman(stderr)) if stderr.contains("no such volume") => Ok(()),
             Err(error) => Err(error),
         }
+    }
+
+    /// With `sandbox_files` a workspace from a snapshot is sent into the
+    /// snapshot's own `/work` (`FilesStore::plan_from`).
+    fn workspace_over_image(&self) -> bool {
+        uses_sandbox_files(&self.cfg)
     }
 
     async fn volume_exists(&self, volume: &str) -> bool {

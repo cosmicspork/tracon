@@ -227,7 +227,7 @@ impl ProtocolRunner {
         let image = cmd.image.clone().unwrap_or_else(|| self.image.clone());
         let (provided, files) = match &self.files {
             Some(store) => store
-                .plan(&mounts)
+                .plan_from(&mounts, &image, cmd.labels.kind)
                 .map_err(|e| RunnerError::Other(format!("sandbox {name}: {e}")))?,
             None => (mounts.clone(), None),
         };

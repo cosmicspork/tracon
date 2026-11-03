@@ -847,6 +847,11 @@ impl Backend for AppleBackend {
         !from_snapshot && self.files_store().holds(base)
     }
 
+    /// Every tree is sent onto the VM's own disk, over the image's.
+    fn workspace_over_image(&self) -> bool {
+        true
+    }
+
     async fn clone_volume(&self, source: &str, destination: &str) -> Result<(), BoundaryError> {
         self.files_store()
             .clone_volume(source, destination)
