@@ -542,6 +542,62 @@ async fn a_preparation_comes_back_whole_and_a_check_not_at_all() {
     let tree = l.store.tree(WORKSPACE).unwrap();
     assert_eq!(read(tree.join("node_modules/new/i.js")), "fresh\n");
 
+    // Its links come back as links, whether they name a place in the tree
+    // by the path it is mounted at (bun's cache) or leave it (a virtualenv's
+    // interpreter), and the next sandbox has them.
+    l.fresh();
+    let out = runner
+        .run_capture(capture(
+            format!(
+                "mkdir -p {w}/.venv/bin {w}/node_modules/.bin && \
+                 ln -s /usr/bin/python3 {w}/.venv/bin/python && \
+                 ln -s {w}/node_modules/new/i.js {w}/node_modules/.bin/new"
+            ),
+            RunKind::Prepare,
+            workspace.clone(),
+        ))
+        .await
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        std::fs::read_link(tree.join(".venv/bin/python")).unwrap(),
+        Path::new("/usr/bin/python3")
+    );
+    assert_eq!(
+        std::fs::read_link(tree.join("node_modules/.bin/new")).unwrap(),
+        l.work.join("node_modules/new/i.js")
+    );
+    l.fresh();
+    let out = runner
+        .run_capture(capture(
+            format!("readlink {w}/.venv/bin/python && cat {w}/node_modules/.bin/new"),
+            RunKind::Probe,
+            workspace.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "/usr/bin/python3\nfresh\n"
+    );
+
+    // One whose tree cannot be taken back has prepared nothing, and says
+    // why; the node keeps what it had.
+    l.fresh();
+    let failed = runner
+        .run_capture(capture(
+            format!("echo lost > {w}/a.txt && rm -rf {w}"),
+            RunKind::Prepare,
+            workspace.clone(),
+        ))
+        .await;
+    let error = failed
+        .expect_err("a preparation whose tree never came back")
+        .to_string();
+    assert!(error.contains("could not take its trees back"), "{error}");
+    assert_eq!(read(tree.join("a.txt")), "one\n");
+    assert!(tree.join(".venv/bin").is_dir());
+
     // A check's copy is the tree itself, sent in; what the check does to it
     // stays in its sandbox.
     l.store

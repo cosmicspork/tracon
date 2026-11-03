@@ -379,8 +379,18 @@ impl ProtocolRunner {
         let name = self.capture_name(&cmd.name);
         let Started { process, teardown } = self.start(&name, &cmd, shape).await?;
         let output = process.output().await;
-        teardown.finish().await;
+        let taken_back = teardown.conclude().await;
         let output = output.map_err(|e| RunnerError::Other(format!("{name}: {e}")))?;
+        // What a preparation installed is its point: one that ran and whose
+        // tree never reached the node has prepared nothing. A failed command
+        // says more by its own exit.
+        if let (Err(error), Some(super::RunKind::Prepare)) = (&taken_back, cmd.labels.kind) {
+            if exit_code(output.status) == 0 {
+                return Err(RunnerError::Other(format!(
+                    "{name}: could not take its trees back: {error}"
+                )));
+            }
+        }
         Ok(std::process::Output {
             status: std_status(exit_code(output.status)),
             stdout: output.stdout,
@@ -412,7 +422,13 @@ struct Teardown {
 }
 
 impl Teardown {
-    async fn finish(mut self) {
+    async fn finish(self) {
+        let _ = self.conclude().await;
+    }
+
+    /// [`Self::finish`], saying whether the last take-back of its trees
+    /// failed.
+    async fn conclude(mut self) -> Result<(), super::sandbox_files::FilesError> {
         self.armed = false;
         let _tunnels = std::mem::take(&mut self.tunnels);
         teardown(
@@ -424,7 +440,7 @@ impl Teardown {
             self.conn.take(),
             self.files.take(),
         )
-        .await;
+        .await
     }
 }
 
@@ -457,13 +473,14 @@ async fn teardown(
     run: String,
     conn: Option<SandboxConn>,
     files: Option<super::sandbox_files::Attached>,
-) {
+) -> Result<(), super::sandbox_files::FilesError> {
     server.tokens().revoke(&run);
     super::services::unregister(&name, &run);
     // While the sandbox is still there to read from.
-    if let Some(files) = files {
-        files.finish().await;
-    }
+    let taken_back = match files {
+        Some(files) => files.conclude().await,
+        None => Ok(()),
+    };
     if let Some(conn) = conn {
         // Its processes get their stop signal and grace from the sandbox,
         // before the provider's removal makes sure of it.
@@ -478,6 +495,7 @@ async fn teardown(
     if let Err(error) = provider.destroy(&handle).await {
         tracing::warn!(sandbox = %handle.0, %error, "could not remove a sandbox");
     }
+    taken_back
 }
 
 /// An exit as a container's would read: the code, or 128 and the signal.

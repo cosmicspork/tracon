@@ -466,6 +466,53 @@ async fn what_a_session_changed_is_there_for_the_next_sandbox() {
     backend.remove_volume(&scratch).await.unwrap();
 }
 
+/// A preparation's virtualenv, whose interpreter is an absolute link to the
+/// image's, comes back to the node whole and is there for the next sandbox.
+/// Needs an image with Python's venv module (`ghcr.io/cosmicspork/
+/// tracon-sandbox-base` has it, without `ensurepip`) or uv.
+#[tokio::test]
+async fn a_prepared_virtualenv_is_there_for_the_next_sandbox() {
+    let Some(rig) = Rig::new("venv") else {
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let seed = seed(tmp.path());
+    let backend = rig.backend(&rig.cfg).await;
+    let work = rig.kept("prep", "v");
+    backend.import_volume(&work, &seed).await.unwrap();
+    let mounts = vec![Mount::volume(&work, "/work", false)];
+    let runner = rig.runner(&rig.cfg, Vec::new());
+    let out = runner
+        .run_capture(sh(
+            &rig.name("prepare"),
+            RunKind::Prepare,
+            "cd /work && { python3 -m venv --without-pip .venv || uv venv .venv; }",
+            mounts.clone(),
+        ))
+        .await
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let tree = FilesStore::for_node().tree(&work).unwrap();
+    let outward = std::fs::read_dir(tree.join(".venv/bin"))
+        .unwrap()
+        .filter_map(|entry| std::fs::read_link(entry.unwrap().path()).ok())
+        .any(|target| target.is_absolute());
+    assert!(outward, "the interpreter link to the image's came back");
+    assert!(tree.join(".venv/pyvenv.cfg").is_file());
+
+    let out = runner
+        .run_capture(sh(
+            &rig.name("use"),
+            RunKind::Probe,
+            "/work/.venv/bin/python -c 'import sys; print(sys.prefix)'",
+            mounts,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(text(&out.stdout), "/work/.venv\n", "{}", text(&out.stderr));
+    backend.remove_volume(&work).await.unwrap();
+}
+
 /// Runs the bundle's copy of a harness in place of the image's.
 struct FromBundle(&'static str, Arc<dyn Runner>);
 

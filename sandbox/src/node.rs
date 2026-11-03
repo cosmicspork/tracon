@@ -556,8 +556,9 @@ impl SandboxConn {
         dest: &Path,
         limits: Limits,
     ) -> Result<TreeSummary, SandboxError> {
+        let dir = dir.into();
         let args = protocol::encode_args(&ExportRequest {
-            dir: dir.into(),
+            dir: dir.clone(),
             exclusions,
         });
         let reader = self.open_read(path::EXPORT, args).await?;
@@ -568,7 +569,8 @@ impl SandboxConn {
         let staging = tempfile::Builder::new()
             .prefix(".sandbox-export-")
             .tempdir_in(parent)?;
-        let summary = files::unpack_async(reader, staging.path().to_path_buf(), limits).await?;
+        let summary =
+            files::unpack_async(reader, staging.path().to_path_buf(), Some(dir), limits).await?;
         let staged = staging.keep();
         if tokio::fs::symlink_metadata(dest).await.is_ok() {
             tokio::fs::remove_dir_all(dest).await?;
