@@ -205,6 +205,11 @@ session to read from it rather than assuming it can.
 whatever `[harness] id` says. A session on an Anthropic credential reopens on
 Claude Code only, and one on any other provider on `native` only.
 
+The new session runs the archived one's model; `--model provider/model` names
+another, and the pairing is checked as a session start checks it. A model the
+channel no longer offers is refused by name rather than swapped for the node's
+default, so pass `--model` to carry the work onto one it does.
+
 ## Locked out of admin from afar
 
 Admin actions made from off the node need a passkey; made at the node they need

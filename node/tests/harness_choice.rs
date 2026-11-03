@@ -113,6 +113,9 @@ async fn node(default: &'static str) -> Node {
         .insert("anthropic-key".into(), provider("key", SHAPE_ANTHROPIC));
     cfg.providers
         .insert("openai".into(), provider("oai", SHAPE_OPENAI));
+    // Configured, but its credential is gone: nothing on it is offered.
+    cfg.providers
+        .insert("retired".into(), provider("gone", SHAPE_OPENAI));
     let cfg = Arc::new(cfg);
     let broker: Broker = toml::from_str(BROKER).unwrap();
     let tools = Arc::new(tracon::mcp::Tools {
@@ -172,6 +175,40 @@ impl Node {
                 Request::builder()
                     .method("POST")
                     .uri("/api/sessions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    /// An ended session on `model` and `harness`, to reopen.
+    fn ended(&self, id: &str, model: &str, harness: &str) {
+        let mut row = support::rows::session_row(id, "n1", "personal");
+        row.repo_path = self.repo.clone();
+        row.model = model.into();
+        row.harness_id = harness.into();
+        row.state = "closed".into();
+        self.store.insert_session(&row).unwrap();
+    }
+
+    async fn reopen(&self, id: &str, body: Value) -> (StatusCode, Value) {
+        let response = self
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{id}/reopen"))
                     .header("content-type", "application/json")
                     .body(Body::from(body.to_string()))
                     .unwrap(),
@@ -363,4 +400,103 @@ async fn a_mismatched_harness_blocks_only_its_own_sessions() {
     let (status, body) = node.start("openai/gpt-x", None).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert_eq!(body["harness_id"], "native");
+}
+
+/// A reopened session runs on the model the old one ran, so a session on a
+/// non-Anthropic provider reopens on `native` rather than on whatever the
+/// node's default model is.
+#[tokio::test]
+async fn reopening_keeps_the_sessions_model() {
+    state::isolate();
+    let node = node("claude").await;
+    node.ended("old-1", "openai/gpt-x", "native");
+
+    let (status, body) = node.reopen("old-1", json!({ "harness": "native" })).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["model"], "openai/gpt-x");
+    assert_eq!(body["harness_id"], "native");
+    assert_eq!(body["continued_from"], "old-1");
+}
+
+/// A model named on the reopen replaces the old one's, and the harness is
+/// checked against it.
+#[tokio::test]
+async fn reopening_on_another_model_runs_that_model() {
+    state::isolate();
+    let node = node("native").await;
+    node.ended("old-1", "openai/gpt-x", "native");
+
+    let (status, body) = node
+        .reopen(
+            "old-1",
+            json!({ "harness": "claude", "model": "anthropic/claude-x" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["model"], "anthropic/claude-x");
+    assert_eq!(body["harness_id"], "claude");
+}
+
+/// A pairing session start refuses, reopen refuses in the same words, whether
+/// the model is the old session's or one named on the reopen.
+#[tokio::test]
+async fn reopening_on_a_harness_the_model_cannot_run_on_is_refused_as_a_start_is() {
+    state::isolate();
+    let node = node("native").await;
+    node.ended("old-1", "anthropic/claude-x", "claude");
+    node.ended("old-2", "openai/gpt-x", "native");
+
+    let (status, started) = node.start("anthropic/claude-x", Some("native")).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{started}");
+    let refusal = &started["error"]["message"];
+    assert!(
+        refusal.as_str().unwrap().contains("Claude Code only"),
+        "{refusal}"
+    );
+    for (id, body) in [
+        ("old-1", json!({ "harness": "native" })),
+        (
+            "old-2",
+            json!({ "harness": "native", "model": "anthropic/claude-x" }),
+        ),
+    ] {
+        let (status, reopened) = node.reopen(id, body).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{id}: {reopened}");
+        assert_eq!(&reopened["error"]["message"], refusal, "{id}");
+    }
+    assert!(
+        !node
+            .store
+            .list_sessions(None)
+            .unwrap()
+            .iter()
+            .any(|s| s.continued_from.is_some()),
+        "nothing was started"
+    );
+}
+
+/// An old model no longer offered is refused by name, not swapped for the
+/// node's default; naming one that is offered carries the work on.
+#[tokio::test]
+async fn reopening_a_session_whose_model_is_gone_names_it() {
+    state::isolate();
+    let node = node("native").await;
+    node.ended("old-1", "retired/m", "native");
+
+    let (status, body) = node.reopen("old-1", json!({ "harness": "native" })).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("retired/m") && message.contains("no longer offers"),
+        "{message}"
+    );
+
+    let (status, body) = node
+        .reopen(
+            "old-1",
+            json!({ "harness": "native", "model": "openai/gpt-x" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["model"], "openai/gpt-x");
 }
