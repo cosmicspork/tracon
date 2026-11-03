@@ -62,6 +62,8 @@ struct Loopback {
     gone: Mutex<std::collections::HashSet<String>>,
     /// Present a token other than the one issued.
     wrong_token: bool,
+    /// Where each sandbox dials, by name.
+    paths: Mutex<HashMap<String, PathBuf>>,
     /// Every sandbox made gets a socket of its own: one cut off before is
     /// still redialling its own, as a removed container's never could.
     made: std::sync::atomic::AtomicUsize,
@@ -114,6 +116,10 @@ impl SandboxProvider for Loopback {
             spec.mounts.to_vec(),
         ));
         let path = self.path(&name);
+        self.paths
+            .lock()
+            .unwrap()
+            .insert(name.clone(), path.clone());
         let _ = std::fs::remove_file(&path);
         let listener = tokio::net::UnixListener::bind(&path).unwrap();
         let token = match self.wrong_token {
@@ -158,6 +164,27 @@ impl SandboxProvider for Loopback {
             .accept(far)
             .await
             .map_err(|e| ProviderError::Failed(e.to_string()))
+    }
+
+    /// The socket bound again where the sandbox dials, taking only its
+    /// run's connections, as Podman's provider does.
+    async fn reattach(
+        &self,
+        handle: &Handle,
+        server: &SandboxServer,
+        conn: &SandboxConn,
+    ) -> Result<(), ProviderError> {
+        let path = self
+            .paths
+            .lock()
+            .unwrap()
+            .get(&handle.0)
+            .cloned()
+            .ok_or_else(|| ProviderError::NotFound(handle.0.clone()))?;
+        let _ = std::fs::remove_file(&path);
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        server.keep_accepting(tracon_sandbox::carrier::Listener::Unix(listener), conn);
+        Ok(())
     }
 
     async fn destroy(&self, handle: &Handle) -> Result<(), ProviderError> {
@@ -234,6 +261,91 @@ async fn the_protocol_runner_over_a_loopback_sandbox() {
     a_dropped_capture_still_removes_its_sandbox().await;
     a_sandbox_with_the_wrong_token_is_refused_and_removed().await;
     the_podman_provider_takes_the_supervisors_connection_past_a_bad_one().await;
+    a_sandbox_left_running_is_taken_back_by_the_next_node_process().await;
+}
+
+/// The node stops with a session's harness in a sandbox that can resume:
+/// the sandbox stays, with a record, and the next process's runner takes it
+/// back for the session's next harness rather than making another.
+async fn a_sandbox_left_running_is_taken_back_by_the_next_node_process() {
+    let provider = Loopback::new(false);
+    let identity = tracon_sandbox::tls::NodeIdentity::generate().unwrap();
+    let process = || {
+        let options = tracon_sandbox::node::ServerOptions {
+            resume_within: Duration::from_secs(10),
+            ..Default::default()
+        };
+        ProtocolRunner::new(provider.clone(), "img@sha256:aa")
+            .with_server(Arc::new(SandboxServer::new(&identity, options).unwrap()))
+            .with_connect_within(Duration::from_secs(10))
+    };
+    let marks = tempfile::tempdir().unwrap();
+    let mark = marks.path().join("first");
+    let name = "tracon-h-adopt";
+    let first = process();
+    let spawned = first
+        .spawn(sh(
+            &format!(
+                "touch {}; while read -r line; do echo \"first $line\"; done",
+                mark.display()
+            ),
+            name,
+        ))
+        .await
+        .unwrap();
+    let mut stdin = spawned.stdin;
+    let mut lines = BufReader::new(spawned.stdout).lines();
+    stdin.write_all(b"a\n").await.unwrap();
+    assert_eq!(lines.next_line().await.unwrap().unwrap(), "first a");
+
+    // The node stops: the sandbox is left, and the harness goes as its
+    // session's supervisor closes its stdin.
+    assert_eq!(tracon::runner::protocol::detach_all(), 1);
+    let record = tracon::runner::reattach::all()
+        .into_iter()
+        .find(|r| r.name == name)
+        .expect("kept for the next process");
+    assert!(record.harness.is_some());
+    stdin.shutdown().await.unwrap();
+    assert_eq!(spawned.done.await.unwrap(), 0);
+    drop((stdin, lines, first));
+    assert!(
+        provider.destroyed.lock().unwrap().is_empty(),
+        "left running"
+    );
+
+    // The next process.
+    let next = process();
+    let again = next
+        .spawn(sh(
+            &format!(
+                "test -e {} || exit 9; while read -r line; do echo \"again $line\"; done",
+                mark.display()
+            ),
+            name,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        provider.created.lock().unwrap().len(),
+        1,
+        "taken back, not made"
+    );
+    assert!(tracon::runner::reattach::all()
+        .iter()
+        .all(|r| r.name != name));
+    let mut stdin = again.stdin;
+    let mut lines = BufReader::new(again.stdout).lines();
+    stdin.write_all(b"b\n").await.unwrap();
+    assert_eq!(lines.next_line().await.unwrap().unwrap(), "again b");
+    stdin.shutdown().await.unwrap();
+    assert_eq!(again.done.await.unwrap(), 0);
+    assert_eq!(
+        *provider.destroyed.lock().unwrap(),
+        vec![name.to_string()],
+        "removed once its run is really over"
+    );
+    provider.settle().await;
 }
 
 async fn a_capture_runs_with_its_env_cwd_and_exit_code() {

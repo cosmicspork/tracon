@@ -145,6 +145,75 @@ fn end_if_gone(
 /// How often a sandbox whose connection is down is looked for.
 const AWAY_POLL: Duration = Duration::from_secs(2);
 
+/// A session's sandbox, as the node would leave it running when it stops.
+struct Kept {
+    run: String,
+    handle: Handle,
+    server: Arc<SandboxServer>,
+    conn: tracon_sandbox::node::WeakConn,
+    harness: u64,
+    /// Left for the next node process: its teardown neither stops nor
+    /// removes it.
+    detached: bool,
+}
+
+/// Every session's sandbox this process runs, by name.
+fn sessions() -> &'static Mutex<HashMap<String, Kept>> {
+    static SESSIONS: OnceLock<Mutex<HashMap<String, Kept>>> = OnceLock::new();
+    SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn detached(name: &str) -> bool {
+    sessions()
+        .lock()
+        .unwrap()
+        .get(name)
+        .is_some_and(|kept| kept.detached)
+}
+
+/// The node is stopping: leave every session's sandbox that can resume
+/// running for the next node process, with a record of it
+/// (`runner::reattach`). Their sessions still end as the node stops them,
+/// and their trees come back as at any end; what stays is the sandbox, its
+/// services and its tunnels' listeners, which the next process takes back
+/// when it carries the session on. One the next process never takes back
+/// ends itself once its redials run out. The number left.
+pub fn detach_all() -> usize {
+    let mut left = 0;
+    for (name, kept) in sessions().lock().unwrap().iter_mut() {
+        if kept.detached {
+            continue;
+        }
+        let Some(conn) = kept.conn.upgrade() else {
+            continue;
+        };
+        if !conn.is_resumable() || conn.is_closed() {
+            continue;
+        }
+        let Some(digest) = kept.server.tokens().resume_digest(&kept.run) else {
+            continue;
+        };
+        let record = super::reattach::Record {
+            name: name.clone(),
+            run: kept.run.clone(),
+            handle: kept.handle.0.clone(),
+            digest: hex::encode(digest),
+            harness: Some(kept.harness),
+            in_turn: super::sandbox_files::in_turn(name),
+        };
+        match super::reattach::keep(&record) {
+            Ok(()) => {
+                kept.detached = true;
+                left += 1;
+            }
+            Err(error) => {
+                tracing::warn!(sandbox = %name, %error, "could not keep a sandbox for the next node process; it is removed")
+            }
+        }
+    }
+    left
+}
+
 pub struct ProtocolRunner {
     provider: Arc<dyn SandboxProvider>,
     /// `None` for this process's own, `node_server`.
@@ -295,80 +364,33 @@ impl ProtocolRunner {
             return Err(RunnerError::Other("empty argv".into()));
         }
         let server = self.server()?;
-        let run = format!("{name}:{}", uuid::Uuid::now_v7().simple());
-        let token = match self.token_window {
-            Some(window) => server.tokens().issue_within(run.clone(), window),
-            None => server.tokens().issue(run.clone()),
-        };
-        let bootstrap = Bootstrap {
-            run: run.clone(),
-            cert_pin: server.pin().to_string(),
-            token,
-        };
+        let image = cmd.image.clone().unwrap_or_else(|| self.image.clone());
         let mounts: Vec<Mount> = self
             .extra_mounts
             .iter()
             .chain(cmd.mounts.iter())
             .cloned()
             .collect();
-        let image = cmd.image.clone().unwrap_or_else(|| self.image.clone());
         let (provided, files) = match &self.files {
             Some(store) => store
                 .plan_from(&mounts, &image, cmd.labels.kind)
                 .map_err(|e| RunnerError::Other(format!("sandbox {name}: {e}")))?,
             None => (mounts.clone(), None),
         };
-        let created = {
-            // While the sandbox is made, not while it runs.
-            let _images = crate::boundary::reconcile::images_in_use().await;
-            self.provider
-                .create(&CreateSpec {
-                    name: Some(name),
-                    image: &image,
-                    resources: &Resources::default(),
-                    mounts: &provided,
-                    bootstrap: &bootstrap,
-                    labels: &cmd.labels,
-                    shape,
-                })
-                .await
+        // A session's sandbox the node's previous process left running is
+        // taken back as it is: its trees, services and tunnels are there.
+        let kept = match shape {
+            Shape::Session => super::reattach::take(name),
+            _ => None,
         };
-        let handle = match created {
-            Ok(handle) => handle,
-            Err(error) => {
-                server.tokens().revoke(&run);
-                return Err(failed(error, || format!("start sandbox {name}")));
+        let adopted = kept.is_some();
+        let (handle, conn, mut teardown) = match kept {
+            Some(record) => self.adopt(name, record, &server).await?,
+            None => {
+                self.make(name, cmd, shape, &server, &provided, &image)
+                    .await?
             }
         };
-        let teardown = Teardown {
-            provider: self.provider.clone(),
-            server: server.clone(),
-            name: name.to_string(),
-            handle: handle.clone(),
-            run,
-            conn: None,
-            files: None,
-            tunnels: Vec::new(),
-            armed: true,
-        };
-        running()
-            .lock()
-            .unwrap()
-            .insert(name.to_string(), (handle.clone(), teardown.run.clone()));
-        let conn = match self
-            .provider
-            .connect(&handle, &server, self.connect_within)
-            .await
-        {
-            Ok(conn) => conn,
-            Err(error) => {
-                teardown.finish().await;
-                return Err(failed(error, || format!("connect to sandbox {name}")));
-            }
-        };
-        end_if_gone(self.provider.clone(), server.clone(), handle.clone(), &conn);
-        let mut teardown = teardown;
-        teardown.conn = Some(conn.clone());
         if let Some(requirements) = &self.requirements {
             let verified = self
                 .provider
@@ -384,13 +406,20 @@ impl ProtocolRunner {
             }
         }
         super::services::register(name, &teardown.run, conn.clone());
+        if adopted {
+            super::services::adopt(name).await;
+        }
         if let Some(files) = files {
             // A spawn is a session's harness unless it says otherwise.
             let kind = cmd.labels.kind.unwrap_or(match stdin {
                 true => super::RunKind::Session,
                 false => super::RunKind::Probe,
             });
-            match files.attach(&conn, name, kind).await {
+            let attached = match adopted {
+                true => Ok(files.adopt(&conn, name, kind)),
+                false => files.attach(&conn, name, kind).await,
+            };
+            match attached {
                 Ok(attached) => teardown.files = Some(attached),
                 Err(error) => {
                     teardown.finish().await;
@@ -400,7 +429,11 @@ impl ProtocolRunner {
                 }
             }
         }
-        match super::tunnels::open(&conn, &self.tunnels).await {
+        let tunnels = match adopted {
+            true => Ok(super::tunnels::adopt(&conn, &self.tunnels)),
+            false => super::tunnels::open(&conn, &self.tunnels).await,
+        };
+        match tunnels {
             Ok(tunnels) => teardown.tunnels = tunnels,
             Err(error) => {
                 teardown.finish().await;
@@ -445,6 +478,142 @@ impl ProtocolRunner {
             }
         };
         Ok(Started { process, teardown })
+    }
+
+    /// Make the sandbox and take its first connection.
+    async fn make(
+        &self,
+        name: &str,
+        cmd: &RunnerCommand,
+        shape: Shape,
+        server: &Arc<SandboxServer>,
+        provided: &[Mount],
+        image: &str,
+    ) -> Result<(Handle, SandboxConn, Teardown), RunnerError> {
+        let run = format!("{name}:{}", uuid::Uuid::now_v7().simple());
+        let token = match self.token_window {
+            Some(window) => server.tokens().issue_within(run.clone(), window),
+            None => server.tokens().issue(run.clone()),
+        };
+        let bootstrap = Bootstrap {
+            run: run.clone(),
+            cert_pin: server.pin().to_string(),
+            token,
+        };
+        let created = {
+            // While the sandbox is made, not while it runs.
+            let _images = crate::boundary::reconcile::images_in_use().await;
+            self.provider
+                .create(&CreateSpec {
+                    name: Some(name),
+                    image,
+                    resources: &Resources::default(),
+                    mounts: provided,
+                    bootstrap: &bootstrap,
+                    labels: &cmd.labels,
+                    shape,
+                })
+                .await
+        };
+        let handle = match created {
+            Ok(handle) => handle,
+            Err(error) => {
+                server.tokens().revoke(&run);
+                return Err(failed(error, || format!("start sandbox {name}")));
+            }
+        };
+        let teardown = Teardown {
+            provider: self.provider.clone(),
+            server: server.clone(),
+            name: name.to_string(),
+            handle: handle.clone(),
+            run,
+            conn: None,
+            files: None,
+            tunnels: Vec::new(),
+            armed: true,
+        };
+        running()
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), (handle.clone(), teardown.run.clone()));
+        let conn = match self
+            .provider
+            .connect(&handle, server, self.connect_within)
+            .await
+        {
+            Ok(conn) => conn,
+            Err(error) => {
+                teardown.finish().await;
+                return Err(failed(error, || format!("connect to sandbox {name}")));
+            }
+        };
+        end_if_gone(self.provider.clone(), server.clone(), handle.clone(), &conn);
+        let mut teardown = teardown;
+        teardown.conn = Some(conn.clone());
+        Ok((handle, conn, teardown))
+    }
+
+    /// Take back a sandbox the node's previous process left running: know
+    /// its run again, set its carrier up again, and wait for it to redial.
+    /// The harness that ran in it is stopped; the caller starts another,
+    /// which carries the conversation on. On any failure the sandbox goes,
+    /// as a sandbox that failed to start would.
+    async fn adopt(
+        &self,
+        name: &str,
+        record: super::reattach::Record,
+        server: &Arc<SandboxServer>,
+    ) -> Result<(Handle, SandboxConn, Teardown), RunnerError> {
+        let handle = Handle(record.handle.clone());
+        // What this process knew of it as the one that left it, if it is.
+        sessions().lock().unwrap().remove(name);
+        let Some(digest) = record.digest() else {
+            let _ = self.provider.destroy(&handle).await;
+            return Err(RunnerError::Other(format!(
+                "sandbox {name}: its record is unreadable"
+            )));
+        };
+        let conn = server.restore(&record.run, digest);
+        let teardown = Teardown {
+            provider: self.provider.clone(),
+            server: server.clone(),
+            name: name.to_string(),
+            handle: handle.clone(),
+            run: record.run.clone(),
+            conn: Some(conn.clone()),
+            files: None,
+            tunnels: Vec::new(),
+            armed: true,
+        };
+        running()
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), (handle.clone(), record.run.clone()));
+        if let Err(error) = self.provider.reattach(&handle, server, &conn).await {
+            teardown.finish().await;
+            return Err(failed(error, || format!("take sandbox {name} back")));
+        }
+        let within = server.options().resume_within;
+        if !matches!(
+            tokio::time::timeout(within, conn.connected()).await,
+            Ok(true)
+        ) {
+            teardown.finish().await;
+            return Err(RunnerError::Other(format!(
+                "sandbox {name} did not come back within {} s",
+                within.as_secs()
+            )));
+        }
+        tracing::info!(sandbox = %name, run = %record.run, "took back a sandbox the previous node process left running");
+        end_if_gone(self.provider.clone(), server.clone(), handle.clone(), &conn);
+        if let Some(id) = record.harness {
+            // Usually gone already: the node closed its stdin as it stopped.
+            let harness = conn.process(id);
+            let _ = harness.signal_group(libc::SIGKILL).await;
+            let _ = tokio::time::timeout(Duration::from_secs(10), harness.wait()).await;
+        }
+        Ok((handle, conn, teardown))
     }
 }
 
@@ -569,6 +738,15 @@ async fn teardown(
         Some(files) => files.conclude().await,
         None => Ok(()),
     };
+    if detached(&name) {
+        return taken_back;
+    }
+    {
+        let mut kept = sessions().lock().unwrap();
+        if kept.get(&name).is_some_and(|k| k.run == run) {
+            kept.remove(&name);
+        }
+    }
     if let Some(conn) = conn {
         // Its processes get their stop signal and grace from the sandbox,
         // before the provider's removal makes sure of it.
@@ -620,6 +798,19 @@ impl Runner for ProtocolRunner {
             teardown.finish().await;
             return Err(RunnerError::Other(format!("{name} has no stdio")));
         };
+        if let Some(conn) = &teardown.conn {
+            sessions().lock().unwrap().insert(
+                name.clone(),
+                Kept {
+                    run: teardown.run.clone(),
+                    handle: teardown.handle.clone(),
+                    server: teardown.server.clone(),
+                    conn: conn.downgrade(),
+                    harness: process.id(),
+                    detached: false,
+                },
+            );
+        }
         // Counted until the harness is gone.
         let in_flight = telemetry().run_started(run_kind(cmd.labels.kind, "session"));
         Ok(Spawned {
@@ -647,6 +838,10 @@ impl Runner for ProtocolRunner {
     /// The sandbox the name is running in, else a sandbox of that name (one
     /// left by an earlier node process, which the provider named as asked).
     async fn kill(&self, name: &str) -> Result<(), RunnerError> {
+        // Left for the next node process, with what runs in it.
+        if detached(name) || super::services::sandbox_of(name).is_some_and(|s| detached(&s)) {
+            return Ok(());
+        }
         // A service in a session's sandbox stops there; its sandbox stays.
         if let Some(stopped) = super::services::stop(name).await {
             return stopped;

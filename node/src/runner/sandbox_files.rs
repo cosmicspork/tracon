@@ -719,6 +719,14 @@ impl Plan {
             let _guard = lock.lock().await;
             send(conn, p).await?;
         }
+        Ok(self.adopt(conn, name, kind))
+    }
+
+    /// Begin taking back what a run of `kind` takes back from a sandbox
+    /// whose trees are there already: one an earlier node process sent them
+    /// into and left running. Nothing is sent; the sandbox's copy is the
+    /// newer.
+    pub fn adopt(self, conn: &SandboxConn, name: &str, kind: RunKind) -> Attached {
         let syncs: Vec<Sync> = self
             .placed
             .iter()
@@ -759,7 +767,7 @@ impl Plan {
                 tokio::spawn(periodic(Arc::downgrade(&inner), inner.conn.clone(), every));
             *inner.periodic.lock().unwrap() = Some(periodic);
         }
-        Ok(Attached { inner })
+        Attached { inner }
     }
 }
 
@@ -983,6 +991,12 @@ pub fn turn_began(name: &str) {
     if let Some(inner) = named(name) {
         inner.turn.store(true, Ordering::SeqCst);
     }
+}
+
+/// Whether a session's turn is running in the sandbox of this name, as far
+/// as its turns were announced.
+pub fn in_turn(name: &str) -> bool {
+    named(name).is_some_and(|inner| inner.turn.load(Ordering::SeqCst))
 }
 
 /// A session's turn has ended: its trees are taken back now.

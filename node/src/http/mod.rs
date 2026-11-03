@@ -1021,6 +1021,11 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         });
     }
     {
+        // Before their sandboxes give up redialling.
+        let manager = state.manager.clone();
+        tokio::spawn(async move { manager.carry_on_after_restart().await });
+    }
+    {
         let store = store.clone();
         let manager = state.manager.clone();
         let node_id = state.node_id.clone();
@@ -1179,6 +1184,15 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     })
     .await
     .context("http server")?;
+    // A session's sandbox that can resume stays for the next process to
+    // carry the session on in; it ends itself if no process takes it back.
+    let left = crate::runner::protocol::detach_all();
+    if left > 0 {
+        tracing::info!(
+            sandboxes = left,
+            "left sessions' sandboxes running for the next node process"
+        );
+    }
     // The listener is closed; end every live session so no harness container
     // outlives the process that gates it.
     manager.shutdown_all().await;

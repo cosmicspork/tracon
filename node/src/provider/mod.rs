@@ -285,6 +285,19 @@ pub trait SandboxProvider: Send + Sync {
         within: Duration,
     ) -> Result<SandboxConn, ProviderError>;
 
+    /// For a sandbox an earlier node process left running: set up again the
+    /// carrier [`Self::connect`] set up, so its supervisor can redial this
+    /// process with its run's resume secret. `conn` is the run restored
+    /// (`SandboxServer::restore`), waiting for that redial.
+    async fn reattach(
+        &self,
+        _handle: &Handle,
+        _server: &SandboxServer,
+        _conn: &SandboxConn,
+    ) -> Result<(), ProviderError> {
+        Err(self.unsupported("reattach"))
+    }
+
     /// Stop it and remove everything the provider made for it. Idempotent.
     async fn destroy(&self, handle: &Handle) -> Result<(), ProviderError>;
 

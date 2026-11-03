@@ -1,9 +1,9 @@
 //! What the node removes from DigitalOcean on its own, because the runtime
 //! keeps it and bills for it:
 //!
-//! - **Orphaned sessions**, at start: the node's sandbox identity is made
-//!   per process, so a sandbox the previous process started can never
-//!   connect to this one, and a kept-warm session would run until removed.
+//! - **Orphaned sessions**, at start: a kept-warm session would run until
+//!   removed. One the previous process left running for this one to take
+//!   back (`runner::reattach`) is kept for it.
 //! - **Leftover configs**: each create stores one that removing its session
 //!   leaves behind (`do_harness::cleanup`).
 //! - **Checkpoints**: one per prepared environment is kept to fork from, the
@@ -50,12 +50,20 @@ pub fn environment_of(owner: &Owner, session: &Session) -> Option<String> {
     })
 }
 
-/// Remove every session of this node's that is still there: called once, at
-/// start, before any sandbox of this process exists.
+/// Remove every session of this node's that is still there and not left
+/// to be taken back: called once, at start, before any sandbox of this
+/// process exists.
 pub async fn remove_orphans(client: &Client, owner: &Owner) -> Result<Swept, DoError> {
     let mut swept = Swept::default();
+    let kept = crate::runner::reattach::all();
     for session in client.list_sessions(&SessionFilter::default()).await? {
         if !owner.owns(&session.name) || session.status.is_terminal() {
+            continue;
+        }
+        if kept
+            .iter()
+            .any(|r| r.handle == session.session_id || session.name.starts_with(&r.name))
+        {
             continue;
         }
         match client.delete_session(&session.session_id).await {

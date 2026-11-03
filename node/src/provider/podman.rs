@@ -362,6 +362,36 @@ impl PodmanProvider {
         Ok(Listener::Unix(listener))
     }
 
+    /// The node's socket bound again for a sandbox still running, in the
+    /// directory its container already mounts: the directory stays (a new
+    /// one would not be the one mounted), and only the socket an earlier
+    /// node process left is replaced.
+    fn rebind(&self, name: &str) -> Result<Listener, ProviderError> {
+        use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
+        let failed = |what: &str, path: &Path, e: std::io::Error| {
+            ProviderError::Failed(format!("{what} {}: {e}", path.display()))
+        };
+        let socket = self.socket_dir(name).join(SOCKET_NAME);
+        match std::fs::symlink_metadata(&socket) {
+            Ok(meta) if meta.file_type().is_socket() => {
+                std::fs::remove_file(&socket).map_err(|e| failed("replace", &socket, e))?
+            }
+            Ok(_) => {
+                return Err(ProviderError::Failed(format!(
+                    "{} is not the node's socket",
+                    socket.display()
+                )))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(failed("read", &socket, e)),
+        }
+        let listener = bind_unix_labelled(&socket, Some(SOCKET_CONTEXT))
+            .map_err(|e| failed("bind", &socket, e))?;
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o666))
+            .map_err(|e| failed("open", &socket, e))?;
+        Ok(Listener::Unix(listener))
+    }
+
     async fn inspect(&self, handle: &Handle) -> Result<serde_json::Value, ProviderError> {
         let text = match self
             .cli(&["container", "inspect", "--format", "json", &handle.0])
@@ -834,6 +864,26 @@ impl SandboxProvider for PodmanProvider {
             server.keep_accepting(listener, conn);
         }
         accepted
+    }
+
+    async fn reattach(
+        &self,
+        handle: &Handle,
+        server: &SandboxServer,
+        conn: &SandboxConn,
+    ) -> Result<(), ProviderError> {
+        match self.status(handle).await? {
+            Status::Running => {}
+            status => {
+                return Err(ProviderError::Failed(format!(
+                    "{} is not running ({status:?})",
+                    handle.0
+                )))
+            }
+        }
+        let listener = self.rebind(&handle.0)?;
+        server.keep_accepting(listener, conn);
+        Ok(())
     }
 
     /// Stop (the supervisor tears its processes down on the stop signal,
