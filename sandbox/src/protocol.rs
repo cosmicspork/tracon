@@ -50,6 +50,11 @@ pub struct Hello {
     pub pid: u32,
     /// Whether it runs as its namespace's init.
     pub init: bool,
+    /// It can redial with a resume secret and replay what its processes
+    /// wrote while it was away. An older binary leaves this out, and its
+    /// run ends with its first connection, as before.
+    #[serde(default)]
+    pub resumable: bool,
 }
 
 impl std::fmt::Display for Hello {
@@ -87,11 +92,39 @@ impl From<&Hello> for SandboxInfo {
 
 /// The node's answer to [`Hello`]. A refusal is followed by the node closing
 /// the connection.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Ack {
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// On the first connection of a run whose sandbox said it is
+    /// [`Hello::resumable`]: how it may come back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<Resume>,
+}
+
+impl std::fmt::Debug for Ack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Ack")
+            .field("ok", &self.ok)
+            .field("error", &self.error)
+            .field(
+                "resume_within_ms",
+                &self.resume.as_ref().map(|r| r.within_ms),
+            )
+            .finish()
+    }
+}
+
+/// What a sandbox redials with after its connection drops. The secret is
+/// presented in place of the token, any number of times while the run is
+/// live, and refused once the run has ended.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Resume {
+    pub secret: String,
+    /// How long the sandbox keeps redialling before it gives up and tears
+    /// itself down.
+    pub within_ms: u64,
 }
 
 /// Request paths. Every one is a request the node makes.
@@ -160,8 +193,10 @@ pub struct SpawnSpec {
     #[serde(default)]
     pub tty: Option<WinSize>,
     /// Which of the three streams are pipes the node attaches to; the others
-    /// are `/dev/null`. Ignored with `tty`. A pipe nobody attaches to is never
-    /// drained, so a process writing to one blocks: that is the backpressure.
+    /// are `/dev/null`. Ignored with `tty`. The sandbox reads output at most
+    /// [`OUTPUT_AHEAD`] bytes ahead of what it has sent, so a process writing
+    /// to a pipe nobody reads blocks once that is full: that is the
+    /// backpressure.
     #[serde(default = "yes")]
     pub stdin: bool,
     #[serde(default = "yes")]
@@ -206,6 +241,12 @@ pub struct Spawned {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct ProcRef {
     pub id: u64,
+    /// For stdout and stderr, the byte offset in the stream to send from
+    /// (the start when absent). For stdin, the offset in the process's
+    /// input of the body's first byte, so what the sandbox already wrote is
+    /// skipped (absent: the body follows on from what it wrote).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -503,6 +544,20 @@ pub enum Event {
     /// The node read too slowly and this many events were dropped.
     Lagged { missed: u64 },
 }
+
+/// How far the sandbox reads a process's stdout or stderr ahead of what it
+/// has sent. Output produced while the node is away waits here; past it the
+/// process blocks writing, so it is paused, never dropped.
+pub const OUTPUT_AHEAD: usize = 4 * 1024 * 1024;
+
+/// Output the sandbox keeps after sending it, for a node that reattaches
+/// after a dropped connection: twice the stream window, which bounds what
+/// can have been sent and not yet read.
+pub const OUTPUT_KEPT: usize = 2 * 1024 * 1024;
+
+/// What the node keeps of a process's stdin after sending it, to send again
+/// over a new connection; the sandbox skips what it had already written.
+pub const INPUT_KEPT: usize = 2 * 1024 * 1024;
 
 /// The longest log line sent whole; longer ones are cut here.
 pub const MAX_LOG_LINE: usize = 16 * 1024;

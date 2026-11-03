@@ -58,8 +58,13 @@ struct Loopback {
     threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
     created: Mutex<Vec<(String, String, Vec<Mount>)>>,
     destroyed: Mutex<Vec<String>>,
+    /// Destroyed, until made again.
+    gone: Mutex<std::collections::HashSet<String>>,
     /// Present a token other than the one issued.
     wrong_token: bool,
+    /// Every sandbox made gets a socket of its own: one cut off before is
+    /// still redialling its own, as a removed container's never could.
+    made: std::sync::atomic::AtomicUsize,
 }
 
 impl Loopback {
@@ -72,11 +77,10 @@ impl Loopback {
     }
 
     fn path(&self, name: &str) -> PathBuf {
-        self.dir
-            .as_ref()
-            .unwrap()
-            .path()
-            .join(format!("{name}.sock"))
+        self.dir.as_ref().unwrap().path().join(format!(
+            "{name}-{}.sock",
+            self.made.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ))
     }
 
     /// Wait for every sandbox to have ended, so no reaper outlives its test.
@@ -103,6 +107,7 @@ impl SandboxProvider for Loopback {
 
     async fn create(&self, spec: &CreateSpec<'_>) -> Result<Handle, ProviderError> {
         let name = spec.name.unwrap().to_string();
+        self.gone.lock().unwrap().remove(&name);
         self.created.lock().unwrap().push((
             name.clone(),
             spec.image.to_string(),
@@ -157,6 +162,7 @@ impl SandboxProvider for Loopback {
 
     async fn destroy(&self, handle: &Handle) -> Result<(), ProviderError> {
         self.destroyed.lock().unwrap().push(handle.0.clone());
+        self.gone.lock().unwrap().insert(handle.0.clone());
         self.listeners.lock().unwrap().remove(&handle.0);
         // The loop sees its connection lost and tears its processes down
         // itself.
@@ -166,8 +172,11 @@ impl SandboxProvider for Loopback {
         Ok(())
     }
 
-    async fn status(&self, _: &Handle) -> Result<Status, ProviderError> {
-        Ok(Status::Running)
+    async fn status(&self, handle: &Handle) -> Result<Status, ProviderError> {
+        Ok(match self.gone.lock().unwrap().contains(&handle.0) {
+            true => Status::Lost,
+            false => Status::Running,
+        })
     }
 
     async fn image_identity(&self, _: &Handle) -> Result<ImageIdentity, ProviderError> {
@@ -203,6 +212,7 @@ impl SandboxProvider for Loopback {
 
 fn runner(provider: Arc<Loopback>) -> ProtocolRunner {
     ProtocolRunner::new(provider, "img@sha256:aa")
+        .with_server(support::sandbox_server())
         .with_mounts(vec![Mount::volume("state", "/state", false)])
         .with_connect_within(Duration::from_secs(10))
 }

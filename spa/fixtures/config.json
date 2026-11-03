@@ -3404,6 +3404,22 @@
     },
     {
       "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "sandbox.resume_within_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
       "apply": "live",
       "editable": true,
       "editable_at_node": true,

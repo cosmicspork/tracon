@@ -23,6 +23,8 @@ pub enum TlsError {
     Generate(String),
     #[error("tls configuration: {0}")]
     Config(#[from] rustls::Error),
+    #[error("node identity: {0}")]
+    Store(String),
 }
 
 /// The SHA-256 of a DER certificate.
@@ -84,6 +86,59 @@ impl NodeIdentity {
             cert: certified.cert.der().clone(),
             key: PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der()),
         })
+    }
+
+    /// The identity kept in `dir` (`cert.der` and `key.der`), made and kept
+    /// there first if the certificate is not: so the pin every sandbox holds
+    /// still matches after the node restarts. `true` with one just made.
+    ///
+    /// The certificate is written last, so one present is one whose pin may
+    /// have been handed out: a key missing beside it is an error, never a
+    /// reason to make another. Removing both is how the identity is
+    /// rotated; sandboxes holding the old pin then refuse the node.
+    pub fn load_or_generate(dir: &std::path::Path) -> Result<(Self, bool), TlsError> {
+        use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
+        let store = |what: &str, path: &std::path::Path, e: std::io::Error| {
+            TlsError::Store(format!("{what} {}: {e}", path.display()))
+        };
+        let (cert_path, key_path) = (dir.join("cert.der"), dir.join("key.der"));
+        match std::fs::read(&cert_path) {
+            Ok(cert) => {
+                let key = std::fs::read(&key_path).map_err(|e| store("read", &key_path, e))?;
+                let identity = NodeIdentity::from_der(cert, key);
+                // The pair must still make a server: a key that does not
+                // match the certificate is refused here, not at a handshake.
+                identity.server_config()?;
+                return Ok((identity, false));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(store("read", &cert_path, error)),
+        }
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .map_err(|e| store("create", dir, e))?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| store("restrict", dir, e))?;
+        let identity = NodeIdentity::generate()?;
+        for (path, bytes) in [
+            (&key_path, identity.key_der()),
+            (&cert_path, identity.cert_der()),
+        ] {
+            let staged = path.with_extension("tmp");
+            let _ = std::fs::remove_file(&staged);
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&staged)
+                .map_err(|e| store("create", &staged, e))?;
+            std::io::Write::write_all(&mut file, bytes).map_err(|e| store("write", &staged, e))?;
+            file.sync_all().map_err(|e| store("sync", &staged, e))?;
+            std::fs::rename(&staged, path).map_err(|e| store("keep", path, e))?;
+        }
+        Ok((identity, true))
     }
 
     pub fn from_der(cert: Vec<u8>, pkcs8_key: Vec<u8>) -> Self {
@@ -221,5 +276,43 @@ mod tests {
         assert!(CertPin::parse("not hex at all").is_err());
         assert!(pin.matches(identity.cert_der()));
         assert!(!pin.matches(b"something else"));
+    }
+
+    #[test]
+    fn a_kept_identity_keeps_its_pin_until_removed() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("sandbox-identity");
+        let (made, created) = NodeIdentity::load_or_generate(&dir).unwrap();
+        assert!(created);
+        for name in ["cert.der", "key.der"] {
+            let mode = std::fs::metadata(dir.join(name))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "{name}");
+        }
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let (loaded, created) = NodeIdentity::load_or_generate(&dir).unwrap();
+        assert!(!created);
+        assert_eq!(loaded.pin(), made.pin());
+        // A certificate whose key went missing is not quietly replaced.
+        std::fs::remove_file(dir.join("key.der")).unwrap();
+        assert!(NodeIdentity::load_or_generate(&dir).is_err());
+        // Nor is one whose key is another's.
+        std::fs::write(
+            dir.join("key.der"),
+            NodeIdentity::generate().unwrap().key_der(),
+        )
+        .unwrap();
+        assert!(NodeIdentity::load_or_generate(&dir).is_err());
+        // Removing both rotates it.
+        std::fs::remove_dir_all(&dir).unwrap();
+        let (rotated, created) = NodeIdentity::load_or_generate(&dir).unwrap();
+        assert!(created);
+        assert_ne!(rotated.pin(), made.pin());
     }
 }

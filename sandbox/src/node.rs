@@ -19,11 +19,28 @@
 //! assert!(process.wait().await?.success());
 //! # Ok(()) }
 //! ```
+//!
+//! # A run outlives its connection
+//!
+//! A sandbox that says it can resume is given a resume secret with its
+//! first ack. When its connection drops, the [`SandboxConn`] stays: requests
+//! wait for the sandbox to redial (on Podman's and Kubernetes's carriers it
+//! dials again, on Apple's the node connects in again) and prove the secret,
+//! and the run is lost only if that does not happen within
+//! [`ServerOptions::resume_within`]. Process output is read from the offset
+//! the node had reached, stdin is sent again from what the node still keeps
+//! and the sandbox skips what it already wrote, and a wait, a tunnel's
+//! accept and the event stream are asked again. A request that was in
+//! flight otherwise fails, as before.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -35,8 +52,10 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use tokio::io::{
-    AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWriteExt as _, BufReader,
+    AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader,
+    ReadBuf,
 };
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -48,14 +67,23 @@ use crate::inside::{
 use crate::io::{H2Reader, H2Writer};
 use crate::protocol::{
     self, path, Ack, ErrorBody, Event, Exclusions, ExitStatus, ExportRequest, Hello, ImportRequest,
-    ListenAddr, ProcRef, ResizeRequest, SandboxInfo, ServiceSpec, ServiceStatus, ServicesStart,
-    ServicesStop, SignalRequest, SpawnSpec, Spawned, TreeSummary, TunnelListen, TunnelListening,
-    TunnelRef, WinSize, ARGS_HEADER, DEFAULT_KEEPALIVE, MAX_JSON_BYTES,
+    ListenAddr, ProcRef, ResizeRequest, Resume, SandboxInfo, ServiceSpec, ServiceStatus,
+    ServicesStart, ServicesStop, SignalRequest, SpawnSpec, Spawned, TreeSummary, TunnelListen,
+    TunnelListening, TunnelRef, WinSize, ARGS_HEADER, DEFAULT_KEEPALIVE, INPUT_KEPT,
+    MAX_JSON_BYTES,
 };
 use crate::tls::{CertPin, NodeIdentity, TlsError};
 
 /// The longest line the node reads from the events stream.
 const MAX_EVENT_LINE: usize = 256 * 1024;
+
+/// How long a run waits for its sandbox to redial when nothing says
+/// otherwise.
+pub const DEFAULT_RESUME_WITHIN: Duration = Duration::from_secs(120);
+
+/// How long after a stream fails the node waits to see whether its
+/// connection failed with it, before taking the failure as the stream's own.
+const DROP_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
 pub enum SandboxError {
@@ -77,6 +105,35 @@ pub enum SandboxError {
     Files(#[from] FilesError),
     #[error("io: {0}")]
     Io(#[from] io::Error),
+    #[error("the sandbox's connection was lost and it did not come back")]
+    Lost,
+}
+
+impl SandboxError {
+    /// Whether this is the connection failing rather than the request: the
+    /// kind of failure a redial can cure.
+    fn of_connection(&self) -> bool {
+        match self {
+            SandboxError::H2(error) => h2_of_connection(error),
+            SandboxError::Io(error) => io_of_connection(error),
+            _ => false,
+        }
+    }
+}
+
+fn h2_of_connection(error: &h2::Error) -> bool {
+    error.is_io() || error.is_go_away()
+}
+
+/// As [`h2_of_connection`] for what an [`H2Reader`] or [`H2Writer`] says: an
+/// h2 error it wrapped, else the connection's own I/O error unwrapped, or a
+/// stream that closed under it, which the connection closing would also do
+/// ([`SandboxConn::worth_retrying`] tells which).
+fn io_of_connection(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<h2::Error>())
+        .is_none_or(h2_of_connection)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -85,6 +142,12 @@ pub struct ServerOptions {
     pub keepalive: Duration,
     /// TLS, hello and HTTP/2 setup together must finish within this.
     pub handshake_timeout: Duration,
+    /// How long a run whose connection dropped waits for its sandbox to
+    /// redial before it is lost. The sandbox is told to keep redialling for
+    /// twice as long, so a node that takes up to this long to come back
+    /// still finds it. Zero gives no resume secret: the first dropped
+    /// connection ends the run.
+    pub resume_within: Duration,
 }
 
 impl Default for ServerOptions {
@@ -92,17 +155,20 @@ impl Default for ServerOptions {
         ServerOptions {
             keepalive: DEFAULT_KEEPALIVE,
             handshake_timeout: Duration::from_secs(10),
+            resume_within: DEFAULT_RESUME_WITHIN,
         }
     }
 }
 
-/// One-time tokens, each naming the run it was issued for. A token is
-/// consumed by the first hello that presents it, accepted or not by anything
-/// after, so a copy of a sandbox's environment is worth nothing once that
-/// sandbox has connected. One issued with a window
-/// ([`TokenRegistry::issue_within`]) is also worth nothing once the window
-/// has passed unused, for a provider that may keep a copy of how it was
-/// delivered.
+/// Each run's tokens. A first-use token is consumed by the first hello that
+/// presents it, accepted or not by anything after, so a copy of a sandbox's
+/// environment is worth nothing once that sandbox has connected. One issued
+/// with a window ([`TokenRegistry::issue_within`]) is also worth nothing
+/// once the window has passed unused, for a provider that may keep a copy of
+/// how it was delivered.
+///
+/// A resume secret is issued by the node itself, inside TLS, with the first
+/// ack; it may be presented any number of times until the run is revoked.
 #[derive(Clone, Default)]
 pub struct TokenRegistry {
     // Keyed by the token's digest, so the table never holds a usable token
@@ -114,73 +180,144 @@ struct Issued {
     run: String,
     /// Redeemable until then; `None` for no window of its own.
     until: Option<std::time::Instant>,
+    resume: bool,
+}
+
+/// What a presented token turned out to be.
+#[derive(Debug, PartialEq, Eq)]
+enum Redeemed {
+    First(String),
+    Resume(String),
+}
+
+fn random_token() -> String {
+    use ring::rand::SecureRandom as _;
+    let mut bytes = [0u8; 32];
+    ring::rand::SystemRandom::new()
+        .fill(&mut bytes)
+        .expect("system randomness");
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn digest(token: &str) -> [u8; 32] {
+    Sha256::digest(token.as_bytes()).into()
 }
 
 impl TokenRegistry {
     /// A fresh token for `run`: 32 random bytes, base64url.
     pub fn issue(&self, run: impl Into<String>) -> String {
-        self.insert(run.into(), None)
+        self.insert(run.into(), None, false)
     }
 
     /// A fresh token for `run` that is refused unless redeemed within
     /// `window` of now.
     pub fn issue_within(&self, run: impl Into<String>, window: Duration) -> String {
-        self.insert(run.into(), Some(std::time::Instant::now() + window))
+        self.insert(run.into(), Some(std::time::Instant::now() + window), false)
     }
 
-    fn insert(&self, run: String, until: Option<std::time::Instant>) -> String {
-        use ring::rand::SecureRandom as _;
-        let mut bytes = [0u8; 32];
-        ring::rand::SystemRandom::new()
-            .fill(&mut bytes)
-            .expect("system randomness");
-        let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    fn issue_resume(&self, run: &str) -> String {
+        self.insert(run.to_string(), None, true)
+    }
+
+    fn insert(&self, run: String, until: Option<std::time::Instant>, resume: bool) -> String {
+        let token = random_token();
         let mut issued = self.issued.lock().unwrap();
         // Expired tokens are dropped as new ones are issued, so a run whose
         // sandbox never came leaves nothing behind for long.
         let now = std::time::Instant::now();
         issued.retain(|_, i| i.until.is_none_or(|until| until > now));
-        issued.insert(
-            Sha256::digest(token.as_bytes()).into(),
-            Issued { run, until },
-        );
+        issued.insert(digest(&token), Issued { run, until, resume });
         token
     }
 
-    /// Forget every unused token issued for `run`.
+    /// Forget every token issued for `run`, its resume secret included.
     pub fn revoke(&self, run: &str) {
         self.issued.lock().unwrap().retain(|_, i| i.run != run);
     }
 
-    /// Whether an unused, unexpired token for `run` is outstanding.
+    /// Whether an unused, unexpired first-use token for `run` is
+    /// outstanding.
     pub fn outstanding(&self, run: &str) -> bool {
         let now = std::time::Instant::now();
         self.issued
             .lock()
             .unwrap()
             .values()
-            .any(|i| i.run == run && i.until.is_none_or(|until| until > now))
+            .any(|i| i.run == run && !i.resume && i.until.is_none_or(|until| until > now))
     }
 
-    fn redeem(&self, token: &str) -> Option<String> {
-        let issued = self
-            .issued
+    /// Whether `run` holds a resume secret.
+    pub fn resumable(&self, run: &str) -> bool {
+        self.issued
             .lock()
             .unwrap()
-            .remove(&<[u8; 32]>::from(Sha256::digest(token.as_bytes())))?;
-        match issued.until {
+            .values()
+            .any(|i| i.run == run && i.resume)
+    }
+
+    /// The run `token` was issued for, consuming it unless it is a resume
+    /// secret. With `bound`, a token issued for another run is refused and
+    /// left as it was: a carrier that belongs to one run cannot spend
+    /// another's.
+    fn redeem(&self, token: &str, bound: Option<&str>) -> Option<Redeemed> {
+        let mut issued = self.issued.lock().unwrap();
+        let key = digest(token);
+        let found = issued.get(&key)?;
+        if bound.is_some_and(|run| run != found.run) {
+            return None;
+        }
+        if found.resume {
+            return Some(Redeemed::Resume(found.run.clone()));
+        }
+        let found = issued.remove(&key)?;
+        match found.until {
             Some(until) if until <= std::time::Instant::now() => None,
-            _ => Some(issued.run),
+            _ => Some(Redeemed::First(found.run)),
         }
     }
 }
 
-/// Accepts sandbox connections for any run whose token it issued.
+type Runs = Arc<Mutex<HashMap<String, Weak<Inner>>>>;
+
+/// Accepts sandbox connections for any run whose token it issued, and takes
+/// back a run's sandbox when it redials with its resume secret. Cheap to
+/// clone; clones share their tokens and runs.
+#[derive(Clone)]
 pub struct SandboxServer {
     acceptor: tokio_rustls::TlsAcceptor,
     tokens: TokenRegistry,
     pin: CertPin,
     options: ServerOptions,
+    runs: Runs,
+}
+
+/// A connection that passed its handshake.
+pub enum Accepted {
+    /// A run's first connection.
+    New(SandboxConn),
+    /// A run's sandbox came back: the connection now carries the
+    /// [`SandboxConn`] it had before.
+    Resumed(SandboxConn),
+}
+
+impl Accepted {
+    pub fn into_conn(self) -> SandboxConn {
+        match self {
+            Accepted::New(conn) | Accepted::Resumed(conn) => conn,
+        }
+    }
+}
+
+type ClientConnection = h2::client::Connection<tokio_rustls::server::TlsStream<BoxedIo>, Bytes>;
+
+struct Handshaken {
+    run: String,
+    info: SandboxInfo,
+    /// The run it resumes, for a resume secret.
+    resumes: Option<Arc<Inner>>,
+    resumable: bool,
+    send: SendRequest<Bytes>,
+    connection: ClientConnection,
 }
 
 impl SandboxServer {
@@ -190,6 +327,7 @@ impl SandboxServer {
             tokens: TokenRegistry::default(),
             pin: identity.pin(),
             options,
+            runs: Arc::default(),
         })
     }
 
@@ -199,6 +337,10 @@ impl SandboxServer {
 
     pub fn pin(&self) -> CertPin {
         self.pin
+    }
+
+    pub fn options(&self) -> &ServerOptions {
+        &self.options
     }
 
     /// Accept the next connection on `listener` as a sandbox.
@@ -219,15 +361,26 @@ impl SandboxServer {
         path: &Path,
         within: Duration,
     ) -> Result<SandboxConn, SandboxError> {
+        self.connect_to_bound(path, within, None)
+            .await
+            .map(Accepted::into_conn)
+    }
+
+    async fn connect_to_bound(
+        &self,
+        path: &Path,
+        within: Duration,
+        bound: Option<&str>,
+    ) -> Result<Accepted, SandboxError> {
         let deadline = tokio::time::Instant::now() + within;
         let mut delay = Duration::from_millis(20);
         loop {
             let attempt = match tokio::net::UnixStream::connect(path).await {
-                Ok(stream) => self.accept(stream).await,
+                Ok(stream) => self.accept_bound(Box::new(stream), bound).await,
                 Err(error) => Err(SandboxError::Io(error)),
             };
             match attempt {
-                Ok(conn) => return Ok(conn),
+                Ok(accepted) => return Ok(accepted),
                 Err(
                     error @ (SandboxError::Io(_) | SandboxError::Tls(_) | SandboxError::Timeout),
                 ) if tokio::time::Instant::now() + delay < deadline => {
@@ -241,105 +394,435 @@ impl SandboxServer {
     }
 
     /// Run the handshake on an accepted connection: TLS, then the hello,
-    /// whose token must be one this server issued and nobody has used. No
-    /// channel exists before that check passes.
+    /// whose token must be one this server issued and nobody has used, or a
+    /// live run's resume secret. No channel exists before that check passes.
     pub async fn accept(&self, io: impl Io) -> Result<SandboxConn, SandboxError> {
-        let io: BoxedIo = Box::new(io);
-        let handshake = async {
-            let mut tls = self.acceptor.accept(io).await.map_err(SandboxError::Tls)?;
-            if tls.get_ref().1.alpn_protocol() != Some(protocol::ALPN) {
-                return Err(SandboxError::Handshake("no protocol agreed".into()));
-            }
-            let hello: Hello = read_frame(&mut tls)
-                .await
-                .map_err(|e| SandboxError::Handshake(format!("hello: {e}")))?;
-            let Some(run) = self.tokens.redeem(&hello.token) else {
-                let _ = write_frame(
-                    &mut tls,
-                    &Ack {
-                        ok: false,
-                        error: Some("unknown or already used token".into()),
-                    },
-                )
-                .await;
-                let _ = tls.shutdown().await;
-                return Err(SandboxError::BadToken);
-            };
-            write_frame(
-                &mut tls,
-                &Ack {
-                    ok: true,
-                    error: None,
-                },
-            )
-            .await?;
-            let (send, connection) = h2::client::Builder::new()
-                .initial_window_size(STREAM_WINDOW)
-                .initial_connection_window_size(CONNECTION_WINDOW)
-                .max_frame_size(MAX_FRAME)
-                // Replies carry a status and a content type; nothing a
-                // sandbox sends in headers needs more.
-                .max_header_list_size(64 * 1024)
-                .enable_push(false)
-                .handshake::<_, Bytes>(tls)
-                .await?;
-            Ok((run, SandboxInfo::from(&hello), send, connection))
-        };
-        let (run, info, send, mut connection) =
-            tokio::time::timeout(self.options.handshake_timeout, handshake)
+        self.accept_any(io).await.map(Accepted::into_conn)
+    }
+
+    /// [`Self::accept`], saying whether it was a run's first connection or
+    /// its sandbox coming back.
+    pub async fn accept_any(&self, io: impl Io) -> Result<Accepted, SandboxError> {
+        self.accept_bound(Box::new(io), None).await
+    }
+
+    /// [`Self::accept_any`] on a carrier that belongs to `run`: a token or
+    /// secret of any other run is refused, and not spent.
+    pub async fn accept_for(&self, io: impl Io, run: &str) -> Result<Accepted, SandboxError> {
+        self.accept_bound(Box::new(io), Some(run)).await
+    }
+
+    async fn accept_bound(
+        &self,
+        io: BoxedIo,
+        bound: Option<&str>,
+    ) -> Result<Accepted, SandboxError> {
+        let handshaken =
+            tokio::time::timeout(self.options.handshake_timeout, self.handshake(io, bound))
                 .await
                 .map_err(|_| SandboxError::Timeout)??;
-        let closed = CancellationToken::new();
-        let ping_pong = connection.ping_pong().expect("ping_pong taken once");
-        let driver = {
-            let closed = closed.clone();
-            let interval = self.options.keepalive;
-            let run = run.clone();
-            tokio::spawn(async move {
-                tokio::select! {
-                    result = &mut connection => {
-                        if let Err(error) = result {
-                            tracing::debug!(%run, %error, "sandbox connection ended");
-                        }
-                    }
-                    _ = keepalive(ping_pong, interval) => {
-                        tracing::warn!(%run, "sandbox stopped answering pings");
-                    }
-                }
-                closed.cancel();
-            })
+        let Handshaken {
+            run,
+            info,
+            resumes,
+            resumable,
+            send,
+            connection,
+        } = handshaken;
+        if let Some(inner) = resumes {
+            if !inner.attach(send, connection) {
+                return Err(SandboxError::Lost);
+            }
+            tracing::info!(%run, connections = inner.connections.load(Ordering::SeqCst), "a sandbox came back");
+            return Ok(Accepted::Resumed(SandboxConn { inner }));
+        }
+        let (link, _) = watch::channel(Link::Down(0));
+        let inner = Arc::new(Inner {
+            run: run.clone(),
+            info,
+            resumable,
+            link,
+            ended: CancellationToken::new(),
+            connections: AtomicU64::new(0),
+            driver: Mutex::new(None),
+            tokens: self.tokens.clone(),
+            runs: Arc::downgrade(&self.runs),
+            resume_within: self.options.resume_within,
+            keepalive: self.options.keepalive,
+        });
+        self.runs
+            .lock()
+            .unwrap()
+            .insert(run, Arc::downgrade(&inner));
+        inner.attach(send, connection);
+        Ok(Accepted::New(SandboxConn { inner }))
+    }
+
+    async fn handshake(
+        &self,
+        io: BoxedIo,
+        bound: Option<&str>,
+    ) -> Result<Handshaken, SandboxError> {
+        let mut tls = self.acceptor.accept(io).await.map_err(SandboxError::Tls)?;
+        if tls.get_ref().1.alpn_protocol() != Some(protocol::ALPN) {
+            return Err(SandboxError::Handshake("no protocol agreed".into()));
+        }
+        let hello: Hello = read_frame(&mut tls)
+            .await
+            .map_err(|e| SandboxError::Handshake(format!("hello: {e}")))?;
+        let refuse = |why: &str| Ack {
+            ok: false,
+            error: Some(why.into()),
+            resume: None,
         };
-        Ok(SandboxConn {
-            inner: Arc::new(Inner {
-                run,
-                info,
-                send,
-                closed,
-                driver,
-            }),
+        let (run, resumes, resume) = match self.tokens.redeem(&hello.token, bound) {
+            None => {
+                let _ = write_frame(&mut tls, &refuse("unknown or already used token")).await;
+                let _ = tls.shutdown().await;
+                return Err(SandboxError::BadToken);
+            }
+            Some(Redeemed::Resume(run)) => {
+                let live = self
+                    .runs
+                    .lock()
+                    .unwrap()
+                    .get(&run)
+                    .and_then(Weak::upgrade)
+                    .filter(|inner| !inner.ended.is_cancelled());
+                let Some(inner) = live else {
+                    self.tokens.revoke(&run);
+                    let _ = write_frame(&mut tls, &refuse("the run is over")).await;
+                    let _ = tls.shutdown().await;
+                    return Err(SandboxError::BadToken);
+                };
+                (run, Some(inner), None)
+            }
+            Some(Redeemed::First(run)) => {
+                let resume =
+                    (hello.resumable && !self.options.resume_within.is_zero()).then(|| Resume {
+                        secret: self.tokens.issue_resume(&run),
+                        within_ms: 2 * self.options.resume_within.as_millis() as u64,
+                    });
+                (run, None, resume)
+            }
+        };
+        let resumable = resumes.is_some() || resume.is_some();
+        write_frame(
+            &mut tls,
+            &Ack {
+                ok: true,
+                error: None,
+                resume,
+            },
+        )
+        .await?;
+        let (send, connection) = h2::client::Builder::new()
+            .initial_window_size(STREAM_WINDOW)
+            .initial_connection_window_size(CONNECTION_WINDOW)
+            .max_frame_size(MAX_FRAME)
+            // Replies carry a status and a content type; nothing a
+            // sandbox sends in headers needs more.
+            .max_header_list_size(64 * 1024)
+            .enable_push(false)
+            .handshake::<_, Bytes>(tls)
+            .await?;
+        Ok(Handshaken {
+            run,
+            info: SandboxInfo::from(&hello),
+            resumes,
+            resumable,
+            send,
+            connection,
         })
     }
+
+    /// End `run` now, whether or not a connection carries it: its sandbox is
+    /// gone or being removed, so nothing should wait for it to come back.
+    pub fn end_run(&self, run: &str) {
+        let inner = self.runs.lock().unwrap().get(run).and_then(Weak::upgrade);
+        match inner {
+            Some(inner) => inner.finish(),
+            None => self.tokens.revoke(run),
+        }
+    }
+
+    /// Take `conn`'s sandbox back each time it redials on `listener`, a
+    /// carrier that belongs to its run alone, until the run ends. `None`
+    /// for a run that cannot resume.
+    pub fn keep_accepting(&self, listener: Listener, conn: &SandboxConn) -> Option<JoinHandle<()>> {
+        if !conn.is_resumable() {
+            return None;
+        }
+        let server = self.clone();
+        let run = conn.run().to_string();
+        let ended = conn.inner.ended.clone();
+        Some(tokio::spawn(async move {
+            loop {
+                let io = tokio::select! {
+                    io = listener.accept() => io,
+                    _ = ended.cancelled() => return,
+                };
+                let io = match io {
+                    Ok(io) => io,
+                    Err(error) => {
+                        tracing::debug!(%run, %error, "accept on a sandbox's carrier");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                };
+                let accepted = tokio::select! {
+                    accepted = server.accept_bound(io, Some(&run)) => accepted,
+                    _ = ended.cancelled() => return,
+                };
+                if let Err(error) = accepted {
+                    tracing::warn!(%run, %error, "refused a connection on a sandbox's carrier");
+                }
+            }
+        }))
+    }
+
+    /// For a sandbox that listens (Apple's carrier): connect in at `path`
+    /// again whenever `conn`'s connection drops, until its run ends. `None`
+    /// for a run that cannot resume.
+    pub fn keep_connecting(&self, path: PathBuf, conn: &SandboxConn) -> Option<JoinHandle<()>> {
+        if !conn.is_resumable() {
+            return None;
+        }
+        let server = self.clone();
+        let run = conn.run().to_string();
+        let ended = conn.inner.ended.clone();
+        let mut link = conn.inner.link.subscribe();
+        Some(tokio::spawn(async move {
+            loop {
+                loop {
+                    if !matches!(*link.borrow_and_update(), Link::Up(_)) {
+                        break;
+                    }
+                    tokio::select! {
+                        changed = link.changed() => if changed.is_err() { return },
+                        _ = ended.cancelled() => return,
+                    }
+                }
+                let within = server.options.resume_within;
+                let attempt = tokio::select! {
+                    attempt = server.connect_to_bound(&path, within, Some(&run)) => attempt,
+                    _ = ended.cancelled() => return,
+                };
+                if let Err(error) = attempt {
+                    tracing::debug!(%run, %error, "the sandbox is not listening again yet");
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                        _ = ended.cancelled() => return,
+                    }
+                }
+            }
+        }))
+    }
+}
+
+/// One connection carrying a run.
+struct Live {
+    generation: u64,
+    send: SendRequest<Bytes>,
+    /// Cancelled once this connection has ended.
+    closed: CancellationToken,
+}
+
+#[derive(Clone)]
+enum Link {
+    Up(Arc<Live>),
+    /// The connection of this generation dropped; waiting for the sandbox.
+    Down(u64),
+    Lost,
 }
 
 struct Inner {
     run: String,
     info: SandboxInfo,
-    send: SendRequest<Bytes>,
-    closed: CancellationToken,
-    driver: JoinHandle<()>,
+    /// The sandbox holds a resume secret.
+    resumable: bool,
+    link: watch::Sender<Link>,
+    /// Cancelled once the run is over: lost, or every handle dropped.
+    ended: CancellationToken,
+    connections: AtomicU64,
+    driver: Mutex<Option<JoinHandle<()>>>,
+    tokens: TokenRegistry,
+    runs: Weak<Mutex<HashMap<String, Weak<Inner>>>>,
+    resume_within: Duration,
+    keepalive: Duration,
+}
+
+impl Inner {
+    /// Carry the run over `connection` from now on. `false` when the run is
+    /// already over.
+    fn attach(
+        self: &Arc<Self>,
+        send: SendRequest<Bytes>,
+        mut connection: ClientConnection,
+    ) -> bool {
+        if self.ended.is_cancelled() {
+            return false;
+        }
+        let generation = self.connections.fetch_add(1, Ordering::SeqCst) + 1;
+        let closed = CancellationToken::new();
+        let live = Arc::new(Live {
+            generation,
+            send,
+            closed: closed.clone(),
+        });
+        let ping_pong = connection.ping_pong().expect("ping_pong taken once");
+        let weak = Arc::downgrade(self);
+        let interval = self.keepalive;
+        let run = self.run.clone();
+        let driver = tokio::spawn(async move {
+            tokio::select! {
+                result = &mut connection => {
+                    if let Err(error) = result {
+                        tracing::debug!(%run, %error, "sandbox connection ended");
+                    }
+                }
+                _ = keepalive(ping_pong, interval) => {
+                    tracing::warn!(%run, "sandbox stopped answering pings");
+                }
+            }
+            if let Some(inner) = weak.upgrade() {
+                inner.dropped(generation);
+            }
+            closed.cancel();
+            // Dropping it fails every stream still open on it.
+            drop(connection);
+        });
+        let previous = self.link.send_replace(Link::Up(live));
+        if let Link::Up(previous) = previous {
+            previous.closed.cancel();
+        }
+        if let Some(old) = self.driver.lock().unwrap().replace(driver) {
+            old.abort();
+        }
+        true
+    }
+
+    /// The connection of `generation` has ended.
+    fn dropped(self: &Arc<Self>, generation: u64) {
+        let mut now = None;
+        self.link.send_if_modified(|link| match link {
+            Link::Up(live) if live.generation == generation => {
+                *link = match self.resumable {
+                    true => Link::Down(generation),
+                    false => Link::Lost,
+                };
+                now = Some(link.clone());
+                true
+            }
+            _ => false,
+        });
+        match now {
+            Some(Link::Lost) => self.end(),
+            Some(_) => {
+                tracing::warn!(run = %self.run, within_s = self.resume_within.as_secs(), "lost a sandbox's connection; waiting for it to redial");
+                let weak = Arc::downgrade(self);
+                let within = self.resume_within;
+                tokio::spawn(async move {
+                    tokio::time::sleep(within).await;
+                    if let Some(inner) = weak.upgrade() {
+                        inner.expire(generation);
+                    }
+                });
+            }
+            None => {}
+        }
+    }
+
+    /// The window for the connection of `generation` to come back has
+    /// passed.
+    fn expire(&self, generation: u64) {
+        let lost = self.link.send_if_modified(|link| match link {
+            Link::Down(dropped) if *dropped == generation => {
+                *link = Link::Lost;
+                true
+            }
+            _ => false,
+        });
+        if lost {
+            tracing::warn!(run = %self.run, "a sandbox did not come back in time; its run is lost");
+            self.end();
+        }
+    }
+
+    /// Over now, connected or not.
+    fn finish(&self) {
+        if let Link::Up(live) = self.link.send_replace(Link::Lost) {
+            live.closed.cancel();
+        }
+        if let Some(driver) = self.driver.lock().unwrap().take() {
+            driver.abort();
+        }
+        self.end();
+    }
+
+    fn end(&self) {
+        self.ended.cancel();
+        self.tokens.revoke(&self.run);
+        if let Some(runs) = self.runs.upgrade() {
+            let mut runs = runs.lock().unwrap();
+            if runs
+                .get(&self.run)
+                .is_some_and(|held| std::ptr::eq(held.as_ptr(), self))
+            {
+                runs.remove(&self.run);
+            }
+        }
+    }
 }
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        self.driver.abort();
+        if let Some(driver) = self.driver.lock().unwrap().take() {
+            driver.abort();
+        }
+        self.ended.cancel();
+        self.tokens.revoke(&self.run);
+        if let Some(runs) = self.runs.upgrade() {
+            let mut runs = runs.lock().unwrap();
+            if runs
+                .get(&self.run)
+                .is_some_and(|held| held.strong_count() == 0)
+            {
+                runs.remove(&self.run);
+            }
+        }
     }
 }
 
-/// A connected sandbox. Cheap to clone; the connection closes when the last
-/// clone is dropped.
+/// A connected sandbox. Cheap to clone; the run ends, and its connection
+/// closes, when the last clone is dropped.
 #[derive(Clone)]
 pub struct SandboxConn {
     inner: Arc<Inner>,
+}
+
+/// A [`SandboxConn`] that does not keep the run open.
+#[derive(Clone)]
+pub struct WeakConn(Weak<Inner>);
+
+impl WeakConn {
+    pub fn upgrade(&self) -> Option<SandboxConn> {
+        self.0.upgrade().map(|inner| SandboxConn { inner })
+    }
+
+    /// Resolves once no connection carries the run, or the run is gone.
+    pub async fn disconnected(&self) {
+        let Some(inner) = self.0.upgrade() else {
+            return;
+        };
+        let mut link = inner.link.subscribe();
+        drop(inner);
+        while matches!(*link.borrow_and_update(), Link::Up(_)) {
+            if link.changed().await.is_err() {
+                return;
+            }
+        }
+    }
 }
 
 fn request(method: Method, path: &str, args: Option<String>) -> Request<()> {
@@ -397,13 +880,107 @@ impl SandboxConn {
         &self.inner.info
     }
 
-    pub fn is_closed(&self) -> bool {
-        self.inner.closed.is_cancelled()
+    /// Whether the sandbox holds a resume secret, so a dropped connection
+    /// need not end the run.
+    pub fn is_resumable(&self) -> bool {
+        self.inner.resumable
     }
 
-    /// Resolves when the connection has ended, including by keepalive.
+    /// Whether the run is over: its connection ended and the sandbox did
+    /// not come back in time (at once, for one that cannot resume).
+    pub fn is_closed(&self) -> bool {
+        self.inner.ended.is_cancelled()
+    }
+
+    /// Resolves when the run is over, as [`Self::is_closed`].
     pub async fn closed(&self) {
-        self.inner.closed.cancelled().await
+        self.inner.ended.cancelled().await
+    }
+
+    /// [`Self::closed`] for a task that must not hold the run open: it
+    /// keeps no handle to the connection.
+    pub fn ended(&self) -> tokio_util::sync::WaitForCancellationFutureOwned {
+        self.inner.ended.clone().cancelled_owned()
+    }
+
+    pub fn downgrade(&self) -> WeakConn {
+        WeakConn(Arc::downgrade(&self.inner))
+    }
+
+    /// Whether a connection carries the run right now.
+    pub fn is_connected(&self) -> bool {
+        matches!(*self.inner.link.borrow(), Link::Up(_))
+    }
+
+    /// Resolves once no connection carries the run: dropped, or lost.
+    pub async fn disconnected(&self) {
+        let mut link = self.inner.link.subscribe();
+        while matches!(*link.borrow_and_update(), Link::Up(_)) {
+            if link.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
+    /// How many connections have carried the run: one, until its sandbox
+    /// first comes back.
+    pub fn connections(&self) -> u64 {
+        self.inner.connections.load(Ordering::SeqCst)
+    }
+
+    /// Drop the connection carrying the run, as a failing network would:
+    /// the run then waits for its sandbox to come back, or ends at once if
+    /// it cannot. For tests and diagnostics.
+    pub fn sever(&self) {
+        let live = match &*self.inner.link.borrow() {
+            Link::Up(live) => live.clone(),
+            _ => return,
+        };
+        if let Some(driver) = self.inner.driver.lock().unwrap().take() {
+            driver.abort();
+        }
+        self.inner.dropped(live.generation);
+        live.closed.cancel();
+    }
+
+    /// The connection carrying the run, waiting for the sandbox to come back
+    /// if it is away.
+    async fn live(&self) -> Result<Arc<Live>, SandboxError> {
+        let mut link = self.inner.link.subscribe();
+        loop {
+            match &*link.borrow_and_update() {
+                Link::Up(live) => return Ok(live.clone()),
+                Link::Lost => return Err(SandboxError::Lost),
+                Link::Down(_) => {}
+            }
+            if link.changed().await.is_err() {
+                return Err(SandboxError::Lost);
+            }
+        }
+    }
+
+    /// After a request on `live` failed (`of_connection` saying whether the
+    /// failure looked like the connection's): whether that connection has
+    /// gone and the run may yet come back, so the request is worth making
+    /// again.
+    async fn worth_retrying(&self, live: &Live, of_connection: bool) -> bool {
+        if !self.inner.resumable || !of_connection {
+            return false;
+        }
+        let gone = tokio::time::timeout(DROP_GRACE, live.closed.cancelled())
+            .await
+            .is_ok();
+        gone && !self.is_closed()
+    }
+
+    async fn send_on(
+        &self,
+        live: &Live,
+        request: Request<()>,
+        end_of_stream: bool,
+    ) -> Result<(ResponseFuture, h2::SendStream<Bytes>), SandboxError> {
+        let mut send = live.send.clone().ready().await?;
+        Ok(send.send_request(request, end_of_stream)?)
     }
 
     async fn send(
@@ -411,8 +988,8 @@ impl SandboxConn {
         request: Request<()>,
         end_of_stream: bool,
     ) -> Result<(ResponseFuture, h2::SendStream<Bytes>), SandboxError> {
-        let mut send = self.inner.send.clone().ready().await?;
-        Ok(send.send_request(request, end_of_stream)?)
+        let live = self.live().await?;
+        self.send_on(&live, request, end_of_stream).await
     }
 
     async fn post_json<B: Serialize, T: DeserializeOwned>(
@@ -426,20 +1003,42 @@ impl SandboxConn {
         json_body(checked(response).await?).await
     }
 
+    async fn get_json_on<T: DeserializeOwned>(
+        &self,
+        live: &Live,
+        path: &str,
+        args: Option<String>,
+    ) -> Result<T, SandboxError> {
+        let (response, _) = self
+            .send_on(live, request(Method::GET, path, args), true)
+            .await?;
+        json_body(checked(response).await?).await
+    }
+
     async fn get_json<T: DeserializeOwned>(
         &self,
         path: &str,
         args: Option<String>,
     ) -> Result<T, SandboxError> {
-        let (response, _) = self.send(request(Method::GET, path, args), true).await?;
-        json_body(checked(response).await?).await
+        let live = self.live().await?;
+        self.get_json_on(&live, path, args).await
+    }
+
+    async fn open_read_on(
+        &self,
+        live: &Live,
+        path: &str,
+        args: String,
+    ) -> Result<H2Reader, SandboxError> {
+        let (response, _) = self
+            .send_on(live, request(Method::GET, path, Some(args)), true)
+            .await?;
+        Ok(H2Reader::new(checked(response).await?))
     }
 
     async fn open_read(&self, path: &str, args: String) -> Result<H2Reader, SandboxError> {
-        let (response, _) = self
-            .send(request(Method::GET, path, Some(args)), true)
-            .await?;
-        Ok(H2Reader::new(checked(response).await?))
+        let live = self.live().await?;
+        self.open_read_on(&live, path, args).await
     }
 
     /// Start a process.
@@ -455,8 +1054,8 @@ impl SandboxConn {
         })
     }
 
-    /// Attach to every stream `process` was started with. Each stream can be
-    /// attached once; attach before waiting.
+    /// Attach to every stream `process` was started with. Attach before
+    /// waiting.
     pub async fn stdio(&self, process: &Process) -> Result<Stdio, SandboxError> {
         process.stdio().await
     }
@@ -584,7 +1183,9 @@ impl SandboxConn {
 
     /// Listen on `listen` inside the sandbox and join each connection to
     /// `endpoint` on the node's side. The sandbox only ever knows the
-    /// tunnel's name; where it leads is the node's.
+    /// tunnel's name; where it leads is the node's. The listener stays
+    /// through a dropped connection, and connections to it are taken again
+    /// once the sandbox is back.
     pub async fn open_tunnel(
         &self,
         name: impl Into<String>,
@@ -614,15 +1215,25 @@ impl SandboxConn {
         Services { conn: self.clone() }
     }
 
-    /// Service state changes and log lines, from now on.
+    /// Service state changes and log lines, from now on. Asked again over a
+    /// new connection when the sandbox comes back; what happened while it
+    /// was away is not sent.
     pub async fn events(&self) -> Result<EventStream, SandboxError> {
-        let (response, _) = self
-            .send(request(Method::GET, path::EVENTS, None), true)
-            .await?;
+        let live = self.live().await?;
+        let reader = self.open_events(&live).await?;
         Ok(EventStream {
-            reader: BufReader::new(H2Reader::new(checked(response).await?)),
+            conn: self.clone(),
+            live,
+            reader,
             line: Vec::new(),
         })
+    }
+
+    async fn open_events(&self, live: &Live) -> Result<BufReader<H2Reader>, SandboxError> {
+        let (response, _) = self
+            .send_on(live, request(Method::GET, path::EVENTS, None), true)
+            .await?;
+        Ok(BufReader::new(H2Reader::new(checked(response).await?)))
     }
 
     /// Ask the sandbox to stop its services and processes and exit.
@@ -643,9 +1254,9 @@ pub struct Process {
 
 /// A process's attached streams; `None` for one it was not given.
 pub struct Stdio {
-    pub stdin: Option<H2Writer>,
-    pub stdout: Option<H2Reader>,
-    pub stderr: Option<H2Reader>,
+    pub stdin: Option<InputWriter>,
+    pub stdout: Option<OutputReader>,
+    pub stderr: Option<OutputReader>,
 }
 
 impl Process {
@@ -659,33 +1270,43 @@ impl Process {
         self.spawned.pid
     }
 
-    fn proc_ref(&self) -> String {
+    fn proc_ref(&self, from: Option<u64>) -> String {
         protocol::encode_args(&ProcRef {
             id: self.spawned.id,
+            from,
         })
     }
 
-    /// Its stdin; shutting the writer down closes it.
-    pub async fn stdin(&self) -> Result<H2Writer, SandboxError> {
+    /// Its stdin; shutting the writer down closes it. What is written goes
+    /// on over a new connection when the sandbox comes back.
+    pub async fn stdin(&self) -> Result<InputWriter, SandboxError> {
+        let live = self.conn.live().await?;
         let (response, stream) = self
             .conn
-            .send(
-                request(Method::POST, path::STDIN, Some(self.proc_ref())),
+            .send_on(
+                &live,
+                request(Method::POST, path::STDIN, Some(self.proc_ref(Some(0)))),
                 false,
             )
             .await?;
-        tokio::spawn(async move {
-            let _ = response.await;
-        });
-        Ok(H2Writer::new(stream))
+        let (user, pump) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(pump_input(
+            self.conn.clone(),
+            self.spawned.id,
+            pump,
+            Some((H2Writer::new(stream), response, live)),
+        ));
+        Ok(InputWriter { user })
     }
 
-    pub async fn stdout(&self) -> Result<H2Reader, SandboxError> {
-        self.conn.open_read(path::STDOUT, self.proc_ref()).await
+    /// Its stdout, from the start; carried on from where it was cut off
+    /// when the sandbox comes back.
+    pub async fn stdout(&self) -> Result<OutputReader, SandboxError> {
+        OutputReader::open(&self.conn, path::STDOUT, self.spawned.id).await
     }
 
-    pub async fn stderr(&self) -> Result<H2Reader, SandboxError> {
-        self.conn.open_read(path::STDERR, self.proc_ref()).await
+    pub async fn stderr(&self) -> Result<OutputReader, SandboxError> {
+        OutputReader::open(&self.conn, path::STDERR, self.spawned.id).await
     }
 
     pub async fn stdio(&self) -> Result<Stdio, SandboxError> {
@@ -747,9 +1368,24 @@ impl Process {
         Ok(())
     }
 
-    /// Wait for it to exit. Afterwards the sandbox forgets it.
+    /// Wait for it to exit, asking again over a new connection when the
+    /// sandbox comes back. The sandbox keeps the status for a later ask.
     pub async fn wait(&self) -> Result<ExitStatus, SandboxError> {
-        self.conn.get_json(path::WAIT, Some(self.proc_ref())).await
+        loop {
+            let live = self.conn.live().await?;
+            match self
+                .conn
+                .get_json_on(&live, path::WAIT, Some(self.proc_ref(None)))
+                .await
+            {
+                Ok(status) => return Ok(status),
+                Err(error) => {
+                    if !self.conn.worth_retrying(&live, error.of_connection()).await {
+                        return Err(error);
+                    }
+                }
+            }
+        }
     }
 
     /// Wait, collecting everything it writes to stdout and stderr. For short
@@ -759,7 +1395,7 @@ impl Process {
         if let Some(mut stdin) = stdio.stdin {
             stdin.shutdown().await?;
         }
-        let read_all = |reader: Option<H2Reader>| async move {
+        let read_all = |reader: Option<OutputReader>| async move {
             let mut bytes = Vec::new();
             if let Some(mut reader) = reader {
                 reader.read_to_end(&mut bytes).await?;
@@ -781,6 +1417,249 @@ pub struct Output {
     pub status: ExitStatus,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+}
+
+type Reopening = Pin<Box<dyn Future<Output = io::Result<(H2Reader, Arc<Live>)>> + Send>>;
+
+enum ReadState {
+    Open(H2Reader, Arc<Live>),
+    Reopening(Reopening),
+    Done,
+}
+
+/// A process's stdout or stderr. When the connection carrying it drops, it
+/// asks again from the byte it had reached once the sandbox is back, so
+/// what it reads has neither gaps nor repeats.
+pub struct OutputReader {
+    conn: SandboxConn,
+    path: &'static str,
+    id: u64,
+    /// Bytes handed to the reader so far: where to carry on from.
+    offset: u64,
+    state: ReadState,
+}
+
+impl OutputReader {
+    async fn open(conn: &SandboxConn, path: &'static str, id: u64) -> Result<Self, SandboxError> {
+        let live = conn.live().await?;
+        let args = protocol::encode_args(&ProcRef { id, from: Some(0) });
+        let reader = conn.open_read_on(&live, path, args).await?;
+        Ok(OutputReader {
+            conn: conn.clone(),
+            path,
+            id,
+            offset: 0,
+            state: ReadState::Open(reader, live),
+        })
+    }
+
+    /// Bytes read so far.
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+}
+
+async fn reopen_output(
+    conn: SandboxConn,
+    mut was: Arc<Live>,
+    path: &'static str,
+    id: u64,
+    from: u64,
+    mut failure: io::Error,
+) -> io::Result<(H2Reader, Arc<Live>)> {
+    loop {
+        if !conn.worth_retrying(&was, io_of_connection(&failure)).await {
+            return Err(failure);
+        }
+        let live = conn.live().await.map_err(io::Error::other)?;
+        let args = protocol::encode_args(&ProcRef {
+            id,
+            from: Some(from),
+        });
+        match conn.open_read_on(&live, path, args).await {
+            Ok(reader) => return Ok((reader, live)),
+            Err(error) if error.of_connection() => {
+                failure = io::Error::other(error);
+                was = live;
+            }
+            Err(error) => return Err(io::Error::other(error)),
+        }
+    }
+}
+
+impl AsyncRead for OutputReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = &mut *self;
+        loop {
+            match &mut this.state {
+                ReadState::Open(reader, live) => {
+                    let before = buf.filled().len();
+                    match Pin::new(reader).poll_read(cx, buf) {
+                        Poll::Ready(Ok(())) => {
+                            let n = buf.filled().len() - before;
+                            if n == 0 {
+                                this.state = ReadState::Done;
+                            }
+                            this.offset += n as u64;
+                            return Poll::Ready(Ok(()));
+                        }
+                        Poll::Ready(Err(error)) => {
+                            if !this.conn.is_resumable() {
+                                this.state = ReadState::Done;
+                                return Poll::Ready(Err(error));
+                            }
+                            let live = live.clone();
+                            this.state = ReadState::Reopening(Box::pin(reopen_output(
+                                this.conn.clone(),
+                                live,
+                                this.path,
+                                this.id,
+                                this.offset,
+                                error,
+                            )));
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+                ReadState::Reopening(reopening) => match reopening.as_mut().poll(cx) {
+                    Poll::Ready(Ok((reader, live))) => {
+                        tracing::debug!(run = %this.conn.run(), from = this.offset, "output carried on over a new connection");
+                        this.state = ReadState::Open(reader, live);
+                    }
+                    Poll::Ready(Err(error)) => {
+                        this.state = ReadState::Done;
+                        return Poll::Ready(Err(error));
+                    }
+                    Poll::Pending => return Poll::Pending,
+                },
+                ReadState::Done => return Poll::Ready(Ok(())),
+            }
+        }
+    }
+}
+
+/// A process's stdin. Writes go to a task that sends them on and keeps the
+/// last [`INPUT_KEPT`] bytes, to send again over a new connection when the
+/// sandbox comes back; writes wait meanwhile. Once the process has closed
+/// its stdin, or the run is lost, writes fail as on a broken pipe.
+pub struct InputWriter {
+    user: tokio::io::DuplexStream,
+}
+
+impl AsyncWrite for InputWriter {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.user).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.user).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.user).poll_shutdown(cx)
+    }
+}
+
+/// The tail of what was sent, from offset `base`.
+#[derive(Default)]
+struct Kept {
+    base: u64,
+    bytes: VecDeque<u8>,
+}
+
+impl Kept {
+    fn push(&mut self, bytes: &[u8]) {
+        self.bytes.extend(bytes);
+        let over = self.bytes.len().saturating_sub(INPUT_KEPT);
+        if over > 0 {
+            self.bytes.drain(..over);
+            self.base += over as u64;
+        }
+    }
+}
+
+type InputStream = (H2Writer, ResponseFuture, Arc<Live>);
+
+async fn pump_input(
+    conn: SandboxConn,
+    id: u64,
+    mut from_user: tokio::io::DuplexStream,
+    mut stream: Option<InputStream>,
+) {
+    let mut kept = Kept::default();
+    let mut ended = false;
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let (mut writer, response, live) = match stream.take() {
+            Some(stream) => stream,
+            None => match reopen_input(&conn, id, &kept).await {
+                Some(stream) => stream,
+                None => return,
+            },
+        };
+        let failure: SandboxError = loop {
+            if ended {
+                if let Err(error) = writer.shutdown().await {
+                    break error.into();
+                }
+                match response.await {
+                    Ok(_) => return,
+                    Err(error) => break error.into(),
+                }
+            }
+            let n = from_user.read(&mut buf).await.unwrap_or(0);
+            if n == 0 {
+                ended = true;
+                continue;
+            }
+            kept.push(&buf[..n]);
+            if let Err(error) = writer.write_all(&buf[..n]).await {
+                break error.into();
+            }
+        };
+        if !conn.worth_retrying(&live, failure.of_connection()).await {
+            return;
+        }
+    }
+}
+
+/// A stdin stream over the current connection, with what is kept sent
+/// again; the sandbox skips what it had written.
+async fn reopen_input(conn: &SandboxConn, id: u64, kept: &Kept) -> Option<InputStream> {
+    loop {
+        let live = conn.live().await.ok()?;
+        let attempt = async {
+            let args = protocol::encode_args(&ProcRef {
+                id,
+                from: Some(kept.base),
+            });
+            let (response, stream) = conn
+                .send_on(&live, request(Method::POST, path::STDIN, Some(args)), false)
+                .await?;
+            let mut writer = H2Writer::new(stream);
+            let (a, b) = kept.bytes.as_slices();
+            writer.write_all(a).await?;
+            writer.write_all(b).await?;
+            Ok::<_, SandboxError>((writer, response))
+        }
+        .await;
+        match attempt {
+            Ok((writer, response)) => return Some((writer, response, live)),
+            Err(error) => {
+                if !conn.worth_retrying(&live, error.of_connection()).await {
+                    return None;
+                }
+            }
+        }
+    }
 }
 
 /// Where a tunnel leads on the node's side.
@@ -846,18 +1725,26 @@ impl Drop for Tunnel {
 async fn accept_loop(conn: SandboxConn, name: String, endpoint: Endpoint) {
     let args = protocol::encode_args(&TunnelRef { name: name.clone() });
     loop {
-        let Ok((response, to_sandbox)) = conn
-            .send(
-                request(Method::POST, path::TUNNEL_ACCEPT, Some(args.clone())),
-                false,
-            )
-            .await
-        else {
+        let Ok(live) = conn.live().await else {
             return;
         };
-        let from_sandbox = match checked(response).await {
-            Ok(body) => body,
+        let accepted = async {
+            let (response, to_sandbox) = conn
+                .send_on(
+                    &live,
+                    request(Method::POST, path::TUNNEL_ACCEPT, Some(args.clone())),
+                    false,
+                )
+                .await?;
+            Ok::<_, SandboxError>((checked(response).await?, to_sandbox))
+        }
+        .await;
+        let (from_sandbox, to_sandbox) = match accepted {
+            Ok(accepted) => accepted,
             Err(error) => {
+                if conn.worth_retrying(&live, error.of_connection()).await {
+                    continue;
+                }
                 tracing::debug!(tunnel = %name, %error, "tunnel stopped accepting");
                 return;
             }
@@ -921,6 +1808,8 @@ impl Services {
 
 /// The sandbox's events, one JSON object per line.
 pub struct EventStream {
+    conn: SandboxConn,
+    live: Arc<Live>,
     reader: BufReader<H2Reader>,
     line: Vec<u8>,
 }
@@ -928,22 +1817,40 @@ pub struct EventStream {
 impl EventStream {
     /// The next event, or `None` when the stream has ended.
     pub async fn next(&mut self) -> Result<Option<Event>, SandboxError> {
-        self.line.clear();
-        let read = (&mut self.reader)
-            .take(MAX_EVENT_LINE as u64 + 1)
-            .read_until(b'\n', &mut self.line)
-            .await?;
-        if read == 0 {
-            return Ok(None);
+        loop {
+            self.line.clear();
+            let read = (&mut self.reader)
+                .take(MAX_EVENT_LINE as u64 + 1)
+                .read_until(b'\n', &mut self.line)
+                .await;
+            let read = match read {
+                Ok(read) => read,
+                Err(error) => {
+                    if !self
+                        .conn
+                        .worth_retrying(&self.live, io_of_connection(&error))
+                        .await
+                    {
+                        return Err(error.into());
+                    }
+                    let live = self.conn.live().await?;
+                    self.reader = self.conn.open_events(&live).await?;
+                    self.live = live;
+                    continue;
+                }
+            };
+            if read == 0 {
+                return Ok(None);
+            }
+            if self.line.last() != Some(&b'\n') {
+                return Err(SandboxError::Protocol(
+                    "event line too long or cut short".into(),
+                ));
+            }
+            return serde_json::from_slice(&self.line)
+                .map(Some)
+                .map_err(|e| SandboxError::Protocol(e.to_string()));
         }
-        if self.line.last() != Some(&b'\n') {
-            return Err(SandboxError::Protocol(
-                "event line too long or cut short".into(),
-            ));
-        }
-        serde_json::from_slice(&self.line)
-            .map(Some)
-            .map_err(|e| SandboxError::Protocol(e.to_string()))
     }
 }
 
@@ -956,8 +1863,11 @@ mod tests {
         let tokens = TokenRegistry::default();
         let token = tokens.issue("run-1");
         assert!(tokens.outstanding("run-1"));
-        assert_eq!(tokens.redeem(&token).as_deref(), Some("run-1"));
-        assert_eq!(tokens.redeem(&token), None);
+        assert_eq!(
+            tokens.redeem(&token, None),
+            Some(Redeemed::First("run-1".into()))
+        );
+        assert_eq!(tokens.redeem(&token, None), None);
         assert!(!tokens.outstanding("run-1"));
     }
 
@@ -968,8 +1878,11 @@ mod tests {
         let early = tokens.issue_within("early", Duration::from_secs(60));
         std::thread::sleep(Duration::from_millis(20));
         assert!(!tokens.outstanding("late"));
-        assert_eq!(tokens.redeem(&late), None);
-        assert_eq!(tokens.redeem(&early).as_deref(), Some("early"));
+        assert_eq!(tokens.redeem(&late, None), None);
+        assert_eq!(
+            tokens.redeem(&early, None),
+            Some(Redeemed::First("early".into()))
+        );
     }
 
     #[test]
@@ -985,7 +1898,71 @@ mod tests {
     fn revoking_forgets_the_runs_tokens() {
         let tokens = TokenRegistry::default();
         let token = tokens.issue_within("run", Duration::from_secs(60));
+        let secret = tokens.issue_resume("run");
         tokens.revoke("run");
-        assert_eq!(tokens.redeem(&token), None);
+        assert_eq!(tokens.redeem(&token, None), None);
+        assert_eq!(tokens.redeem(&secret, None), None);
+        assert!(!tokens.resumable("run"));
+    }
+
+    #[test]
+    fn a_resume_secret_works_until_revoked_and_is_no_first_use_token() {
+        let tokens = TokenRegistry::default();
+        let secret = tokens.issue_resume("run");
+        assert!(!tokens.outstanding("run"));
+        assert!(tokens.resumable("run"));
+        for _ in 0..3 {
+            assert_eq!(
+                tokens.redeem(&secret, None),
+                Some(Redeemed::Resume("run".into()))
+            );
+        }
+        tokens.revoke("run");
+        assert_eq!(tokens.redeem(&secret, None), None);
+    }
+
+    #[test]
+    fn a_bound_carrier_neither_spends_nor_accepts_another_runs_token() {
+        let tokens = TokenRegistry::default();
+        let token = tokens.issue("a");
+        let secret = tokens.issue_resume("a");
+        assert_eq!(tokens.redeem(&token, Some("b")), None);
+        assert_eq!(tokens.redeem(&secret, Some("b")), None);
+        assert!(
+            tokens.outstanding("a"),
+            "a refusal elsewhere spends nothing"
+        );
+        assert_eq!(
+            tokens.redeem(&secret, Some("a")),
+            Some(Redeemed::Resume("a".into()))
+        );
+        assert_eq!(
+            tokens.redeem(&token, Some("a")),
+            Some(Redeemed::First("a".into()))
+        );
+    }
+
+    #[test]
+    fn only_a_dead_connection_is_worth_a_redial() {
+        let io = io::Error::new(io::ErrorKind::BrokenPipe, "connection closed");
+        assert!(io_of_connection(&io));
+        let reset = h2::Error::from(h2::Reason::CANCEL);
+        assert!(!h2_of_connection(&reset));
+        assert!(!SandboxError::Remote {
+            status: StatusCode::NOT_FOUND,
+            message: "no".into()
+        }
+        .of_connection());
+        assert!(!SandboxError::Lost.of_connection());
+    }
+
+    #[test]
+    fn kept_input_holds_its_tail() {
+        let mut kept = Kept::default();
+        kept.push(&vec![1u8; INPUT_KEPT]);
+        kept.push(&[2u8; 10]);
+        assert_eq!(kept.base, 10);
+        assert_eq!(kept.bytes.len(), INPUT_KEPT);
+        assert_eq!(kept.bytes.back(), Some(&2));
     }
 }

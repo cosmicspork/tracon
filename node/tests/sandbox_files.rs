@@ -56,6 +56,11 @@ struct Loopback {
     relays: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
     created: Mutex<Vec<Vec<Mount>>>,
+    /// Every sandbox made gets a socket of its own: one cut off before is
+    /// still redialling its own, as a removed container's never could.
+    made: std::sync::atomic::AtomicUsize,
+    /// Lost or destroyed, until made again.
+    gone: Mutex<std::collections::HashSet<String>>,
 }
 
 impl Loopback {
@@ -72,6 +77,7 @@ impl Loopback {
         if let Some(relay) = self.relays.lock().unwrap().remove(name) {
             relay.abort();
         }
+        self.gone.lock().unwrap().insert(name.to_string());
     }
 
     async fn settle(&self) {
@@ -98,12 +104,11 @@ impl SandboxProvider for Loopback {
     async fn create(&self, spec: &CreateSpec<'_>) -> Result<Handle, ProviderError> {
         let name = spec.name.unwrap().to_string();
         self.created.lock().unwrap().push(spec.mounts.to_vec());
-        let path = self
-            .dir
-            .as_ref()
-            .unwrap()
-            .path()
-            .join(format!("{name}.sock"));
+        self.gone.lock().unwrap().remove(&name);
+        let path = self.dir.as_ref().unwrap().path().join(format!(
+            "{name}-{}.sock",
+            self.made.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         let _ = std::fs::remove_file(&path);
         let listener = tokio::net::UnixListener::bind(&path).unwrap();
         let config = inside::Config::new(
@@ -152,8 +157,11 @@ impl SandboxProvider for Loopback {
         Ok(())
     }
 
-    async fn status(&self, _: &Handle) -> Result<Status, ProviderError> {
-        Ok(Status::Running)
+    async fn status(&self, handle: &Handle) -> Result<Status, ProviderError> {
+        Ok(match self.gone.lock().unwrap().contains(&handle.0) {
+            true => Status::Lost,
+            false => Status::Running,
+        })
     }
 
     async fn image_identity(&self, _: &Handle) -> Result<ImageIdentity, ProviderError> {
@@ -354,6 +362,7 @@ async fn a_sessions_trees_go_in_come_back_and_resume() {
     let provider = Loopback::new();
     let runner = || {
         ProtocolRunner::new(provider.clone(), "img")
+            .with_server(support::sandbox_server())
             .with_files(l.store.clone())
             .with_connect_within(Duration::from_secs(10))
     };
@@ -516,6 +525,7 @@ async fn a_preparation_comes_back_whole_and_a_check_not_at_all() {
     let l = layout();
     let provider = Loopback::new();
     let runner = ProtocolRunner::new(provider.clone(), "img")
+        .with_server(support::sandbox_server())
         .with_files(l.store.clone())
         .with_connect_within(Duration::from_secs(10));
     let w = l.work.display().to_string();

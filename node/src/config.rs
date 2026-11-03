@@ -107,6 +107,12 @@ pub struct Sandbox {
     /// project's GitHub releases.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub release_url: Option<String>,
+    /// How long a run over the sandbox protocol whose connection dropped
+    /// waits for its sandbox to redial before the run is lost; the sandbox
+    /// keeps redialling for twice as long. 0 turns resuming off, so a
+    /// dropped connection ends the run. Unset, 120.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resume_within_secs: Option<u64>,
 }
 
 /// Where releases are downloaded from, unless `[sandbox] release_url` says.
@@ -130,6 +136,13 @@ impl Sandbox {
             Some(url) if !url.is_empty() => url.trim_end_matches('/').to_string(),
             _ => RELEASE_URL.to_string(),
         }
+    }
+
+    /// `resume_within_secs`, or the protocol's default.
+    pub fn resume_within(&self) -> std::time::Duration {
+        self.resume_within_secs
+            .map(std::time::Duration::from_secs)
+            .unwrap_or(tracon_sandbox::node::DEFAULT_RESUME_WITHIN)
     }
 }
 

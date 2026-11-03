@@ -7,7 +7,9 @@
 //! inside the VM to a socket file on the host. The relay runs only that way
 //! round, so `tracon-sandbox` listens (`TRACON_SANDBOX_LISTEN`) and
 //! [`SandboxProvider::connect`] connects in at [`AppleProvider::node_socket`];
-//! TLS, the pin and the token are as on every other provider. A node listening on the host's vmnet
+//! TLS, the pin and the token are as on every other provider. When the
+//! connection drops, the supervisor listens again and the node connects in
+//! again with nothing new: the sandbox proves its run's resume secret. A node listening on the host's vmnet
 //! address is no alternative: the application firewall or an endpoint
 //! agent's network extension may hold an unsigned binary's traffic there,
 //! and an `--internal` network exposes every host service listening on all
@@ -710,10 +712,16 @@ impl SandboxProvider for AppleProvider {
         server: &SandboxServer,
         within: Duration,
     ) -> Result<SandboxConn, ProviderError> {
-        server
-            .connect_to(&self.node_socket(handle), within)
+        let socket = self.node_socket(handle);
+        let conn = server
+            .connect_to(&socket, within)
             .await
-            .map_err(|e| ProviderError::Failed(format!("connect to {}: {e}", handle.0)))
+            .map_err(|e| ProviderError::Failed(format!("connect to {}: {e}", handle.0)))?;
+        // Its supervisor listens again when the connection drops, and the
+        // relay carries only node-to-VM connections, so the node connects in
+        // again until the run ends.
+        server.keep_connecting(socket, &conn);
+        Ok(conn)
     }
 
     async fn destroy(&self, handle: &Handle) -> Result<(), ProviderError> {
