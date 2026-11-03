@@ -7,7 +7,8 @@
 //!   (`[sandbox] base_image`, pulled and pinned by digest when the boundary
 //!   converges) or its repository's image. A repository's Dockerfile may
 //!   stand on the base: `FROM ${TRACON_SANDBOX_BASE}` names the pinned base
-//!   (`repo_image::build_base`), and a new base rebuilds it. The
+//!   (`repo_image::build_base`), and a new base rebuilds it; one that does
+//!   not, or an `image` of its own, is refused (`repo_image::refusal`). The
 //!   `tracon-harness-*` images and the layered `-claude`/`-native` repository
 //!   images are neither built nor used.
 //! - **Harnesses.** Claude Code and tracon-agent run from the harness bundle

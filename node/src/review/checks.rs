@@ -251,7 +251,7 @@ pub async fn run_required_for(
     // The one place a check run may build: the image for the default branch's
     // Dockerfile as it is now, so a check never runs in an image a merged
     // change has since replaced.
-    let environment = crate::repo_image::environment(backend, cfg, store, repo).await;
+    let environment = crate::repo_image::environment(backend, cfg, store, repo).await?;
     let commands = environment.checks.clone();
     let raw_image = environment.image.clone();
     let runner = backend.runner(Vec::new());

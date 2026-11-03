@@ -1822,7 +1822,8 @@ export interface RepoEnvironments {
   hash: string
   /** Preset name, and the hosts it opens. */
   presets: [string, string[]][]
-  entries: { entry: RepoEntry; builds: RepoImageBuild[]; hold?: CredentialHold | null }[]
+  /** `refused`: why this node runs nothing for the entry (an image off its stock base). */
+  entries: { entry: RepoEntry; builds: RepoImageBuild[]; hold?: CredentialHold | null; refused?: string | null }[]
 }
 
 /**

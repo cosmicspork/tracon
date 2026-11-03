@@ -186,7 +186,8 @@ async fn layer(
         (ClaudeAdapter::ID, PINNED),
         &|| {},
     )
-    .await;
+    .await
+    .unwrap();
     images.0.extend(got.image.clone());
     (got, store, repo.path().to_string_lossy().into_owned())
 }

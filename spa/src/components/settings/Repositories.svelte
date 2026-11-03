@@ -94,6 +94,10 @@
     return loaded?.entries.find((item) => item.entry.path === path)?.hold ?? null
   }
 
+  function refusalOf(path: string) {
+    return loaded?.entries.find((item) => item.entry.path === path)?.refused ?? null
+  }
+
   async function startHeld(path: string, lendingHash: string) {
     if (busy) return
     busy = `start:${path}`
@@ -271,6 +275,7 @@
     {#each forms as form, index (index)}
       {@const built = builds(form.path)}
       {@const hold = holdOf(form.path)}
+      {@const refused = refusalOf(form.path)}
       {@const uploads = acceptsUploads(words(form.egress), presets)}
       <details class="entry" open={!form.path || forms.length <= 2}>
         <summary>
@@ -353,6 +358,7 @@
         </div>
 
         {#each entryErrors(index) as message (message)}<p class="error" role="alert">{message}</p>{/each}
+        {#if refused}<p class="error" role="alert">Refused on this node: {refused}</p>{/if}
 
         {#if hold}
           <div class="held" role="status">

@@ -718,6 +718,95 @@ fn layered(base: &str, harness_image: &str, layer: &HarnessLayer, run_as: &RunAs
     )
 }
 
+/// Whether this node runs every repository on its stock base: Podman with
+/// `sandbox_images`, Apple, and Kubernetes with `sandbox_protocol`. A
+/// sandbox there runs as the base's own user, in the `/work`, `/cache` and
+/// home the base made that user's; an image of the repository's own has none
+/// of them, and no layer over an arbitrary image can be trusted to add them.
+pub fn stock_base_only(cfg: &Config) -> bool {
+    crate::sandbox_images::bundled(cfg) || crate::boundary::kubernetes::uses_sandbox_protocol(cfg)
+}
+
+/// Why `entry` is refused on this node, if it is: it names an `image`, or a
+/// Dockerfile (whose text is `dockerfile`, where it could be read) that does
+/// not begin on the stock base.
+pub fn off_the_stock_base(cfg: &Config, entry: &Repo, dockerfile: Option<&str>) -> Option<String> {
+    if !stock_base_only(cfg) {
+        return None;
+    }
+    let path = entry.path.display();
+    let migrate = "this node's sandboxes run every repository on the stock base; install what \
+        it needs with root `build` steps in its [[repo]] entry, and fetch its dependencies with \
+        `prepare`";
+    if let Some(image) = &entry.image {
+        return Some(format!(
+            "[[repo]] {path}: `image = {image:?}` is refused: {migrate}"
+        ));
+    }
+    let named = entry.dockerfile.as_deref()?;
+    let from = first_from(dockerfile?)?;
+    let base = crate::sandbox_images::BASE_ARG;
+    if from == format!("${{{base}}}") || from == format!("${base}") {
+        return None;
+    }
+    Some(format!(
+        "[[repo]] {path}: `dockerfile = {named:?}` begins `FROM {from}`, not \
+         `FROM ${{{base}}}`, and is refused: {migrate} (or begin the Dockerfile \
+         `FROM ${{{base}}}`)"
+    ))
+}
+
+/// [`off_the_stock_base`] for `repo`, reading its Dockerfile from the default
+/// branch as a build would. One that cannot be read is left to the build to
+/// report.
+pub async fn refusal(cfg: &Config, repo: &Path, entry: &Repo) -> Option<String> {
+    if !stock_base_only(cfg) {
+        return None;
+    }
+    let dockerfile = match &entry.dockerfile {
+        Some(path) if entry.image.is_none() => {
+            let (_, commit) = default_commit(repo).await.ok()?;
+            let object = format!("{commit}:{path}");
+            let blob = crate::review::blob(&repo.to_string_lossy(), &object)
+                .await
+                .ok()?;
+            Some(String::from_utf8_lossy(&blob).into_owned())
+        }
+        _ => None,
+    };
+    off_the_stock_base(cfg, entry, dockerfile.as_deref())
+}
+
+/// What a Dockerfile's first `FROM` stands on, its flags and stage name
+/// aside.
+fn first_from(dockerfile: &str) -> Option<String> {
+    let mut instruction = String::new();
+    for line in dockerfile.lines() {
+        let line = line.trim();
+        // Comments are dropped inside a continued instruction too.
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(continued) = line.strip_suffix('\\') {
+            instruction.push_str(continued);
+            instruction.push(' ');
+            continue;
+        }
+        instruction.push_str(line);
+        let mut words = instruction.split_whitespace();
+        if words
+            .next()
+            .is_some_and(|word| word.eq_ignore_ascii_case("FROM"))
+        {
+            return words
+                .find(|word| !word.starts_with("--"))
+                .map(str::to_string);
+        }
+        instruction.clear();
+    }
+    None
+}
+
 /// The image one session's harness runs in.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionImage {
@@ -754,7 +843,8 @@ impl SessionImage {
 /// Dockerfile change costs the next session nothing and this one no wait.
 /// Anything that stops the session having its repository's image leaves it in
 /// the harness's own, with the reason: a session that cannot build is still
-/// the one that can fix what broke.
+/// the one that can fix what broke. `Err` is a repository this node refuses
+/// ([`refusal`]), whose session does not start.
 pub async fn session_image(
     backend: &Arc<dyn Backend>,
     cfg: &Arc<Config>,
@@ -762,42 +852,47 @@ pub async fn session_image(
     repo: &Path,
     (harness_id, harness_version): (&str, &str),
     building: &(dyn Fn() + Send + Sync),
-) -> SessionImage {
+) -> Result<SessionImage, String> {
     let repos = cfg.repos();
+    if let Some(entry) = repos.iter().find(|entry| entry.matches(repo)) {
+        if let Some(refused) = refusal(cfg, repo, entry).await {
+            return Err(refused);
+        }
+    }
     if crate::sandbox_images::bundled(cfg) {
         let Some(entry) = repos.iter().find(|entry| entry.matches(repo)) else {
-            return SessionImage::default();
+            return Ok(SessionImage::default());
         };
-        return sandbox_session_image(backend, cfg, store, repo, entry, building).await;
+        return Ok(sandbox_session_image(backend, cfg, store, repo, entry, building).await);
     }
     let Some(entry) = repos
         .iter()
         .find(|entry| entry.matches(repo))
         .filter(|entry| entry.image.is_some() || entry.dockerfile.is_some())
     else {
-        return SessionImage::default();
+        return Ok(SessionImage::default());
     };
     let run_as = RunAs::of(cfg);
     let Some(layer) = harness_layer(harness_id, &run_as) else {
-        return SessionImage::aside(format!(
+        return Ok(SessionImage::aside(format!(
             "the {harness_id} harness runs in its own image; it is not layered onto a repository's"
-        ));
+        )));
     };
     let Some(builder) = backend.image_builder() else {
-        return SessionImage::aside(format!(
+        return Ok(SessionImage::aside(format!(
             "the {} runtime cannot build images",
             backend.kind()
-        ));
+        )));
     };
     if !backend.runs_sessions_in_repository_images() {
-        return SessionImage::aside(format!(
+        return Ok(SessionImage::aside(format!(
             "the {} runtime runs a session in its harness's own image",
             backend.kind()
-        ));
+        )));
     }
     let base = match repository_base(backend, cfg, store, repo, entry, builder, building).await {
         Ok(base) => base,
-        Err(aside) => return aside,
+        Err(aside) => return Ok(aside),
     };
     let runner = backend.runner_for(harness_id, Vec::new());
     let harness = SessionHarness {
@@ -807,7 +902,7 @@ pub async fn session_image(
         layer,
         run_as,
     };
-    ensure_session_with(builder, runner.as_ref(), store, repo, &base, &harness).await
+    Ok(ensure_session_with(builder, runner.as_ref(), store, repo, &base, &harness).await)
 }
 
 /// The repository's own image a session on `repo` stands on: the one its
@@ -1162,6 +1257,9 @@ pub async fn ensure_base(
     let Some(entry) = building_entry(cfg, repo) else {
         return Ensured::Unconfigured;
     };
+    if let Some(reason) = refusal(cfg, repo, &entry).await {
+        return Ensured::Unavailable { reason };
+    }
     // An entry that keeps lending credentials to a preparation a peer's
     // recipe changed builds nothing, forced or not, until the operator
     // starts that build: a build is followed by the one warm-up the
@@ -1256,6 +1354,10 @@ pub(crate) async fn warm_base_cache(
     let Some(entry) = entry else {
         return;
     };
+    if let Some(refused) = refusal(cfg, repo, &entry).await {
+        tracing::warn!(repo = %repo.display(), %refused, "base cache not warmed");
+        return;
+    }
     // `ensure_base` builds nothing for a held entry, so it never gets here;
     // this is the one place credentials are lent, so it checks again.
     if crate::mesh::recipe::held(store, &entry).is_some() {
@@ -1360,14 +1462,21 @@ fn lend(
 /// The environment a run in `repo` gets, with its image built first if the
 /// entry names a Dockerfile. A build that fails leaves whatever
 /// `environment_for` still resolves: the last image that built, or the
-/// harness image with that said.
+/// harness image with that said. `Err` is a repository this node refuses
+/// ([`refusal`]): nothing runs for it.
 pub async fn environment(
     backend: &dyn Backend,
     cfg: &Config,
     store: &Store,
     repo: Option<&Path>,
-) -> crate::environment::RepoEnvironment {
+) -> Result<crate::environment::RepoEnvironment, String> {
     if let Some(repo) = repo {
+        let repos = cfg.repos();
+        if let Some(entry) = repos.iter().find(|entry| entry.matches(repo)) {
+            if let Some(refused) = refusal(cfg, repo, entry).await {
+                return Err(refused);
+            }
+        }
         ensure_base(backend, cfg, store, repo, false).await;
     }
     let mut environment = crate::environment::environment_for(cfg, store, repo);
@@ -1380,7 +1489,7 @@ pub async fn environment(
             environment.image_source = crate::sandbox_images::SNAPSHOT_SOURCE;
         }
     }
-    environment
+    Ok(environment)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2766,6 +2875,7 @@ mod tests {
                     &quiet,
                 )
                 .await
+                .unwrap()
             }
         };
         assert_eq!(ask("/src/other", "claude").await, SessionImage::default());
@@ -2864,7 +2974,8 @@ mod tests {
             ("claude", "1"),
             &|| {},
         )
-        .await;
+        .await
+        .unwrap();
         assert!(got.image.is_some(), "{got:?}");
         let builds = pulling.builder.builds.lock().unwrap();
         assert!(
@@ -3017,6 +3128,115 @@ mod tests {
             .trim_start_matches("localhost/")
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'));
+    }
+
+    /// The sandbox providers run every repository on the stock base: an
+    /// `image`, or a Dockerfile that does not begin on the base, is refused
+    /// with what to do instead. Without them nothing changes.
+    #[test]
+    fn the_sandbox_providers_refuse_a_repository_off_the_stock_base() {
+        let legacy = Config::default();
+        let mut podman = Config::default();
+        podman.runtime.podman.sandbox_protocol = true;
+        podman.runtime.podman.sandbox_images = true;
+        let mut apple = Config::default();
+        apple.runtime.kind = crate::config::RuntimeKind::Apple;
+        let mut kube = kubernetes();
+        kube.runtime.kubernetes.sandbox_protocol = true;
+        let mut protocol_only = Config::default();
+        protocol_only.runtime.podman.sandbox_protocol = true;
+
+        let image = Repo {
+            path: "github.com/o/mesa".into(),
+            image: Some("ghcr.io/astral-sh/uv@sha256:35b0".into()),
+            ..Default::default()
+        };
+        let dockerfile = Repo {
+            path: "github.com/o/tracon".into(),
+            dockerfile: Some(".devcontainer/Containerfile".into()),
+            ..Default::default()
+        };
+        let fedora = "# syntax=docker/dockerfile:1\nARG V=41\nFROM --platform=$BUILDPLATFORM \\\n  fedora:$V AS dev\nUSER dev\n";
+        let on_base = [
+            "FROM ${TRACON_SANDBOX_BASE}\nRUN apt-get install -y jq\n",
+            "# comment\nfrom $TRACON_SANDBOX_BASE as tools\nFROM rust AS other\n",
+        ];
+
+        for (cfg, refuses) in [
+            (&legacy, false),
+            (&protocol_only, false),
+            (&kubernetes(), false),
+            (&podman, cfg!(target_os = "linux")),
+            (&apple, true),
+            (&kube, true),
+        ] {
+            assert_eq!(stock_base_only(cfg), refuses, "{:?}", cfg.runtime.kind);
+            let refused = off_the_stock_base(cfg, &image, None);
+            assert_eq!(refused.is_some(), refuses, "{refused:?}");
+            let refused = off_the_stock_base(cfg, &dockerfile, Some(fedora));
+            assert_eq!(refused.is_some(), refuses, "{refused:?}");
+            for text in on_base {
+                assert_eq!(off_the_stock_base(cfg, &dockerfile, Some(text)), None);
+            }
+            // A Dockerfile that cannot be read is the build's to report.
+            assert_eq!(off_the_stock_base(cfg, &dockerfile, None), None);
+            let stock = Repo {
+                path: "github.com/o/plain".into(),
+                prepare: vec!["uv sync".into()],
+                ..Default::default()
+            };
+            assert_eq!(off_the_stock_base(cfg, &stock, None), None);
+        }
+
+        let said = off_the_stock_base(&apple, &image, None).unwrap();
+        for part in [
+            "github.com/o/mesa",
+            "`image = ",
+            "stock base",
+            "`build`",
+            "`prepare`",
+        ] {
+            assert!(said.contains(part), "{part}: {said}");
+        }
+        let said = off_the_stock_base(&apple, &dockerfile, Some(fedora)).unwrap();
+        for part in [
+            "`dockerfile = \".devcontainer/Containerfile\"`",
+            "FROM fedora:$V",
+            "FROM ${TRACON_SANDBOX_BASE}",
+            "`build`",
+        ] {
+            assert!(said.contains(part), "{part}: {said}");
+        }
+    }
+
+    /// What a session, a check or a preparation is told: the refusal, read
+    /// from the Dockerfile on the default branch, before anything is built.
+    #[tokio::test]
+    async fn a_refused_repository_builds_and_starts_nothing() {
+        let tmp = checkout();
+        let mut cfg = Config::default();
+        cfg.runtime.kind = crate::config::RuntimeKind::Apple;
+        cfg.repo = vec![entry(tmp.path())];
+        let cfg = Arc::new(cfg);
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let pulling = Arc::new(Pulling {
+            builder: FakeBuilder::default(),
+        });
+        let backend: Arc<dyn Backend> = pulling.clone();
+        let refused = refusal(&cfg, tmp.path(), &cfg.repos()[0]).await.unwrap();
+        assert!(refused.contains("FROM scratch"), "{refused}");
+        assert!(matches!(
+            ensure_base(backend.as_ref(), &cfg, &store, tmp.path(), true).await,
+            Ensured::Unavailable { reason } if reason == refused
+        ));
+        let session = session_image(&backend, &cfg, &store, tmp.path(), ("claude", "1"), &|| {
+            panic!("nothing is built")
+        })
+        .await;
+        assert_eq!(session, Err(refused.clone()));
+        let checks = environment(backend.as_ref(), &cfg, &store, Some(tmp.path())).await;
+        assert_eq!(checks.err(), Some(refused));
+        assert!(pulling.builder.builds.lock().unwrap().is_empty());
     }
 
     /// What Podman builds, pinned. The repository's own image (its normalised
@@ -3228,6 +3448,7 @@ ENTRYPOINT []
                     &|| {},
                 )
                 .await
+                .unwrap()
             }
         };
         let on_kube = ask(Config {
@@ -3394,13 +3615,17 @@ ENTRYPOINT []
             matches!(&forced, Ensured::Unavailable { reason } if reason.starts_with("held: nova")),
             "{forced:?}"
         );
-        let checks = environment(backend.as_ref(), &cfg, &store, Some(repo)).await;
+        let checks = environment(backend.as_ref(), &cfg, &store, Some(repo))
+            .await
+            .unwrap();
         assert!(
             checks.image_source.contains("held"),
             "{}",
             checks.image_source
         );
-        let session = session_image(&backend, &cfg, &store, repo, ("claude", "1"), &|| {}).await;
+        let session = session_image(&backend, &cfg, &store, repo, ("claude", "1"), &|| {})
+            .await
+            .unwrap();
         assert!(session.image.is_none());
         assert!(session.note.unwrap().contains("held"));
         assert_eq!(builds(), 0);

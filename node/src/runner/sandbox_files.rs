@@ -431,8 +431,9 @@ impl FilesStore {
 
     /// Split a run's mounts into what the provider mounts and what goes over
     /// the files channel: every mount of a volume kept here. Each directory
-    /// sent in lands on storage of the sandbox's own ([`Mount::local`]),
-    /// unless it is inside another that does.
+    /// sent in, and the directory each file is sent into, lands on storage
+    /// of the sandbox's own ([`Mount::local`]), unless it is inside another
+    /// that does.
     pub fn plan(&self, mounts: &[Mount]) -> Result<(Vec<Mount>, Option<Plan>), FilesError> {
         let mut provided = Vec::new();
         let mut placed = Vec::new();
@@ -463,13 +464,25 @@ impl FilesStore {
             return Ok((provided, None));
         }
         placed.sort_by_key(|p| Path::new(&p.target).components().count());
+        // A file lands in the directory that holds it, which the image may
+        // not have, or not have given the sandbox's user: Podman makes a
+        // missing parent of a mountpoint as root. That directory is made the
+        // sandbox's own too, unless it already is.
+        let wanted: Vec<String> = placed
+            .iter()
+            .filter_map(|p| match p.file {
+                false => Some(p.target.clone()),
+                true => Path::new(&p.target)
+                    .parent()
+                    .filter(|parent| *parent != Path::new("/"))
+                    .map(|parent| parent.to_string_lossy().into_owned()),
+            })
+            .collect();
         let mut local: Vec<String> = Vec::new();
-        for p in placed.iter().filter(|p| !p.file) {
-            let inside_another = placed
-                .iter()
-                .any(|o| !o.file && o.target != p.target && inside(&p.target, &o.target));
-            if !inside_another && !local.contains(&p.target) {
-                local.push(p.target.clone());
+        for target in &wanted {
+            let inside_another = wanted.iter().any(|o| inside(target, o));
+            if !inside_another && !local.contains(target) {
+                local.push(target.clone());
             }
         }
         provided.extend(local.into_iter().map(Mount::local));

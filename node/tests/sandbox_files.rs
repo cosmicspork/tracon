@@ -364,11 +364,13 @@ async fn a_sessions_trees_go_in_come_back_and_resume() {
     let st = l.state.display().to_string();
 
     // In: the provider mounts none of it; two directories of the sandbox's
-    // own carry everything, and every tree arrived.
+    // own carry everything (the home, which the gitconfig is sent into,
+    // holds the state), and every tree arrived.
     let mut harness = Harness::start(&runner(), name, &l).await;
+    let home = l.state.parent().unwrap().display().to_string();
     assert_eq!(
         provider.created.lock().unwrap()[0],
-        vec![Mount::local(&w), Mount::local(&st)]
+        vec![Mount::local(&w), Mount::local(&home)]
     );
     assert_eq!(
         harness

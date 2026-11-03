@@ -2871,6 +2871,7 @@ impl Manager {
                     &announce,
                 )
                 .await
+                .map_err(anyhow::Error::msg)?
             }
             None => Default::default(),
         };
