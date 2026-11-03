@@ -100,8 +100,9 @@ enum Command {
     },
     /// The trail behind a commit: model, prompts, approval, policy version.
     Provenance { sha: String },
-    /// Runtime volumes and state directories whose session, workspace or
-    /// check is over. Lists them; `--apply` removes them (talks to `tracon serve`).
+    /// Runtime volumes, state directories and images whose session,
+    /// workspace, check or build is over. Lists them, images by class with
+    /// their sizes; `--apply` removes them (talks to `tracon serve`).
     Gc {
         /// Remove what is listed for removal.
         #[arg(long)]
@@ -109,6 +110,14 @@ enum Command {
         /// Include dependency caches, which are rebuilt when next needed.
         #[arg(long)]
         caches: bool,
+        /// Include the images sandbox images retired: harness images, and
+        /// layered (`-claude`, `-native`) and `-src` repository images.
+        #[arg(long)]
+        legacy: bool,
+        /// Take images named as this node's that carry no owner label (made
+        /// before the labels) for this node's own.
+        #[arg(long)]
+        adopt_unlabelled: bool,
         /// Also list what is kept, and why.
         #[arg(long)]
         all: bool,
@@ -758,19 +767,40 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Gc { apply, caches, all } => {
+        Command::Gc {
+            apply,
+            caches,
+            legacy,
+            adopt_unlabelled,
+            all,
+        } => {
             use reqwest::Method;
             let v = node_call(
                 Method::POST,
                 "/api/maintenance/storage",
-                Some(serde_json::json!({ "apply": apply, "caches": caches })),
+                Some(serde_json::json!({
+                    "apply": apply,
+                    "caches": caches,
+                    "legacy": legacy,
+                    "adopt_unlabelled": adopt_unlabelled,
+                })),
                 None,
             )
             .await?;
             let items = v["items"].as_array().cloned().unwrap_or_default();
+            // Images last, grouped by class.
+            let (images, others): (Vec<_>, Vec<_>) =
+                items.iter().partition(|item| item["kind"] == "image");
+            let mut images = images;
+            images.sort_by_key(|item| {
+                (
+                    item["class"].as_str().unwrap_or("").to_string(),
+                    !item["remove"].as_bool().unwrap_or(false),
+                )
+            });
             let mut listed = 0;
             let mut failed = 0;
-            for item in &items {
+            for item in others.iter().chain(images.iter()) {
                 let remove = item["remove"].as_bool().unwrap_or(false);
                 if !remove && !all {
                     continue;
@@ -785,13 +815,21 @@ async fn main() -> Result<()> {
                     (true, true, None) => "removed".to_string(),
                 };
                 listed += usize::from(remove);
+                let class = match item["class"].as_str() {
+                    Some(class) => format!(
+                        "{class:<10} {:>9} ",
+                        human_bytes(item["size"].as_u64().unwrap_or(0))
+                    ),
+                    None => String::new(),
+                };
                 println!(
-                    "{status:<8} {:<9} {}  — {}",
+                    "{status:<8} {:<9} {class}{}  — {}",
                     item["kind"].as_str().unwrap_or(""),
                     item["name"].as_str().unwrap_or(""),
                     item["reason"].as_str().unwrap_or("")
                 );
             }
+            print_image_classes(&images, apply);
             if listed == 0 {
                 println!("nothing to remove");
             } else if !apply {
@@ -1556,6 +1594,72 @@ async fn save_repo_entries(entries: Vec<serde_json::Value>, hash: &str) -> Resul
         _ => error,
     })?;
     Ok(())
+}
+
+/// Bytes as a person reads them, in powers of 1000 as `podman images` shows
+/// sizes.
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "kB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1000.0 && unit < UNITS.len() - 1 {
+        value /= 1000.0;
+        unit += 1;
+    }
+    match unit {
+        0 => format!("{bytes} B"),
+        _ => format!("{value:.1} {}", UNITS[unit]),
+    }
+}
+
+/// `tracon gc`'s images, class by class: how many go and about what that
+/// frees, the total, and what is held back for a flag.
+fn print_image_classes(images: &[&serde_json::Value], applied: bool) {
+    if images.is_empty() {
+        return;
+    }
+    let mut classes: Vec<&str> = images
+        .iter()
+        .filter_map(|item| item["class"].as_str())
+        .collect();
+    classes.dedup();
+    let verb = if applied { "removed" } else { "to remove" };
+    println!("images by class (what removing frees, about; shared layers counted once):");
+    let (mut count, mut bytes) = (0, 0);
+    for class in classes {
+        let of: Vec<_> = images
+            .iter()
+            .filter(|item| item["class"] == class)
+            .collect();
+        let going: Vec<_> = of
+            .iter()
+            .filter(|item| item["remove"].as_bool().unwrap_or(false))
+            .filter(|item| !applied || item["error"].is_null())
+            .collect();
+        let size: u64 = going
+            .iter()
+            .map(|item| item["size"].as_u64().unwrap_or(0))
+            .sum();
+        let kept = of.len() - going.len();
+        let note = match (class, kept) {
+            (_, 0) => String::new(),
+            ("unowned", _) => ", no owner label; --adopt-unlabelled takes them".into(),
+            ("legacy", _) => ", --legacy removes what nothing uses".into(),
+            _ => String::new(),
+        };
+        println!(
+            "  {class:<10} {:>3} {verb:<9} {:>9}   {kept} kept{note}",
+            going.len(),
+            human_bytes(size)
+        );
+        count += going.len();
+        bytes += size;
+    }
+    println!(
+        "  {:<10} {count:>3} {verb:<9} {:>9}",
+        "total",
+        human_bytes(bytes)
+    );
 }
 
 /// A repeated flag as the list it stands for: one empty value is an empty

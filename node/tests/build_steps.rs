@@ -127,7 +127,7 @@ async fn a_repository_built_from_steps_prepares_snapshots_and_starts() {
     assert!(podman(&["network", "create", "--disable-dns", &network]).is_some());
     let _cleanup = Cleanup {
         prefix: prefix.clone(),
-        repo_image: format!("localhost/tracon-repo-{prefix}app-"),
+        repo_image: format!("localhost/{prefix}repo-{prefix}app-"),
         network: network.clone(),
     };
     let short = tempfile::Builder::new()

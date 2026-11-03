@@ -382,6 +382,27 @@ workspace no open session uses and older than a day, a finished check run) and
 removes them with `--apply`; dependency caches only with `--caches`, and the
 node-wide volumes, any name it does not recognize, and another node's volumes (named with
 that node's `[boundary] resource_prefix`) never.
+
+On Podman it lists images too, class by class with about what each frees and a total.
+Every image a node builds or commits (a repository's image, the `-src` image under it, a
+layered `-claude`/`-native` image, a build-steps image, a prepared snapshot) carries two
+labels naming its owner, `io.tracon.node.prefix` (the `resource_prefix`) and
+`io.tracon.node.id`, and only images carrying this node's pair are ever removed:
+
+| Class | Removed with `--apply` |
+|---|---|
+| `base` | a `tracon-sandbox-base` other than the one the node pins, once nothing is built on it. Pulled bases carry no owner label, so a node with a prefix of its own leaves them to the default node unless `--adopt-unlabelled` |
+| `repository` | a repository image no current build, snapshot or open session uses |
+| `snapshot` | a prepared snapshot that is no repository's current one |
+| `dangling` | a `<none>` image of this node's whose tag a later build took |
+| `legacy` | with `sandbox_images`, the harness images (and the gateway's under `sandbox_tunnels`) and the layered and `-src` repository images; only with `--legacy` |
+| `unowned` | never: an image named as this node's with no owner label (made before the labels). `--adopt-unlabelled` takes it as the node's, and it is then judged as above |
+
+Nothing a container uses (running or stopped, any node's) is removed, nothing an image
+that stays is built on, and nothing made in the last hour, whose build may not have
+recorded it yet. A replaced snapshot is still removed as soon as the new one is made.
+After the boundary converges the node logs how much is reclaimable, and removes nothing
+itself.
 Dependency preparation runs first as its own credential-free command in an
 isolated cache: a `devcontainer.json` may name a digest-pinned image, but hooks,
 mounts, sockets, and privilege in it are refused rather than partly honoured, and
@@ -1238,7 +1259,7 @@ and revoked the moment the hub loses that key.
 | `tracon repo ls\|show\|set\|rm\|build [repo]` | the `[[repo]]` entries (also **Settings → Repositories**), and building a repository's image from its default-branch Dockerfile |
 | `tracon policy keygen\|init\|sign\|push\|show` | the policy bundle |
 | `tracon metrics [--channel] [--days]`, `provenance <sha>` | what happened |
-| `tracon gc [--apply] [--caches] [--all]` | runtime storage whose owner is over |
+| `tracon gc [--apply] [--caches] [--legacy] [--adopt-unlabelled] [--all]` | runtime storage and images whose owner is over |
 
 Most commands talk to the running node over its API, and `TRACON_URL` and
 `TRACON_TOKEN` point them at a remote node. The ones that act on this machine itself
@@ -2269,15 +2290,18 @@ TOML
 ./target/release/tracon serve
 ```
 
-Repository images (`localhost/tracon-repo-…`) stay shared: a tag is keyed on what the
-image is built from, so both nodes build the same image under the same tag. To clean up,
-stop the node, then remove what carries its names, and its two directories:
+Its repository images and snapshots are named `localhost/scratch-repo-…` and
+`localhost/scratch-snapshot-…`, so neither node moves the other's tags, and each carries
+the node's owner labels, so neither node's `tracon gc` removes the other's (a node with
+the default prefix keeps `localhost/tracon-repo-…`). To clean up, stop the node, then
+remove what carries its names, and its two directories:
 
 ```sh
 podman ps -a --format '{{.Names}}' | grep '^scratch-' | xargs -r podman rm -f
 podman volume ls -q --filter name='^scratch-' | xargs -r podman volume rm
 podman network rm scratch-int
 podman image rm localhost/scratch-gateway localhost/scratch-harness-claude localhost/scratch-harness-native
+podman images --format '{{.Repository}}:{{.Tag}}' | grep '^localhost/scratch-' | xargs -r podman image rm
 systemctl --user disable --now tracon-gateway-scratch-gw.service   # Linux, if setup made it
 rm -rf "$TRACON_STATE_DIR" "$TRACON_CONFIG_DIR"
 ```

@@ -284,7 +284,7 @@ pub fn snapshot_repo() -> String {
 pub fn snapshot_repository(repo: &Path) -> String {
     let image = crate::repo_image::image_name(repo);
     let rest = image
-        .strip_prefix("localhost/tracon-repo-")
+        .strip_prefix(&crate::repo_image::image_stem())
         .unwrap_or(&image);
     format!("{}-{rest}", snapshot_repo())
 }
@@ -1062,7 +1062,11 @@ impl Held {
         labels: &[(String, String)],
     ) -> Result<String, String> {
         self.provider
-            .snapshot_as(&self.handle, reference, labels)
+            .snapshot_as(
+                &self.handle,
+                reference,
+                &crate::image_gc::with_owner(labels),
+            )
             .await
             .map(|id| id.0)
             .map_err(|error| format!("snapshot {}: {error}", self.handle.0))
