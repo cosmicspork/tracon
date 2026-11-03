@@ -488,6 +488,10 @@ async fn a_sessions_trees_go_in_come_back_and_resume() {
     runner().kill(name).await.unwrap();
     let _ = tokio::time::timeout(Duration::from_secs(30), harness.done).await;
     assert_eq!(read(tree().join("a.txt")), "seven\n");
+    // A loop cut off from its node redials until its window passes; it
+    // reaps any child of this process meanwhile, so it ends before the next
+    // starts.
+    provider.settle().await;
 
     // A lost sandbox costs what changed since its last sync, no more.
     let mut harness = Harness::start(&runner(), name, &l).await;
@@ -498,6 +502,7 @@ async fn a_sessions_trees_go_in_come_back_and_resume() {
     provider.lose(name);
     let _ = tokio::time::timeout(Duration::from_secs(30), harness.done).await;
     assert_eq!(read(tree().join("a.txt")), "eight\n");
+    provider.settle().await;
 
     // A hostile sandbox's tree is refused whole, and the node keeps its copy.
     let mut harness = Harness::start(&runner(), name, &l).await;
