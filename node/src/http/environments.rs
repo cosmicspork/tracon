@@ -226,7 +226,7 @@ pub async fn build(
     };
     let entry = repo_image::building_entry(&s.cfg, &repo).ok_or_else(|| {
         unprocessable(format!(
-            "no [[repo]] entry with a dockerfile matches {}",
+            "no [[repo]] entry with a dockerfile or build steps matches {}",
             repo.display()
         ))
     })?;

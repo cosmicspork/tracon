@@ -1786,6 +1786,8 @@ export interface RepoEntry {
   image?: string
   dockerfile?: string
   context?: string
+  /** Root steps on the stock base, in place of `image` and `dockerfile`. */
+  build?: string[]
   /** Absent: the node-wide checks. Empty: explicitly none. */
   checks?: string[]
   timeout_secs?: number

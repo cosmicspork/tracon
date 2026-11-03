@@ -155,6 +155,17 @@ pub enum Presence {
 #[async_trait]
 pub trait ImageBuilder: Send + Sync {
     async fn build(&self, build: ImageBuild<'_>) -> Result<BuiltImage, BuildFailure>;
+    /// `build`, with the network its `RUN` steps get held to `hosts`,
+    /// through a grant on the node's egress proxy, where this builder can
+    /// hold it there (Podman's). One that cannot builds on its own network,
+    /// as it builds a Dockerfile: Apple's builder VM, a cluster's BuildKit.
+    async fn build_with_egress(
+        &self,
+        build: ImageBuild<'_>,
+        _hosts: &[String],
+    ) -> Result<BuiltImage, BuildFailure> {
+        self.build(build).await
+    }
     /// Whether the runtime still holds this image. One it pruned has to be
     /// built again before anything can run in it.
     async fn exists(&self, image: &str) -> bool;

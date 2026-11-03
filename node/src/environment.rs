@@ -71,6 +71,8 @@ pub struct Verification {
 
 /// `image_source` for an image the node built from the repository's Dockerfile.
 pub const REPOSITORY_DOCKERFILE: &str = "repository Dockerfile";
+/// An image built from the entry's `build` steps on the stock base.
+pub const REPOSITORY_BUILD: &str = "repository build steps";
 
 /// Everything the node resolved for one repository's checks and preparation:
 /// the operator's `[[repo]]` entry where there is one, the node-wide answer
@@ -162,6 +164,13 @@ pub fn environment_with(
                 harness_image(cfg),
                 "harness image (repository image held: start its build in Settings, Repositories)",
             ),
+            None => (
+                harness_image(cfg),
+                "harness image (repository image not built)",
+            ),
+        },
+        Some(entry) if !entry.build.is_empty() => match built() {
+            Some(row) => (row.image, REPOSITORY_BUILD),
             None => (
                 harness_image(cfg),
                 "harness image (repository image not built)",

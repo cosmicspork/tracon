@@ -45,6 +45,7 @@ const SENSITIVE: &[&str] = &[
     "repo.egress",
     "repo.dockerfile",
     "repo.context",
+    "repo.build",
     "repo.image",
     "repo.checks",
     "service.image",

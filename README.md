@@ -455,6 +455,59 @@ trust `devcontainer up` asks for, which is why it is per repository and yours to
 first, with the node's forge credential or anonymously, so `repo set` then `repo build`
 works on a fresh node.
 
+#### Repository recipes on the stock base
+
+Where sandboxes run on the stock base (`[runtime.podman] sandbox_images`, or an Apple
+node), a repository's recipe lives in `node.toml` and nothing goes in the repository:
+
+```toml
+[[repo]]
+path = "github.com/owner/app"
+build = [
+  "apt-get update",
+  "apt-get install -y --no-install-recommends php8.5-gmp librsvg2-bin",
+  "rm -rf /var/lib/apt/lists/*",
+]
+prepare = ["composer install --no-interaction --no-scripts", "npm ci --ignore-scripts"]
+egress = ["apt", "packagist", "npm"]
+checks = ["just check"]
+```
+
+- **`build`** runs as root at image build time, each step one `RUN` of `sh -ec`, on the
+  base pinned by digest when the node starts. The node writes the Containerfile itself
+  (`FROM` the base, the steps, then back to user 65532, `HOME=/home/harness`, `/work`)
+  and builds one image per repository: no build context and no layer over it. The image
+  is keyed on the base's digest, the steps and the egress, so a new base, an edited step
+  or a host you add rebuilds it; a build that failed is not retried until one of those
+  changes or you ask (`tracon repo build`).
+- **`prepare`** then runs as uid 65532 on the default branch, in a sandbox from that
+  image, which is snapshotted for the repository's sessions and checks as for any
+  repository on the base.
+- **Egress.** The steps reach only the entry's `egress`, through a grant of their own on
+  the node's egress proxy. On Podman the build has no network but one loopback port to
+  that proxy (`pasta --splice-only`), and no DNS: a step gets `HTTPS_PROXY` and nothing
+  else. The proxy carries HTTPS only; the base's apt sources already are, and the `apt`
+  preset names them. On Apple the build runs in `container`'s builder VM on its own
+  network, so the list is not enforced there. Kubernetes accepts the key but does not
+  build steps yet.
+
+Settings → Repositories offers it as *Build steps on the stock base*, and
+`tracon repo set <path> --build "apt-get update" --build "…" --egress apt` sets it from a
+shell. On any other node the key is refused at load, naming the setting it needs.
+
+Install what sessions need where uid 65532 can read and run it: under `/usr/local`
+(its `bin` is on `PATH`), not root's home. For rustup, set `CARGO_HOME=/usr/local/cargo`
+and `RUSTUP_HOME=/usr/local/rustup` in the step and link `cargo`, `rustc` and the rest
+into `/usr/local/bin`.
+
+**From a devcontainer Dockerfile.** Take its `RUN` lines as steps, in order, and drop
+what the base already has (git, curl, a C toolchain, jq, Node, Python with uv, PHP 8.5
+with Composer: see `containers/sandbox-base/Containerfile`). `ENV` and `ARG` values go
+into the steps that read them (`export NAME=value && …`); a `COPY` from the repository
+becomes a step that writes or fetches the file, since there is no build context. Name
+the hosts the steps fetch from in `egress`, then drop `dockerfile` (or `image`): an
+entry names one of the three.
+
 The table is edited where you would look for it: **Settings → Repositories**, or
 `tracon repo set <path> --dockerfile .devcontainer/Dockerfile --check "just check"
 --prepare "cargo fetch --locked" --egress crates` (and `show`, `rm`). Either writes
@@ -1411,19 +1464,28 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node, or
                                     # refused, so is a Dockerfile whose first FROM is not
                                     # ${TRACON_SANDBOX_BASE}
 # context = "."                     # the build context; left out, the Dockerfile's own directory
+# build = ["apt-get update", "apt-get install -y --no-install-recommends php8.5-cli"]
+                                    # in place of `image` and `dockerfile`: steps run as root, one
+                                    # `RUN` each, on the pinned stock base ([sandbox] base_image),
+                                    # into one image that ends as the base's user 65532 in /work.
+                                    # They reach only `egress`, over HTTPS. Rebuilt when the base,
+                                    # a step or the egress changes. Needs [runtime.podman]
+                                    # sandbox_images, Apple, or Kubernetes sandbox_protocol (see
+                                    # "Repository recipes on the stock base")
 # checks = ["just check"]           # in place of [supervision] checks
 # timeout_secs = 1800               # in place of [supervision] timeout_secs; covers preparation too
 # prepare = ["bun install --frozen-lockfile"]  # run once before a run's checks, on a copy each check
                                     # is then copied from, with a cache writable and `egress` reachable;
                                     # and on a session's workspace before its harness starts
-# egress = ["npm"]                  # what `prepare` may reach: crates, npm, pypi, packagist, github, or a
-                                    # literal host name. Empty is no egress at all
+# egress = ["npm"]                  # what `prepare` and `build` may reach: crates, npm, pypi, packagist,
+                                    # github, apt (the stock base's apt sources and Ubuntu's mirrors),
+                                    # or a literal host name. Empty is no egress at all
 # session_egress = true             # open `egress` to this repository's sessions too, so an agent can
                                     # add a dependency. Off by default: a session that can reach a host
                                     # that accepts uploads can upload to it
 # prepare_credentials = ["nova"]    # broker credentials (kind `env`) whose environment is lent to the
                                     # default branch's preparation when the image is built, and to
-                                    # nothing else. Needs `dockerfile`; each credential must also list
+                                    # nothing else. Needs `dockerfile` or `build`; each credential must also list
                                     # this repository, or a `group/**` above it, in its own `repos`
 
 # [upstreams]                       # credentials the node attaches to requests for one declared host,

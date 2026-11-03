@@ -281,7 +281,7 @@
         <summary>
           <code>{form.path || 'new repository'}</code>
           <small>
-            {form.source === 'dockerfile' ? `builds ${form.dockerfile || '…'}` : form.source === 'image' ? 'pinned image' : 'harness image'}{form.sessionEgress ? ' · registries open to sessions' : ''}
+            {form.source === 'dockerfile' ? `builds ${form.dockerfile || '…'}` : form.source === 'build' ? 'build steps on the base' : form.source === 'image' ? 'pinned image' : 'harness image'}{form.sessionEgress ? ' · registries open to sessions' : ''}
           </small>
         </summary>
         <div class="grid">
@@ -295,11 +295,13 @@
             <span>Image</span>
             <select bind:value={form.source} >
               <option value="dockerfile">Built from its Dockerfile</option>
+              <option value="build">Build steps on the stock base</option>
               <option value="image">Pinned by hand</option>
               <option value="harness">The harness image</option>
             </select>
             <small>
               {#if form.source === 'dockerfile'}From the default branch. Devcontainer hooks and services are ignored.
+              {:else if form.source === 'build'}Run as root on the pinned base; sessions run as its user.
               {:else if form.source === 'image'}Digest-pinned; you keep it current.
               {:else}No project toolchain.{/if}
             </small>
@@ -312,6 +314,12 @@
             <label>
               <span>Build context</span>
               <input bind:value={form.context} spellcheck="false" placeholder="the Dockerfile's directory" />
+            </label>
+          {:else if form.source === 'build'}
+            <label class="wide">
+              <span>Build steps</span>
+              <textarea class="grow" bind:value={form.build} use:autogrow={form.build} rows="2" spellcheck="false" placeholder="apt-get update&#10;apt-get install -y --no-install-recommends php8.5-gmp"></textarea>
+              <small>One per line, each its own step. They reach only the registries below.</small>
             </label>
           {:else if form.source === 'image'}
             <label class="wide">
@@ -390,7 +398,7 @@
               </li>
             {/each}
           </ul>
-        {:else if form.source === 'dockerfile' && form.path}
+        {:else if (form.source === 'dockerfile' || form.source === 'build') && form.path}
           <p class="dim">
             Not built · builds on first use.
             {#if loaded.can_build}

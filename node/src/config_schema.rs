@@ -285,6 +285,7 @@ pub const KEYS: &[KeySpec] = &[
     live("repo.image"),
     live("repo.dockerfile"),
     live("repo.context"),
+    live("repo.build"),
     live("repo.checks"),
     live("repo.timeout_secs"),
     live("repo.prepare"),

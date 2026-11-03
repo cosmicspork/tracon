@@ -53,6 +53,13 @@ pub struct Recipe {
     /// The Dockerfile, its context and the node's own layer, as one hash. A
     /// commit that touches none of them leaves it — and the image — as it was.
     pub hash: String,
+    /// `[[repo]] build`: root steps on the stock base, built in place of a
+    /// Dockerfile (`dockerfile` and `context` are then empty).
+    pub steps: Vec<String>,
+    /// The pinned stock base `steps` are built on.
+    pub steps_base: String,
+    /// The hosts `steps` reach, the entry's `egress` expanded.
+    pub steps_egress: Vec<String>,
 }
 
 /// What `ensure_base` found or made.
@@ -289,17 +296,22 @@ fn warm(repo: &Path, key: &str) {
         .remove(&(repo.to_path_buf(), key.to_string()));
 }
 
-/// The `[[repo]]` entry for `repo`, if it names a Dockerfile to build.
+/// The `[[repo]]` entry for `repo`, if it names a Dockerfile or build steps
+/// to build.
 pub fn building_entry(cfg: &Config, repo: &Path) -> Option<Repo> {
     cfg.repos()
         .iter()
         .find(|entry| entry.matches(repo))
-        .filter(|entry| entry.dockerfile.is_some())
+        .filter(|entry| entry.dockerfile.is_some() || !entry.build.is_empty())
         .cloned()
 }
 
 /// The recipe `entry` names, as the repository's default branch has it now.
 pub async fn recipe(repo: &Path, entry: &Repo, run_as: &RunAs) -> Result<Recipe, String> {
+    if !entry.build.is_empty() {
+        let base = crate::sandbox_images::active_base().ok_or(STEPS_UNPINNED)?;
+        return steps_recipe(repo, entry, &base).await;
+    }
     let dockerfile = entry
         .dockerfile
         .clone()
@@ -358,6 +370,9 @@ pub async fn recipe(repo: &Path, entry: &Repo, run_as: &RunAs) -> Result<Recipe,
         source_commit,
         context_tree,
         hash: hex::encode(hash.finalize()),
+        steps: Vec::new(),
+        steps_base: String::new(),
+        steps_egress: Vec::new(),
     })
 }
 
@@ -1031,7 +1046,7 @@ async fn sandbox_session_image(
     building: &(dyn Fn() + Send + Sync),
 ) -> SessionImage {
     let toolchain = match (&entry.image, &entry.dockerfile, backend.image_builder()) {
-        (None, None, _) => crate::environment::harness_image(cfg),
+        (None, None, _) if entry.build.is_empty() => crate::environment::harness_image(cfg),
         (_, _, Some(builder)) => {
             match repository_base(backend, cfg, store, repo, entry, builder, building).await {
                 Ok(base) => base,
@@ -1928,7 +1943,10 @@ async fn build(
     recipe: &Recipe,
 ) -> Result<Built, BuildFailure> {
     let begun = std::time::Instant::now();
-    let built = build_base(builder, cfg, store, repo, recipe).await;
+    let built = match recipe.steps.is_empty() {
+        true => build_base(builder, cfg, store, repo, recipe).await,
+        false => build_steps(builder, repo, recipe).await,
+    };
     count_build(BASE, repo, built.as_ref().err(), begun);
     built
 }
@@ -2051,6 +2069,111 @@ fn with_base_arg(dockerfile: &[u8], base: &str) -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Bumped when `steps_containerfile` changes what it writes, so every
+/// repository built from steps is built again.
+const STEPS_SCHEME: &str = "steps-1";
+
+/// Why an entry's `build` steps have no recipe yet.
+const STEPS_UNPINNED: &str = "build steps stand on the stock sandbox base, which this node \
+     has not pinned: it pins it when the boundary converges with \
+     [runtime.podman] sandbox_images or on Apple, and Kubernetes does not build steps yet";
+
+/// The recipe of an entry's `build` steps on `base`, the pinned stock base.
+/// What the image is built from is the base and the steps alone (there is no
+/// build context), and the hosts the steps may reach: a host added after a
+/// build failed for want of it is a new recipe, built without being asked.
+async fn steps_recipe(repo: &Path, entry: &Repo, base: &str) -> Result<Recipe, String> {
+    let steps_egress = entry.egress_hosts()?;
+    let mut hash = Sha256::new();
+    let mut part = |text: &str| {
+        hash.update(text.as_bytes());
+        hash.update([0]);
+    };
+    part(STEPS_SCHEME);
+    part(base);
+    part("build");
+    for step in &entry.build {
+        part(step);
+    }
+    part("egress");
+    for host in &steps_egress {
+        part(host);
+    }
+    // Recorded with the build, not part of it: a repository with no commit
+    // yet still has an image.
+    let (source_ref, source_commit) = default_commit(repo).await.unwrap_or_default();
+    Ok(Recipe {
+        dockerfile: String::new(),
+        context: String::new(),
+        source_ref,
+        source_commit,
+        context_tree: String::new(),
+        hash: hex::encode(hash.finalize()),
+        steps: entry.build.clone(),
+        steps_base: base.to_string(),
+        steps_egress,
+    })
+}
+
+/// The Containerfile `steps` are built from: each a `RUN` of its own as
+/// root, so a failure names the step, in exec form so a step's quotes and
+/// newlines reach the shell as written; then back to the base's own user,
+/// home and directory, as every sandbox runs.
+pub(crate) fn steps_containerfile(base: &str, steps: &[String]) -> String {
+    let mut out = format!("FROM {base}\nUSER 0:0\n");
+    for step in steps {
+        let argv = serde_json::json!(["/bin/sh", "-ec", step]);
+        out.push_str(&format!("RUN {argv}\n"));
+    }
+    out.push_str(&format!(
+        "USER {}\nENV HOME={}\nWORKDIR /work\n",
+        crate::sandbox_images::USER,
+        crate::sandbox_images::HOME
+    ));
+    out
+}
+
+/// Build the repository's image from its `build` steps: one image, the base
+/// and the steps, with nothing layered over it. The steps reach only the
+/// recipe's hosts, where the builder can hold them to that.
+async fn build_steps(
+    builder: &dyn ImageBuilder,
+    repo: &Path,
+    recipe: &Recipe,
+) -> Result<Built, BuildFailure> {
+    let staged = |error: String| BuildFailure {
+        error,
+        log_tail: String::new(),
+        ..Default::default()
+    };
+    let stage = stage_dir(builder).map_err(|e| staged(e.to_string()))?;
+    let containerfile = stage.path().join("Steps.Containerfile");
+    std::fs::write(
+        &containerfile,
+        steps_containerfile(&recipe.steps_base, &recipe.steps),
+    )
+    .map_err(|e| staged(e.to_string()))?;
+    let empty = stage.path().join("empty");
+    std::fs::create_dir_all(&empty).map_err(|e| staged(e.to_string()))?;
+    let built = builder
+        .build_with_egress(
+            ImageBuild {
+                tag: &format!("{}:{}", image_name(repo), &recipe.hash[..12]),
+                containerfile: &containerfile,
+                context: &empty,
+                labels: &[(RECIPE_LABEL.to_string(), recipe.hash.clone())],
+                timeout: BUILD_TIMEOUT,
+            },
+            &recipe.steps_egress,
+        )
+        .await?;
+    // No source image: the base is not this node's to remove with it.
+    Ok(Built {
+        image: built,
+        source: String::new(),
+    })
+}
+
 /// The commands whose first word the image has no tool for, so the operator
 /// hears it when the image is built rather than from a check that could not
 /// run. A probe that cannot run says nothing.
@@ -2136,10 +2259,20 @@ mod tests {
         /// each import takes.
         warms: StdMutex<usize>,
         warming: Option<Duration>,
+        /// The hosts each build held to an egress grant was given.
+        egress: StdMutex<Vec<Vec<String>>>,
     }
 
     #[async_trait]
     impl ImageBuilder for FakeBuilder {
+        async fn build_with_egress(
+            &self,
+            build: ImageBuild<'_>,
+            hosts: &[String],
+        ) -> Result<BuiltImage, BuildFailure> {
+            self.egress.lock().unwrap().push(hosts.to_vec());
+            self.build(build).await
+        }
         async fn build(&self, build: ImageBuild<'_>) -> Result<BuiltImage, BuildFailure> {
             let slow = *self.slow.lock().unwrap();
             if let Some(slow) = slow {
@@ -3829,5 +3962,132 @@ ENTRYPOINT []
             );
         }
         assert_eq!(builds(), after_start);
+    }
+
+    fn stepped(repo: &Path) -> Repo {
+        Repo {
+            path: repo.to_path_buf(),
+            build: vec![
+                "apt-get update".into(),
+                "apt-get install -y --no-install-recommends jq".into(),
+            ],
+            egress: vec!["apt".into()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn build_steps_run_as_root_one_each_and_end_as_the_bases_user() {
+        let file = steps_containerfile(
+            "ghcr.io/cosmicspork/tracon-sandbox-base@sha256:ab",
+            &["apt-get update".into(), "echo \"a b\" \\\nexit 3".into()],
+        );
+        assert_eq!(
+            file,
+            r#"FROM ghcr.io/cosmicspork/tracon-sandbox-base@sha256:ab
+USER 0:0
+RUN ["/bin/sh","-ec","apt-get update"]
+RUN ["/bin/sh","-ec","echo \"a b\" \\\nexit 3"]
+USER 65532:65532
+ENV HOME=/home/harness
+WORKDIR /work
+"#
+        );
+    }
+
+    #[tokio::test]
+    async fn a_steps_recipe_is_keyed_on_the_base_the_steps_and_their_egress_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let base = "localhost/base@sha256:aa";
+        let recipe = steps_recipe(repo, &stepped(repo), base).await.unwrap();
+        assert_eq!(recipe.steps, stepped(repo).build);
+        assert_eq!(recipe.steps_base, base);
+        assert!(recipe.dockerfile.is_empty() && recipe.context.is_empty());
+        assert!(
+            recipe
+                .steps_egress
+                .iter()
+                .any(|host| host == "snapshot.ubuntu.com"),
+            "{:?}",
+            recipe.steps_egress
+        );
+        assert!(recipe.source_commit.is_empty(), "no commit, still a recipe");
+
+        // A commit is recorded with the build and is no part of its key.
+        sh(
+            repo,
+            "git init -q -b main . && git config user.email t@e && git config user.name t \
+             && git config commit.gpgsign false && git commit -q --allow-empty -m one",
+        );
+        let committed = steps_recipe(repo, &stepped(repo), base).await.unwrap();
+        assert_eq!(committed.hash, recipe.hash);
+        assert_eq!(committed.source_ref, "HEAD");
+        assert!(!committed.source_commit.is_empty());
+
+        let mut steps = stepped(repo);
+        steps.build.push("true".into());
+        let mut egress = stepped(repo);
+        egress.egress.push("pypi".into());
+        for (entry, base) in [
+            (stepped(repo), "localhost/base@sha256:bb"),
+            (steps, base),
+            (egress, base),
+        ] {
+            let changed = steps_recipe(repo, &entry, base).await.unwrap();
+            assert_ne!(changed.hash, recipe.hash, "{entry:?} on {base}");
+        }
+    }
+
+    /// What the stock-base refusal turns away, build steps are the way
+    /// round: an entry naming them passes it wherever it applies.
+    #[tokio::test]
+    async fn build_steps_are_what_the_stock_base_refusal_points_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut apple = Config::default();
+        apple.runtime.kind = crate::config::RuntimeKind::Apple;
+        let mut kube = kubernetes();
+        kube.runtime.kubernetes.sandbox_protocol = true;
+        for cfg in [&apple, &kube] {
+            assert!(stock_base_only(cfg));
+            assert_eq!(refusal(cfg, dir.path(), &stepped(dir.path())).await, None);
+        }
+        let image = Repo {
+            image: Some("ghcr.io/astral-sh/uv@sha256:35b0".into()),
+            build: Vec::new(),
+            ..stepped(dir.path())
+        };
+        let refused = off_the_stock_base(&apple, &image, None).unwrap();
+        assert!(refused.contains("root `build` steps"), "{refused}");
+    }
+
+    #[tokio::test]
+    async fn build_steps_build_one_image_on_the_base_held_to_their_egress() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("app");
+        std::fs::create_dir_all(&repo).unwrap();
+        let recipe = steps_recipe(&repo, &stepped(&repo), "localhost/base@sha256:aa")
+            .await
+            .unwrap();
+        let builder = FakeBuilder::default();
+        let built = build_steps(&builder, &repo, &recipe).await.unwrap();
+        assert!(built.source.is_empty(), "no source image to remove with it");
+        let builds = builder.builds.lock().unwrap();
+        assert_eq!(builds.len(), 1, "one image, nothing layered over it");
+        let (tag, containerfile, context) = &builds[0];
+        assert_eq!(
+            *tag,
+            format!("{}:{}", image_name(&repo), &recipe.hash[..12])
+        );
+        assert_eq!(
+            *containerfile,
+            steps_containerfile("localhost/base@sha256:aa", &recipe.steps)
+        );
+        assert!(context.is_empty(), "no build context: {context:?}");
+        assert_eq!(
+            *builder.egress.lock().unwrap(),
+            std::slice::from_ref(&recipe.steps_egress)
+        );
+        assert!(built.image.image.starts_with(&image_name(&repo)));
     }
 }

@@ -2035,6 +2035,24 @@
       "editable_by_peer": true,
       "exec_path": false,
       "fs_path": false,
+      "key": "repo.build",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "repo",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
       "key": "repo.checks",
       "path": null,
       "secret": false,
