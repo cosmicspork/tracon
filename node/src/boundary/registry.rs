@@ -562,6 +562,39 @@ impl Registry {
         Some(format!("{name}@{digest}"))
     }
 
+    /// `name@sha256:…` of the manifest `image` has for Linux on `arch`: the
+    /// entry an index or manifest list names for it, or the manifest itself
+    /// when `image` is a single platform's. `None` where the registry holds
+    /// nothing under `image`.
+    pub async fn platform_identity(
+        &self,
+        image: &str,
+        arch: &str,
+    ) -> Result<Option<String>, RegistryError> {
+        let reference = Reference::parse(image)?;
+        let path = format!("{}/manifests/{}", reference.repository, reference.reference);
+        let pull = Some(format!("repository:{}:pull", reference.repository));
+        let response = self.send(Method::GET, &reference.host, &path, pull).await?;
+        match response.status() {
+            StatusCode::NOT_FOUND => return Ok(None),
+            status if !status.is_success() => {
+                return Err(RegistryError(format!(
+                    "{} answered {status} for {}",
+                    reference.host, reference.name
+                )))
+            }
+            _ => {}
+        }
+        let body = response.bytes().await?;
+        let digest = match platform_entry(&body, arch)? {
+            Some(digest) => digest,
+            // The digest is the manifest's own bytes, as served, whatever a
+            // header claims.
+            None => format!("sha256:{}", hex::encode(Sha256::digest(&body))),
+        };
+        Ok(Some(format!("{}@{digest}", reference.name)))
+    }
+
     /// Remove the manifest `image` names, and with it every tag on it. One
     /// the registry no longer holds is already removed.
     pub async fn remove(&self, image: &str) -> Result<(), RegistryError> {
@@ -729,6 +762,66 @@ impl Registry {
     }
 }
 
+/// The OCI name of this host's architecture, as an index names a platform.
+pub fn host_architecture() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        other => other,
+    }
+}
+
+/// The digest of the manifest `manifest` names for Linux on `arch`, when it
+/// is an index (OCI) or a manifest list (Docker); `None` when it is a single
+/// image's manifest, which is its own platform's. An index with no entry for
+/// `arch` is refused rather than answered with another platform's image.
+pub fn platform_entry(manifest: &[u8], arch: &str) -> Result<Option<String>, RegistryError> {
+    #[derive(serde::Deserialize)]
+    struct Listed {
+        manifests: Option<Vec<Entry>>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        digest: String,
+        platform: Option<Platform>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Platform {
+        os: String,
+        architecture: String,
+        variant: Option<String>,
+    }
+    let listed: Listed = serde_json::from_slice(manifest)
+        .map_err(|error| RegistryError(format!("not a manifest: {error}")))?;
+    let Some(entries) = listed.manifests else {
+        return Ok(None);
+    };
+    // Attestations sit in the same index under `unknown/unknown`.
+    let mut matching: Vec<Entry> = entries
+        .into_iter()
+        .filter(|entry| {
+            entry
+                .platform
+                .as_ref()
+                .is_some_and(|p| p.os == "linux" && p.architecture == arch)
+        })
+        .collect();
+    // arm64 may be listed by variant; v8 is the one every arm64 host runs.
+    matching.sort_by_key(|entry| {
+        !matches!(
+            entry.platform.as_ref().and_then(|p| p.variant.as_deref()),
+            None | Some("v8")
+        )
+    });
+    let entry = matching
+        .into_iter()
+        .next()
+        .ok_or_else(|| RegistryError(format!("the index has no linux/{arch} image")))?;
+    crate::config::immutable_image(&format!("x@{}", entry.digest))
+        .map_err(|_| RegistryError(format!("the index names no sha256 digest for linux/{arch}")))?;
+    Ok(Some(entry.digest))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -764,6 +857,8 @@ pub(crate) mod tests {
         /// an empty name leaves the `access` claim out.
         pub jwt_name: Mutex<Option<String>>,
         pub base: Mutex<String>,
+        /// digest → the manifest served for it; empty where not set.
+        pub bodies: Mutex<HashMap<String, Vec<u8>>>,
     }
 
     impl Fake {
@@ -772,6 +867,17 @@ pub(crate) mod tests {
             let held = manifests.entry(repository.to_string()).or_default();
             held.insert(tag.to_string(), digest.to_string());
             held.insert(digest.to_string(), digest.to_string());
+        }
+
+        /// `manifest` under `tag`, by the digest of its bytes.
+        pub fn put_manifest(&self, repository: &str, tag: &str, manifest: &[u8]) -> String {
+            let digest = format!("sha256:{}", hex::encode(Sha256::digest(manifest)));
+            self.put(repository, tag, &digest);
+            self.bodies
+                .lock()
+                .unwrap()
+                .insert(digest.clone(), manifest.to_vec());
+            digest
         }
     }
 
@@ -914,7 +1020,17 @@ pub(crate) mod tests {
             }
             _ => match held.get(&reference) {
                 Some(digest) => {
-                    let mut response = StatusCode::OK.into_response();
+                    let body = match method {
+                        Method::GET => fake
+                            .bodies
+                            .lock()
+                            .unwrap()
+                            .get(digest)
+                            .cloned()
+                            .unwrap_or_default(),
+                        _ => Vec::new(),
+                    };
+                    let mut response = (StatusCode::OK, body).into_response();
                     if !*fake.no_digest_header.lock().unwrap() {
                         response.headers_mut().insert(
                             "docker-content-digest",
@@ -1266,6 +1382,142 @@ pub(crate) mod tests {
             .unwrap_err()
             .0
             .contains("no credential"));
+    }
+
+    pub(crate) const AMD64: &str =
+        "sha256:c9d629a83e51fc14e9d563e2db88ad1356f03d27c86811e54295807c6e974e97";
+    pub(crate) const ARM64: &str =
+        "sha256:83f7a7484c46f20af5306f10b104949c4c8a2368681a3ab8608e8674da553c3d";
+
+    /// An OCI index as the release pushes the base: each platform's manifest
+    /// and an attestation for each, whose digests change with every build
+    /// even when the image does not.
+    pub(crate) fn oci_index(attestation: char) -> String {
+        let attestation = |of: &str| {
+            serde_json::json!({
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "digest": format!("sha256:{}", attestation.to_string().repeat(64)),
+                "size": 838,
+                "platform": {"architecture": "unknown", "os": "unknown"},
+                "annotations": {
+                    "vnd.docker.reference.digest": of,
+                    "vnd.docker.reference.type": "attestation-manifest"
+                }
+            })
+        };
+        serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": [
+                {"mediaType": "application/vnd.oci.image.manifest.v1+json", "digest": ARM64,
+                 "size": 1819, "platform": {"architecture": "arm64", "os": "linux"}},
+                attestation(ARM64),
+                {"mediaType": "application/vnd.oci.image.manifest.v1+json", "digest": AMD64,
+                 "size": 1819, "platform": {"architecture": "amd64", "os": "linux"}},
+                attestation(AMD64),
+            ]
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn an_index_names_each_platforms_manifest() {
+        let index = oci_index('a');
+        assert_eq!(
+            platform_entry(index.as_bytes(), "amd64")
+                .unwrap()
+                .as_deref(),
+            Some(AMD64)
+        );
+        assert_eq!(
+            platform_entry(index.as_bytes(), "arm64")
+                .unwrap()
+                .as_deref(),
+            Some(ARM64)
+        );
+        let missing = platform_entry(index.as_bytes(), "s390x").unwrap_err();
+        assert!(missing.0.contains("no linux/s390x image"), "{missing}");
+    }
+
+    #[test]
+    fn a_docker_manifest_list_names_arm64_by_its_v8_variant() {
+        let v7 = format!("sha256:{}", "7".repeat(64));
+        let list = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.docker.distribution.manifest.list.v2+json",
+            "manifests": [
+                {"mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+                 "digest": v7, "size": 1,
+                 "platform": {"architecture": "arm", "os": "linux", "variant": "v7"}},
+                {"mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+                 "digest": format!("sha256:{}", "6".repeat(64)), "size": 1,
+                 "platform": {"architecture": "arm64", "os": "linux", "variant": "v9"}},
+                {"mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+                 "digest": ARM64, "size": 1,
+                 "platform": {"architecture": "arm64", "os": "linux", "variant": "v8"}},
+                {"mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+                 "digest": format!("sha256:{}", "5".repeat(64)), "size": 1,
+                 "platform": {"architecture": "amd64", "os": "windows"}},
+                {"mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+                 "digest": AMD64, "size": 1,
+                 "platform": {"architecture": "amd64", "os": "linux"}},
+            ]
+        })
+        .to_string();
+        assert_eq!(
+            platform_entry(list.as_bytes(), "arm64").unwrap().as_deref(),
+            Some(ARM64)
+        );
+        assert_eq!(
+            platform_entry(list.as_bytes(), "amd64").unwrap().as_deref(),
+            Some(AMD64)
+        );
+    }
+
+    #[test]
+    fn a_single_manifest_is_its_own_platforms() {
+        let manifest = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {"mediaType": "application/vnd.oci.image.config.v1+json",
+                       "digest": format!("sha256:{}", "c".repeat(64)), "size": 1},
+            "layers": []
+        })
+        .to_string();
+        assert_eq!(platform_entry(manifest.as_bytes(), "amd64").unwrap(), None);
+        assert!(platform_entry(b"<html>", "amd64").is_err());
+    }
+
+    /// A tag on an index is resolved to the platform's entry; a digest of a
+    /// single manifest is itself; a name the registry does not hold is none.
+    #[tokio::test]
+    async fn a_platform_identity_is_the_platforms_manifest() {
+        let (fake, host) = serve().await;
+        fake.put_manifest("ns/base", "1", oci_index('a').as_bytes());
+        let single = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","layers":[]}"#;
+        let single_digest = fake.put_manifest("ns/base", "single", single);
+        let config = docker_config(&host);
+        let registry =
+            Registry::new(Some(config.path().to_path_buf())).for_test("unused", "unused");
+        assert_eq!(
+            registry
+                .platform_identity(&format!("{host}/ns/base:1"), "amd64")
+                .await
+                .unwrap(),
+            Some(format!("{host}/ns/base@{AMD64}"))
+        );
+        let pinned = format!("{host}/ns/base@{single_digest}");
+        assert_eq!(
+            registry.platform_identity(&pinned, "arm64").await.unwrap(),
+            Some(pinned.clone())
+        );
+        assert_eq!(
+            registry
+                .platform_identity(&format!("{host}/ns/base:gone"), "amd64")
+                .await
+                .unwrap(),
+            None
+        );
     }
 
     /// A registry that leaves the digest header off is read by hashing what
