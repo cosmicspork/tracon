@@ -24,7 +24,10 @@
 //! connected.
 //!
 //! **Snapshots** are `container commit`: an image of the filesystem, not of
-//! the processes, which a fork starts afresh with its own bootstrap.
+//! the processes, which a fork starts afresh with its own bootstrap. A
+//! commit keeps the run's environment and takes no changes, so a prepared
+//! snapshot ([`SandboxProvider::snapshot_as`]) is the commit built over once
+//! more with a configuration of its own; the layers are shared.
 //!
 //! Isolation is read back from `container inspect`, never from inside.
 
@@ -55,6 +58,9 @@ pub const SOCKET_INSIDE: &str = "/tmp/tracon-node.sock";
 const LABEL: &str = "tracon.provider=apple";
 /// The runtime that gives every container a VM of its own.
 const RUNTIME_HANDLER: &str = "container-runtime-linux";
+/// How long configuring a commit as a snapshot may take: a build over one
+/// image, which starts the builder if it is not running.
+const SNAPSHOT_BUILD_WITHIN: Duration = Duration::from_secs(600);
 /// macOS's `sun_path`, including the terminating NUL.
 const SUN_PATH_MAX: usize = 104;
 
@@ -205,6 +211,103 @@ impl AppleProvider {
                 handle.0
             ))),
         }
+    }
+
+    /// An image's digest and its `linux/arm64` configuration (`Env`, `User`,
+    /// `Entrypoint` and the rest, as OCI has them).
+    async fn image_config(
+        &self,
+        image: &str,
+    ) -> Result<(String, serde_json::Value), ProviderError> {
+        let text = match self.cli(&["image", "inspect", image]).await {
+            Ok(text) => text,
+            Err(error) if error.not_found() => {
+                return Err(ProviderError::NotFound(image.to_string()))
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let all: Vec<serde_json::Value> = serde_json::from_str(&text)
+            .map_err(|e| ProviderError::Failed(format!("container image inspect: {e}")))?;
+        let first = all
+            .into_iter()
+            .next()
+            .ok_or_else(|| ProviderError::NotFound(image.to_string()))?;
+        let digest = first["configuration"]["descriptor"]["digest"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        if !digest.starts_with("sha256:") {
+            return Err(ProviderError::Failed(format!("{image} has no digest")));
+        }
+        let config = first["variants"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|v| v["platform"]["os"] == "linux" && v["platform"]["architecture"] == "arm64")
+            .map(|v| v["config"]["config"].clone())
+            .unwrap_or_default();
+        Ok((digest, config))
+    }
+
+    /// `image` named by its digest as well, which is the only way
+    /// `container` runs an image it built by digest: any reference its store
+    /// does not hold is asked of the registry. The pinned reference.
+    async fn pin(&self, image: &str, digest: &str) -> Result<String, ProviderError> {
+        let pinned = format!("{}@{digest}", crate::boundary::apple::image_name(image));
+        self.cli(&["image", "tag", image, &pinned]).await?;
+        Ok(pinned)
+    }
+
+    /// The commit `committed` built over as `reference`: configured as
+    /// `parent` was, with `labels`, and every variable the run added
+    /// emptied. `created` collects what it named on the way.
+    async fn configure(
+        &self,
+        committed: &str,
+        parent: &serde_json::Value,
+        reference: &str,
+        labels: &[(String, String)],
+        created: &mut Vec<String>,
+    ) -> Result<String, ProviderError> {
+        let (digest, config) = self.image_config(committed).await?;
+        let from = self.pin(committed, &digest).await?;
+        created.push(from.clone());
+        let mut containerfile = format!("FROM {from}\n");
+        for change in super::podman::commit_changes(parent, &config["Env"], labels) {
+            containerfile.push_str(&change);
+            containerfile.push('\n');
+        }
+        let context = tempfile::tempdir()
+            .map_err(|e| ProviderError::Failed(format!("snapshot context: {e}")))?;
+        let file = context.path().join("Containerfile");
+        std::fs::write(&file, containerfile)
+            .map_err(|e| ProviderError::Failed(format!("snapshot context: {e}")))?;
+        let (file, dir) = (file.to_string_lossy(), context.path().to_string_lossy());
+        // `-q` never returns in container 1.6.
+        let args = [
+            "build",
+            "--progress",
+            "plain",
+            "-f",
+            &file,
+            "-t",
+            reference,
+            &dir,
+        ];
+        let build = self.cli(&args);
+        match tokio::time::timeout(SNAPSHOT_BUILD_WITHIN, build).await {
+            Ok(built) => {
+                built.map_err(|e| ProviderError::Failed(format!("build {reference}: {e}")))?
+            }
+            Err(_) => {
+                return Err(ProviderError::Failed(format!(
+                    "build {reference}: no result within {}s",
+                    SNAPSHOT_BUILD_WITHIN.as_secs()
+                )))
+            }
+        };
+        let (digest, _) = self.image_config(reference).await?;
+        self.pin(reference, &digest).await
     }
 
     /// A private, short directory for the published sockets.
@@ -457,6 +560,9 @@ struct Configuration {
 #[derive(Debug, Deserialize)]
 struct InspectedImage {
     descriptor: Descriptor,
+    /// What the sandbox was made from, as it was named.
+    #[serde(default)]
+    reference: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -627,6 +733,41 @@ impl SandboxProvider for AppleProvider {
         Ok(SnapshotId(reference))
     }
 
+    /// The commit, built over with the configuration of the image the
+    /// sandbox was made from and `labels`; the snapshot is named by its
+    /// digest as well, so it runs by the reference the node records.
+    async fn snapshot_as(
+        &self,
+        handle: &Handle,
+        reference: &str,
+        labels: &[(String, String)],
+    ) -> Result<SnapshotId, ProviderError> {
+        let parent = self.inspect(handle).await?.configuration.image.reference;
+        let (_, parent) = self.image_config(&parent).await?;
+        // In a repository of its own, so neither its tag nor its digest
+        // name is ever taken for a snapshot.
+        let name = crate::boundary::apple::image_name(reference);
+        let tag = reference
+            .strip_prefix(name)
+            .and_then(|rest| rest.strip_prefix(':'))
+            .unwrap_or("latest");
+        let committed = format!("{name}-commit:{tag}");
+        self.cli(&["commit", &handle.0, &committed])
+            .await
+            .map_err(|e| ProviderError::Failed(format!("commit {}: {e}", handle.0)))?;
+        let mut created = vec![committed.clone()];
+        let configured = self
+            .configure(&committed, &parent, reference, labels, &mut created)
+            .await;
+        // The commit's own names; its layers are the snapshot's.
+        for image in created.iter().rev() {
+            if let Err(error) = self.cli(&["image", "delete", image]).await {
+                tracing::warn!(%image, %error, "could not remove a snapshot's commit");
+            }
+        }
+        configured.map(SnapshotId)
+    }
+
     /// A new sandbox from the snapshot's filesystem: nothing of the
     /// snapshot's processes survives, and the bundle is mounted afresh.
     async fn fork(
@@ -639,15 +780,28 @@ impl SandboxProvider for AppleProvider {
             .await
     }
 
+    /// Exact, or derived from another by a snapshot (its label names which).
     async fn image_identity(&self, handle: &Handle) -> Result<ImageIdentity, ProviderError> {
-        Ok(ImageIdentity::Exact {
-            digest: self
-                .inspect(handle)
-                .await?
-                .configuration
-                .image
-                .descriptor
-                .digest,
+        let image = self.inspect(handle).await?.configuration.image;
+        let digest = image.descriptor.digest;
+        let from = match image.reference.is_empty() {
+            true => None,
+            false => self
+                .image_config(&image.reference)
+                .await
+                .ok()
+                .and_then(|(_, c)| {
+                    c["Labels"][crate::sandbox_images::FROM_LABEL]
+                        .as_str()
+                        .map(str::to_string)
+                }),
+        };
+        Ok(match from {
+            Some(from) => ImageIdentity::Derived {
+                from,
+                actual: digest,
+            },
+            None => ImageIdentity::Exact { digest },
         })
     }
 
@@ -732,6 +886,49 @@ mod tests {
         inspect: Arc<Mutex<Option<String>>>,
         env_seen: Arc<Mutex<Option<String>>>,
         fail_run: bool,
+        /// The Containerfile each build was given.
+        built: Arc<Mutex<Vec<String>>>,
+    }
+
+    /// `container image inspect` of `image`: the parent as the base has it,
+    /// a commit with the run's environment in it, and a snapshot labelled
+    /// with what it came from.
+    fn image_json(image: &str) -> String {
+        let (digest, env, labels) = match image {
+            i if i.contains("-commit:") || i.contains("-commit@") => (
+                "sha256:c0",
+                serde_json::json!([
+                    "PATH=/usr/bin",
+                    "HOME=/home/harness",
+                    "TRACON_SANDBOX_TOKEN=t"
+                ]),
+                serde_json::json!({}),
+            ),
+            i if i.starts_with("localhost/snap") => (
+                "sha256:5a",
+                serde_json::json!([
+                    "PATH=/usr/bin",
+                    "HOME=/home/harness",
+                    "TRACON_SANDBOX_TOKEN="
+                ]),
+                serde_json::json!({(crate::sandbox_images::FROM_LABEL): "sha256:fe81"}),
+            ),
+            _ => (
+                "sha256:fe81",
+                serde_json::json!(["PATH=/usr/bin", "HOME=/home/harness"]),
+                serde_json::json!({}),
+            ),
+        };
+        serde_json::json!([{
+            "configuration": {"descriptor": {"digest": digest}, "name": image},
+            "variants": [
+                {"platform": {"os": "linux", "architecture": "amd64"}, "config": {"config": {}}},
+                {"platform": {"os": "linux", "architecture": "arm64"}, "config": {"config": {
+                    "Env": env, "Labels": labels, "User": "65532:65532", "WorkingDir": "/work"
+                }}}
+            ]
+        }])
+        .to_string()
     }
 
     #[async_trait]
@@ -757,6 +954,19 @@ mod tests {
                 },
                 "delete" => Err(CliError::Failed("Error: container not found: x".into())),
                 "commit" => Ok(String::new()),
+                "image" => match args[1].as_str() {
+                    "inspect" => Ok(image_json(&args[2])),
+                    "tag" | "delete" => Ok(String::new()),
+                    other => panic!("unexpected container image {other}"),
+                },
+                "build" => {
+                    let at = args.iter().position(|a| a == "-f").unwrap();
+                    self.built
+                        .lock()
+                        .unwrap()
+                        .push(std::fs::read_to_string(&args[at + 1]).unwrap());
+                    Ok("#4 DONE 0.1s\n".into())
+                }
                 "list" => Ok(serde_json::json!([
                     {"configuration": {"labels": {"tracon.provider": "apple"}}, "status": {"state": "running"}},
                     {"configuration": {"labels": {"tracon.provider": "apple"}}, "status": {"state": "stopped"}},
@@ -1170,6 +1380,59 @@ mod tests {
                 running: 1,
                 limit: Some(4)
             }
+        );
+    }
+
+    /// A prepared snapshot is the commit built over: the run's token emptied,
+    /// the base's entrypoint and user back, labelled, and named by digest;
+    /// the commit's own names are gone.
+    #[tokio::test]
+    async fn a_prepared_snapshot_is_configured_as_its_parent_and_pinned() {
+        let s = setup(Fake::default());
+        let handle = Handle("tracon-w-1".into());
+        *s.fake.inspect.lock().unwrap() = Some(inspected(&s, &handle).to_string());
+        let labels = [(
+            crate::sandbox_images::KEY_LABEL.to_string(),
+            "k1".to_string(),
+        )];
+        let snapshot = s
+            .provider
+            .snapshot_as(&handle, "localhost/snap-app:k1", &labels)
+            .await
+            .unwrap();
+        assert_eq!(snapshot.0, "localhost/snap-app@sha256:5a");
+        let built = s.fake.built.lock().unwrap().clone();
+        assert_eq!(
+            built,
+            ["FROM localhost/snap-app-commit@sha256:c0\n\
+              ENTRYPOINT []\nCMD []\nUSER 65532:65532\nWORKDIR /work\n\
+              ENV TRACON_SANDBOX_TOKEN=\n\
+              LABEL io.tracon.snapshot.key=\"k1\"\n"]
+        );
+        let calls = s.fake.calls.lock().unwrap().clone();
+        let has = |call: &[&str]| calls.iter().any(|c| c == call);
+        assert!(has(&[
+            "commit",
+            "tracon-w-1",
+            "localhost/snap-app-commit:k1"
+        ]));
+        assert!(has(&[
+            "image",
+            "tag",
+            "localhost/snap-app:k1",
+            "localhost/snap-app@sha256:5a"
+        ]));
+        let deleted: Vec<&str> = calls
+            .iter()
+            .filter(|c| c[..2] == ["image", "delete"])
+            .map(|c| c[2].as_str())
+            .collect();
+        assert_eq!(
+            deleted,
+            [
+                "localhost/snap-app-commit@sha256:c0",
+                "localhost/snap-app-commit:k1"
+            ]
         );
     }
 

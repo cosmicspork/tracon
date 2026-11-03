@@ -2084,8 +2084,13 @@ once. Without that flag, starting it prompts for a kernel and fails when there i
   (`[sandbox] base_image`), which is pulled and pinned at start, or on a repository's
   image, which `container build` makes in `container`'s own builder VM and keeps in its
   image store. Sandboxes run as the base's user 65532 with home `/home/harness`.
-  Prepared snapshots are Podman's alone so far, so a repository's `prepare` is not
-  snapshotted here.
+- **Prepared snapshots.** A repository's `prepare` runs once on its default branch in one
+  sandbox, which is then committed (`container commit`) as
+  `localhost/<prefix>-snapshot-<repo>`. Its sessions and checks start from that image.
+  The commit keeps the preparation's environment, so the node builds it over once more
+  with the base's configuration, the preparation's token emptied and the snapshot's
+  labels. A commit is one flattened layer, so each snapshot costs about the base's size
+  on disk. `tracon gc` removes snapshots that a newer one superseded.
 - **Placement.** The node reports its sandboxes as tier `microvm`, so work that
   requires one (`tier = ["microvm"]`) stays on the Mac.
 

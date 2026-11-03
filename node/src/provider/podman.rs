@@ -496,7 +496,7 @@ impl PodmanProvider {
 /// What a commit changes so the snapshot is configured as `parent` was, plus
 /// `labels`. An environment variable the run added is emptied (a commit
 /// cannot remove one); a value the parent had is restored.
-fn commit_changes(
+pub(crate) fn commit_changes(
     parent: &serde_json::Value,
     run_env: &serde_json::Value,
     labels: &[(String, String)],
@@ -879,6 +879,15 @@ impl SandboxProvider for PodmanProvider {
             &[(crate::sandbox_images::FROM_LABEL.to_string(), from)],
         )
         .await
+    }
+
+    async fn snapshot_as(
+        &self,
+        handle: &Handle,
+        reference: &str,
+        labels: &[(String, String)],
+    ) -> Result<SnapshotId, ProviderError> {
+        PodmanProvider::snapshot_as(self, handle, reference, labels).await
     }
 
     /// A sandbox made from the snapshot's image: a commit is an image like

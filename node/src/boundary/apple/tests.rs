@@ -45,7 +45,23 @@ impl ContainerCli for Fake {
                 self.images.lock().unwrap().push(to.to_string());
                 Ok(String::new())
             }
-            ["image", "delete", _] => Ok(String::new()),
+            ["image", "delete", image] => {
+                self.images.lock().unwrap().retain(|held| held != image);
+                Ok(String::new())
+            }
+            ["image", "list", "--format", "json"] => Ok(serde_json::Value::Array(
+                self.images
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|name| {
+                        serde_json::json!({"configuration": {
+                            "name": name, "descriptor": {"digest": DIGEST}
+                        }})
+                    })
+                    .collect(),
+            )
+            .to_string()),
             other => panic!("unexpected container {other:?}"),
         }
     }
@@ -214,4 +230,149 @@ async fn volumes_are_trees_in_the_files_store() {
         assert!(!b.volume_exists(v).await);
     }
     assert!(fake.calls.lock().unwrap().is_empty(), "no runtime involved");
+}
+
+/// `tracon gc` finds this node's snapshots by name, not a commit still being
+/// configured or another node's; removing one removes its tag too.
+#[tokio::test]
+async fn snapshots_are_listed_by_this_nodes_name_and_removed_whole() {
+    let ours = crate::sandbox_images::snapshot_repo();
+    let tagged = format!("{ours}-app-1:k1");
+    let pinned = format!("{ours}-app-1@{DIGEST}");
+    let fake = Fake::default();
+    *fake.images.lock().unwrap() = vec![
+        tagged.clone(),
+        pinned.clone(),
+        format!("{ours}-app-1-commit:k1"),
+        "localhost/other-snapshot-app-1:k1".into(),
+        "ubuntu:24.04".into(),
+    ];
+    let (b, fake) = backend(fake);
+    assert_eq!(b.prepared_snapshots().await, std::slice::from_ref(&pinned));
+    b.remove(&pinned).await;
+    let left = fake.images.lock().unwrap().clone();
+    assert!(
+        !left.contains(&tagged) && !left.contains(&pinned),
+        "{left:?}"
+    );
+    assert_eq!(left.len(), 3, "{left:?}");
+}
+
+/// Against a real `container`, the arm64 bundle at `TRACON_E2E_APPLE_BUNDLE`
+/// and the base at `TRACON_E2E_APPLE_BASE`, with `TRACON_STATE_DIR` set to a
+/// scratch directory: a repository's `prepare` runs once, its sandbox is
+/// snapshotted, and a sandbox from the snapshot finds what it left.
+#[tokio::test]
+#[ignore = "needs Apple's container, a bundle and a base image"]
+async fn a_repository_is_prepared_once_and_its_sessions_start_from_the_snapshot() {
+    let (Ok(bundle), Ok(base)) = (
+        std::env::var("TRACON_E2E_APPLE_BUNDLE"),
+        std::env::var("TRACON_E2E_APPLE_BASE"),
+    ) else {
+        eprintln!("skipped: no bundle or base named");
+        return;
+    };
+    let mut cfg = Config::default();
+    cfg.runtime.kind = crate::config::RuntimeKind::Apple;
+    cfg.sandbox.bundle = Some(bundle.into());
+    cfg.sandbox.base_image = Some(base);
+    let b = AppleBackend::new(&cfg);
+    b.converge_images().await.unwrap();
+
+    let repo = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=e2e",
+                "-c",
+                "user.email=e2e@example.invalid",
+            ])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    std::fs::write(repo.path().join("tracked"), "from the checkout").unwrap();
+    git(&["add", "tracked"]);
+    git(&["commit", "-q", "-m", "one"]);
+
+    let store = crate::store::Store::open_in_memory().unwrap();
+    let environment = crate::environment::RepoEnvironment {
+        image: crate::sandbox_images::base_image(&cfg),
+        image_source: "base",
+        checks: Vec::new(),
+        timeout_secs: 600,
+        prepare: vec![
+            "mkdir -p /cache/e2e && echo warm > /cache/e2e/made && cat tracked > \"$HOME/prepared\""
+                .into(),
+        ],
+        egress: Vec::new(),
+        session_egress: Vec::new(),
+        cache_volume: crate::config::resource_name("cache-e2e"),
+        repo: Some("e2e".into()),
+    };
+    let secrets = crate::environment::PrepareSecrets::default();
+    let warm =
+        || crate::sandbox_images::warm(&b, &cfg, &store, repo.path(), &environment, &secrets);
+    let snapshot = warm().await.unwrap().unwrap();
+    assert!(snapshot.contains("@sha256:"), "{snapshot}");
+    assert_eq!(warm().await.unwrap().unwrap(), snapshot, "made once");
+
+    let cmd = crate::runner::RunnerCommand {
+        argv: vec![
+            "sh".into(),
+            "-c".into(),
+            "cat /cache/e2e/made \"$HOME/prepared\"; echo; id -u".into(),
+        ],
+        image: Some(snapshot.clone()),
+        name: crate::config::resource_name("e2e-from-snapshot"),
+        labels: crate::runner::RunLabels::of(crate::runner::RunKind::Probe),
+        ..Default::default()
+    };
+    let out = crate::boundary::Backend::runner(&b, Vec::new())
+        .run_capture(cmd)
+        .await;
+    let snapshots = b.prepared_snapshots().await;
+    let inspected = b
+        .container(&["image", "inspect", &snapshot])
+        .await
+        .unwrap_or_default();
+    b.remove(&snapshot).await;
+    // The preparation's own token is not kept in the image.
+    assert!(
+        inspected.contains("\"TRACON_SANDBOX_TOKEN=\""),
+        "{inspected}"
+    );
+    assert!(
+        inspected.contains(crate::sandbox_images::KEY_LABEL),
+        "{inspected}"
+    );
+    let out = out.unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.starts_with("warm\nfrom the checkout\n65532\n"),
+        "{stdout}"
+    );
+    assert!(snapshots.contains(&snapshot), "{snapshots:?}");
+    assert!(!b.exists(&snapshot).await);
+    let left: Vec<_> = b
+        .references()
+        .await
+        .into_iter()
+        .filter(|(name, _)| name.starts_with(&crate::sandbox_images::snapshot_repo()))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
 }

@@ -454,6 +454,16 @@ pub async fn sweep(
             }
             items.push(item);
         }
+    } else if let Some(builder) = backend.image_builder() {
+        for pinned in backend.prepared_snapshots().await {
+            let (remove, reason) = classify_snapshot(&pinned, &owners);
+            let mut item = item("image", pinned, remove, reason);
+            if apply && remove {
+                builder.remove(&item.name).await;
+                item.removed = !builder.exists(&item.name).await;
+            }
+            items.push(item);
+        }
     }
     for (mut item, path) in directory_items(&Config::state_dir(), &owners) {
         if apply && item.remove {

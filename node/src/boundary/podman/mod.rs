@@ -526,6 +526,21 @@ impl Backend for PodmanBackend {
         Some(self)
     }
 
+    fn preparer(&self) -> Option<crate::sandbox_images::Preparer> {
+        let cfg = &self.cfg;
+        crate::sandbox_images::enabled(cfg).then(|| crate::sandbox_images::Preparer {
+            provider: Arc::new(crate::provider::podman::PodmanProvider::from_config(
+                cfg,
+                crate::runner::podman::RunSpec::from_config(cfg, false),
+            )),
+            files: uses_sandbox_files(cfg).then(crate::runner::sandbox_files::FilesStore::for_node),
+            tunnels: match uses_sandbox_tunnels(cfg) {
+                true => crate::runner::tunnels::gateway_tunnels(cfg),
+                false => Vec::new(),
+            },
+        })
+    }
+
     fn runs_sessions_in_repository_images(&self) -> bool {
         true
     }

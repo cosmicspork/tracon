@@ -273,6 +273,17 @@ pub trait Backend: Send + Sync {
     fn image_builder(&self) -> Option<&dyn ImageBuilder> {
         None
     }
+    /// What a repository's `prepare` runs in and is snapshotted from, on a
+    /// runtime whose repositories start from prepared snapshots.
+    fn preparer(&self) -> Option<crate::sandbox_images::Preparer> {
+        None
+    }
+    /// Every prepared snapshot of this node's that the runtime holds, pinned,
+    /// for `tracon gc`; its image builder removes one. Podman's are listed
+    /// by `sandbox_images::snapshot_images`.
+    async fn prepared_snapshots(&self) -> Vec<String> {
+        Vec::new()
+    }
     /// The image a named harness runs in here, which a repository's image
     /// copies the harness from. Podman's unless a runtime says otherwise.
     fn harness_image(&self, cfg: &Config, harness_id: &str) -> String {

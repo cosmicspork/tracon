@@ -17,10 +17,12 @@
 //! - **Prepare once, then fork.** A repository's `prepare` runs on its
 //!   default branch in one sandbox, with the dependency cache in the
 //!   sandbox's own filesystem; the provider then snapshots the sandbox
-//!   (`podman commit`) and the repository's sessions and checks start from
-//!   the snapshot. The cache volumes they mount are seeded from it, so the
-//!   warm cache rides along. The workspace is a volume, so nothing of it is
-//!   in a snapshot.
+//!   (`podman commit`, or `container commit` on an Apple node) and the
+//!   repository's sessions and checks start from the snapshot. On Podman the
+//!   cache volumes they mount are seeded from it; on Apple a cache is sent in
+//!   over the snapshot's own, which keeps what it held. Either way the warm
+//!   cache rides along. The workspace is a volume, so nothing of it is in a
+//!   snapshot.
 //!
 //! A snapshot is keyed on what it was made from: the base image's digest,
 //! the repository image's digest, the default branch's lockfiles and the
@@ -48,8 +50,7 @@ use tracon_sandbox::protocol::{ExitStatus, SpawnSpec};
 use crate::boundary::Backend;
 use crate::config::Config;
 use crate::environment::RepoEnvironment;
-use crate::provider::podman::PodmanProvider;
-use crate::provider::{Bootstrap, CreateSpec, Handle, Resources, SandboxProvider as _};
+use crate::provider::{Bootstrap, CreateSpec, Handle, Resources, SandboxProvider};
 use crate::runner::{Mount, Runner, RunnerCommand, RunnerError, Spawned};
 use crate::store::{RepoImageStart, Store};
 
@@ -98,8 +99,8 @@ pub fn enabled(cfg: &Config) -> bool {
 
 /// Whether this node's sandboxes run harnesses from the bundle on the stock
 /// base or a repository's image, with no harness images: Podman's with the
-/// setting, and an Apple node's always. Snapshots ([`enabled`]) are
-/// Podman's alone so far.
+/// setting, and an Apple node's always. A repository with a `prepare` starts
+/// from its prepared snapshot on either.
 pub fn bundled(cfg: &Config) -> bool {
     enabled(cfg) || cfg.runtime.kind == crate::config::RuntimeKind::Apple
 }
@@ -328,11 +329,16 @@ pub async fn lockfiles(repo: &Path, commit: &str) -> Vec<Lockfile> {
 
 /// What a snapshot of `repo` in `environment` would be made from now.
 pub async fn inputs(
+    backend: &dyn Backend,
     cfg: &Config,
     repo: &Path,
     environment: &RepoEnvironment,
 ) -> Result<SnapshotInputs, String> {
-    let image = crate::boundary::podman::image_identity(&environment.image)
+    let builder = backend
+        .image_builder()
+        .ok_or_else(|| format!("the {} runtime keeps no images", backend.kind()))?;
+    let image = builder
+        .identity(&environment.image)
         .await
         .ok_or_else(|| format!("the image {} is not here", environment.image))?;
     let (_, commit) = crate::repo_image::default_commit(repo).await?;
@@ -365,16 +371,32 @@ pub fn record_seed(base_cache: &str, snapshot: &str) {
         .insert(base_cache.to_string(), snapshot.to_string());
 }
 
+/// What a runtime prepares a repository in and snapshots
+/// ([`Backend::preparer`]): its provider, the store that sends the
+/// preparation's tree in where the runtime mounts none, and the tunnels to
+/// the gateways where its sandboxes have no network.
+pub struct Preparer {
+    pub provider: Arc<dyn SandboxProvider>,
+    pub files: Option<crate::runner::sandbox_files::FilesStore>,
+    pub tunnels: Vec<crate::runner::tunnels::TunnelSpec>,
+}
+
 /// The ready snapshot of `repo` made for `key`, if the runtime still has it.
-pub async fn current(store: &Store, repo: &Path, key: &str) -> Option<String> {
+pub async fn current(
+    backend: &dyn Backend,
+    store: &Store,
+    repo: &Path,
+    key: &str,
+) -> Option<String> {
     let row = store
         .ready_repo_image(&repo.to_string_lossy(), SNAPSHOT)
         .ok()
         .flatten()
         .filter(|row| row.recipe_hash == key)?;
-    crate::boundary::podman::podman(&["image", "exists", &row.image])
+    backend
+        .image_builder()?
+        .exists(&row.image)
         .await
-        .is_ok()
         .then_some(row.image)
 }
 
@@ -388,10 +410,10 @@ pub async fn snapshot_for(
     environment: &RepoEnvironment,
     prepare: bool,
 ) -> Option<String> {
-    if !enabled(cfg) || environment.prepare.is_empty() {
+    if !bundled(cfg) || environment.prepare.is_empty() {
         return None;
     }
-    let inputs = match inputs(cfg, repo, environment).await {
+    let inputs = match inputs(backend, cfg, repo, environment).await {
         Ok(inputs) => inputs,
         Err(error) => {
             tracing::info!(repo = %repo.display(), %error, "no snapshot for this repository");
@@ -399,10 +421,10 @@ pub async fn snapshot_for(
         }
     };
     let key = inputs.key();
-    let mut found = current(store, repo, &key).await;
+    let mut found = current(backend, store, repo, &key).await;
     if found.is_none() && prepare {
         crate::repo_image::warm_base_cache(backend, cfg, store, repo).await;
-        found = current(store, repo, &key).await;
+        found = current(backend, store, repo, &key).await;
     }
     if let Some(snapshot) = &found {
         record_seed(&environment.cache_volume, snapshot);
@@ -421,9 +443,12 @@ pub async fn warm(
     environment: &RepoEnvironment,
     secrets: &crate::environment::PrepareSecrets,
 ) -> Result<Option<String>, String> {
-    let inputs = inputs(cfg, repo, environment).await?;
+    let inputs = inputs(backend, cfg, repo, environment).await?;
     let key = inputs.key();
-    if let Some(snapshot) = current(store, repo, &key).await {
+    let Some(preparer) = backend.preparer() else {
+        return Err(format!("the {} runtime makes no snapshots", backend.kind()));
+    };
+    if let Some(snapshot) = current(backend, store, repo, &key).await {
         record_seed(&environment.cache_volume, &snapshot);
         return Ok(Some(snapshot));
     }
@@ -452,19 +477,12 @@ pub async fn warm(
             .import_writable(&work, &tree.root)
             .await
             .map_err(|error| error.to_string())?;
-        let provider = Arc::new(PodmanProvider::from_config(
-            cfg,
-            crate::runner::podman::RunSpec::from_config(cfg, false),
-        ));
         let reference = format!("{}:{}", snapshot_repository(repo), &key[..12]);
         let name = crate::config::resource_name(&format!("w-{}", &id[..12]));
-        let mut held = Held::for_preparation(provider, &name, &inputs.image, &work).await;
+        let mut held = Held::for_preparation(&preparer, &name, &inputs.image, &work).await;
         if let Ok(opened) = &held {
-            if crate::boundary::podman::uses_sandbox_tunnels(cfg) {
-                if let Err(error) = opened
-                    .open_tunnels(&crate::runner::tunnels::gateway_tunnels(cfg))
-                    .await
-                {
+            if !preparer.tunnels.is_empty() {
+                if let Err(error) = opened.open_tunnels(&preparer.tunnels).await {
                     opened.finish().await;
                     held = Err(error);
                 }
@@ -504,17 +522,25 @@ pub async fn warm(
     };
     match made.await {
         Ok(reference) => {
-            let pinned = crate::boundary::podman::image_identity(&reference)
-                .await
-                .unwrap_or(reference);
+            // Apple's provider names the snapshot by digest itself.
+            let pinned = match reference.contains("@sha256:") {
+                true => reference,
+                false => match backend.image_builder() {
+                    Some(builder) => builder.identity(&reference).await.unwrap_or(reference),
+                    None => reference,
+                },
+            };
             let _ = store.finish_repo_image(&row, Ok(&pinned), "", &[]);
             if let Some(builder) = backend.image_builder() {
                 crate::repo_image::supersede(builder, store, repo, SNAPSHOT).await;
             }
             record_seed(&environment.cache_volume, &pinned);
             tracing::info!(repo = %repo.display(), snapshot = %pinned, "prepared the repository and snapshotted it");
-            // Its DigitalOcean template too, where sessions may run there.
-            crate::provider::digitalocean::runtime::DoRuntime::prepare_if_running(&pinned);
+            // Its DigitalOcean template too, where sessions may run there:
+            // pushed from Podman's store.
+            if backend.kind() == "podman" {
+                crate::provider::digitalocean::runtime::DoRuntime::prepare_if_running(&pinned);
+            }
             Ok(Some(pinned))
         }
         Err(error) => {
@@ -529,7 +555,7 @@ pub async fn warm(
 /// for the next and for the snapshot. Its mounts are fixed when it is made;
 /// a command's own are not mounted again.
 pub struct Held {
-    provider: Arc<PodmanProvider>,
+    provider: Arc<dyn SandboxProvider>,
     server: Arc<SandboxServer>,
     handle: Handle,
     run: String,
@@ -538,17 +564,26 @@ pub struct Held {
     /// Open for as long as the sandbox is: on a node whose sandboxes have
     /// no network, the way to the gateways.
     tunnels: Mutex<Vec<tracon_sandbox::node::Tunnel>>,
+    /// The trees sent in where the runtime mounts no volume.
+    files: Option<crate::runner::sandbox_files::Attached>,
     finished: std::sync::atomic::AtomicBool,
 }
 
 impl Held {
     pub async fn start(
-        provider: Arc<PodmanProvider>,
+        provider: Arc<dyn SandboxProvider>,
+        files: Option<&crate::runner::sandbox_files::FilesStore>,
         server: Arc<SandboxServer>,
         name: &str,
         image: &str,
         mounts: &[Mount],
     ) -> Result<Held, String> {
+        let (mounts, plan) = match files {
+            Some(store) => store
+                .plan(mounts)
+                .map_err(|e| format!("sandbox {name}: {e}"))?,
+            None => (mounts.to_vec(), None),
+        };
         let run = format!("{name}:{}", uuid::Uuid::now_v7().simple());
         let token = server.tokens().issue(run.clone());
         let bootstrap = Bootstrap {
@@ -563,7 +598,7 @@ impl Held {
                     name: Some(name),
                     image,
                     resources: &Resources::default(),
-                    mounts,
+                    mounts: &mounts,
                     bootstrap: &bootstrap,
                     labels: &crate::runner::RunLabels::of(crate::runner::RunKind::Prepare),
                     shape: crate::provider::Shape::Command,
@@ -577,11 +612,22 @@ impl Held {
                 return Err(format!("start sandbox {name}: {error}"));
             }
         };
-        match provider
+        let connected = provider
             .connect(&handle, &server, crate::runner::protocol::CONNECT_WITHIN)
             .await
-        {
-            Ok(conn) => Ok(Held {
+            .map_err(|error| format!("connect to sandbox {name}: {error}"));
+        // Sent in, never taken back: what a preparation leaves is in the
+        // sandbox's own filesystem, for the snapshot.
+        let sent = match (&connected, plan) {
+            (Ok(conn), Some(plan)) => plan
+                .attach(conn, name, crate::runner::RunKind::Check)
+                .await
+                .map(Some)
+                .map_err(|error| format!("send files to sandbox {name}: {error}")),
+            _ => Ok(None),
+        };
+        match (connected, sent) {
+            (Ok(conn), Ok(files)) => Ok(Held {
                 provider,
                 server,
                 handle,
@@ -589,12 +635,13 @@ impl Held {
                 conn,
                 running: Mutex::new(HashMap::new()),
                 tunnels: Mutex::new(Vec::new()),
+                files,
                 finished: Default::default(),
             }),
-            Err(error) => {
+            (Err(error), _) | (_, Err(error)) => {
                 server.tokens().revoke(&run);
                 let _ = provider.destroy(&handle).await;
-                Err(format!("connect to sandbox {name}: {error}"))
+                Err(error)
             }
         }
     }
@@ -602,14 +649,15 @@ impl Held {
     /// A sandbox for a preparation: `image`, with `work` at `/work`, on this
     /// process's own node identity.
     pub async fn for_preparation(
-        provider: Arc<PodmanProvider>,
+        preparer: &Preparer,
         name: &str,
         image: &str,
         work: &str,
     ) -> Result<Held, String> {
         let server = crate::runner::protocol::node_server().map_err(|e| e.to_string())?;
         Held::start(
-            provider,
+            preparer.provider.clone(),
+            preparer.files.as_ref(),
             server,
             name,
             image,
@@ -671,6 +719,9 @@ impl Held {
         }
         self.server.tokens().revoke(&self.run);
         drop(std::mem::take(&mut *self.tunnels.lock().unwrap()));
+        if let Some(files) = &self.files {
+            files.finish().await;
+        }
         let _ = tokio::time::timeout(Duration::from_secs(5), self.conn.shutdown()).await;
         if let Err(error) = self.provider.destroy(&self.handle).await {
             tracing::warn!(sandbox = %self.handle.0, %error, "could not remove a preparation sandbox");
