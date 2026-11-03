@@ -239,6 +239,12 @@ pub const KEYS: &[KeySpec] = &[
     restart("runtime.podman.sandbox_tunnels"),
     restart("runtime.podman.sandbox_images"),
     restart("runtime.podman.sandbox_services"),
+    // [runtime.apple]
+    restart("runtime.apple.container").exec(),
+    restart("runtime.apple.limit"),
+    restart("runtime.apple.cpus"),
+    restart("runtime.apple.memory"),
+    restart("runtime.apple.build_timeout_secs"),
     restart("runtime.kubernetes.namespace"),
     restart("runtime.kubernetes.harness_image").host_only(),
     restart("runtime.kubernetes.state_claim"),

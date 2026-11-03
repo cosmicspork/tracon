@@ -50,9 +50,9 @@ pub fn in_play(digitalocean: bool, resolved: &Resolved) -> bool {
     digitalocean || resolved.requirements != Requirements::any()
 }
 
-/// The node's own runtime as placement sees it: what a verified container
-/// boundary gives, healthy while the node's checks pass, full at
-/// `[placement] local_limit`.
+/// The node's own runtime as placement sees it: what its verified boundary
+/// gives (a VM of its own per sandbox on a Mac, a container elsewhere),
+/// healthy while the node's checks pass, full at `[placement] local_limit`.
 pub fn local_candidate(
     kind: ProviderKind,
     health: Result<(), String>,
@@ -62,13 +62,17 @@ pub fn local_candidate(
     use crate::provider::capabilities::{
         Capabilities, Dns, ImageIdentityKind, Privilege, Route, RuntimeSocket, Tier,
     };
+    let (tier, privilege) = match kind {
+        ProviderKind::Apple => (Tier::Microvm, Privilege::RootInVm),
+        _ => (Tier::Container, Privilege::Unprivileged),
+    };
     Candidate {
         kind,
         capabilities: Capabilities {
-            tier: Tier::Container,
+            tier,
             route: Route::NodeOnly,
             dns: Dns::None,
-            privilege: Privilege::Unprivileged,
+            privilege,
             runtime_socket: RuntimeSocket::Absent,
             image_identity: ImageIdentityKind::Exact,
         },
@@ -303,6 +307,29 @@ mod tests {
             DoMode::Overflow,
             false,
         );
+        assert!(matches!(p, Placement::Refuse { .. }), "{p:?}");
+    }
+
+    /// A Mac's own sandboxes are VMs: work that requires one stays on the
+    /// node, where a container node would have nowhere to put it.
+    #[test]
+    fn a_mac_takes_work_that_requires_a_vm() {
+        let mut vm = Requirements::any();
+        vm.tier = Some(vec![crate::provider::capabilities::Tier::Microvm]);
+        let mac = local_candidate(ProviderKind::Apple, node("ready"), 0, None);
+        assert_eq!(
+            mac.capabilities.tier,
+            crate::provider::capabilities::Tier::Microvm
+        );
+        let p = crate::provider::place(&[mac], &vm, DoMode::Off, false);
+        assert_eq!(
+            p,
+            Placement::Place {
+                provider: ProviderKind::Apple
+            }
+        );
+        let linux = local_candidate(ProviderKind::Podman, node("ready"), 0, None);
+        let p = crate::provider::place(&[linux], &vm, DoMode::Off, false);
         assert!(matches!(p, Placement::Refuse { .. }), "{p:?}");
     }
 

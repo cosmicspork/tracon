@@ -7,6 +7,7 @@
 //! same `Runner`. `Backend` is that seam; `backend_for` picks one from
 //! `[runtime] kind`.
 
+pub mod apple;
 pub mod checks;
 pub mod kubernetes;
 pub mod podman;
@@ -541,7 +542,16 @@ pub async fn backend_for(cfg: &Config) -> Arc<dyn Backend> {
     match cfg.runtime.kind {
         RuntimeKind::Podman => Arc::new(podman::PodmanBackend::detect(cfg).await),
         RuntimeKind::Kubernetes => Arc::new(kubernetes::KubeBackend::new(cfg)),
+        RuntimeKind::Apple => Arc::new(apple::AppleBackend::new(cfg)),
     }
+}
+
+/// Whether this node's sandboxes take their trees over the files channel and
+/// reach the node only through tunnels: what a sandbox that mounts nothing
+/// and has no network of its own (DigitalOcean's) needs of the node.
+pub fn sandboxes_over_protocol(cfg: &Config) -> bool {
+    cfg.runtime.kind == RuntimeKind::Apple
+        || (podman::uses_sandbox_files(cfg) && podman::uses_sandbox_tunnels(cfg))
 }
 
 #[cfg(test)]

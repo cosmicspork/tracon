@@ -68,6 +68,7 @@ pub const GUARDED: &[(&str, PathKind)] = &[
     ("consulta.command", PathKind::Executable),
     ("consulta.args", PathKind::ExecArgs),
     ("runtime.kubernetes.builder.buildctl", PathKind::Executable),
+    ("runtime.apple.container", PathKind::Executable),
     ("runtime.kubernetes.builder.tls_dir", PathKind::SecretDir),
     (
         "runtime.kubernetes.builder.docker_config",
@@ -99,7 +100,7 @@ fn program_names(key: &str) -> &'static [&'static str] {
         "publish.git" => &["git"],
         "consulta.command" => &["uv", "consulta"],
         "runtime.kubernetes.builder.buildctl" => &["buildctl"],
-        "provider.apple.container" => &["container"],
+        "runtime.apple.container" => &["container"],
         _ => &[],
     }
 }
@@ -1539,6 +1540,10 @@ fn values(cfg: &Config) -> Vec<(&'static str, String)> {
         ("publish.git", cfg.publish.git.clone()),
         ("consulta.command", cfg.consulta.command.clone()),
         ("consulta.args", cfg.consulta.args.join(" ")),
+        (
+            "runtime.apple.container",
+            cfg.runtime.apple.container.clone(),
+        ),
         ("session.worktree_root", shown(&cfg.session.worktree_root)),
         (
             "runtime.kubernetes.state_mount",

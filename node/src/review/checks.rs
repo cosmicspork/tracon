@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 use super::output;
 use crate::{
     boundary::Backend,
-    config::{Config, RuntimeKind},
+    config::Config,
     environment::{
         cache_env, check_env, environment_for, origin_repo, scoped_egress, PrepareSecrets,
         Refusals, RepoEnvironment,
@@ -1304,10 +1304,7 @@ fn immutable_image_identity(image: &str) -> Option<String> {
 /// a node with none keeps the identity its existing evidence was keyed on.
 fn check_inputs(cfg: &Config, environment: &RepoEnvironment) -> serde_json::Value {
     let mut inputs = json!({
-        "runtime": match cfg.runtime.kind {
-            RuntimeKind::Podman => "podman",
-            RuntimeKind::Kubernetes => "kubernetes",
-        },
+        "runtime": cfg.runtime.kind.as_str(),
         "timeout_secs": environment.timeout_secs,
         "dependency_inputs": cfg.live().supervision.dependency_inputs,
     });
@@ -1363,6 +1360,7 @@ pub(crate) fn tail_of(text: &str, bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::RuntimeKind;
 
     #[test]
     fn only_digest_images_can_form_a_reuse_identity() {

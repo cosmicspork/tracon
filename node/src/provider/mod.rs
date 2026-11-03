@@ -85,6 +85,7 @@ impl ProviderKind {
         match kind {
             "podman" => Some(Self::Podman),
             "kubernetes" => Some(Self::Kubernetes),
+            "apple" => Some(Self::Apple),
             _ => None,
         }
     }

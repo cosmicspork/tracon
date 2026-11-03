@@ -398,6 +398,11 @@ impl RunAs {
                 uid: cfg.runtime.kubernetes.uid,
                 home: cfg.runtime.kubernetes.harness_home.clone(),
             },
+            // The stock base's own user, which every sandbox there runs as.
+            crate::config::RuntimeKind::Apple => RunAs::Pod {
+                uid: 65532,
+                home: crate::sandbox_images::HOME.into(),
+            },
         }
     }
 
@@ -759,7 +764,7 @@ pub async fn session_image(
     building: &(dyn Fn() + Send + Sync),
 ) -> SessionImage {
     let repos = cfg.repos();
-    if crate::sandbox_images::enabled(cfg) {
+    if crate::sandbox_images::bundled(cfg) {
         let Some(entry) = repos.iter().find(|entry| entry.matches(repo)) else {
             return SessionImage::default();
         };

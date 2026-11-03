@@ -141,6 +141,20 @@ pub fn validate_sandbox(config: &Config) -> Result<(), String> {
             "runtime.podman.sandbox_images needs runtime.podman.sandbox_protocol = true".into(),
         );
     }
+    let memory = &config.runtime.apple.memory;
+    let digits = memory.trim_end_matches(['K', 'M', 'G', 'T']);
+    if !memory.is_empty()
+        && (digits.is_empty()
+            || !digits.bytes().all(|b| b.is_ascii_digit())
+            || memory.len() - digits.len() > 1)
+    {
+        return Err(format!(
+            "runtime.apple.memory: {memory:?} is not a size such as 4G or 2048M"
+        ));
+    }
+    if config.runtime.apple.cpus == Some(0) || config.runtime.apple.limit == Some(0) {
+        return Err("runtime.apple.cpus and runtime.apple.limit must be at least 1".into());
+    }
     if let Some(url) = config.sandbox.release_url.as_deref() {
         let parsed =
             url::Url::parse(url.trim()).map_err(|error| format!("sandbox.release_url: {error}"))?;
@@ -1083,13 +1097,25 @@ impl ReviewLimits {
 
 /// Which boundary this node establishes. `podman` is a laptop or Linux host
 /// with rootless Podman; `kubernetes` is a node running as a pod that owns
-/// harness pods.
+/// harness pods; `apple` is a Mac running each sandbox in a lightweight VM of
+/// its own with Apple's `container`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum RuntimeKind {
     #[default]
     Podman,
     Kubernetes,
+    Apple,
+}
+
+impl RuntimeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Podman => "podman",
+            Self::Kubernetes => "kubernetes",
+            Self::Apple => "apple",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1098,6 +1124,7 @@ pub struct Runtime {
     pub kind: RuntimeKind,
     pub podman: PodmanRuntime,
     pub kubernetes: Kubernetes,
+    pub apple: AppleRuntime,
     /// Immutable project images the operator explicitly accepts in addition to
     /// digest-addressed images from safe devcontainer metadata.
     pub approved_images: Vec<String>,
@@ -1140,6 +1167,40 @@ pub struct PodmanRuntime {
     /// Needs `sandbox_protocol`. A service with only an image stays a
     /// container.
     pub sandbox_services: bool,
+}
+
+/// `[runtime.apple]`: a Mac node whose sandboxes are Apple Containerization
+/// VMs (`kind = "apple"`). Every sandbox runs over the sandbox protocol with
+/// no network of its own: its trees travel over the files channel, its
+/// routes to the node are tunnels, and its harness comes from the bundle on
+/// the stock base image (`[sandbox] base_image`) or the repository's image,
+/// which `container build` makes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppleRuntime {
+    /// The `container` CLI. Empty: `/usr/local/bin/container`, where Apple's
+    /// installer puts it.
+    pub container: String,
+    /// Most sandboxes at once; none for no limit of the provider's own.
+    pub limit: Option<u32>,
+    /// CPUs and memory (`4G`, `2048M`) each sandbox's VM gets; empty for
+    /// `container`'s defaults.
+    pub cpus: Option<u32>,
+    pub memory: String,
+    /// How long one `container build` of a repository's image may take.
+    pub build_timeout_secs: u64,
+}
+
+impl Default for AppleRuntime {
+    fn default() -> Self {
+        Self {
+            container: String::new(),
+            limit: None,
+            cpus: None,
+            memory: String::new(),
+            build_timeout_secs: 30 * 60,
+        }
+    }
 }
 
 /// The `[[repo]]` table a running node resolves against, once the operator
