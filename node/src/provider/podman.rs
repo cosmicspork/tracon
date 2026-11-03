@@ -188,8 +188,13 @@ impl PodmanProvider {
             connect_timeout: crate::runner::protocol::CONNECT_WITHIN,
             user: images.then(|| crate::sandbox_images::USER.to_string()),
             userns: images.then(|| crate::sandbox_images::USERNS.to_string()),
+            // HOME as Apple sets it: the image's own `ENV HOME` (a snapshot
+            // keeps whatever its source said) is not what the node placed
+            // the harness's state under.
             env: match images {
-                true => crate::sandbox_images::sandbox_env(),
+                true => std::iter::once(("HOME".into(), crate::sandbox_images::HOME.into()))
+                    .chain(crate::sandbox_images::sandbox_env())
+                    .collect(),
                 false => Vec::new(),
             },
             snapshot_repo: crate::sandbox_images::snapshot_repo(),

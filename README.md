@@ -1322,12 +1322,13 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node, or
                                     # egress proxy are tunnels to the node on the gateway's ports.
                                     # No gateway container or internal network is made
 # sandbox_images = false            # with sandbox_protocol: no harness images. Sandboxes run the
-                                    # stock base ([sandbox] base_image) or the repository's image,
-                                    # harnesses run from the bundle the node fetches for its own
-                                    # release, and a repository's prepare runs once and is
-                                    # snapshotted (podman commit) for its sessions and checks.
-                                    # Sandboxes run as the base's user 65532, mapped to the node's
-                                    # own (--userns=keep-id), with the harness home /home/harness
+                                    # stock base ([sandbox] base_image), or a repository's image
+                                    # built FROM ${TRACON_SANDBOX_BASE} (an `image` or another
+                                    # Dockerfile is refused), harnesses run from the bundle the node
+                                    # fetches for its own release, and a repository's prepare runs
+                                    # once and is snapshotted (podman commit) for its sessions and
+                                    # checks. Sandboxes run as the base's user 65532, mapped to the
+                                    # node's own (--userns=keep-id), with HOME=/home/harness
 # sandbox_services = false          # with sandbox_protocol: run each [[service]] that has a bundle
                                     # inside the session's sandbox under tracon-sandbox, not as a
                                     # container beside it; one with only an image stays a container
@@ -1398,10 +1399,15 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node, or
                                     # confirmed, and a tag is not an identity. A locally built image has
                                     # a digest too (`podman image inspect` reports `RepoDigests`); the
                                     # node refuses to start on a tag. Without one, the harness image,
-                                    # which carries no project toolchain
+                                    # which carries no project toolchain. Refused with sandbox_images,
+                                    # on Apple and with [runtime.kubernetes] sandbox_protocol, which
+                                    # run every repository on the stock base: use `build` steps and
+                                    # `prepare` there (Settings → Repositories names each refusal)
 # dockerfile = ".devcontainer/Dockerfile"  # in place of `image`: the node builds this from the
                                     # repository's default branch, pins what it built, and rebuilds
-                                    # when the file or its context changes there
+                                    # when the file or its context changes there. Where `image` is
+                                    # refused, so is a Dockerfile whose first FROM is not
+                                    # ${TRACON_SANDBOX_BASE}
 # context = "."                     # the build context; left out, the Dockerfile's own directory
 # checks = ["just check"]           # in place of [supervision] checks
 # timeout_secs = 1800               # in place of [supervision] timeout_secs; covers preparation too

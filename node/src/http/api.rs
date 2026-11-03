@@ -1338,7 +1338,8 @@ pub async fn prepare_workspace(
         s.store(),
         repo.as_deref(),
     )
-    .await;
+    .await
+    .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
     let plan = crate::environment::inspect(&workspace.snapshot, &environment)
         .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
     let prepared = crate::environment::prepare(

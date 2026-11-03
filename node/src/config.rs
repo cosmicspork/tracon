@@ -1156,7 +1156,8 @@ pub struct PodmanRuntime {
     /// no gateway container or internal network is made for them.
     pub sandbox_tunnels: bool,
     /// With `sandbox_protocol`: no harness images. Sandboxes run the stock
-    /// base image (`[sandbox] base_image`) or the repository's image, the
+    /// base image (`[sandbox] base_image`) or a repository's image built on
+    /// it (any other is refused, `repo_image::stock_base_only`), the
     /// harnesses come from the harness bundle the node fetches for its own
     /// version (unless `[sandbox] bundle` names one), and a repository's
     /// preparation is run once and snapshotted for its sessions and checks
@@ -1245,6 +1246,10 @@ pub struct Repo {
     /// either side of a pull, and a check's reuse key would not know. A locally
     /// built image has a digest too (`podman image inspect` reports
     /// `RepoDigests`), so this costs a local build nothing.
+    ///
+    /// Refused where every repository runs on the stock base
+    /// (`repo_image::stock_base_only`), as is a `dockerfile` that does not
+    /// begin `FROM ${TRACON_SANDBOX_BASE}`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
     /// The repository's own dev environment, as a path inside it (commonly

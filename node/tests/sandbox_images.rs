@@ -662,3 +662,61 @@ async fn a_repository_prepares_once_and_its_sessions_fork_from_the_snapshot() {
         text(&out.stdout)
     );
 }
+
+/// A session on the stock base with `sandbox_files`: its harness state and
+/// its gitconfig are sent in as a session's are, the gitconfig into a home
+/// the sandbox's user owns whatever the image made of it (a local mount
+/// holding what the image had there), and `$HOME` is that home.
+#[tokio::test]
+async fn a_session_on_the_stock_base_has_its_home_and_its_gitconfig() {
+    let Some(mut rig) = Rig::new("home") else {
+        return;
+    };
+    rig.cfg.runtime.podman.sandbox_files = true;
+    rig.cfg.sandbox.bundle = Some(PathBuf::from(
+        std::env::var("TRACON_SANDBOX_BUNDLE").expect("TRACON_SANDBOX_BUNDLE"),
+    ));
+    tracon::sandbox_images::converge(&rig.cfg).await.unwrap();
+    let base = tracon::sandbox_images::base_image(&rig.cfg);
+
+    let seed = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(seed.path().join("state")).unwrap();
+    std::fs::write(
+        seed.path().join("gitconfig"),
+        "[user]\n\tname = Spike A1\n[safe]\n\tdirectory = /work\n",
+    )
+    .unwrap();
+    let files = tracon::runner::sandbox_files::FilesStore::for_node();
+    let scratch = format!("tracon-scratch-{}s", rig.prefix);
+    files.import(&scratch, seed.path()).unwrap();
+    let home = tracon::sandbox_images::HOME;
+    let mut cmd = rig.command(
+        "session",
+        "id -u; echo \"$HOME\"; git config --global user.name; \
+         test -w \"$HOME/.claude\" && echo state-writable; \
+         stat -c %u \"$HOME\"; test -f \"$HOME/.profile\" && echo kept-profile",
+    );
+    cmd.labels = tracon::runner::RunLabels::of(tracon::runner::RunKind::Session);
+    cmd.mounts = vec![
+        Mount::at(&scratch, "state", format!("{home}/.claude"), false),
+        Mount::at(&scratch, "gitconfig", format!("{home}/.gitconfig"), true),
+    ];
+    let out = rig.runner(&base, Vec::new()).run_capture(cmd).await;
+    let _ = files.remove(&scratch);
+    let out = out.unwrap();
+    let said = text(&out.stdout);
+    assert!(out.status.success(), "{said}{}", text(&out.stderr));
+    let lines: Vec<&str> = said.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "65532",
+            home,
+            "Spike A1",
+            "state-writable",
+            "65532",
+            "kept-profile"
+        ],
+        "{said}"
+    );
+}

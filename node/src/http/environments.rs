@@ -20,32 +20,46 @@ pub async fn list(State(s): State<AppState>) -> ApiResult<Json<Value>> {
     let hash = crate::config::edit::file_hash(&Config::config_path())?;
     let builds = s.store().repo_images()?;
     let repos = s.cfg.repos();
-    let entries: Vec<Value> = repos
-        .iter()
-        .enumerate()
-        .map(|(index, entry)| {
-            // The first matching entry wins, here as everywhere else.
-            let builds: Vec<_> = builds
-                .iter()
-                .filter(|build| {
-                    repos
-                        .iter()
-                        .position(|entry| entry.matches(Path::new(&build.repo_path)))
-                        == Some(index)
-                })
-                .collect();
-            // An entry that keeps lending credentials to a preparation a
-            // peer's recipe changed builds nothing until it is started.
-            let hold = crate::mesh::recipe::held(s.store(), entry);
-            json!({ "entry": entry, "builds": builds, "hold": hold })
-        })
-        .collect();
+    let mut entries: Vec<Value> = Vec::with_capacity(repos.len());
+    for (index, entry) in repos.iter().enumerate() {
+        // The first matching entry wins, here as everywhere else.
+        let builds: Vec<_> = builds
+            .iter()
+            .filter(|build| {
+                repos
+                    .iter()
+                    .position(|entry| entry.matches(Path::new(&build.repo_path)))
+                    == Some(index)
+            })
+            .collect();
+        // An entry that keeps lending credentials to a preparation a
+        // peer's recipe changed builds nothing until it is started.
+        let hold = crate::mesh::recipe::held(s.store(), entry);
+        let refused = refused(&s.cfg, entry, builds.first().map(|b| b.repo_path.as_str())).await;
+        entries.push(json!({ "entry": entry, "builds": builds, "hold": hold, "refused": refused }));
+    }
     Ok(Json(json!({
         "can_build": s.manager.backend().image_builder().is_some(),
         "presets": crate::config::egress_presets(),
         "entries": entries,
         "hash": hash,
     })))
+}
+
+/// Why a session, check or preparation for `entry` would be refused on this
+/// node, so the operator reads it here before starting one. A Dockerfile is
+/// read from a clone the entry answers for: one it built in, else its own
+/// path, else the managed clone at it.
+async fn refused(cfg: &Config, entry: &Repo, built_in: Option<&str>) -> Option<String> {
+    if !repo_image::stock_base_only(cfg) {
+        return None;
+    }
+    let clone = match built_in {
+        Some(path) => PathBuf::from(path),
+        None if entry.path.is_absolute() => entry.path.clone(),
+        None => crate::forge::managed_root(&Config::state_dir()).join(&entry.path),
+    };
+    repo_image::refusal(cfg, &clone, entry).await
 }
 
 #[derive(Deserialize)]

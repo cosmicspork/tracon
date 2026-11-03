@@ -371,7 +371,7 @@ fn a_plan_mounts_only_what_the_store_does_not_keep() {
         vec![
             Mount::volume("tracon-cache-r-1", "/cache", false),
             Mount::local("/work"),
-            Mount::local("/root/.claude"),
+            Mount::local("/root"),
         ]
     );
     let plan = plan.unwrap();
@@ -500,6 +500,65 @@ fn a_session_gets_its_own_state() {
         Mount::at("tracon-scratch-s", "state", "/root/.claude", false)
     );
     assert_eq!(mounts[1].sub_path, "harness/plugin");
+}
+
+/// A file is sent into a directory of the sandbox's own: its parent, where
+/// no directory sent in already holds it. The gitconfig beside the harness's
+/// state makes the home local, which then holds the state too.
+#[test]
+fn a_files_parent_is_the_sandboxs_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesStore::new(dir.path().join("store"));
+    let seed = dir.path().join("seed");
+    std::fs::create_dir_all(seed.join("state")).unwrap();
+    std::fs::write(seed.join("gitconfig"), "[user]").unwrap();
+    std::fs::write(seed.join("orientation.md"), "# o").unwrap();
+    store.import("tracon-scratch-s", &seed).unwrap();
+    let home = crate::sandbox_images::HOME;
+    let mounts = vec![
+        Mount::at(
+            "tracon-scratch-s",
+            "state",
+            format!("{home}/.claude"),
+            false,
+        ),
+        Mount::at(
+            "tracon-scratch-s",
+            "orientation.md",
+            format!("{home}/.claude/orientation.md"),
+            true,
+        ),
+        Mount::at(
+            "tracon-scratch-s",
+            "gitconfig",
+            format!("{home}/.gitconfig"),
+            true,
+        ),
+    ];
+    let (provided, plan) = store.plan(&mounts).unwrap();
+    assert_eq!(provided, vec![Mount::local(home)]);
+    assert_eq!(plan.unwrap().targets().len(), 3);
+
+    // Inside a directory sent in, a file needs nothing more; at the root, it
+    // is never given the root.
+    let (provided, _) = store
+        .plan(&[
+            Mount::at(
+                "tracon-scratch-s",
+                "state",
+                format!("{home}/.claude"),
+                false,
+            ),
+            Mount::at(
+                "tracon-scratch-s",
+                "orientation.md",
+                format!("{home}/.claude/orientation.md"),
+                true,
+            ),
+            Mount::at("tracon-scratch-s", "gitconfig", "/gitconfig", true),
+        ])
+        .unwrap();
+    assert_eq!(provided, vec![Mount::local(format!("{home}/.claude"))]);
 }
 
 /// A withheld volume is never sent, even though the store keeps it: the run
