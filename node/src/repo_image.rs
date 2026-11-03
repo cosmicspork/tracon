@@ -1243,9 +1243,9 @@ pub(crate) async fn warm_base_cache(
     if environment.prepare.is_empty() {
         return;
     }
-    // With `sandbox_images`, a repository prepared in the stock base has a
-    // snapshot too, so any entry with a `prepare` is warmed.
-    let entry = match crate::sandbox_images::enabled(cfg) {
+    // With `sandbox_images` or on Apple, a repository prepared in the stock
+    // base has a snapshot too, so any entry with a `prepare` is warmed.
+    let entry = match crate::sandbox_images::bundled(cfg) {
         true => cfg
             .repos()
             .iter()
@@ -1270,7 +1270,7 @@ pub(crate) async fn warm_base_cache(
         }
     };
     let warming = (environment.image.clone(), commit.clone());
-    if crate::sandbox_images::enabled(cfg) {
+    if crate::sandbox_images::bundled(cfg) {
         let secrets = match lend(cfg, repo, &entry) {
             Ok(secrets) => secrets,
             Err(error) => {

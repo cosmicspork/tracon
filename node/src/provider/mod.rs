@@ -302,6 +302,18 @@ pub trait SandboxProvider: Send + Sync {
         Err(self.unsupported("snapshot"))
     }
 
+    /// The sandbox's filesystem as the image `reference`, labelled with
+    /// `labels` and configured as the image it was made from: what a
+    /// repository's prepared snapshot is.
+    async fn snapshot_as(
+        &self,
+        _handle: &Handle,
+        _reference: &str,
+        _labels: &[(String, String)],
+    ) -> Result<SnapshotId, ProviderError> {
+        Err(self.unsupported("snapshot_as"))
+    }
+
     /// A new sandbox from a snapshot, with its own bootstrap: a fork is a
     /// different run and never holds its parent's token.
     async fn fork(

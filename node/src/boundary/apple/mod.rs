@@ -139,6 +139,31 @@ impl AppleBackend {
         identity(self.cli.as_ref(), image).await
     }
 
+    /// Every name the image store holds, with the digest it names.
+    async fn references(&self) -> Vec<(String, String)> {
+        #[derive(Deserialize)]
+        struct Listed {
+            configuration: Named,
+        }
+        #[derive(Deserialize)]
+        struct Named {
+            name: String,
+            descriptor: ListedDescriptor,
+        }
+        #[derive(Deserialize)]
+        struct ListedDescriptor {
+            digest: String,
+        }
+        let Ok(text) = self.container(&["image", "list", "--format", "json"]).await else {
+            return Vec::new();
+        };
+        serde_json::from_str::<Vec<Listed>>(&text)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|l| (l.configuration.name, l.configuration.descriptor.digest))
+            .collect()
+    }
+
     /// `image` by digest, runnable as such: `container` finds an image only
     /// by a reference its store holds, and asks the registry for any other,
     /// which for an image built here is nowhere. So the digest reference is
@@ -290,7 +315,7 @@ async fn identity(cli: &dyn ContainerCli, image: &str) -> Option<String> {
 
 /// A reference without its tag or digest: a tag is the last `:` after the
 /// last `/`, and a registry's port is not one.
-fn image_name(image: &str) -> &str {
+pub(crate) fn image_name(image: &str) -> &str {
     match image.split_once('@') {
         Some((name, _)) => name,
         None => match image.rsplit_once(':') {
@@ -388,8 +413,24 @@ impl ImageBuilder for AppleBackend {
         self.image_identity(image).await
     }
 
+    /// `image`, and when it is pinned every other name the store holds it
+    /// by: a pinned image here is also tagged, and the tag would keep it.
     async fn remove(&self, image: &str) {
-        let _ = self.container(&["image", "delete", image]).await;
+        let mut names = vec![image.to_string()];
+        if let Some((name, digest)) = image.split_once('@') {
+            names.extend(
+                self.references()
+                    .await
+                    .into_iter()
+                    .filter(|(held, at)| at == digest && image_name(held) == name)
+                    .map(|(held, _)| held),
+            );
+        }
+        names.sort();
+        names.dedup();
+        for name in names {
+            let _ = self.container(&["image", "delete", &name]).await;
+        }
     }
 
     async fn presence(&self, image: &str) -> Presence {
@@ -487,6 +528,30 @@ impl Backend for AppleBackend {
 
     fn image_builder(&self) -> Option<&dyn ImageBuilder> {
         Some(self)
+    }
+
+    async fn prepared_snapshots(&self) -> Vec<String> {
+        let ours = format!("{}-", crate::sandbox_images::snapshot_repo());
+        let mut pinned: Vec<String> = self
+            .references()
+            .await
+            .into_iter()
+            .filter(|(name, _)| name.starts_with(&ours))
+            // A commit not yet configured is a snapshot still being made.
+            .filter(|(name, _)| !image_name(name).ends_with("-commit"))
+            .map(|(name, digest)| format!("{}@{digest}", image_name(&name)))
+            .collect();
+        pinned.sort();
+        pinned.dedup();
+        pinned
+    }
+
+    fn preparer(&self) -> Option<crate::sandbox_images::Preparer> {
+        Some(crate::sandbox_images::Preparer {
+            provider: Arc::new(self.provider(&self.cfg.harness.id)),
+            files: Some(self.files_store()),
+            tunnels: crate::runner::tunnels::gateway_tunnels(&self.cfg),
+        })
     }
 
     fn harness_image(&self, cfg: &Config, _harness_id: &str) -> String {

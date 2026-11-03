@@ -119,6 +119,14 @@ impl Rig {
             RunSpec::from_config(&self.cfg, true),
         ))
     }
+
+    fn preparer(&self) -> tracon::sandbox_images::Preparer {
+        tracon::sandbox_images::Preparer {
+            provider: self.provider(),
+            files: None,
+            tunnels: Vec::new(),
+        }
+    }
 }
 
 impl Drop for Rig {
@@ -417,7 +425,7 @@ async fn prepare(rig: &mut Rig, repo: &Path, round: &str) -> (String, String, st
     rig.images.push(reference.clone());
     let began = std::time::Instant::now();
     let held = Held::for_preparation(
-        rig.provider(),
+        &rig.preparer(),
         &rig.name(&format!("prep-{round}")),
         &base,
         &work,
@@ -544,8 +552,9 @@ async fn a_repository_prepares_once_and_its_sessions_fork_from_the_snapshot() {
     store
         .finish_repo_image(&row, Ok(&snapshot), "", &[])
         .unwrap();
+    let backend = tracon::boundary::podman::PodmanBackend::detect(&rig.cfg).await;
     assert_eq!(
-        tracon::sandbox_images::current(&store, &repo, &key)
+        tracon::sandbox_images::current(&backend, &store, &repo, &key)
             .await
             .as_deref(),
         Some(snapshot.as_str())
@@ -553,7 +562,6 @@ async fn a_repository_prepares_once_and_its_sessions_fork_from_the_snapshot() {
 
     // Two sessions fork from it, each with a cache volume of its own seeded
     // from the snapshot's, and each prepares its own workspace in it.
-    let backend = tracon::boundary::podman::PodmanBackend::detect(&rig.cfg).await;
     let base_cache = rig.name("cache-base");
     tracon::sandbox_images::record_seed(&base_cache, &snapshot);
     for session in ["s1", "s2"] {
@@ -638,7 +646,7 @@ async fn a_repository_prepares_once_and_its_sessions_fork_from_the_snapshot() {
     let (again, key2, _) = prepare(&mut rig, &repo, "2").await;
     assert_ne!(key2, key, "a lockfile change is a new key");
     assert_eq!(
-        tracon::sandbox_images::current(&store, &repo, &key2).await,
+        tracon::sandbox_images::current(&backend, &store, &repo, &key2).await,
         None
     );
     assert_ne!(again, snapshot);
