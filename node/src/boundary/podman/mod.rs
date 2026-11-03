@@ -886,15 +886,6 @@ pub(super) fn guarded_podman(bin: &str) -> std::io::Result<String> {
         .map(|path| path.to_string_lossy().into_owned())
 }
 
-/// What a build step is told when it asks for a host the repository's
-/// entry does not name.
-const BUILD_REFUSAL: &str =
-    "not reachable from this repository's build steps; add it to its egress";
-
-/// The proxy variables a build's steps are given, in both spellings: curl
-/// reads only the lowercase ones, apt and most package managers either.
-const BUILD_PROXY_VARS: [&str; 4] = ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"];
-
 /// The `podman build` arguments that hold a build's `RUN` steps to the
 /// node's egress proxy on loopback `port`: a network namespace whose only
 /// route is that one port spliced to the node's loopback (no interface, no
@@ -907,24 +898,10 @@ pub(crate) fn build_egress_args(port: u16) -> Vec<String> {
         format!("pasta:--splice-only,-T,{port}"),
         "--http-proxy=false".to_string(),
     ];
-    for name in BUILD_PROXY_VARS {
+    for name in super::BUILD_PROXY_VARS {
         args.extend(["--build-arg".to_string(), name.to_string()]);
     }
     args
-}
-
-/// One build's listener and grant on the node's egress proxy.
-struct BuildEgress {
-    task: tokio::task::JoinHandle<()>,
-    grants: crate::gateway::proxy::Grants,
-    token: String,
-}
-
-impl Drop for BuildEgress {
-    fn drop(&mut self) {
-        self.task.abort();
-        self.grants.revoke(&self.token);
-    }
 }
 
 impl PodmanBackend {
@@ -951,7 +928,7 @@ impl PodmanBackend {
         }
         if let Some((port, proxy)) = egress {
             command.args(build_egress_args(port));
-            for name in BUILD_PROXY_VARS {
+            for name in super::BUILD_PROXY_VARS {
                 command.env(name, proxy);
             }
         }
@@ -1018,36 +995,12 @@ impl super::ImageBuilder for PodmanBackend {
         build: super::ImageBuild<'_>,
         hosts: &[String],
     ) -> Result<super::BuiltImage, super::BuildFailure> {
-        let unready = |error: std::io::Error| {
-            super::BuildFailure::transient(format!("build egress listener: {error}"))
-        };
-        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .await
-            .map_err(unready)?;
-        let port = listener.local_addr().map_err(unready)?.port();
-        let token = self
-            .grants
-            .issue(crate::gateway::proxy::GrantSpec {
-                client: "build".into(),
-                hosts: hosts.to_vec(),
-                refusal: BUILD_REFUSAL.into(),
-                ..Default::default()
-            })
-            .map_err(|error| {
-                super::BuildFailure::transient(format!("build egress grant: {error}"))
-            })?;
-        let granted = crate::gateway::proxy::Granted::refusing(
-            self.grants.clone(),
-            super::Backend::egress_refusal(self),
-        );
-        let proxy = format!("http://build:{token}@127.0.0.1:{port}");
         // Gone with the build, however it ends, abandoned at its deadline
         // included.
-        let _serving = BuildEgress {
-            task: tokio::spawn(crate::gateway::proxy::serve_granted(listener, granted)),
-            grants: self.grants.clone(),
-            token,
-        };
+        let serving =
+            super::BuildEgress::serve(&self.grants, super::Backend::egress_refusal(self), hosts)
+                .await?;
+        let (port, proxy) = (serving.port, serving.proxy(serving.port));
         self.build_in(build, Some((port, &proxy))).await
     }
 
@@ -1249,7 +1202,7 @@ mod tests {
                 pair[1].as_str()
             })
             .collect();
-        assert_eq!(named, super::BUILD_PROXY_VARS);
+        assert_eq!(named, crate::boundary::BUILD_PROXY_VARS);
         assert!(args.iter().all(|arg| !arg.contains('@')), "{args:?}");
     }
 

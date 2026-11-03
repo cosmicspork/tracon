@@ -152,6 +152,9 @@ pub struct AppleOptions {
     /// Each catalogue service's bundle and where it is mounted, read-only,
     /// for services run under the sandbox's supervisor.
     pub service_bundles: Vec<(PathBuf, String)>,
+    /// Who the supervisor, and so every command, runs as, when not the
+    /// image's own user: root for a repository's build steps.
+    pub user: Option<String>,
 }
 
 impl AppleOptions {
@@ -413,6 +416,10 @@ impl AppleProvider {
         }
         args.push("--env-file".into());
         args.push(env_file.to_string_lossy().into_owned());
+        if let Some(user) = &self.options.user {
+            args.push("--user".into());
+            args.push(user.clone());
+        }
         args.push("--entrypoint".into());
         args.push(SANDBOX_BIN.into());
         args.push(image.into());
@@ -451,6 +458,23 @@ impl AppleProvider {
         bootstrap: &Bootstrap,
     ) -> Result<Handle, ProviderError> {
         self.prepare_socket_dir()?;
+        // `container` asks a registry for any image its store lacks, and
+        // for a localhost/ one that is nowhere: tens of seconds, then a
+        // refused connection.
+        if crate::boundary::podman::local_only(image) {
+            match self.cli(&["image", "inspect", image]).await {
+                Ok(_) => {}
+                Err(error) if error.not_found() => {
+                    return Err(ProviderError::Failed(format!(
+                        "{image} is no longer in container's image store: a rebuild of its \
+                         tag replaced it, or it was removed. No registry holds a localhost/ \
+                         image, so it is not pulled; start again to use the image that \
+                         stands now"
+                    )))
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
         let name = self.name_for(name);
         let handle = Handle(name.clone());
         let socket = self.node_socket(&handle);
@@ -888,6 +912,8 @@ mod tests {
         fail_run: bool,
         /// The Containerfile each build was given.
         built: Arc<Mutex<Vec<String>>>,
+        /// Images the store does not hold.
+        missing: Arc<Mutex<Vec<String>>>,
     }
 
     /// `container image inspect` of `image`: the parent as the base has it,
@@ -955,6 +981,9 @@ mod tests {
                 "delete" => Err(CliError::Failed("Error: container not found: x".into())),
                 "commit" => Ok(String::new()),
                 "image" => match args[1].as_str() {
+                    "inspect" if self.missing.lock().unwrap().contains(&args[2]) => Err(
+                        CliError::Failed(format!("Error: image not found: {}", args[2])),
+                    ),
                     "inspect" => Ok(image_json(&args[2])),
                     "tag" | "delete" => Ok(String::new()),
                     other => panic!("unexpected container image {other}"),
@@ -1057,6 +1086,54 @@ mod tests {
             "id": handle.0,
             "status": {"networks": [], "state": "running"}
         }])
+    }
+
+    #[tokio::test]
+    async fn a_missing_local_image_is_refused_without_asking_a_registry() {
+        let gone = "localhost/tracon-repo-gone@sha256:0a";
+        let fake = Fake::default();
+        fake.missing.lock().unwrap().push(gone.into());
+        let s = setup(fake);
+        let error = s
+            .provider
+            .create_with(gone, &Resources::default(), &[], &bootstrap())
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("no longer in container's image store"),
+            "{error}"
+        );
+        assert!(!s.fake.calls.lock().unwrap().iter().any(|c| c[0] == "run"));
+    }
+
+    #[tokio::test]
+    async fn only_a_provider_given_a_user_runs_its_sandboxes_as_that_user() {
+        let s = setup(Fake::default());
+        s.provider
+            .create_with("ubuntu:24.04", &Resources::default(), &[], &bootstrap())
+            .await
+            .unwrap();
+        let mut options = s.provider.options().clone();
+        options.user = Some("0:0".into());
+        let root = AppleProvider::with_cli(options, Box::new(s.fake.clone()));
+        root.create_with("ubuntu:24.04", &Resources::default(), &[], &bootstrap())
+            .await
+            .unwrap();
+        let runs: Vec<Vec<String>> = s
+            .fake
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c[0] == "run")
+            .cloned()
+            .collect();
+        assert!(!runs[0].contains(&"--user".to_string()), "{:?}", runs[0]);
+        let at = runs[1].iter().position(|a| a == "--user").unwrap();
+        assert_eq!(runs[1][at + 1], "0:0");
+        assert_eq!(runs[1].last().unwrap(), "ubuntu:24.04");
     }
 
     #[tokio::test]

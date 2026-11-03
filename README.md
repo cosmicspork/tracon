@@ -487,8 +487,10 @@ checks = ["just check"]
   the node's egress proxy. On Podman the build has no network but one loopback port to
   that proxy (`pasta --splice-only`), and no DNS: a step gets `HTTPS_PROXY` and nothing
   else. The proxy carries HTTPS only; the base's apt sources already are, and the `apt`
-  preset names them. On Apple the build runs in `container`'s builder VM on its own
-  network, so the list is not enforced there. Kubernetes accepts the key but does not
+  preset names them. On Apple the steps don't go through `container build`, whose
+  builder VM has a network of its own: they run as root in a sandbox from the base,
+  with no network and one loopback tunnel to that grant, which is then committed and
+  given the base's user, home and directory. Kubernetes accepts the key but does not
   build steps yet.
 
 Settings → Repositories offers it as *Build steps on the stock base*, and
