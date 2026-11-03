@@ -265,13 +265,18 @@ export function worktreeOrigin(payload: Record<string, unknown>): string {
 /// Where the harness is running, appended to the start line. Said only when
 /// there is something to say: the repository's image, or why a repository
 /// that has one is not being used. A session in the plain harness image, with
-/// no repository image to miss, adds nothing.
+/// no repository image to miss, adds nothing; nor does one on the stock base
+/// that had none either.
 export function sessionImage(payload: Record<string, unknown>): string {
-  if (typeof payload.image === 'string' && payload.image) return " · in the repository's image"
-  if (typeof payload.image_note === 'string' && payload.image_note) {
-    return ` · in the harness image: ${payload.image_note}`
+  const note = typeof payload.image_note === 'string' && payload.image_note ? payload.image_note : ''
+  switch (payload.image_source) {
+    case 'stock base':
+      return note ? ` · on the stock base: ${note}` : ''
+    case 'prepared snapshot':
+      return " · from the repository's prepared snapshot"
   }
-  return ''
+  if (typeof payload.image === 'string' && payload.image) return " · in the repository's image"
+  return note ? ` · in the harness image: ${note}` : ''
 }
 
 /// The most recent repetition signal of the current turn, if the harness has

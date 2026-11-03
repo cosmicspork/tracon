@@ -324,10 +324,17 @@ async fn the_browser_runs_in_the_session_sandbox_and_show_work_carries_its_scree
     eprintln!("service_start: {view} in {:?}", started.elapsed());
     assert_eq!(view["state"], "ready", "{view}");
     assert_eq!(view["url"], "http://127.0.0.1:9222/json/version");
-    // In the sandbox, not beside it.
-    let beside = sidecars::containers(&h.store, "s1");
-    assert_eq!(beside, [format!("{session_container}-svc-browser")]);
-    assert!(podman(&["container", "exists", &beside[0]]).is_none());
+    // In the sandbox, not beside it, and recorded so.
+    assert!(sidecars::containers(&h.store, "s1").is_empty());
+    let recorded = sidecars::recorded(&h.store, "s1")
+        .remove("browser")
+        .unwrap();
+    assert_eq!(
+        recorded.sandbox.as_deref(),
+        Some(session_container.as_str())
+    );
+    let beside = format!("{session_container}-svc-browser");
+    assert!(podman(&["container", "exists", &beside]).is_none());
     let tree = podman(&["exec", &session_container, "ps", "-eo", "pid,ppid,args"]).unwrap();
     eprintln!("{tree}");
     assert!(tree.contains("/opt/tracon-services/browser/headless-shell/headless-shell"));

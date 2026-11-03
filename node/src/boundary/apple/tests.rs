@@ -376,3 +376,17 @@ async fn a_repository_is_prepared_once_and_its_sessions_start_from_the_snapshot(
         .collect();
     assert!(left.is_empty(), "{left:?}");
 }
+
+/// A session from a snapshot finds its cache in the snapshot, and one with
+/// no base cache held has nothing to copy: neither looks for a cache volume.
+#[tokio::test]
+async fn a_session_cache_is_not_copied_from_a_base_cache_the_snapshot_holds() {
+    let (b, fake) = backend(Fake::default());
+    let base = crate::environment::base_cache_volume(
+        Some(std::path::Path::new("/src/no-such-app")),
+        "localhost/tracon-repo-x@sha256:0",
+    );
+    assert!(!b.seeds_session_cache(&base, true).await);
+    assert!(!b.seeds_session_cache(&base, false).await);
+    assert!(fake.calls.lock().unwrap().is_empty(), "no runtime involved");
+}

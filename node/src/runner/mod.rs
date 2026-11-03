@@ -383,6 +383,12 @@ pub trait Runner: Send + Sync {
         let _ = sidecar;
         false
     }
+    /// Whether `sidecar` runs inside its session's sandbox from its bundle,
+    /// rather than as a container of its own from its image.
+    fn sidecar_in_sandbox(&self, sidecar: &Sidecar) -> bool {
+        let _ = sidecar;
+        false
+    }
 }
 
 pub const SIDECARS_UNSUPPORTED: &str =

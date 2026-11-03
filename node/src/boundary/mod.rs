@@ -399,6 +399,14 @@ pub trait Backend: Send + Sync {
             self.kind()
         )))
     }
+    /// Whether a new session cache starts as a copy of the repository's base
+    /// cache `base`. Podman's does, from the snapshot's cache when there is
+    /// one (`sandbox_images::seed_for`); a runtime whose snapshot carries the
+    /// cache inside it, or which holds no base cache, has nothing to copy.
+    async fn seeds_session_cache(&self, base: &str, from_snapshot: bool) -> bool {
+        let _ = (base, from_snapshot);
+        true
+    }
     /// Remove a runtime volume. One that does not exist is already removed;
     /// one a running harness still mounts is refused, never forced.
     async fn remove_volume(&self, volume: &str) -> Result<(), BoundaryError> {

@@ -1320,7 +1320,9 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node, or
                                     # only route the protocol's socket; the MCP and model gateway,
                                     # the allowlist proxy (served by the node) and the per-client
                                     # egress proxy are tunnels to the node on the gateway's ports.
-                                    # No gateway container or internal network is made
+                                    # No gateway container or internal network is made, and the
+                                    # node's own from before (its unit, container and network)
+                                    # is removed
 # sandbox_images = false            # with sandbox_protocol: no harness images. Sandboxes run the
                                     # stock base ([sandbox] base_image), or a repository's image
                                     # built FROM ${TRACON_SANDBOX_BASE} (an `image` or another

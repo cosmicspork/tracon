@@ -591,6 +591,10 @@ impl Runner for ProtocolRunner {
         self.in_sandbox(sidecar).is_some()
     }
 
+    fn sidecar_in_sandbox(&self, sidecar: &Sidecar) -> bool {
+        self.in_sandbox(sidecar).is_some()
+    }
+
     async fn probe_sidecar(&self, sidecar: &Sidecar) -> Result<bool, RunnerError> {
         if let Some(spec) = self.in_sandbox(sidecar) {
             return super::services::probe(sidecar, spec).await;

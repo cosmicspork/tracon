@@ -33,7 +33,10 @@ const PROBE_INTERVAL: Duration = Duration::from_millis(500);
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Recorded {
     pub name: String,
+    /// Its own container; empty for one run inside the session's sandbox.
     pub container: String,
+    /// The session's sandbox it runs in, from its bundle.
+    pub sandbox: Option<String>,
     pub state: String,
     pub detail: Option<String>,
     /// When it was started: the clock its readiness timeout runs on.
@@ -63,6 +66,11 @@ pub fn recorded(store: &Store, session_id: &str) -> BTreeMap<String, Recorded> {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string(),
+                sandbox: payload
+                    .get("sandbox")
+                    .and_then(Value::as_str)
+                    .filter(|_| payload.get("in_sandbox") == Some(&Value::Bool(true)))
+                    .map(str::to_string),
                 state: state.to_string(),
                 detail: payload
                     .get("detail")
@@ -85,12 +93,19 @@ pub fn containers(store: &Store, session_id: &str) -> Vec<String> {
         .collect()
 }
 
-/// Remove a session's services. Errors are logged, not returned: this runs on
-/// the way out of a session, where a service that is already gone is fine.
+/// Remove a session's services: their containers, and those in its sandbox
+/// by the name the runner stops them by. Errors are logged, not returned:
+/// this runs on the way out of a session, where a service that is already
+/// gone is fine.
 pub async fn stop_all(runner: &dyn Runner, store: &Store, session_id: &str) {
-    for container in containers(store, session_id) {
-        if let Err(error) = runner.kill(&container).await {
-            tracing::warn!(%container, %error, "could not remove a session's service");
+    let services = recorded(store, session_id).into_values();
+    let names = services.filter_map(|service| match service.sandbox {
+        Some(sandbox) => Some(sidecar_name(&sandbox, &service.name)),
+        None => Some(service.container).filter(|container| !container.is_empty()),
+    });
+    for name in names {
+        if let Err(error) = runner.kill(&name).await {
+            tracing::warn!(service = %name, %error, "could not remove a session's service");
         }
     }
 }
@@ -127,6 +142,33 @@ fn sidecar(service: &Service, session_container: &str) -> Sidecar {
             ready_within: Duration::from_secs(service.timeout_secs()),
         }),
     }
+}
+
+/// A `service` event, saying where it runs: the session's sandbox with its
+/// bundle, or a container of its own (from its image, said when it starts).
+fn event(cx: &Context<'_>, service: &Service, sidecar: &Sidecar, state: &str) -> Value {
+    let mut out = json!({ "name": service.name, "state": state });
+    if cx.runner.sidecar_in_sandbox(sidecar) {
+        out["in_sandbox"] = json!(true);
+        out["sandbox"] = json!(sidecar.session_container);
+        out["bundle"] = json!(service.bundle);
+        out["mounted_at"] = json!(service.bundle_target());
+        return out;
+    }
+    out["container"] = json!(sidecar.name);
+    if state == STARTED {
+        out["image"] = json!(service.image);
+        if let Some(bundle) = &service.bundle {
+            out["bundle"] = json!(bundle);
+        }
+    }
+    out
+}
+
+fn failed(cx: &Context<'_>, service: &Service, sidecar: &Sidecar, detail: &str) -> Value {
+    let mut out = event(cx, service, sidecar, FAILED);
+    out["detail"] = json!(detail);
+    out
 }
 
 fn view(service: &Service, state: &str, detail: Option<&str>) -> Value {
@@ -177,18 +219,10 @@ pub async fn start(cx: &Context<'_>, name: &str, wait: Duration) -> Result<Value
         _ => {
             if let Err(error) = cx.runner.start_sidecar(&sidecar).await {
                 let detail = error.to_string();
-                (cx.record)(json!({
-                    "name": name, "container": sidecar.name, "state": FAILED, "detail": detail,
-                }));
+                (cx.record)(failed(cx, service, &sidecar, &detail));
                 return Ok(view(service, FAILED, Some(&detail)));
             }
-            let mut started = json!({
-                "name": name, "container": sidecar.name, "state": STARTED, "image": service.image,
-            });
-            if let Some(bundle) = &service.bundle {
-                started["bundle"] = json!(bundle);
-            }
-            (cx.record)(started);
+            (cx.record)(event(cx, service, &sidecar, STARTED));
             now_ms()
         }
     };
@@ -233,18 +267,14 @@ async fn await_ready(
             // Given up on where it runs: failed now, not at the timeout.
             Err(RunnerError::ServiceFailed(detail)) => {
                 let _ = cx.runner.kill(&sidecar.name).await;
-                (cx.record)(json!({
-                    "name": service.name, "container": sidecar.name, "state": FAILED, "detail": detail,
-                }));
+                (cx.record)(failed(cx, service, sidecar, &detail));
                 return Ok(view(service, FAILED, Some(&detail)));
             }
             Err(error) => return Err(error.to_string()),
         };
         if ready {
             if current.is_none_or(|c| c.state != READY) {
-                (cx.record)(json!({
-                    "name": service.name, "container": sidecar.name, "state": READY,
-                }));
+                (cx.record)(event(cx, service, sidecar, READY));
             }
             return Ok(view(service, READY, None));
         }
@@ -259,9 +289,7 @@ async fn await_ready(
             // The container is removed rather than left half-started; asking
             // again starts it afresh.
             let _ = cx.runner.kill(&sidecar.name).await;
-            (cx.record)(json!({
-                "name": service.name, "container": sidecar.name, "state": FAILED, "detail": detail,
-            }));
+            (cx.record)(failed(cx, service, sidecar, &detail));
             return Ok(view(service, FAILED, Some(&detail)));
         }
         if tokio::time::Instant::now() + PROBE_INTERVAL > deadline {
@@ -347,6 +375,18 @@ mod tests {
         fn supervises_sidecar(&self, _: &Sidecar) -> bool {
             self.supervises
         }
+        fn sidecar_in_sandbox(&self, _: &Sidecar) -> bool {
+            self.supervises
+        }
+    }
+
+    fn service_events(store: &Store) -> Vec<Value> {
+        store
+            .session_service_events("s1")
+            .unwrap()
+            .into_iter()
+            .map(|(payload, _)| payload)
+            .collect()
     }
 
     fn cfg(timeout_secs: u64) -> Config {
@@ -418,6 +458,19 @@ mod tests {
         assert_eq!(started.len(), 1);
         assert_eq!(started[0].session_container, "tracon-h-s1");
         assert_eq!(started[0].name, "tracon-h-s1-svc-browser");
+        // Its events name the container it runs in and the image it runs.
+        let events = service_events(&store);
+        assert_eq!(
+            events[0],
+            json!({
+                "name": "browser", "state": STARTED,
+                "container": "tracon-h-s1-svc-browser", "image": PINNED,
+            })
+        );
+        assert_eq!(
+            events[1],
+            json!({ "name": "browser", "state": READY, "container": "tracon-h-s1-svc-browser" })
+        );
 
         // Asked again: still the one container.
         let v = start(&cx, "browser", Duration::from_secs(1)).await.unwrap();
@@ -511,6 +564,20 @@ mod tests {
             STARTED,
             "recorded as started"
         );
+        // Recorded as what runs: the session's sandbox and the bundle, with
+        // no container or image of its own.
+        assert_eq!(
+            service_events(&store)[0],
+            json!({
+                "name": "browser", "state": STARTED, "in_sandbox": true,
+                "sandbox": "tracon-h-s1", "bundle": "/srv/browser/amd64",
+                "mounted_at": "/opt/tracon-services/browser",
+            })
+        );
+        assert!(
+            containers(&store, "s1").is_empty(),
+            "no container to reconcile"
+        );
 
         // Past the catalogue's timeout, still restarting: not failed, since
         // its supervisor restarts it by its policy.
@@ -519,6 +586,14 @@ mod tests {
             .unwrap();
         assert_eq!(v["state"], STARTING, "{v}");
         assert!(runner.killed.lock().unwrap().is_empty());
+
+        // Leaving the session still stops it in its sandbox, by the name the
+        // runner knows it by.
+        stop_all(&runner, &store, "s1").await;
+        assert_eq!(
+            runner.killed.lock().unwrap().clone(),
+            vec!["tracon-h-s1-svc-browser"]
+        );
     }
 
     #[tokio::test]

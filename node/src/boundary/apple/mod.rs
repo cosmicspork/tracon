@@ -645,6 +645,12 @@ impl Backend for AppleBackend {
         self.files_store().holds(volume)
     }
 
+    /// A snapshot is a commit of the sandbox its preparation ran in, cache
+    /// and all.
+    async fn seeds_session_cache(&self, base: &str, from_snapshot: bool) -> bool {
+        !from_snapshot && self.files_store().holds(base)
+    }
+
     async fn clone_volume(&self, source: &str, destination: &str) -> Result<(), BoundaryError> {
         self.files_store()
             .clone_volume(source, destination)
