@@ -2968,7 +2968,11 @@ impl Manager {
                     &environment.cache_volume,
                     &spec.channel,
                 );
-                if !self.backend.volume_exists(&cache).await {
+                let seeded = self
+                    .backend
+                    .seeds_session_cache(&environment.cache_volume, image.from_snapshot(&self.cfg))
+                    .await;
+                if seeded && !self.backend.volume_exists(&cache).await {
                     if let Err(error) = self
                         .backend
                         .clone_volume(&environment.cache_volume, &cache)
@@ -3372,8 +3376,8 @@ impl Manager {
                 "harness_version": compat.version,
                 "harness_expected": adapter.pinned_version(),
                 "harness_protocol": compat.protocol,
-                "image": image.image,
-                "image_source": image.source(),
+                "image": image.reported(&self.cfg),
+                "image_source": image.source(&self.cfg),
                 "toolchain_image": image.toolchain_image,
                 "image_note": image.note,
                 "resumed": reopened.is_some(),

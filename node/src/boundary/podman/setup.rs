@@ -212,12 +212,9 @@ async fn steps(cfg: &Config, rebuild: bool, restart_gateway: bool) -> Result<boo
         .await
         .map_err(BoundaryError::Other)?;
     std::fs::create_dir_all(Config::harness_state_dir())?;
-    // Sandboxes on no network reach the node through tunnels, and the node
-    // serves the allowlist itself: no internal network, allowlist file or
-    // gateway to keep. One left from before is not removed; nothing joins
-    // it.
-    if super::uses_sandbox_tunnels(cfg) {
-        return Ok(built || fetched);
+    if let GatewayPlan::Retire(gateway) = gateway_plan(cfg) {
+        let retired = retire_gateway(&SystemHost, &gateway).await?;
+        return Ok(built || fetched || retired);
     }
     let created = ensure_network(cfg).await?;
     let rewritten = write_allowlist(cfg)?;
@@ -617,6 +614,134 @@ async fn ensure_gateway(cfg: &Config, restart: bool) -> Result<bool, BoundaryErr
     Ok(true)
 }
 
+/// What a converge does about the gateway.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GatewayPlan {
+    /// Make it, or keep the one that is current.
+    Keep,
+    /// Sandboxes on no network reach the node through tunnels, and the node
+    /// serves the allowlist itself: no internal network or gateway to keep.
+    /// A boot without tunnels left this node's running under its own unit,
+    /// which nothing else would stop.
+    Retire(RetiredGateway),
+}
+
+pub fn gateway_plan(cfg: &Config) -> GatewayPlan {
+    match super::uses_sandbox_tunnels(cfg) {
+        true => GatewayPlan::Retire(retired_gateway(cfg)),
+        false => GatewayPlan::Keep,
+    }
+}
+
+/// The gateway objects a node with `sandbox_tunnels` removes: its own unit,
+/// container and internal network, as its configuration names them. `None`
+/// where the name is the default node's and this node has a prefix of its
+/// own: a scratch node left on the default names must not take down the
+/// gateway of the node beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetiredGateway {
+    pub unit: Option<String>,
+    pub container: Option<String>,
+    pub network: Option<String>,
+}
+
+fn retired_gateway(cfg: &Config) -> RetiredGateway {
+    let own_prefix = cfg.boundary.resource_prefix != crate::config::DEFAULT_RESOURCE_PREFIX;
+    let ours = |name: String, default: &str| {
+        (!name.is_empty() && !(own_prefix && name == default)).then_some(name)
+    };
+    RetiredGateway {
+        unit: ours(gateway_unit(cfg), GATEWAY_UNIT),
+        container: ours(cfg.boundary.gateway_container.clone(), DEFAULT_GATEWAY),
+        network: ours(cfg.boundary.network.clone(), DEFAULT_NETWORK),
+    }
+}
+
+/// The default internal network.
+const DEFAULT_NETWORK: &str = "tracon-int";
+
+/// What retiring a gateway runs on: podman, the user manager, and where a
+/// unit's file is.
+#[async_trait::async_trait]
+pub(crate) trait GatewayHost: Send + Sync {
+    async fn podman(&self, args: &[&str]) -> Result<String, BoundaryError>;
+    async fn systemctl(&self, args: &[&str]) -> Result<(), BoundaryError>;
+    fn unit_file(&self, unit: &str) -> Option<std::path::PathBuf>;
+}
+
+struct SystemHost;
+
+#[async_trait::async_trait]
+impl GatewayHost for SystemHost {
+    async fn podman(&self, args: &[&str]) -> Result<String, BoundaryError> {
+        podman(args).await
+    }
+    async fn systemctl(&self, args: &[&str]) -> Result<(), BoundaryError> {
+        systemctl(args).await
+    }
+    fn unit_file(&self, unit: &str) -> Option<std::path::PathBuf> {
+        unit_path(unit).filter(|_| !cfg!(target_os = "macos"))
+    }
+}
+
+/// Stop, disable and remove the gateway's unit, then remove its container and
+/// network, whichever of them are still there. Turning tunnels off again makes
+/// all three anew. `Ok(true)` when it removed anything, which is logged once:
+/// the next converge finds nothing left to remove.
+pub(crate) async fn retire_gateway(
+    host: &dyn GatewayHost,
+    gateway: &RetiredGateway,
+) -> Result<bool, BoundaryError> {
+    let mut removed: Vec<String> = Vec::new();
+    if let Some(unit) = &gateway.unit {
+        if let Some(path) = host.unit_file(unit).filter(|path| path.exists()) {
+            // Stopping runs the unit's `ExecStop`, which removes its
+            // container. A host whose user manager is gone still loses the
+            // file, so nothing starts it at the next login.
+            if let Err(error) = host.systemctl(&["disable", "--now", unit]).await {
+                tracing::warn!(%unit, %error, "could not stop the gateway's unit");
+            }
+            std::fs::remove_file(&path)?;
+            host.systemctl(&["daemon-reload"]).await?;
+            removed.push(unit.clone());
+        }
+    }
+    if let Some(container) = &gateway.container {
+        // Only a container the node made as its gateway, whatever the
+        // configuration calls it.
+        let format = format!("{{{{ index .Config.Labels \"{GATEWAY_LABEL}\" }}}}");
+        let made = host
+            .podman(&["container", "inspect", "--format", &format, container])
+            .await
+            .ok()
+            .and_then(|out| label_value(&out));
+        if made.is_some() {
+            host.podman(&["rm", "-f", "-i", container]).await?;
+            removed.push(container.clone());
+        }
+    }
+    if let Some(network) = &gateway.network {
+        if host.podman(&["network", "exists", network]).await.is_ok() {
+            // Never forced: that would remove whatever is still on it.
+            match host.podman(&["network", "rm", network]).await {
+                Ok(_) => removed.push(network.clone()),
+                Err(error) => tracing::warn!(
+                    %network,
+                    %error,
+                    "left the gateway's network, which something is still on; the next setup removes it"
+                ),
+            }
+        }
+    }
+    if !removed.is_empty() {
+        tracing::info!(
+            removed = %removed.join(", "),
+            "sandboxes reach the node through tunnels; removed the gateway they no longer use"
+        );
+    }
+    Ok(!removed.is_empty())
+}
+
 /// What `recover_gateway` did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Recovery {
@@ -676,10 +801,14 @@ pub async fn recover_gateway(cfg: &Config) -> Result<Recovery, BoundaryError> {
 
 /// Where the gateway's unit goes: beside the node's own.
 fn gateway_unit_path(cfg: &Config) -> Option<std::path::PathBuf> {
+    unit_path(&gateway_unit(cfg))
+}
+
+fn unit_path(unit: &str) -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").map(|home| {
         std::path::PathBuf::from(home)
             .join(".config/systemd/user")
-            .join(gateway_unit(cfg))
+            .join(unit)
     })
 }
 
@@ -811,6 +940,193 @@ fn systemd_quote(word: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// A host holding some of a gateway: a unit file in a directory of the
+    /// test's own, containers that carry the gateway's label, and networks.
+    struct FakeHost {
+        units: tempfile::TempDir,
+        containers: Mutex<Vec<String>>,
+        networks: Mutex<Vec<String>>,
+        /// Networks something is still on.
+        busy: Vec<String>,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl FakeHost {
+        fn new(unit: Option<&str>, containers: &[&str], networks: &[&str]) -> FakeHost {
+            let units = tempfile::tempdir().unwrap();
+            if let Some(unit) = unit {
+                std::fs::write(units.path().join(unit), "[Service]\n").unwrap();
+            }
+            FakeHost {
+                units,
+                containers: Mutex::new(containers.iter().map(|c| c.to_string()).collect()),
+                networks: Mutex::new(networks.iter().map(|n| n.to_string()).collect()),
+                busy: Vec::new(),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl GatewayHost for FakeHost {
+        async fn podman(&self, args: &[&str]) -> Result<String, BoundaryError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("podman {}", args.join(" ")));
+            let missing = || Err(BoundaryError::Podman("no such object".into()));
+            match args {
+                ["container", "inspect", .., name] => {
+                    match self.containers.lock().unwrap().iter().any(|c| c == name) {
+                        true => Ok("0123abcd\n".into()),
+                        false => missing(),
+                    }
+                }
+                ["rm", "-f", "-i", name] => {
+                    self.containers.lock().unwrap().retain(|c| c != name);
+                    Ok(String::new())
+                }
+                ["network", "exists", name] => {
+                    match self.networks.lock().unwrap().iter().any(|n| n == name) {
+                        true => Ok(String::new()),
+                        false => missing(),
+                    }
+                }
+                ["network", "rm", name] if self.busy.iter().any(|n| n == name) => Err(
+                    BoundaryError::Podman(format!("network {name} is being used")),
+                ),
+                ["network", "rm", name] => {
+                    self.networks.lock().unwrap().retain(|n| n != name);
+                    Ok(String::new())
+                }
+                other => panic!("unexpected podman {other:?}"),
+            }
+        }
+        async fn systemctl(&self, args: &[&str]) -> Result<(), BoundaryError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("systemctl {}", args.join(" ")));
+            // Stopping the unit runs its `ExecStop`, which removes the
+            // container it ran.
+            if args.first() == Some(&"disable") {
+                self.containers.lock().unwrap().clear();
+            }
+            Ok(())
+        }
+        fn unit_file(&self, unit: &str) -> Option<std::path::PathBuf> {
+            Some(self.units.path().join(unit))
+        }
+    }
+
+    fn tunnels(prefix: &str, gateway: &str, network: &str) -> Config {
+        let mut cfg: Config =
+            toml::from_str("[runtime.podman]\nsandbox_protocol = true\nsandbox_tunnels = true\n")
+                .unwrap();
+        cfg.boundary.resource_prefix = prefix.into();
+        cfg.boundary.gateway_container = gateway.into();
+        cfg.boundary.network = network.into();
+        cfg
+    }
+
+    #[test]
+    fn a_converge_with_tunnels_retires_the_gateway_and_one_without_keeps_it() {
+        assert_eq!(gateway_plan(&Config::default()), GatewayPlan::Keep);
+        let on = tunnels("tracon", "tracon-gw", "tracon-int");
+        if !cfg!(target_os = "linux") {
+            // Tunnels need the sandbox protocol, which needs a Linux host.
+            assert_eq!(gateway_plan(&on), GatewayPlan::Keep);
+            return;
+        }
+        assert_eq!(
+            gateway_plan(&on),
+            GatewayPlan::Retire(RetiredGateway {
+                unit: Some(GATEWAY_UNIT.into()),
+                container: Some("tracon-gw".into()),
+                network: Some("tracon-int".into()),
+            })
+        );
+        // A second node retires its own, by the names it gave them.
+        assert_eq!(
+            gateway_plan(&tunnels("spike-a4", "spike-a4-gw", "spike-a4-int")),
+            GatewayPlan::Retire(RetiredGateway {
+                unit: Some("tracon-gateway-spike-a4-gw.service".into()),
+                container: Some("spike-a4-gw".into()),
+                network: Some("spike-a4-int".into()),
+            })
+        );
+        // One that kept the default names never takes the default node's.
+        assert_eq!(
+            gateway_plan(&tunnels("spike-a4", "tracon-gw", "tracon-int")),
+            GatewayPlan::Retire(RetiredGateway {
+                unit: None,
+                container: None,
+                network: None,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn retiring_the_gateway_stops_its_unit_and_removes_what_is_left_once() {
+        let unit = "tracon-gateway-spike-a4-gw.service";
+        let host = FakeHost::new(Some(unit), &["spike-a4-gw"], &["spike-a4-int"]);
+        let gateway = RetiredGateway {
+            unit: Some(unit.into()),
+            container: Some("spike-a4-gw".into()),
+            network: Some("spike-a4-int".into()),
+        };
+        assert!(retire_gateway(&host, &gateway).await.unwrap());
+        assert!(!host.units.path().join(unit).exists(), "unit file removed");
+        assert!(host.containers.lock().unwrap().is_empty());
+        assert!(host.networks.lock().unwrap().is_empty());
+        let calls = host.calls();
+        assert_eq!(calls[0], format!("systemctl disable --now {unit}"));
+        assert_eq!(calls[1], "systemctl daemon-reload");
+        assert!(calls.contains(&"podman network rm spike-a4-int".to_string()));
+
+        // Nothing left: nothing changes, nothing is said again.
+        host.calls.lock().unwrap().clear();
+        assert!(!retire_gateway(&host, &gateway).await.unwrap());
+        assert!(host
+            .calls()
+            .iter()
+            .all(|c| !c.contains(" rm ") && !c.starts_with("systemctl")));
+    }
+
+    #[tokio::test]
+    async fn a_bare_gateway_goes_and_a_network_still_in_use_stays() {
+        // An older setup's gateway, a plain container with no unit, and a
+        // session from before still on the network.
+        let mut host = FakeHost::new(None, &["tracon-gw"], &["tracon-int"]);
+        host.busy = vec!["tracon-int".into()];
+        let gateway = RetiredGateway {
+            unit: Some(GATEWAY_UNIT.into()),
+            container: Some("tracon-gw".into()),
+            network: Some("tracon-int".into()),
+        };
+        assert!(retire_gateway(&host, &gateway).await.unwrap());
+        assert!(host.containers.lock().unwrap().is_empty());
+        assert_eq!(host.networks.lock().unwrap().clone(), ["tracon-int"]);
+        assert!(!host.calls().iter().any(|c| c.starts_with("systemctl")));
+        assert!(!host.calls().iter().any(|c| c.contains("network rm -f")));
+
+        // Names it was told to leave are never asked about.
+        let host = FakeHost::new(Some(GATEWAY_UNIT), &["tracon-gw"], &["tracon-int"]);
+        let left = RetiredGateway {
+            unit: None,
+            container: None,
+            network: None,
+        };
+        assert!(!retire_gateway(&host, &left).await.unwrap());
+        assert!(host.calls().is_empty());
+        assert!(host.units.path().join(GATEWAY_UNIT).exists());
+    }
 
     #[test]
     fn the_gateway_unit_runs_it_in_its_own_cgroup_and_restarts_it() {

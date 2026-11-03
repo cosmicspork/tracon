@@ -175,6 +175,19 @@ test('the start line says which image the harness is in only when it matters', (
   )
   expect(sessionImage({ image: null, image_note: null })).toBe('')
   expect(sessionImage({})).toBe('')
+  // With harnesses from the bundle: the stock base, a repository's image, or
+  // the snapshot prepared from one.
+  const base = 'ghcr.io/cosmicspork/tracon-sandbox-base@sha256:abc'
+  expect(sessionImage({ image: base, image_source: 'stock base' })).toBe('')
+  expect(sessionImage({ image: base, image_source: 'stock base', image_note: 'no builder' })).toBe(
+    ' · on the stock base: no builder',
+  )
+  expect(sessionImage({ image: 'repo@sha256:abc', image_source: 'repository image' })).toBe(
+    " · in the repository's image",
+  )
+  expect(
+    sessionImage({ image: 'localhost/tracon-snapshot-app@sha256:d6cc', image_source: 'prepared snapshot' }),
+  ).toBe(" · from the repository's prepared snapshot")
 })
 
 test('the repetition hint stands only until the harness moves on', () => {

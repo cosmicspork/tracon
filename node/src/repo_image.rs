@@ -818,11 +818,42 @@ pub struct SessionImage {
     pub note: Option<String>,
 }
 
+/// `image_source` for a session from the bundle on the release's own base.
+pub const STOCK_BASE: &str = "stock base";
+
 impl SessionImage {
-    pub fn source(&self) -> &'static str {
-        match self.image {
-            Some(_) => "repository image",
-            None => "harness image",
+    /// The one `image_source` a session reports. With the harness from the
+    /// bundle there is no harness image: a session with no image of its own
+    /// runs on the stock base, and one in an image other than its toolchain
+    /// runs from the snapshot prepared in that toolchain.
+    pub fn source(&self, cfg: &Config) -> &'static str {
+        if !crate::sandbox_images::bundled(cfg) {
+            return match self.image {
+                Some(_) => "repository image",
+                None => "harness image",
+            };
+        }
+        match (&self.image, &self.toolchain_image) {
+            (None, _) => STOCK_BASE,
+            (Some(image), Some(toolchain)) if image != toolchain => {
+                crate::sandbox_images::SNAPSHOT_SOURCE
+            }
+            (Some(image), _) if *image == crate::sandbox_images::base_image(cfg) => STOCK_BASE,
+            (Some(_), _) => "repository image",
+        }
+    }
+
+    pub fn from_snapshot(&self, cfg: &Config) -> bool {
+        self.source(cfg) == crate::sandbox_images::SNAPSHOT_SOURCE
+    }
+
+    /// The image a session reports it runs in: the stock base, where a
+    /// session from the bundle has none of its own.
+    pub fn reported(&self, cfg: &Config) -> Option<String> {
+        match (&self.image, crate::sandbox_images::bundled(cfg)) {
+            (Some(image), _) => Some(image.clone()),
+            (None, true) => Some(crate::sandbox_images::base_image(cfg)),
+            (None, false) => None,
         }
     }
 
@@ -2724,6 +2755,49 @@ mod tests {
         claude_as(image, RunAs::Root)
     }
 
+    /// What `session_started` says a session runs in, on each kind of node.
+    #[test]
+    fn a_session_reports_the_image_it_runs_in_and_where_that_came_from() {
+        let image = |image: &str, toolchain: &str| SessionImage {
+            image: Some(image.into()),
+            toolchain_image: Some(toolchain.into()),
+            note: None,
+        };
+        let layered = image("localhost/tracon-session-claude-1", BASE_IMAGE);
+        let podman = Config::default();
+        assert_eq!(SessionImage::default().source(&podman), "harness image");
+        assert_eq!(SessionImage::default().reported(&podman), None);
+        assert_eq!(layered.source(&podman), "repository image");
+
+        let mut sandboxed: Config =
+            toml::from_str("[runtime.podman]\nsandbox_protocol = true\nsandbox_images = true\n")
+                .unwrap();
+        let mut apple = Config::default();
+        apple.runtime.kind = crate::config::RuntimeKind::Apple;
+        sandboxed.sandbox.base_image = Some("ghcr.io/x/tracon-sandbox-base:1".into());
+        let mut bundled = vec![apple];
+        // Podman runs harnesses from the bundle only over the protocol.
+        if cfg!(target_os = "linux") {
+            bundled.push(sandboxed);
+        }
+        let snapshot = "localhost/tracon-snapshot-app-1@sha256:d6cc";
+        for cfg in &bundled {
+            let base = crate::sandbox_images::base_image(cfg);
+            let none = SessionImage::default();
+            assert_eq!(none.source(cfg), STOCK_BASE);
+            assert_eq!(none.reported(cfg), Some(base.clone()));
+            assert_eq!(image(&base, &base).source(cfg), STOCK_BASE);
+            assert_eq!(
+                image(BASE_IMAGE, BASE_IMAGE).source(cfg),
+                "repository image"
+            );
+            let prepared = image(snapshot, BASE_IMAGE);
+            assert_eq!(prepared.source(cfg), "prepared snapshot");
+            assert_eq!(prepared.reported(cfg).as_deref(), Some(snapshot));
+            assert_eq!(image(snapshot, &base).source(cfg), "prepared snapshot");
+        }
+    }
+
     fn claude_as(image: &str, run_as: RunAs) -> SessionHarness<'static> {
         SessionHarness {
             id: "claude",
@@ -2760,7 +2834,7 @@ mod tests {
         let image = first.image.clone().expect("the session image is built");
         assert_eq!(first.toolchain_image.as_deref(), Some(BASE_IMAGE));
         assert_eq!(first.note, None);
-        assert_eq!(first.source(), "repository image");
+        assert_eq!(first.source(&Config::default()), "repository image");
         // Proven in the image that was built, not in the harness's own.
         assert_eq!(
             runner.ran_in.lock().unwrap().as_slice(),
@@ -2825,7 +2899,7 @@ mod tests {
             let got =
                 ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
             assert_eq!(got.image, None, "{says}");
-            assert_eq!(got.source(), "harness image");
+            assert_eq!(got.source(&Config::default()), "harness image");
             assert!(got.note.unwrap().contains("does not run"), "{says}");
             let row = store
                 .latest_repo_image("/src/musl-app", "session:claude")
