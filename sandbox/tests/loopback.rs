@@ -374,6 +374,130 @@ async fn the_node_refuses_a_hostile_export_and_the_sandbox_a_hostile_import() {
     assert!(sandbox.finish().await.success());
 }
 
+/// What a preparation leaves: a cache whose absolute links name places in
+/// itself (bun's), and a virtualenv whose interpreter is the image's.
+#[tokio::test]
+async fn a_prepared_trees_links_cross_and_are_never_followed() {
+    let sandbox = start().await;
+    let work = support::scratch();
+    let prepared = Limits {
+        inert_links: true,
+        ..Limits::default()
+    };
+    let refused = |result: &Result<_, SandboxError>| {
+        matches!(
+            result,
+            Err(SandboxError::Files(
+                tracon_sandbox::files::FilesError::Unsafe(_)
+            ))
+        )
+    };
+
+    // An absolute link inside the tree, read against where it is mounted,
+    // is one inside, for a checkout too.
+    let cache = work.path().join("cache");
+    std::fs::create_dir_all(cache.join("bun/x@1@@@1")).unwrap();
+    std::fs::create_dir_all(cache.join("bun/x")).unwrap();
+    std::os::unix::fs::symlink(cache.join("bun/x@1@@@1"), cache.join("bun/x/1@@@1")).unwrap();
+    let back = work.path().join("cache-back");
+    sandbox
+        .conn
+        .export_tar(&cache, Exclusions::None, &back, Limits::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_link(back.join("bun/x/1@@@1")).unwrap(),
+        cache.join("bun/x@1@@@1")
+    );
+    // Sent in elsewhere, the same link names a place outside it.
+    let elsewhere = work.path().join("elsewhere");
+    let result = sandbox
+        .conn
+        .import_dir(&back, &elsewhere, Exclusions::None)
+        .await;
+    assert!(
+        matches!(result, Err(SandboxError::Remote { .. })),
+        "{result:?}"
+    );
+    // Back where it was mounted, it is inside again.
+    std::fs::remove_dir_all(&cache).unwrap();
+    sandbox
+        .conn
+        .import_dir(&back, &cache, Exclusions::None)
+        .await
+        .unwrap();
+    assert!(cache.join("bun/x/1@@@1").is_dir());
+
+    // A link that leaves crosses as a link in a prepared tree, either way,
+    // and refuses a checkout.
+    let venv = work.path().join("work");
+    std::fs::create_dir_all(venv.join(".venv/bin")).unwrap();
+    std::os::unix::fs::symlink("/usr/bin/python3", venv.join(".venv/bin/python")).unwrap();
+    let strict = work.path().join("strict");
+    let result = sandbox
+        .conn
+        .export_tar(&venv, Exclusions::None, &strict, Limits::default())
+        .await;
+    assert!(refused(&result), "{result:?}");
+    assert!(!strict.exists());
+    let kept = work.path().join("kept");
+    let summary = sandbox
+        .conn
+        .export_tar(&venv, Exclusions::None, &kept, prepared)
+        .await
+        .unwrap();
+    assert_eq!(summary.links, 1);
+    assert_eq!(
+        std::fs::read_link(kept.join(".venv/bin/python")).unwrap(),
+        Path::new("/usr/bin/python3")
+    );
+    let again = work.path().join("again");
+    sandbox
+        .conn
+        .import_dir_within(&kept, &again, Exclusions::None, Some(prepared))
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_link(again.join(".venv/bin/python")).unwrap(),
+        Path::new("/usr/bin/python3")
+    );
+    let result = sandbox
+        .conn
+        .import_dir(&kept, work.path().join("checkout"), Exclusions::None)
+        .await;
+    assert!(
+        matches!(result, Err(SandboxError::Remote { .. })),
+        "{result:?}"
+    );
+
+    // Nothing is written through one.
+    let outside = work.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut link = tar::Header::new_gnu();
+    link.set_entry_type(tar::EntryType::Symlink);
+    link.set_size(0);
+    builder.append_link(&mut link, "alias", &outside).unwrap();
+    let mut file = tar::Header::new_gnu();
+    file.set_entry_type(tar::EntryType::Regular);
+    file.set_mode(0o644);
+    file.set_size(1);
+    builder
+        .append_data(&mut file, "alias/planted", &b"x"[..])
+        .unwrap();
+    let through = builder.into_inner().unwrap();
+    let result = sandbox
+        .conn
+        .import_tar(work.path().join("through"), &through[..], Some(prepared))
+        .await;
+    assert!(
+        matches!(result, Err(SandboxError::Remote { .. })),
+        "{result:?}"
+    );
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    assert!(sandbox.finish().await.success());
+}
+
 async fn echo_server_tcp() -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();

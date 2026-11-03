@@ -13,6 +13,7 @@
 use std::collections::HashSet;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use super::{open_no_follow, FilesError};
 
@@ -28,6 +29,12 @@ pub fn kept_paths(root: &Path) -> Result<Option<HashSet<PathBuf>>, FilesError> {
     if !std::fs::symlink_metadata(&repository).is_ok_and(|m| m.is_dir()) {
         return Ok(None);
     }
+    let real_root = std::fs::canonicalize(root)?;
+    if !ignore_rules_inside(&real_root, root) {
+        return Err(FilesError::Unsafe(root.into()));
+    }
+    let outside = Arc::new(Mutex::new(None::<PathBuf>));
+    let seen = outside.clone();
     let mut keep = HashSet::new();
     let walk = ignore::WalkBuilder::new(root)
         .standard_filters(false)
@@ -35,7 +42,17 @@ pub fn kept_paths(root: &Path) -> Result<Option<HashSet<PathBuf>>, FilesError> {
         .git_exclude(true)
         .require_git(false)
         .follow_links(false)
-        .filter_entry(|entry| !entry.file_name().eq_ignore_ascii_case(".git"))
+        .filter_entry(move |entry| {
+            if entry.file_name().eq_ignore_ascii_case(".git") {
+                return false;
+            }
+            let dir = entry.file_type().is_some_and(|kind| kind.is_dir());
+            if dir && !ignore_rules_inside(&real_root, entry.path()) {
+                *seen.lock().unwrap() = Some(entry.path().to_path_buf());
+                return false;
+            }
+            true
+        })
         .build();
     for entry in walk {
         let entry = match entry {
@@ -51,6 +68,9 @@ pub fn kept_paths(root: &Path) -> Result<Option<HashSet<PathBuf>>, FilesError> {
             }
         }
     }
+    if let Some(dir) = outside.lock().unwrap().take() {
+        return Err(FilesError::Unsafe(dir));
+    }
     for tracked in tracked_paths(&repository)? {
         let mut path = tracked.as_path();
         while !path.as_os_str().is_empty() && keep.insert(path.to_path_buf()) {
@@ -58,6 +78,41 @@ pub fn kept_paths(root: &Path) -> Result<Option<HashSet<PathBuf>>, FilesError> {
         }
     }
     Ok(Some(keep))
+}
+
+/// Whether the ignore rules a walk reads in `dir` (its `.gitignore`, and
+/// `.git/info/exclude`) are, where a link leads to them, files inside
+/// `real_root`, the tree's canonical path. The walk opens them by path and
+/// so follows links, and a tree may hold links that leave it: a prepared
+/// tree's, or on the node an absolute one, which names the node's own
+/// filesystem there.
+pub fn ignore_rules_inside(real_root: &Path, dir: &Path) -> bool {
+    [&[".gitignore"][..], &[".git", "info", "exclude"]]
+        .iter()
+        .all(|names| {
+            let mut path = dir.to_path_buf();
+            let mut linked = false;
+            for name in *names {
+                path.push(name);
+                match std::fs::symlink_metadata(&path) {
+                    Ok(meta) => linked |= meta.file_type().is_symlink(),
+                    Err(_) => break,
+                }
+            }
+            if !linked {
+                return true;
+            }
+            // Resolved without opening anything, so a link to a device or a
+            // FIFO is never read.
+            match std::fs::canonicalize(&path) {
+                Ok(real) => {
+                    real.starts_with(real_root)
+                        && std::fs::metadata(&real).is_ok_and(|meta| meta.is_file())
+                }
+                // Nothing there for the walk to read either.
+                Err(_) => true,
+            }
+        })
 }
 
 fn read_git_file(path: &Path) -> Result<Option<Vec<u8>>, FilesError> {

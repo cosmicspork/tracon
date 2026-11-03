@@ -85,6 +85,7 @@ async fn a_hostile_archive_changes_nothing() {
         max_files: 3,
         max_dirs: 3,
         max_path_bytes: 64,
+        inert_links: false,
     };
     let cases: Vec<(&str, Vec<u8>, Limits)> = vec![
         (
@@ -174,6 +175,7 @@ async fn a_hostile_archive_changes_nothing() {
             .receive(
                 volume,
                 "",
+                "/work",
                 std::io::Cursor::new(bytes),
                 Mode::Whole,
                 limits,
@@ -207,6 +209,7 @@ async fn a_sync_is_never_written_through_a_link_in_the_store() {
         .receive(
             volume,
             "harness/run",
+            "/home/harness/run",
             std::io::Cursor::new(archive(|b| file(b, "journal", b"x"))),
             Mode::Whole,
             checkout_limits(),
@@ -232,6 +235,7 @@ async fn an_alias_is_never_written() {
         .receive(
             "tracon-check-1",
             "",
+            "/work",
             std::io::Cursor::new(archive(|b| file(b, "a", b"changed"))),
             Mode::Whole,
             checkout_limits(),
@@ -282,6 +286,7 @@ async fn a_checkout_comes_back_and_the_ignored_install_stays() {
         .receive(
             volume,
             "",
+            "/work",
             std::io::Cursor::new(bytes),
             Mode::Checkout,
             checkout_limits(),
@@ -318,6 +323,7 @@ async fn nested_mounts_are_never_taken_back() {
         .receive(
             volume,
             own,
+            "/home/harness/.agent",
             std::io::Cursor::new(bytes),
             Mode::Whole,
             checkout_limits(),

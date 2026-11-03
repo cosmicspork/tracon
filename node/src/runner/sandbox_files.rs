@@ -26,7 +26,8 @@
 //!   only ever holds its own session's state, so what comes back is its own
 //!   subtree by construction, and it is written only under that session's
 //!   volume, under the session's state fence;
-//! - a preparation's tree whole when it ends, since its install is the point.
+//! - a preparation's tree whole when it ends, since its install is the point:
+//!   a preparation whose tree does not come back has failed.
 //!
 //! **What a lost sandbox costs.** Each sync replaces the node's copy only
 //! once the whole archive has been received and checked, so a sandbox that
@@ -36,9 +37,11 @@
 //! **Nothing from the sandbox is trusted.** Every archive is unpacked by
 //! `tracon_sandbox::files::unpack` with the rules `workspace::validate_tree`
 //! holds a runtime's tree to (regular files, directories and links only; no
-//! absolute or climbing path; every link resolving inside the tree; nothing
-//! written through a link; bounded bytes, files and directories) into a
-//! staging directory, and only a tree that passed replaces anything. A
+//! absolute or climbing path; every link resolving inside the tree, an
+//! absolute one read against where the tree is mounted, except in a
+//! preparation's tree, whose links may leave it and are never followed;
+//! nothing written through a link; bounded bytes, files and directories)
+//! into a staging directory, and only a tree that passed replaces anything. A
 //! sandbox can say nothing about where its trees go: the node decides that
 //! from the mounts it gave the run.
 //!
@@ -71,12 +74,16 @@ pub const SYNC_EVERY: Duration = Duration::from_secs(60);
 const SYNC_WITHIN: Duration = Duration::from_secs(120);
 
 /// Bounds for a tree that carries what a preparation installed
-/// (`node_modules`, `vendor/`): a checkout's limits are far below it.
+/// (`node_modules`, `vendor/`): a checkout's limits are far below it. Its
+/// links may leave it (a virtualenv's interpreter is the image's), kept as
+/// links: the node never follows one, and a review or publication exports
+/// the checkout, whose links are held to stay inside.
 pub const PREPARED_LIMITS: Limits = Limits {
     max_bytes: 8 * 1024 * 1024 * 1024,
     max_files: 1_000_000,
     max_dirs: 500_000,
     max_path_bytes: 4096,
+    inert_links: true,
 };
 
 /// Bounds for a checkout and for harness state: the node's own import limits.
@@ -379,14 +386,16 @@ impl FilesStore {
     }
 
     /// Unpack an archive a sandbox sent of the tree it holds at
-    /// `volume`/`sub_path`, and make it the node's copy. Nothing is changed
-    /// unless the whole archive passes. `nested` are paths inside it that
-    /// other mounts provide, which the node sends at every start and never
-    /// takes back.
+    /// `volume`/`sub_path`, mounted at `target` in the sandbox, and make it
+    /// the node's copy. Nothing is changed unless the whole archive passes.
+    /// `nested` are paths inside it that other mounts provide, which the node
+    /// sends at every start and never takes back.
+    #[allow(clippy::too_many_arguments)]
     pub async fn receive<R>(
         &self,
         volume: &str,
         sub_path: &str,
+        target: &str,
         reader: R,
         mode: Mode,
         limits: Limits,
@@ -407,7 +416,8 @@ impl FilesStore {
         let dest = base.join(&relative);
         let staging = self.staging(volume);
         std::fs::create_dir(&staging)?;
-        let summary = match tree::unpack_async(reader, staging.clone(), limits).await {
+        let mount = Some(PathBuf::from(target));
+        let summary = match tree::unpack_async(reader, staging.clone(), mount, limits).await {
             Ok(summary) => summary,
             Err(error) => {
                 let _ = std::fs::remove_dir_all(&staging);
@@ -544,6 +554,11 @@ fn commit(
     nested: &[PathBuf],
 ) -> Result<(), FilesError> {
     for path in nested {
+        // Under a link, the path names what the link leads to, not a nested
+        // tree in this one.
+        if real_directories(staging, path).is_err() {
+            continue;
+        }
         let at = staging.join(path);
         match std::fs::symlink_metadata(&at) {
             Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&at)?,
@@ -796,6 +811,7 @@ impl Inner {
                 .receive(
                     &sync.volume,
                     &sync.sub_path,
+                    &sync.target,
                     reader,
                     sync.mode,
                     sync.limits,
@@ -812,33 +828,38 @@ impl Inner {
         Ok(())
     }
 
-    /// `sync`, bounded and logged rather than returned: a failed sync keeps
-    /// the node's last copy, which is what a caller could do about it.
-    async fn sync_logged(&self, why: &str) -> bool {
+    /// `sync`, bounded and logged: a failed sync keeps the node's last copy.
+    async fn sync_logged(&self, why: &str) -> Result<(), FilesError> {
         match tokio::time::timeout(SYNC_WITHIN, self.sync(why)).await {
-            Ok(Ok(())) => true,
+            Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => {
                 tracing::warn!(sandbox = %self.name, why, %error, "could not take the sandbox's trees back; the node keeps its last copy");
-                false
+                Err(error)
             }
             Err(_) => {
                 tracing::warn!(sandbox = %self.name, why, "taking the sandbox's trees back timed out; the node keeps its last copy");
-                false
+                Err(FilesError::Refused(format!(
+                    "taking the trees back took longer than {}s",
+                    SYNC_WITHIN.as_secs()
+                )))
             }
         }
     }
 
-    async fn finish(self: &Arc<Self>) {
+    /// The last sync, once: what it returns is only ever the first call's.
+    async fn finish(self: &Arc<Self>) -> Result<(), FilesError> {
         if self.finished.swap(true, Ordering::SeqCst) {
-            return;
+            return Ok(());
         }
         if let Some(periodic) = self.periodic.lock().unwrap().take() {
             periodic.abort();
         }
-        if !self.syncs.is_empty() {
-            self.sync_logged("exit").await;
-        }
+        let taken = match self.syncs.is_empty() {
+            true => Ok(()),
+            false => self.sync_logged("exit").await,
+        };
         unregister(self);
+        taken
     }
 }
 
@@ -854,7 +875,7 @@ async fn periodic(inner: std::sync::Weak<Inner>, conn: SandboxConn, every: Durat
             return;
         };
         if inner.turn.load(Ordering::SeqCst) {
-            inner.sync_logged("during a turn").await;
+            let _ = inner.sync_logged("during a turn").await;
         }
     }
 }
@@ -868,7 +889,13 @@ pub struct Attached {
 impl Attached {
     /// Take the trees back one last time and stop. Idempotent.
     pub async fn finish(&self) {
-        self.inner.finish().await;
+        let _ = self.inner.finish().await;
+    }
+
+    /// [`Self::finish`], saying whether that last take-back failed: a
+    /// preparation whose tree never came back has prepared nothing.
+    pub async fn conclude(&self) -> Result<(), FilesError> {
+        self.inner.finish().await
     }
 
     /// Take the trees back now, as a turn's end does.
@@ -933,7 +960,7 @@ pub fn turn_began(name: &str) {
 pub async fn turn_ended(name: &str) {
     if let Some(inner) = named(name) {
         inner.turn.store(false, Ordering::SeqCst);
-        inner.sync_logged("turn end").await;
+        let _ = inner.sync_logged("turn end").await;
     }
 }
 
@@ -941,7 +968,7 @@ pub async fn turn_ended(name: &str) {
 /// first.
 pub async fn finish_named(name: &str) {
     if let Some(inner) = named(name) {
-        inner.finish().await;
+        let _ = inner.finish().await;
     }
 }
 

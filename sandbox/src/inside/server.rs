@@ -223,8 +223,10 @@ async fn route(
                 .await
                 .map_err(|e| Failure(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
             let reader = H2Reader::new(request.into_body());
+            let mount = Some(import.dir.clone());
             let summary =
-                files::unpack_async(reader, import.dir, import.limits.unwrap_or_default()).await?;
+                files::unpack_async(reader, import.dir, mount, import.limits.unwrap_or_default())
+                    .await?;
             reply_ok(respond, &summary);
         }
         (&Method::GET, path::EXPORT) => {

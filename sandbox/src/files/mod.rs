@@ -6,10 +6,15 @@
 //! tree from a runtime to (`workspace::validate_tree`): only regular files,
 //! directories and symbolic links; every path relative and inside the
 //! destination; every link resolving inside the tree by the same rule as
-//! `link_stays_inside`; nothing written through a link; and a bounded number
+//! `link_stays_inside`, or naming a place in it by the absolute path the tree
+//! is at in the sandbox; nothing written through a link; and a bounded number
 //! of entries and bytes. What crosses is what Git records of a file: its
 //! bytes, whether it is executable, and a link as a link. Owners, other mode
 //! bits, extended attributes and devices never do.
+//!
+//! A prepared tree (a virtualenv, a package cache) may also keep links that
+//! leave it ([`Limits::inert_links`]): stored as links, and never followed
+//! here, by the node, or by any copy the node makes of the tree.
 
 mod checkout;
 
@@ -23,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::io::SyncIoBridge;
 
-pub use checkout::kept_paths;
+pub use checkout::{ignore_rules_inside, kept_paths};
 
 use crate::protocol::{Exclusions, TreeSummary};
 
@@ -59,6 +64,13 @@ pub struct Limits {
     pub max_dirs: usize,
     /// The longest relative path, in bytes.
     pub max_path_bytes: usize,
+    /// Keep a link whose target leaves the tree as a link rather than refuse
+    /// the archive: what a preparation leaves (`.venv/bin/python` naming the
+    /// image's interpreter) is its point, and nothing that unpacks, copies or
+    /// exports a tree follows one. Never for a checkout: review and
+    /// publication hold those to links that stay inside.
+    #[serde(default)]
+    pub inert_links: bool,
 }
 
 impl Default for Limits {
@@ -69,6 +81,7 @@ impl Default for Limits {
             max_files: 20_000,
             max_dirs: 20_000,
             max_path_bytes: 4096,
+            inert_links: false,
         }
     }
 }
@@ -99,6 +112,32 @@ pub fn link_stays_inside(target: &Path, depth: usize) -> bool {
         }
     }
     true
+}
+
+/// [`link_stays_inside`], or an absolute target under `mount` (the absolute
+/// path the tree is at in the sandbox) that stays inside read from the root:
+/// bun's cache, mounted at `/cache`, links `/cache/bun/x/1@@@1` to
+/// `/cache/bun/x@1@@@1`.
+pub fn link_resolves_inside(target: &Path, depth: usize, mount: Option<&Path>) -> bool {
+    if link_stays_inside(target, depth) {
+        return true;
+    }
+    let Some(mount) = mount.filter(|mount| plain_absolute(mount)) else {
+        return false;
+    };
+    match target.strip_prefix(mount) {
+        Ok(rest) => rest.as_os_str().is_empty() || link_stays_inside(rest, 0),
+        Err(_) => false,
+    }
+}
+
+/// An absolute path of one or more plain names: at `/`, every absolute
+/// target would be one inside.
+fn plain_absolute(path: &Path) -> bool {
+    let mut components = path.components();
+    components.next() == Some(Component::RootDir)
+        && components.clone().next().is_some()
+        && components.all(|c| matches!(c, Component::Normal(_)))
 }
 
 fn file_mode(mode: u32) -> u32 {
@@ -251,6 +290,7 @@ fn entry_path(raw: &[u8]) -> Option<PathBuf> {
 
 struct Unpacker<'a> {
     root: &'a Path,
+    mount: Option<&'a Path>,
     limits: &'a Limits,
     summary: TreeSummary,
 }
@@ -362,7 +402,7 @@ impl Unpacker<'_> {
                 use std::os::unix::ffi::OsStrExt as _;
                 let link = PathBuf::from(std::ffi::OsStr::from_bytes(&link));
                 let depth = relative.components().count() - 1;
-                if !link_stays_inside(&link, depth) {
+                if !self.limits.inert_links && !link_resolves_inside(&link, depth, self.mount) {
                     return Err(FilesError::Unsafe(relative));
                 }
                 self.ensure_dirs(parent)?;
@@ -382,10 +422,17 @@ impl Unpacker<'_> {
 }
 
 /// Unpack an archive into `dest`, an existing directory, by the rules above.
-/// Entries may overwrite files and links already there, never a directory,
-/// and never through a link. On error what was unpacked so far stays: the
-/// caller unpacks into a directory of its own and discards it on failure.
-pub fn unpack<R: Read>(reader: R, dest: &Path, limits: &Limits) -> Result<TreeSummary, FilesError> {
+/// `mount` is where the tree is in the sandbox (`dest` itself, unpacking
+/// there), which an absolute link is read against. Entries may overwrite
+/// files and links already there, never a directory, and never through a
+/// link. On error what was unpacked so far stays: the caller unpacks into a
+/// directory of its own and discards it on failure.
+pub fn unpack<R: Read>(
+    reader: R,
+    dest: &Path,
+    mount: Option<&Path>,
+    limits: &Limits,
+) -> Result<TreeSummary, FilesError> {
     let metadata = std::fs::symlink_metadata(dest)?;
     if !metadata.is_dir() {
         return Err(FilesError::NotADirectory(dest.into()));
@@ -393,6 +440,7 @@ pub fn unpack<R: Read>(reader: R, dest: &Path, limits: &Limits) -> Result<TreeSu
     let mut archive = tar::Archive::new(reader);
     let mut unpacker = Unpacker {
         root: dest,
+        mount,
         limits,
         summary: TreeSummary::default(),
     };
@@ -454,13 +502,14 @@ where
 pub async fn unpack_async<R>(
     reader: R,
     dest: PathBuf,
+    mount: Option<PathBuf>,
     limits: Limits,
 ) -> Result<TreeSummary, FilesError>
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
     let bridge = SyncIoBridge::new(reader);
-    tokio::task::spawn_blocking(move || unpack(bridge, &dest, &limits))
+    tokio::task::spawn_blocking(move || unpack(bridge, &dest, mount.as_deref(), &limits))
         .await
         .map_err(|e| FilesError::Io(io::Error::other(e)))?
 }

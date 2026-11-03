@@ -154,6 +154,14 @@ fn overlay_checkout(source: &Path, destination: &Path) -> Result<(), WorkspaceEr
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(WorkspaceError::Unsafe(source.into()));
     }
+    // The walk reads each directory's ignore rules by path, through any link,
+    // and a prepared tree's links may lead anywhere on the node.
+    let real_root = std::fs::canonicalize(source)?;
+    if !tracon_sandbox::files::ignore_rules_inside(&real_root, source) {
+        return Err(WorkspaceError::Unsafe(source.into()));
+    }
+    let outside = std::sync::Arc::new(std::sync::Mutex::new(None::<PathBuf>));
+    let seen = outside.clone();
     let mut keep = std::collections::HashSet::new();
     let walk = ignore::WalkBuilder::new(source)
         .standard_filters(false)
@@ -161,7 +169,17 @@ fn overlay_checkout(source: &Path, destination: &Path) -> Result<(), WorkspaceEr
         .git_exclude(true)
         .require_git(false)
         .follow_links(false)
-        .filter_entry(|entry| !entry.file_name().eq_ignore_ascii_case(".git"))
+        .filter_entry(move |entry| {
+            if entry.file_name().eq_ignore_ascii_case(".git") {
+                return false;
+            }
+            let dir = entry.file_type().is_some_and(|kind| kind.is_dir());
+            if dir && !tracon_sandbox::files::ignore_rules_inside(&real_root, entry.path()) {
+                *seen.lock().unwrap() = Some(entry.path().to_path_buf());
+                return false;
+            }
+            true
+        })
         .build();
     for entry in walk {
         let entry = match entry {
@@ -174,6 +192,9 @@ fn overlay_checkout(source: &Path, destination: &Path) -> Result<(), WorkspaceEr
         if let Ok(relative) = entry.path().strip_prefix(source) {
             keep.insert(relative.to_path_buf());
         }
+    }
+    if let Some(dir) = outside.lock().unwrap().take() {
+        return Err(WorkspaceError::Unsafe(dir));
     }
     // A linked worktree's `.git` is a file naming an index elsewhere; its
     // walk alone decides, as before.
@@ -514,6 +535,9 @@ fn copy_dir(
         Err(error) if vanished(&error) => return Ok(()),
         Err(error) => return Err(error.into()),
     };
+    // A copy over a tree that holds a link here (a prepared tree's may lead
+    // anywhere) replaces the link rather than filling what it leads to.
+    replace_leaf(destination)?;
     std::fs::create_dir_all(destination)?;
     for entry in entries {
         let entry = match entry {
