@@ -110,7 +110,12 @@ async fn a_build_is_tagged_and_reported_by_digest() {
     assert!(b.exists(&pinned).await);
     assert!(b.exists("localhost:5000/tracon-repo-x:abc").await);
     assert!(!b.exists("tracon-repo-y:abc").await);
-    assert_eq!(b.presence("tracon-repo-y:abc").await, Presence::Absent);
+    // `container` runs only on macOS; anywhere else nothing can say.
+    let expected = match cfg!(target_os = "macos") {
+        true => Presence::Absent,
+        false => Presence::Unknown,
+    };
+    assert_eq!(b.presence("tracon-repo-y:abc").await, expected);
 }
 
 #[tokio::test]
