@@ -15,11 +15,13 @@
 #   tracon-browser-<version>-<arch>.tar.gz          entries rooted at <version>/<arch>/
 #   tracon-browser-<version>-<arch>.tar.gz.sha256
 #
-# <version> is Chrome's. A catalogue entry points at one <version>/<arch>:
+# <version> is Chrome's. A catalogue entry runs the release's, which the node
+# fetches and checks itself (node/src/service_bundle.rs reads <version> from
+# the same FROM line at build time), or points at one <version>/<arch>:
 #
 #   [[service]]
 #   name = "browser"
-#   bundle = "/path/to/<version>/<arch>"
+#   bundle = "release"                    # or "/path/to/<version>/<arch>"
 #   port = 9222
 #   ready = "/json/version"
 #

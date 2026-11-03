@@ -2393,7 +2393,7 @@
         "kind": "string",
         "optional": true
       },
-      "why_not": "is a directory of binaries mounted into every sandbox, which Podman relabels for containers when it mounts it, so it is changed at the node, not from elsewhere"
+      "why_not": "is a directory of binaries mounted into every sandbox (or `release`, the browser bundle the node fetches for its release), which Podman relabels for containers when it mounts it, so it is changed at the node, not from elsewhere"
     },
     {
       "admin": true,

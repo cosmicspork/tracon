@@ -102,7 +102,9 @@ pub struct Sandbox {
     /// Where the node fetches its harness bundle from, with
     /// `[runtime.podman] sandbox_images` on and no `bundle` set:
     /// `<release_url>/v<version>/tracon-bundle-<version>-<arch>.tar.gz` and
-    /// its `.sha256`. Unset, this project's GitHub releases.
+    /// its `.sha256`; and a `[[service]]` with `bundle = "release"`, its
+    /// `tracon-browser-<chrome>-<arch>.tar.gz` beside them. Unset, this
+    /// project's GitHub releases.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub release_url: Option<String>,
 }
@@ -287,10 +289,13 @@ pub struct Service {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub command: Vec<String>,
     /// A directory of binaries for this host's architecture (one
-    /// `<version>/<arch>` of `scripts/browser-bundle.sh`'s output, say).
-    /// With `[runtime.podman] sandbox_services`, it is mounted read-only at
-    /// `/opt/tracon-services/<name>` in every sandbox, and the service runs
-    /// there under the sandbox's supervisor instead of in `image`.
+    /// `<version>/<arch>` of `scripts/browser-bundle.sh`'s output, say), or
+    /// `release` on `browser`: the browser bundle of the node's own release,
+    /// which the node fetches and checks (`crate::service_bundle`).
+    /// With `[runtime.podman] sandbox_services` (and on Apple), it is mounted
+    /// read-only at `/opt/tracon-services/<name>` in every sandbox, and the
+    /// service runs there under the sandbox's supervisor instead of in
+    /// `image`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bundle: Option<PathBuf>,
     /// With `bundle`: what the supervisor starts, inside the sandbox.
@@ -386,8 +391,18 @@ pub fn validate_services(services: &[Service]) -> Result<(), String> {
             (None, true) => {
                 return Err(format!("service {name}: needs an image or a bundle"));
             }
+            (Some(bundle), _) if bundle.as_os_str() == crate::service_bundle::RELEASE => {
+                if name != crate::service_bundle::BROWSER {
+                    return Err(format!(
+                        "service {name}: bundle = \"release\" is the release's browser bundle, \
+                         and only a service named browser runs it"
+                    ));
+                }
+            }
             (Some(bundle), _) if !bundle.is_absolute() => {
-                return Err(format!("service {name}: bundle must be an absolute path"));
+                return Err(format!(
+                    "service {name}: bundle must be an absolute path, or \"release\""
+                ));
             }
             _ => {}
         }
@@ -3549,6 +3564,14 @@ mod tests {
             ),
             (
                 Service {
+                    name: "postgres".into(),
+                    bundle: Some("release".into()),
+                    ..bundled.clone()
+                },
+                "only a service named browser",
+            ),
+            (
+                Service {
                     restart: ServiceRestart::Always,
                     ..ok.clone()
                 },
@@ -3565,6 +3588,12 @@ mod tests {
             let err = validate_services(&[bad]).unwrap_err();
             assert!(err.contains(why), "{err}");
         }
+        // The release's own browser, with no path and no image.
+        let release: Service =
+            toml::from_str("name = \"browser\"\nport = 9222\nbundle = \"release\"\n").unwrap();
+        assert!(validate_services(std::slice::from_ref(&release)).is_ok());
+        assert!(crate::service_bundle::is_release(&release));
+        assert_eq!(release.sandbox_argv(), ["/opt/tracon-services/browser/run"]);
         let toml_in =
             "name = \"browser\"\nport = 9222\nbundle = \"/srv/b\"\nrestart = \"always\"\n";
         let parsed: Service = toml::from_str(toml_in).unwrap();

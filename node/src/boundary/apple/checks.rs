@@ -72,6 +72,9 @@ async fn check_runtime(b: &AppleBackend, cfg: &Config) -> CheckResult {
             ),
         );
     }
+    if let Some(missing) = crate::service_bundle::missing(cfg, false) {
+        return CheckResult::fail(CheckId::Runtime, missing);
+    }
     let base = crate::sandbox_images::base_image(cfg);
     if !base.contains("@sha256:") {
         return CheckResult::fail(

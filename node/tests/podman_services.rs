@@ -8,12 +8,16 @@
 //! ```sh
 //! TRACON_PODMAN_TESTS=1 TRACON_SANDBOX_BUNDLE=<bundle>/<version>/amd64 \
 //!   TRACON_BROWSER_BUNDLE=<browser>/<version>/amd64 \
+//!   TRACON_BROWSER_RELEASE=<dir holding tracon-browser-<chrome>-amd64.tar.gz and its .sha256> \
 //!   TRACON_SANDBOX_TEST_IMAGE=ghcr.io/cosmicspork/tracon-sandbox-base:<version> \
 //!   cargo test -p tracon --test podman_services -- --test-threads 1
 //! ```
 //!
 //! The harness bundle needs `bin/tracon-sandbox` built from this tree; the
-//! browser bundle is `scripts/browser-bundle.sh`'s. The image must be in the
+//! browser bundle is `scripts/browser-bundle.sh`'s, unpacked, and the release
+//! directory holds the same as a release attaches it (a release's own assets
+//! will do, for the Chrome this tree pins), served from a local server as
+//! this version's release. The image must be in the
 //! local store and have Node and Python, as the stock base does: Node drives
 //! the browser over CDP as an agent would, Python stands in for a service.
 //! `TRACON_SERVICES_TEST_TUNNELS=1` runs the sandboxes with
@@ -396,6 +400,164 @@ async fn the_browser_runs_in_the_session_sandbox_and_show_work_carries_its_scree
         )
         .unwrap();
     }
+    rig.assert_gone();
+}
+
+/// Serves `dir` as a release server would: `/v<version>/<file>`. Every path
+/// asked for is kept.
+async fn serve_release(dir: PathBuf) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+    use axum::extract::Path as AxPath;
+    let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = asked.clone();
+    let app = axum::Router::new().route(
+        "/{tag}/{file}",
+        axum::routing::get(move |AxPath((tag, file)): AxPath<(String, String)>| {
+            let (dir, seen) = (dir.clone(), seen.clone());
+            async move {
+                seen.lock().unwrap().push(format!("{tag}/{file}"));
+                match std::fs::read(dir.join(&tag).join(&file)) {
+                    Ok(bytes) => (axum::http::StatusCode::OK, bytes),
+                    Err(_) => (axum::http::StatusCode::NOT_FOUND, Vec::new()),
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{addr}"), asked)
+}
+
+/// `bundle = "release"`: nobody unpacks the browser. The node fetches its
+/// release's browser bundle (`TRACON_BROWSER_RELEASE`, a directory holding
+/// `tracon-browser-<chrome>-<arch>.tar.gz` and its `.sha256` as a release
+/// attaches them, served here as this version's release), checks it, keeps
+/// it under its state directory, and a session's sandbox runs Chrome from
+/// it, answering CDP on its loopback.
+#[tokio::test]
+async fn the_release_browser_is_fetched_and_runs_in_the_session_sandbox() {
+    let Some(mut rig) = Rig::new("release") else {
+        return;
+    };
+    let assets = std::env::var("TRACON_BROWSER_RELEASE")
+        .map(PathBuf::from)
+        .expect("this test needs TRACON_BROWSER_RELEASE");
+    let chrome = tracon::service_bundle::CHROME_VERSION;
+    let arch = tracon::bundle::host_arch().unwrap();
+    let served = tempfile::tempdir().unwrap();
+    let tag = served
+        .path()
+        .join(format!("v{}", env!("CARGO_PKG_VERSION")));
+    std::fs::create_dir_all(&tag).unwrap();
+    for suffix in ["", ".sha256"] {
+        let name = format!("tracon-browser-{chrome}-{arch}.tar.gz{suffix}");
+        assert!(
+            assets.join(&name).is_file(),
+            "{name} in {}",
+            assets.display()
+        );
+        std::os::unix::fs::symlink(assets.join(&name), tag.join(&name)).unwrap();
+    }
+    let (url, asked) = serve_release(served.path().to_path_buf()).await;
+    rig.cfg.sandbox.release_url = Some(url);
+    rig.cfg.service = vec![Service {
+        name: "browser".into(),
+        bundle: Some("release".into()),
+        port: 9222,
+        ready: Some("/json/version".into()),
+        ..Service::default()
+    }];
+    tracon::config::validate_services(&rig.cfg.service).unwrap();
+    assert!(tracon::service_bundle::wanted(&rig.cfg));
+    let missing = tracon::service_bundle::missing(&rig.cfg, false).unwrap();
+    assert!(missing.contains("not here"), "{missing}");
+
+    // What the boundary's converge does at start, then at the next start.
+    let started = std::time::Instant::now();
+    assert!(tracon::service_bundle::converge(&rig.cfg).await.unwrap());
+    eprintln!("fetched and checked in {:?}", started.elapsed());
+    assert!(!tracon::service_bundle::converge(&rig.cfg).await.unwrap());
+    assert_eq!(
+        asked.lock().unwrap().len(),
+        2,
+        "{:?}",
+        asked.lock().unwrap()
+    );
+    assert_eq!(tracon::service_bundle::missing(&rig.cfg, false), None);
+    let fetched = tracon::service_bundle::resolve(&rig.cfg.service[0]).unwrap();
+    assert_eq!(
+        fetched,
+        Config::state_dir().join(format!("bundles/browser/{chrome}/{arch}"))
+    );
+    assert!(fetched.join("run").is_file());
+
+    // A session's sandbox, and the browser started in it.
+    let runner = rig.runner(Vec::new());
+    let session_container = rig.name("h");
+    let mut harness = rig.command(
+        "h",
+        "read go && node -e \"fetch('http://127.0.0.1:9222/json/version').then(r => r.json()).then(v => console.log(JSON.stringify(v)))\"",
+    );
+    harness.mounts = Vec::new();
+    let spawned = runner.spawn(harness).await.unwrap();
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let (row, record) = session(&store, &session_container);
+    let cx = sidecars::Context {
+        cfg: &rig.cfg,
+        store: &store,
+        runner: runner.as_ref(),
+        session: &row,
+        record: &record,
+    };
+    let view = sidecars::start(&cx, "browser", Duration::from_secs(90))
+        .await
+        .unwrap();
+    eprintln!("service_start: {view}");
+    assert_eq!(view["state"], "ready", "{view}");
+    let mounts = podman(&[
+        "inspect",
+        &session_container,
+        "--format",
+        "{{range .Mounts}}{{.Source}}={{.Destination}} {{end}}",
+    ])
+    .unwrap();
+    assert!(
+        mounts.contains(&format!(
+            "{}=/opt/tracon-services/browser",
+            fetched.display()
+        )),
+        "{mounts}"
+    );
+    let tree = podman(&["exec", &session_container, "ps", "-eo", "args"]).unwrap();
+    assert!(
+        tree.contains("/opt/tracon-services/browser/headless-shell/headless-shell"),
+        "{tree}"
+    );
+
+    let mut stdin = spawned.stdin;
+    stdin.write_all(b"go\n").await.unwrap();
+    let mut lines = BufReader::new(spawned.stdout).lines();
+    let line = tokio::time::timeout(Duration::from_secs(60), lines.next_line())
+        .await
+        .expect("CDP answered in time")
+        .unwrap()
+        .expect("a line from the session");
+    let version: Value = serde_json::from_str(&line).unwrap();
+    eprintln!("CDP on 127.0.0.1:9222: {version}");
+    assert!(
+        version["Browser"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("Chrome/{chrome}")),
+        "{version}"
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(30), spawned.done)
+            .await
+            .expect("the session ended")
+            .unwrap(),
+        0
+    );
     rig.assert_gone();
 }
 

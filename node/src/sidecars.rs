@@ -151,7 +151,7 @@ fn event(cx: &Context<'_>, service: &Service, sidecar: &Sidecar, state: &str) ->
     if cx.runner.sidecar_in_sandbox(sidecar) {
         out["in_sandbox"] = json!(true);
         out["sandbox"] = json!(sidecar.session_container);
-        out["bundle"] = json!(service.bundle);
+        out["bundle"] = json!(crate::service_bundle::resolve(service));
         out["mounted_at"] = json!(service.bundle_target());
         return out;
     }

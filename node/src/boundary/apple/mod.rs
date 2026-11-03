@@ -116,12 +116,7 @@ impl AppleBackend {
             env: self.sandbox_env(harness_id),
             cpus: apple.cpus,
             memory: apple.memory.clone(),
-            service_bundles: self
-                .cfg
-                .service
-                .iter()
-                .filter_map(|service| Some((service.bundle.clone()?, service.bundle_target())))
-                .collect(),
+            service_bundles: crate::service_bundle::mounts(&self.cfg),
             user: None,
         };
         AppleProvider::with_cli(options, Box::new(Shared(self.cli.clone())))
@@ -313,7 +308,8 @@ impl AppleBackend {
             }
         };
         crate::sandbox_images::pin(&configured, &pinned);
-        Ok(fetched || pulled)
+        let browser = crate::service_bundle::converge(&self.cfg).await?;
+        Ok(fetched || pulled || browser)
     }
 
     /// `target`, the arm64 manifest `configured` resolved to, held under its

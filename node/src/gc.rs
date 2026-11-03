@@ -306,6 +306,10 @@ pub fn classify_directory(
         )),
         "workspaces" | "workspace-staging" => Some(workspace_verdict(entry, created_ms, owners)),
         "bundles" => Some(match entry {
+            crate::service_bundle::DIR => verdict(
+                false,
+                "the release's browser bundles; the node removes other Chrome versions itself",
+            ),
             version if version == owners.version => {
                 verdict(false, "the harness bundle this node mounts")
             }
@@ -512,6 +516,11 @@ mod tests {
         assert!(classify_snapshot("localhost/tracon-repo-app-1-snapshot@sha256:bb", &o).0);
         assert!(!classify_directory("bundles", "1.2.0", None, &o).unwrap().0);
         assert!(classify_directory("bundles", "1.1.0", None, &o).unwrap().0);
+        assert!(
+            !classify_directory("bundles", "browser", None, &o)
+                .unwrap()
+                .0
+        );
         assert!(
             classify_directory("bundles", ".incoming-x", None, &o)
                 .unwrap()
