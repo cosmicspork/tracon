@@ -322,6 +322,10 @@ enum SessionCommand {
         /// node holds an image for each.
         #[arg(long, default_value = "claude")]
         harness: String,
+        /// The model it runs (`provider/model`). Defaults to the archived
+        /// session's.
+        #[arg(long)]
+        model: Option<String>,
     },
     /// Carry on a session a node restart cut off: a new session on the same
     /// workspace, branch and harness, opening with a handoff note.
@@ -1756,11 +1760,11 @@ async fn session_command(cmd: SessionCommand) -> Result<()> {
             );
             Ok(())
         }
-        SessionCommand::Reopen { id, harness } => {
+        SessionCommand::Reopen { id, harness, model } => {
             let v = node_call(
                 Method::POST,
                 &format!("/api/sessions/{id}/reopen"),
-                Some(serde_json::json!({ "harness": harness })),
+                Some(serde_json::json!({ "harness": harness, "model": model })),
                 None,
             )
             .await?;
@@ -1770,6 +1774,7 @@ async fn session_command(cmd: SessionCommand) -> Result<()> {
                 v["branch"].as_str().unwrap_or("?")
             );
             println!("  harness      {harness}");
+            println!("  model        {}", v["model"].as_str().unwrap_or(""));
             println!("  workspace    {}", v["repo_path"].as_str().unwrap_or(""));
             println!(
                 "  continues    {}",

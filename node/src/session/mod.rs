@@ -747,7 +747,15 @@ impl Manager {
     /// `continued_from`), and gives it an explicit handoff note as its first
     /// prompt, because the new harness inherits none of the old one's context
     /// and pretending otherwise is how an agent redoes finished work.
-    pub async fn reopen(&self, id: &str, harness: &str) -> Result<SessionRow, SessionError> {
+    ///
+    /// The new session runs the old one's model unless `model` names another,
+    /// and either is checked against `harness` as a session start is.
+    pub async fn reopen(
+        &self,
+        id: &str,
+        harness: &str,
+        model: Option<&str>,
+    ) -> Result<SessionRow, SessionError> {
         let old = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
         if !crate::adapter::KNOWN.contains(&harness) {
             return Err(SessionError::Rejected(format!(
@@ -755,6 +763,27 @@ impl Manager {
                 crate::adapter::KNOWN.join(", ")
             )));
         }
+        let model = match model.map(str::trim).filter(|m| !m.is_empty()) {
+            Some(named) => named.to_string(),
+            None => {
+                // As a continuation does: the old model or a refusal, never
+                // a quiet swap to the node's default, which can put a local
+                // model's work on a credential its harness cannot run. Named
+                // here, where `create` could only say no model is usable. A
+                // peer's session is checked by the peer.
+                if old.node_id == self.node_id
+                    && !old.model.trim().is_empty()
+                    && !self.model_usable(&old.channel, &old.model, &self.bindings(&old.channel))
+                {
+                    return Err(SessionError::Rejected(format!(
+                        "session {} ran {}, which channel `{}` no longer offers; name another \
+                         model to reopen it",
+                        old.id, old.model, old.channel
+                    )));
+                }
+                old.model.clone()
+            }
+        };
         // The old session's workspace, as `continue_work` takes it:
         // seeding afresh would put the old branch name on a new base and
         // leave the work in the old volume behind.
@@ -771,7 +800,7 @@ impl Manager {
             branch: Some(old.branch.clone()),
             base: None,
             work_item_id: old.work_item_id.clone(),
-            model: String::new(),
+            model,
             budget_tokens: Some(old.budget_tokens),
             initial_prompt: Some(note),
             node_id: Some(old.node_id.clone()),

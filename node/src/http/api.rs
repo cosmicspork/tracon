@@ -1974,6 +1974,9 @@ pub struct ReopenBody {
     /// The harness the new session runs: either supported one, since the
     /// node holds an image for each.
     pub harness: String,
+    /// The model it runs; the old session's when absent.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// Carry an archived session's work forward under a supported harness. The
@@ -1984,7 +1987,10 @@ pub async fn reopen_session(
     Path(id): Path<String>,
     Json(body): Json<ReopenBody>,
 ) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
-    let row = s.manager.reopen(&id, &body.harness).await?;
+    let row = s
+        .manager
+        .reopen(&id, &body.harness, body.model.as_deref())
+        .await?;
     Ok((StatusCode::CREATED, Json(json!(row))))
 }
 

@@ -1256,6 +1256,43 @@ async fn a_tool_call_the_harness_ran_unasked_is_recorded_against_the_policy() {
     assert!(!rig.kinds().iter().any(|k| k == "policy_denied"));
 }
 
+/// Claude Code loads a deferred tool's definition with `ToolSearch` and never
+/// asks. The node records it as the read it is, allowed by the policy's own
+/// rule, rather than as a call its policy would have asked about.
+#[tokio::test]
+async fn a_tool_search_claude_code_ran_unasked_is_an_allowed_read() {
+    state::isolate();
+    let rig = Rig::start_with_shipped_policy().await;
+    rig.events
+        .send(HarnessEvent::Decided(tracon::adapter::claude::decided(
+            "toolu_9",
+            "ToolSearch",
+            json!({ "query": "select:mcp__tracon__work_get", "max_results": 5 }),
+        )))
+        .await
+        .unwrap();
+    assert!(
+        rig.await_events("policy_allowed", 1).await,
+        "{:?}",
+        rig.kinds()
+    );
+    let events = rig.store.events_after(&rig.session_id, 0, 200).unwrap();
+    let allowed = &events
+        .iter()
+        .find(|e| e.kind == "policy_allowed")
+        .unwrap()
+        .payload;
+    assert_eq!(allowed["tool_call_id"], "toolu_9");
+    assert_eq!(allowed["action"], "toolsearch");
+    assert_eq!(allowed["kind"], "read");
+    assert_eq!(allowed["policy"], "allow");
+    // `harness` is the rule a call the policy would not have allowed is
+    // recorded under, alongside the warning.
+    assert_eq!(allowed["rule"], "reads-and-thoughts");
+    assert_eq!(allowed["decided_by"], "harness");
+    assert!(rig.store.open_permissions().unwrap().is_empty());
+}
+
 /// The operator's own required checks run without asking when the session
 /// runs them exactly as configured; anything else on the same tool is asked.
 #[tokio::test]

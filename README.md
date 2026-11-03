@@ -1157,7 +1157,7 @@ and revoked the moment the hub loses that key.
 | `tracon credential import\|ls\|rm\|share` | what the broker holds (import is also on Settings) |
 | `tracon doc import\|ls\|get\|put [--format html]\|rm\|export\|reindex` | documents (import and export are Markdown; `put` writes either format, converting a document in place), and rebuilding the vector index from them; import, preview, replace, download, archive, and delete HTML bundles in Documents |
 | `tracon session show <package> [--jsonl]` | read a session package offline, with no node running |
-| `tracon session archive-legacy\|reopen --harness` | put sessions from a retired harness away read-only, and carry one forward onto a supported one |
+| `tracon session archive-legacy\|reopen --harness [--model]` | put sessions from a retired harness away read-only, and carry one forward onto a supported one, on its own model unless `--model` names another |
 | `tracon session continue <id>` | carry on a session a node restart cut off, on its workspace and harness (also the session's **Continue** button) |
 | `tracon skill import <dir[#git-rev]>\|ls\|rm` | skill packages in a channel's launch manifest |
 | `tracon memory ls\|add\|rm\|recall\|batch` | memories, and the promotion batch on demand |

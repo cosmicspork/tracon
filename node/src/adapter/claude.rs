@@ -752,18 +752,12 @@ impl Pump {
                     open.lock().unwrap().insert(id.clone(), ());
                     let _ = tx
                         .send(HarnessEvent::Permission {
-                            request: {
-                                let (resource, command) = permission_target(&tool, &input);
-                                PermissionRequest::managed(
-                                    v["request"]["tool_use_id"].as_str().map(str::to_string),
-                                    summarize(&tool, &input),
-                                    &tool,
-                                    resource,
-                                    command,
-                                    Some(input),
-                                    options(),
-                                )
-                            },
+                            request: request(
+                                v["request"]["tool_use_id"].as_str().map(str::to_string),
+                                &tool,
+                                input,
+                                options(),
+                            ),
                             reply: reply_tx,
                         })
                         .await;
@@ -1034,18 +1028,36 @@ fn tool_result_update(block: &Value) -> ToolCallUpdate {
 
 /// The request a call the harness ran unasked would have made, normalized
 /// exactly as a `can_use_tool` for it is, so the policy reads one subject
-/// whether the harness asked or not.
-fn decided(id: &str, tool: &str, input: Value) -> PermissionRequest {
+/// whether the harness asked or not. Public so a test can hand the supervisor
+/// exactly what this adapter sends.
+pub fn decided(id: &str, tool: &str, input: Value) -> PermissionRequest {
+    request(Some(id.to_string()), tool, input, Vec::new())
+}
+
+/// A tool call as the policy reads it, whether the harness asked first or not.
+fn request(
+    id: Option<String>,
+    tool: &str,
+    input: Value,
+    options: Vec<PermissionOption>,
+) -> PermissionRequest {
     let (resource, command) = permission_target(tool, &input);
-    PermissionRequest::managed(
-        Some(id.to_string()),
+    let mut request = PermissionRequest::managed(
+        id,
         summarize(tool, &input),
         tool,
         resource,
         command,
         Some(input),
-        Vec::new(),
-    )
+        options,
+    );
+    // It only loads the definitions of tools the session already has, so it
+    // reads; with no path it would otherwise have no kind and fall to `ask`,
+    // which Claude Code never routes it through.
+    if tool == ClaudeAdapter::TOOL_SEARCH {
+        request.kind = Some("read".into());
+    }
+    request
 }
 
 /// What the operator reads in the queue. The tool's own name plus the one
@@ -1843,5 +1855,38 @@ mod tests {
         let l = ClaudeAdapter::layout();
         assert_eq!(l.dir, ".claude");
         assert_eq!(l.env, "CLAUDE_CONFIG_DIR");
+    }
+
+    /// `ToolSearch` loads the definitions of tools the session already has
+    /// and calls none of them, so the shipped policy reads it as a read
+    /// whether Claude Code ran it unasked or asked first.
+    #[test]
+    fn tool_search_is_a_read_the_shipped_policy_allows() {
+        let input = json!({ "query": "select:mcp__tracon__work_get", "max_results": 5 });
+        let unasked = decided("toolu_9", ClaudeAdapter::TOOL_SEARCH, input.clone());
+        let asked = request(
+            Some("toolu_9".into()),
+            ClaudeAdapter::TOOL_SEARCH,
+            input,
+            options(),
+        );
+        let policy = crate::policy::Policy::shipped();
+        for request in [unasked, asked] {
+            assert_eq!(request.action, "toolsearch");
+            assert_eq!(request.kind.as_deref(), Some("read"));
+            let decision = policy.decide(&crate::policy::Request {
+                channel: "personal",
+                action: &request.action,
+                kind: request.kind.as_deref(),
+                resource: request.resource.as_deref(),
+                command: request.command.as_deref(),
+                arguments: None,
+                doc_kinds: None,
+            });
+            assert_eq!(decision.verdict, crate::policy::Verdict::Allow);
+            assert_eq!(decision.rule_id.as_deref(), Some("reads-and-thoughts"));
+        }
+        // Only that tool: another one without a path still has no kind.
+        assert_eq!(decided("toolu_8", "TaskStop", json!({})).kind, None);
     }
 }
