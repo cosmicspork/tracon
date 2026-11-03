@@ -418,13 +418,18 @@ async fn a_sessions_trees_go_in_come_back_and_resume() {
              echo planted > {st}/plugin/planted"
         ))
         .await;
+    // The workspace and the harness state are separate trees, each replaced
+    // whole when it lands, so one can arrive a moment after the other.
     wait_for(
-        || read(tree().join("a.txt")) == "three\n",
+        || {
+            read(tree().join("a.txt")) == "three\n"
+                && std::fs::read_to_string(state().join("projects/t.jsonl"))
+                    .is_ok_and(|text| text == "{}\n")
+        },
         "a sync during the turn",
     )
     .await;
     // Its own state came back; what the node sealed and sends did not.
-    assert_eq!(read(state().join("projects/t.jsonl")), "{}\n");
     assert!(!state().join("plugin").exists());
     assert!(!state().join("orientation.md").exists());
     let scratch = l.store.tree(SCRATCH).unwrap();
