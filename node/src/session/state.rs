@@ -141,6 +141,12 @@ pub mod event_kind {
     pub const EGRESS_REFUSED: &str = "egress_refused";
     /// What the session was told at start, so the transcript shows it.
     pub const ORIENTATION: &str = "orientation";
+    /// Where the session runs, when placement decided it (`decision`:
+    /// `place` with the `provider`, `ask` with the `reason` and the `offer`,
+    /// or `refuse` with the `reason`; what it was held to and each
+    /// provider's state). An `ask` is followed by a `place` naming the
+    /// `approval_id` once the operator allowed it.
+    pub const PLACEMENT: &str = "placement";
     pub const STATE: &str = "state";
     /// An operator, a failure watchdog, an exhausted provider or a spent
     /// budget fenced this session before it could start another turn.

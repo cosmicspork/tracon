@@ -390,6 +390,7 @@ pub const KEYS: &[KeySpec] = &[
     live("upstreams.host.sessions"),
     // [placement]: read where a session is placed.
     live("placement.digitalocean"),
+    live("placement.local_limit"),
     live("placement.channel.*.client"),
     live("placement.channel.*.forbid_digitalocean"),
     live("placement.channel.*.require.tier"),
@@ -408,6 +409,19 @@ pub const KEYS: &[KeySpec] = &[
     live("placement.repo.require.privilege"),
     live("placement.repo.require.runtime_socket"),
     live("placement.repo.require.image_identity"),
+    // [digitalocean]: the provider is built at start.
+    restart("digitalocean.credential"),
+    restart("digitalocean.region"),
+    restart("digitalocean.api_url").host_only(),
+    restart("digitalocean.image"),
+    restart("digitalocean.registry").host_only(),
+    restart("digitalocean.base_template"),
+    restart("digitalocean.size"),
+    restart("digitalocean.limit"),
+    restart("digitalocean.listen"),
+    restart("digitalocean.node_addr"),
+    restart("digitalocean.server_name"),
+    restart("digitalocean.relay"),
     // [auth]
     restart("auth.public_origin"),
     restart("auth.trusted_proxies"),
@@ -500,6 +514,9 @@ pub fn host_only_reason(key: &str) -> &'static str {
         }
         "boundary.resource_prefix" => {
             "names every volume this node mounts, the shared harness state among them, so a node set to another's would run on that node's state; it is changed at the node, not from elsewhere"
+        }
+        "digitalocean.api_url" | "digitalocean.registry" => {
+            "is where the node sends its DigitalOcean token, so it is changed at the node, not from elsewhere"
         }
         "gateway.harness_listen" => {
             "is the harness socket's path, whose directory the node creates and mounts writable into the gateway container, so it is changed at the node, not from elsewhere"
@@ -1011,6 +1028,8 @@ mod tests {
                 "boundary.gateway_image",
                 "boundary.harness_image",
                 "boundary.resource_prefix",
+                "digitalocean.api_url",
+                "digitalocean.registry",
                 "gateway.harness_listen",
                 "runtime.kubernetes.harness_image",
                 "runtime.kubernetes.state_mount",

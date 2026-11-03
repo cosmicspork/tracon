@@ -88,12 +88,16 @@ pub struct RepoPlacement {
     pub require: Requirements,
 }
 
-/// `[placement]`: where sessions may run. Read by nothing that places a
-/// session yet; the checks interface shows what providers report.
+/// `[placement]`: where sessions may run. Read as each session starts.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Placement {
     pub digitalocean: DoMode,
+    /// The most sessions this node runs on its own machine at once; one
+    /// more is full, and with `digitalocean = "overflow"` runs there.
+    /// Unset: no limit of the node's own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_limit: Option<u32>,
     pub channel: std::collections::BTreeMap<String, ChannelPlacement>,
     pub repo: Vec<RepoPlacement>,
 }

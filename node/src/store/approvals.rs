@@ -56,11 +56,20 @@ pub const EGRESS_CARD_OPTIONS: &str = r#"[{"option_id":"allow_once","name":"Allo
 /// anyone answers, so there is nothing to open once or for a session.
 pub const PREPARE_EGRESS_CARD_OPTIONS: &str = r#"[{"option_id":"allow_repo","name":"Save to the repository's egress","kind":"allow_repo"},{"option_id":"reject_once","name":"Reject","kind":"reject_once"}]"#;
 
+/// The approval a session puts to the operator when this node's own
+/// boundary cannot take it and DigitalOcean could. Allowing it runs the
+/// session there; nothing else is run.
+pub const PLACE_TOOL: &str = "run_on_digitalocean";
+
+/// What a placement card offers: run it there, or not at all.
+pub const PLACE_CARD_OPTIONS: &str = r#"[{"option_id":"allow_once","name":"Run on DigitalOcean","kind":"allow_once"},{"option_id":"reject_once","name":"Don't run it","kind":"reject_once"}]"#;
+
 /// The answers a card for `tool` offers.
 pub fn card_options(tool: &str) -> &'static str {
     match tool {
         EGRESS_TOOL => EGRESS_CARD_OPTIONS,
         PREPARE_EGRESS_TOOL => PREPARE_EGRESS_CARD_OPTIONS,
+        PLACE_TOOL => PLACE_CARD_OPTIONS,
         _ => CARD_OPTIONS,
     }
 }
@@ -471,7 +480,7 @@ impl Store {
                     session_state: r.get("intent_session_state")?,
                 };
                 let options = match approval.tool.as_str() {
-                    EGRESS_TOOL | PREPARE_EGRESS_TOOL => card_options(&approval.tool),
+                    EGRESS_TOOL | PREPARE_EGRESS_TOOL | PLACE_TOOL => card_options(&approval.tool),
                     _ => options,
                 };
                 Ok(approval.as_card(options, intent))

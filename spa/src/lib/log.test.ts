@@ -314,6 +314,11 @@ test('each 0.29.0 kind reads as a sentence, not its name', () => {
     ['pty_opened', { phase: 'spawn', command: 'bash', args: ['-l'], cwd: '/w' }, 'terminal opened · bash -l · in /w · what is typed in it is not recorded'],
     ['pty_closed', { phase: 'detached', duration_ms: 65_000 }, 'terminal detached · after 1m'],
     ['abandoned', { reason: 'item closed', summary: 'superseded by #12' }, 'abandoned · superseded by #12'],
+    ['placement', { decision: 'place', provider: 'digitalocean' }, "runs on DigitalOcean · this node's own runtime is full or DigitalOcean is preferred"],
+    ['placement', { decision: 'place', provider: 'digitalocean', approval_id: 'a1' }, 'runs on DigitalOcean · the operator allowed it'],
+    ['placement', { decision: 'place', provider: 'podman' }, 'runs on this node (podman)'],
+    ['placement', { decision: 'ask', offer: 'digitalocean', reason: 'the gateway is down' }, 'asked whether to run on DigitalOcean · the gateway is down'],
+    ['placement', { decision: 'refuse', reason: 'dns is provider-open' }, 'no sandbox provider can take it · dns is provider-open'],
   ]
   for (const [kind, payload, text] of lines) expect(eventLine(ev(kind, null, payload))?.text).toBe(text)
 })

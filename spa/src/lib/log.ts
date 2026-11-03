@@ -515,6 +515,22 @@ export function eventLine(e: Event): EventLine | null {
       const side = (n: number) => (n === 0 ? 'no budget' : formatTokens(n))
       return line('sys', [`budget ${verb}`, `${side(from)} → ${side(to)}${to === 0 ? '' : ' tokens'}`])
     }
+    case 'placement': {
+      // Where the session runs, when the node had to decide it.
+      const where = (v: unknown) => (str(v) === 'digitalocean' ? 'DigitalOcean' : str(v) ? `this node (${str(v)})` : '')
+      switch (str(p.decision)) {
+        case 'place':
+          return str(p.provider) === 'digitalocean'
+            ? line('mark', ['runs on DigitalOcean', p.approval_id ? 'the operator allowed it' : "this node's own runtime is full or DigitalOcean is preferred"])
+            : line('sys', [`runs on ${where(p.provider)}`])
+        case 'ask':
+          return line('wait', [`asked whether to run on ${where(p.offer) || 'another provider'}`, str(p.reason)])
+        case 'refuse':
+          return line('crit', ['no sandbox provider can take it', str(p.reason)])
+        default:
+          return line('sys', ['placement decided'])
+      }
+    }
     case 'workspace_prepared': {
       // The repository's own `prepare`, run on the workspace before the
       // harness started; what it cost the start is said either way.

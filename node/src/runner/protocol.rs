@@ -85,6 +85,12 @@ pub struct ProtocolRunner {
     /// Run a catalogue service that has a bundle inside the session's
     /// sandbox, under its supervisor, rather than handing it to `delegate`.
     sandbox_services: bool,
+    /// What each sandbox's isolation, read back from the provider once it
+    /// has connected, must satisfy before anything is sent into it.
+    requirements: Option<crate::provider::Requirements>,
+    /// How long a run's token may wait to be redeemed; `None` for as long
+    /// as the run lasts.
+    token_window: Option<Duration>,
 }
 
 impl ProtocolRunner {
@@ -101,7 +107,24 @@ impl ProtocolRunner {
             tunnels: Vec::new(),
             bundled_harness: false,
             sandbox_services: false,
+            requirements: None,
+            token_window: None,
         }
+    }
+
+    /// Hold every sandbox to `requirements`, as its provider reads its
+    /// isolation back after it connects: one that falls short is removed
+    /// before any file, tunnel or command reaches it.
+    pub fn with_requirements(mut self, requirements: crate::provider::Requirements) -> Self {
+        self.requirements = Some(requirements);
+        self
+    }
+
+    /// Refuse a run's token once `window` has passed unredeemed, for a
+    /// provider that may keep a copy of how the token was delivered.
+    pub fn with_token_window(mut self, window: Duration) -> Self {
+        self.token_window = Some(window);
+        self
     }
 
     /// Send the volumes `store` keeps over the files channel instead of
@@ -186,7 +209,10 @@ impl ProtocolRunner {
         }
         let server = self.server()?;
         let run = format!("{name}:{}", uuid::Uuid::now_v7().simple());
-        let token = server.tokens().issue(run.clone());
+        let token = match self.token_window {
+            Some(window) => server.tokens().issue_within(run.clone(), window),
+            None => server.tokens().issue(run.clone()),
+        };
         let bootstrap = Bootstrap {
             run: run.clone(),
             cert_pin: server.pin().to_string(),
@@ -255,6 +281,20 @@ impl ProtocolRunner {
         };
         let mut teardown = teardown;
         teardown.conn = Some(conn.clone());
+        if let Some(requirements) = &self.requirements {
+            let verified = self
+                .provider
+                .verify_isolation(&handle)
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|caps| requirements.check(&caps));
+            if let Err(why) = verified {
+                teardown.finish().await;
+                return Err(RunnerError::Other(format!(
+                    "sandbox {name} is not isolated as required: {why}"
+                )));
+            }
+        }
         super::services::register(name, &teardown.run, conn.clone());
         if let Some(files) = files {
             // A spawn is a session's harness unless it says otherwise.
