@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.47.0](https://github.com/cosmicspork/tracon/compare/v0.46.0...v0.47.0) (2026-11-03)
+
+
+### Features
+
+* **apple:** hold build steps to their egress, and fail fast on a missing local image ([#827](https://github.com/cosmicspork/tracon/issues/827)) ([d8e2d1e](https://github.com/cosmicspork/tracon/commit/d8e2d1ecbe0b65ca9fa0fa5ee100f0dc6e34b26d))
+* **gc:** label the images a node makes and sweep them by class on Podman ([#830](https://github.com/cosmicspork/tracon/issues/830)) ([64e8898](https://github.com/cosmicspork/tracon/commit/64e88984addf8d9bf07449f8ff254ce5fa74697e))
+* **images:** build a repository's sandbox image from root steps on the stock base ([#825](https://github.com/cosmicspork/tracon/issues/825)) ([9e1812f](https://github.com/cosmicspork/tracon/commit/9e1812f1c571321ab33807b7b14a61a61254072d))
+* **sandbox:** a run survives a dropped connection, with a node identity that survives restarts ([#832](https://github.com/cosmicspork/tracon/issues/832)) ([0477686](https://github.com/cosmicspork/tracon/commit/0477686875c23491e21e34690bf31cc40948f26a))
+* **sandbox:** carry a session on in the sandbox the node left running when it restarted ([#833](https://github.com/cosmicspork/tracon/issues/833)) ([ae6af91](https://github.com/cosmicspork/tracon/commit/ae6af9135ce4e8c8fce81a42f4b28a3d91b25115))
+* **services:** fetch the release's browser bundle for bundle = "release" ([#829](https://github.com/cosmicspork/tracon/issues/829)) ([1ccd9bc](https://github.com/cosmicspork/tracon/commit/1ccd9bcb121d5ac6e2621d6c8b06a815774ddd82))
+
+
+### Bug Fixes
+
+* **images:** build each repository image once at a time, and never pull a missing local image ([#826](https://github.com/cosmicspork/tracon/issues/826)) ([7c61ff3](https://github.com/cosmicspork/tracon/commit/7c61ff3088099a871d8f0f2a97e6e75d91a22e0a))
+* **images:** pin the sandbox base by the host architecture's manifest, and pull only it ([#828](https://github.com/cosmicspork/tracon/issues/828)) ([cadfda7](https://github.com/cosmicspork/tracon/commit/cadfda7e4b6a96792eb1e08a1485e8a55c279c82))
+* **sandbox:** keep links in prepared trees, and fail a preparation whose take-back fails ([#823](https://github.com/cosmicspork/tracon/issues/823)) ([b5cf6f4](https://github.com/cosmicspork/tracon/commit/b5cf6f42fca3c1bce104872414cff9f046d08feb))
+* **sandbox:** refuse repository images not on the stock base, and give the sandbox its home ([#821](https://github.com/cosmicspork/tracon/issues/821)) ([7a066a8](https://github.com/cosmicspork/tracon/commit/7a066a8fc87c97a3673d2368c70c64a5db8a9f21))
+* **sandbox:** retire the gateway under tunnels, and report what a session and its services really run ([#822](https://github.com/cosmicspork/tracon/issues/822)) ([5459081](https://github.com/cosmicspork/tracon/commit/545908160d400cc44d3692ea6a26ecbf35410a59))
+* **sessions:** reopen keeps the session's model, and ToolSearch counts as a read ([#820](https://github.com/cosmicspork/tracon/issues/820)) ([94d4047](https://github.com/cosmicspork/tracon/commit/94d40475626f41d5722a832bfef16c5dc0e4ed16))
+
+
+### Performance Improvements
+
+* **sandbox:** skip prepare at the snapshot's commit, and send /work over the snapshot's own ([#831](https://github.com/cosmicspork/tracon/issues/831)) ([b1ef5a3](https://github.com/cosmicspork/tracon/commit/b1ef5a3eaec8c5477950e31e1461676bf22cb664))
+
 ## [0.46.0](https://github.com/cosmicspork/tracon/compare/v0.45.0...v0.46.0) (2026-11-03)
 
 
