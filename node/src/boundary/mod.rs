@@ -502,6 +502,13 @@ pub trait Backend: Send + Sync {
         let _ = (base, from_snapshot);
         true
     }
+    /// Whether a session's workspace is sent over its image's own `/work`
+    /// rather than mounted in its place, so that what a prepared snapshot
+    /// left there (`node_modules`, `vendor/`) is under the session's tree.
+    /// Only then may a session at the snapshot's commit skip `prepare`.
+    fn workspace_over_image(&self) -> bool {
+        false
+    }
     /// Remove a runtime volume. One that does not exist is already removed;
     /// one a running harness still mounts is refused, never forced.
     async fn remove_volume(&self, volume: &str) -> Result<(), BoundaryError> {

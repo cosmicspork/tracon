@@ -2598,6 +2598,7 @@ impl Manager {
 
     /// Prepare a starting session's workspace (`prepare_session_workspace`)
     /// and record how it went. `None` when the entry prepares nothing.
+    #[allow(clippy::too_many_arguments)]
     async fn prepare_workspace(
         &self,
         id: &str,
@@ -2605,6 +2606,7 @@ impl Manager {
         workspace: &crate::workspace::Workspace,
         cache: Result<&str, String>,
         environment: &crate::environment::RepoEnvironment,
+        from: Option<FromSnapshot<'_>>,
         started: Instant,
     ) -> Option<crate::environment::WorkspacePreparation> {
         let preparation = prepare_session_workspace(
@@ -2616,11 +2618,13 @@ impl Manager {
                 store: &self.store,
                 id,
             },
+            from,
         )
         .await?;
         if !matches!(
             preparation.outcome,
             crate::environment::PrepareOutcome::Prepared
+                | crate::environment::PrepareOutcome::FromSnapshot { .. }
         ) {
             tracing::warn!(
                 session = %id,
@@ -2988,7 +2992,23 @@ impl Manager {
         // What an install writes beside the source (`node_modules`,
         // `vendor/`, `.venv`) is in no cache and not in the workspace Git
         // seeded, so the repository's own preparation runs on the workspace
-        // before the agent arrives. Its outcome goes in the orientation.
+        // before the agent arrives, unless the snapshot the session starts
+        // from was prepared at its very commit. Its outcome goes in the
+        // orientation.
+        let prepared_at = match (&origin, image.from_snapshot(&self.cfg), &image.image) {
+            (Some(origin), true, Some(snapshot)) => {
+                crate::sandbox_images::prepared_from(&self.store, origin, snapshot)
+            }
+            _ => None,
+        };
+        let from = match (image.from_snapshot(&self.cfg), &image.image) {
+            (true, Some(snapshot)) => Some(FromSnapshot {
+                snapshot,
+                prepared_at: prepared_at.as_deref(),
+                base: base.as_deref(),
+            }),
+            _ => None,
+        };
         let prepared = self
             .prepare_workspace(
                 id,
@@ -3009,6 +3029,7 @@ impl Manager {
                     )
                 }),
                 &environment,
+                from,
                 started,
             )
             .await;
@@ -4953,12 +4974,23 @@ fn session_series(
     )
 }
 
+/// The prepared snapshot a session's sandbox starts from, the commit it was
+/// prepared at (`sandbox_images::prepared_from`), and the commit the
+/// session's workspace was seeded at (`None` for a resumed workspace).
+#[derive(Debug, Clone, Copy)]
+pub struct FromSnapshot<'a> {
+    pub snapshot: &'a str,
+    pub prepared_at: Option<&'a str>,
+    pub base: Option<&'a str>,
+}
+
 pub async fn prepare_session_workspace(
     backend: &dyn crate::boundary::Backend,
     environment: &crate::environment::RepoEnvironment,
     (workspace, cache): (&str, Result<&str, String>),
     runner_name: &str,
     cancel: &dyn crate::review::checks::Cancel,
+    from: Option<FromSnapshot<'_>>,
 ) -> Option<crate::environment::WorkspacePreparation> {
     use crate::environment::PrepareOutcome;
     use crate::review::checks::Stopped;
@@ -4968,20 +5000,53 @@ pub async fn prepare_session_workspace(
     let begun = Instant::now();
     let outcome = match cache {
         Err(why) => PrepareOutcome::NotRun(why),
+        // What `prepare` would install at this commit is what the snapshot
+        // already holds under the workspace.
+        Ok(_)
+            if from.is_some_and(|from| {
+                backend.workspace_over_image()
+                    && crate::sandbox_images::skips_prepare(from.prepared_at, from.base)
+            }) =>
+        {
+            PrepareOutcome::FromSnapshot {
+                commit: from
+                    .and_then(|from| from.prepared_at)
+                    .unwrap_or_default()
+                    .to_string(),
+            }
+        }
         Ok(cache) => {
-            let runner = backend.runner(Vec::new());
-            let prepared = crate::review::checks::run_preparation(
-                backend,
-                runner.as_ref(),
-                environment,
-                (workspace, cache),
-                runner_name,
-                tokio::time::Instant::now() + Duration::from_secs(environment.timeout_secs),
-                cancel,
-                "the session starts without it",
-                crate::telemetry::Purpose::Session,
-            )
-            .await;
+            let deadline =
+                tokio::time::Instant::now() + Duration::from_secs(environment.timeout_secs);
+            let prepared = match (from, backend.preparer()) {
+                (Some(from), Some(preparer)) => {
+                    prepare_in_snapshot(
+                        backend,
+                        &preparer,
+                        environment,
+                        (workspace, from.snapshot),
+                        runner_name,
+                        deadline,
+                        cancel,
+                    )
+                    .await
+                }
+                _ => {
+                    let runner = backend.runner(Vec::new());
+                    crate::review::checks::run_preparation(
+                        backend,
+                        runner.as_ref(),
+                        environment,
+                        (workspace, cache),
+                        runner_name,
+                        deadline,
+                        cancel,
+                        "the session starts without it",
+                        crate::telemetry::Purpose::Session,
+                    )
+                    .await
+                }
+            };
             match prepared {
                 Ok(()) => PrepareOutcome::Prepared,
                 Err(Stopped::Unprepared(failure)) => PrepareOutcome::Failed(failure.to_string()),
@@ -4997,6 +5062,54 @@ pub async fn prepare_session_workspace(
         outcome,
         elapsed_ms: begun.elapsed().as_millis() as u64,
     })
+}
+
+/// A session's `prepare` at a commit other than its snapshot's: every step
+/// in one sandbox from the snapshot, over the `/work` and `/cache` its
+/// preparation left, and the workspace taken back whole once the steps are
+/// done. Neither the node's cache nor a step's output crosses between steps.
+async fn prepare_in_snapshot(
+    backend: &dyn crate::boundary::Backend,
+    preparer: &crate::sandbox_images::Preparer,
+    environment: &crate::environment::RepoEnvironment,
+    (workspace, snapshot): (&str, &str),
+    runner_name: &str,
+    deadline: tokio::time::Instant,
+    cancel: &dyn crate::review::checks::Cancel,
+) -> Result<(), crate::review::checks::Stopped> {
+    use crate::review::checks::{PrepareFailure, Stopped};
+    const UNPREPARED: &str = "the session starts without it";
+    let held = crate::sandbox_images::Held::for_session(
+        preparer,
+        &format!("{runner_name}-prep"),
+        snapshot,
+        workspace,
+    )
+    .await
+    .map_err(|error| {
+        Stopped::Unprepared(PrepareFailure::said(format!(
+            "could not start the preparation sandbox: {error}; {UNPREPARED}."
+        )))
+    })?;
+    let prepared = crate::review::checks::run_preparation(
+        backend,
+        &held,
+        environment,
+        (workspace, ""),
+        runner_name,
+        deadline,
+        cancel,
+        UNPREPARED,
+        crate::telemetry::Purpose::Session,
+    )
+    .await;
+    let taken = held.take_back().await;
+    match (prepared, taken) {
+        (Ok(()), Err(error)) => Err(Stopped::Unprepared(PrepareFailure::said(format!(
+            "{error}; {UNPREPARED}."
+        )))),
+        (prepared, _) => prepared,
+    }
 }
 
 /// A starting session's preparation is no longer wanted once the session
@@ -5110,8 +5223,137 @@ mod tests {
             (work, cache),
             "tracon-s-test",
             cancel,
+            None,
         )
         .await
+    }
+
+    /// `LocalBackend`, but with a workspace sent over its image's `/work`,
+    /// as a node with files over the protocol sends it.
+    struct OverImage;
+
+    #[async_trait::async_trait]
+    impl crate::boundary::Backend for OverImage {
+        fn kind(&self) -> &'static str {
+            "local"
+        }
+        async fn setup(
+            &self,
+            _cfg: &Config,
+            _rebuild: bool,
+        ) -> Result<(), crate::boundary::BoundaryError> {
+            Ok(())
+        }
+        async fn check_all(&self, _cfg: &Config, _deep: bool) -> crate::boundary::BoundaryReport {
+            crate::boundary::BoundaryReport { checks: Vec::new() }
+        }
+        fn runner(&self, _extra: Vec<crate::runner::Mount>) -> Arc<dyn crate::runner::Runner> {
+            Arc::new(crate::runner::local::LocalRunner)
+        }
+        fn runner_for(
+            &self,
+            _harness: &str,
+            _extra: Vec<crate::runner::Mount>,
+        ) -> Arc<dyn crate::runner::Runner> {
+            Arc::new(crate::runner::local::LocalRunner)
+        }
+        fn harness_host(&self) -> String {
+            "localhost".into()
+        }
+        fn harness_home(&self) -> String {
+            materialize::PODMAN_HARNESS_HOME.into()
+        }
+        async fn reconcile(&self, _names: &[String]) {}
+        async fn import_volume(
+            &self,
+            volume: &str,
+            source: &std::path::Path,
+        ) -> Result<(), crate::boundary::BoundaryError> {
+            crate::runner::local::LocalBackend
+                .import_volume(volume, source)
+                .await
+        }
+        async fn export_volume(
+            &self,
+            volume: &str,
+            destination: &std::path::Path,
+        ) -> Result<(), crate::boundary::BoundaryError> {
+            crate::runner::local::LocalBackend
+                .export_volume(volume, destination)
+                .await
+        }
+        fn workspace_over_image(&self) -> bool {
+            true
+        }
+    }
+
+    /// A session from its snapshot skips `prepare` only at the commit the
+    /// snapshot was prepared from, and only where its workspace is sent over
+    /// the snapshot's `/work`; at another commit, from a stale snapshot (no
+    /// commit to compare), or with the workspace mounted in place of the
+    /// image's, it prepares as before.
+    #[tokio::test]
+    async fn a_session_at_its_snapshots_commit_skips_prepare() {
+        use crate::environment::PrepareOutcome;
+        let environment = preparing(&["touch prepared"], 60);
+        let at = |prepared_at: Option<&'static str>, base: Option<&'static str>| {
+            Some(FromSnapshot {
+                snapshot: "localhost/tracon-snapshot-app@sha256:aa",
+                prepared_at,
+                base,
+            })
+        };
+        let run = |backend: &'static dyn crate::boundary::Backend, from| {
+            let environment = environment.clone();
+            async move {
+                let (work, cache) = volumes();
+                let done = prepare_session_workspace(
+                    backend,
+                    &environment,
+                    (&work, Ok(&cache)),
+                    "tracon-s-test",
+                    &crate::review::checks::RunToCompletion,
+                    from,
+                )
+                .await
+                .unwrap();
+                let ran = crate::runner::local::local_runtime_path(&work)
+                    .join("prepared")
+                    .exists();
+                (done, ran)
+            }
+        };
+
+        let (done, ran) = run(&OverImage, at(Some("c1"), Some("c1"))).await;
+        assert_eq!(
+            done.outcome,
+            PrepareOutcome::FromSnapshot {
+                commit: "c1".into()
+            }
+        );
+        assert!(!ran, "nothing ran");
+        let payload = done.payload();
+        assert_eq!(payload["outcome"], "from_snapshot");
+        assert_eq!(payload["commit"], "c1");
+        assert_eq!(payload["commands"][0], "touch prepared");
+
+        for (backend, from) in [
+            (
+                &OverImage as &dyn crate::boundary::Backend,
+                at(Some("c1"), Some("c2")),
+            ),
+            (&OverImage, at(None, Some("c1"))),
+            (&OverImage, at(Some("c1"), None)),
+            (&OverImage, None),
+            (
+                &crate::runner::local::LocalBackend,
+                at(Some("c1"), Some("c1")),
+            ),
+        ] {
+            let (done, ran) = run(backend, from).await;
+            assert_eq!(done.outcome, PrepareOutcome::Prepared, "{from:?}");
+            assert!(ran, "{from:?}");
+        }
     }
 
     #[tokio::test]

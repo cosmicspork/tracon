@@ -599,3 +599,83 @@ fn a_store_keeping_every_volume_makes_what_it_does_not_hold_yet() {
         .plan(&[Mount::volume("../x", "/x", false)])
         .is_err());
 }
+
+/// A session's sandbox from a prepared snapshot is sent its workspace and
+/// state but not the node's copy of its cache: the snapshot's own `/cache` is
+/// under it. Anything else from a snapshot (a check, a preparation, which
+/// read or carry a cache between steps), and a session from any other
+/// image, is sent the cache as before.
+#[test]
+fn a_session_from_a_snapshot_is_not_sent_the_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesStore::new(dir.path().join("store"));
+    let seed = dir.path().join("seed");
+    std::fs::create_dir_all(seed.join("npm")).unwrap();
+    std::fs::write(seed.join("npm/blob"), "cached").unwrap();
+    let work = crate::config::resource_name("workspace-w");
+    let cache = crate::config::resource_name("cache-r-1");
+    let run_cache = crate::config::resource_name("prep-cache-run");
+    for volume in [&work, &cache, &run_cache] {
+        store.import(volume, &seed).unwrap();
+    }
+    let snapshot = format!(
+        "{}-app-0123456789ab@sha256:{}",
+        crate::sandbox_images::snapshot_repo(),
+        "a".repeat(64)
+    );
+    let session = vec![
+        Mount::volume(work.clone(), "/work", false),
+        Mount::volume(cache.clone(), "/cache", false),
+    ];
+    let sent = |image: &str, kind, mounts: &[Mount]| {
+        let (provided, plan) = store.plan_from(mounts, image, kind).unwrap();
+        let targets: Vec<String> = plan
+            .map(|plan| plan.targets().into_iter().map(str::to_string).collect())
+            .unwrap_or_default();
+        (provided, targets)
+    };
+
+    // Its workspace lands on the snapshot's own `/work`, in place.
+    let (provided, targets) = sent(&snapshot, Some(RunKind::Session), &session);
+    assert_eq!(targets, ["/work"]);
+    assert_eq!(provided, vec![]);
+
+    for (image, kind) in [
+        (snapshot.as_str(), Some(RunKind::Prepare)),
+        (snapshot.as_str(), Some(RunKind::Check)),
+        (snapshot.as_str(), None),
+    ] {
+        let (provided, targets) = sent(image, kind, &session);
+        assert_eq!(targets, ["/work", "/cache"], "{image} {kind:?}");
+        assert_eq!(provided, vec![Mount::local("/cache")], "{image} {kind:?}");
+    }
+    let (provided, targets) = sent(
+        "localhost/tracon-repo-app:1",
+        Some(RunKind::Session),
+        &session,
+    );
+    assert_eq!(targets, ["/work", "/cache"]);
+    assert_eq!(
+        provided,
+        vec![Mount::local("/work"), Mount::local("/cache")]
+    );
+    let check = vec![
+        Mount::volume(crate::config::resource_name("check-1"), "/work", false),
+        Mount::volume(run_cache.clone(), "/cache", true),
+    ];
+    store
+        .import(&crate::config::resource_name("check-1"), &seed)
+        .unwrap();
+    let (_, targets) = sent(&snapshot, Some(RunKind::Check), &check);
+    assert_eq!(targets, ["/work", "/cache"]);
+
+    // A cache the node does not keep is the runtime's volume, mounted as
+    // ever (Podman's, seeded from the snapshot).
+    let podman_cache = vec![
+        Mount::volume(work.clone(), "/work", false),
+        Mount::volume(crate::config::resource_name("cache-r-2"), "/cache", false),
+    ];
+    let (provided, targets) = sent(&snapshot, Some(RunKind::Session), &podman_cache);
+    assert_eq!(targets, ["/work"]);
+    assert!(provided.contains(&podman_cache[1]), "{provided:?}");
+}

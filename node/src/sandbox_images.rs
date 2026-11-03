@@ -20,18 +20,33 @@
 //!   default branch in one sandbox, with the dependency cache in the
 //!   sandbox's own filesystem; the provider then snapshots the sandbox
 //!   (`podman commit`, or `container commit` on an Apple node) and the
-//!   repository's sessions and checks start from the snapshot. On Podman the
-//!   cache volumes they mount are seeded from it; on Apple a cache is sent in
-//!   over the snapshot's own, which keeps what it held. Either way the warm
-//!   cache rides along. The workspace is a volume, so nothing of it is in a
-//!   snapshot.
+//!   repository's sessions and checks start from the snapshot. The
+//!   preparation's tree is sent into the sandbox's own filesystem, never a
+//!   volume, so the snapshot holds what `prepare` left in `/work` as well as
+//!   `/cache`; the default branch's tracked files are removed before the
+//!   commit, so a run's own tree, sent over it, is never mixed with another
+//!   commit's files. On Podman the cache volumes sessions mount are seeded
+//!   from the snapshot's `/cache`; on Apple a session uses the snapshot's
+//!   own.
+//! - **At the snapshot's commit, nothing to prepare.** The snapshot records
+//!   the default-branch commit it was prepared from ([`COMMIT_LABEL`] and the
+//!   store row's `source_commit`). A session that starts from the current
+//!   snapshot at that commit skips `prepare` ([`skips_prepare`]): what it
+//!   would install is already under its `/work`, wherever the runtime sends
+//!   the workspace over the image's own (`Backend::workspace_over_image`).
+//!   At any other commit, or for a resumed workspace, `prepare` runs again
+//!   in one sandbox from the snapshot, on its warm `/work` and `/cache`
+//!   ([`Held::for_session`]). A candidate's preparation always runs: it is a
+//!   tree under review, not a commit the snapshot was made from.
 //!
 //! A snapshot is keyed on what it was made from: the base image's digest,
 //! the repository image's digest, the default branch's lockfiles and the
 //! preparation recipe (its commands and egress). A change to any of them
 //! leaves the snapshot unused and the next session prepares again; the
 //! snapshot it supersedes is removed (`repo_image::supersede`, and
-//! `tracon gc` for any left over).
+//! `tracon gc` for any left over). The commit is recorded, not keyed: a
+//! commit that leaves the lockfiles alone keeps the snapshot current, and
+//! only sessions at the commit it was made from skip `prepare`.
 //!
 //! Sandboxes run as the base image's own user (65532), in a user namespace
 //! that maps it to the node's own user (`--userns=keep-id`): what the image
@@ -66,6 +81,12 @@ const SCHEME: &str = "1";
 pub const FROM_LABEL: &str = "io.tracon.snapshot.from";
 /// On a snapshot image: the key it was made for.
 pub const KEY_LABEL: &str = "io.tracon.snapshot.key";
+/// On a snapshot image: the default-branch commit it was prepared from.
+/// Recorded, not keyed: a session at this commit skips `prepare`.
+pub const COMMIT_LABEL: &str = "io.tracon.snapshot.commit";
+
+/// Where a snapshot holds what its preparation left beside the tree.
+pub const PREPARED_TREE: &str = "/work";
 
 /// What the environment's image is called when it is a snapshot.
 pub const SNAPSHOT_SOURCE: &str = "prepared snapshot";
@@ -462,6 +483,30 @@ pub async fn current(
         .then_some(row.image)
 }
 
+/// Whether `image` is one of this node's prepared snapshots, by its name.
+pub fn is_snapshot(image: &str) -> bool {
+    image.starts_with(&format!("{}-", snapshot_repo()))
+}
+
+/// The default-branch commit `snapshot` was prepared from, while it is still
+/// `repo`'s newest ready snapshot; `None` for one superseded since, or made
+/// before commits were recorded.
+pub fn prepared_from(store: &Store, repo: &Path, snapshot: &str) -> Option<String> {
+    store
+        .ready_repo_image(&repo.to_string_lossy(), SNAPSHOT)
+        .ok()
+        .flatten()
+        .filter(|row| row.image == snapshot && !row.source_commit.is_empty())
+        .map(|row| row.source_commit)
+}
+
+/// Whether a session whose workspace starts at `base` may skip `prepare`
+/// because the snapshot it starts from was prepared at that very commit. A
+/// resumed workspace (`base` unknown) or another commit prepares again.
+pub fn skips_prepare(prepared_at: Option<&str>, base: Option<&str>) -> bool {
+    matches!((prepared_at, base), (Some(at), Some(base)) if !at.is_empty() && at == base)
+}
+
 /// The snapshot `repo`'s runs in `environment` start from, when there is a
 /// current one; with `prepare`, one is made first if there is not.
 pub async fn snapshot_for(
@@ -623,10 +668,16 @@ async fn make_snapshot(
         .map_err(|error| error.to_string())?;
         let id = uuid::Uuid::now_v7().simple().to_string();
         let work = crate::config::resource_name(&format!("warm-{id}"));
-        backend
-            .import_writable(&work, &tree.root)
-            .await
-            .map_err(|error| error.to_string())?;
+        // Kept by the preparer's store, so it is sent into the sandbox's own
+        // filesystem and the commit carries what `prepare` left in it.
+        match &preparer.files {
+            Some(files) => files.import(&work, &tree.root).map_err(|e| e.to_string())?,
+            None => backend
+                .import_writable(&work, &tree.root)
+                .await
+                .map_err(|error| error.to_string())?,
+        }
+        let tracked = tracked_files(&tree.root);
         let reference = format!("{}:{}", snapshot_repository(repo), &key[..12]);
         let name = crate::config::resource_name(&format!("w-{}", &id[..12]));
         let mut held = Held::for_preparation(preparer, &name, &inputs.image, &work).await;
@@ -655,19 +706,32 @@ async fn make_snapshot(
                 )
                 .await
                 .map_err(|stopped| stopped.to_string());
+                let prepared = match (prepared, &tracked) {
+                    (Ok(()), Ok(tracked)) => held.remove_tracked(tracked).await,
+                    (Ok(()), Err(error)) => Err(error.clone()),
+                    (failed, _) => failed,
+                };
                 held.conclude(
                     prepared,
                     &reference,
                     &[
                         (FROM_LABEL.to_string(), inputs.image.clone()),
                         (KEY_LABEL.to_string(), key.clone()),
+                        (COMMIT_LABEL.to_string(), inputs.commit.clone()),
                     ],
                 )
                 .await
             }
             Err(error) => Err(error),
         };
-        let _ = backend.remove_volume(&work).await;
+        match &preparer.files {
+            Some(files) => {
+                let _ = files.remove(&work);
+            }
+            None => {
+                let _ = backend.remove_volume(&work).await;
+            }
+        }
         made
     };
     match made.await {
@@ -700,6 +764,26 @@ async fn make_snapshot(
     }
 }
 
+/// Every file and link under `root` (a commit's tree as the node staged it),
+/// relative to it.
+fn tracked_files(root: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(root.join(dir))? {
+            let entry = entry?;
+            let path = dir.join(entry.file_name());
+            match entry.file_type()?.is_dir() {
+                true => walk(root, &path, out)?,
+                false => out.push(path),
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    walk(root, Path::new(""), &mut out)
+        .map_err(|error| format!("list the default branch's files: {error}"))?;
+    Ok(out)
+}
+
 /// One sandbox held open for several commands: a preparation's steps all
 /// run in it, so what each leaves in the sandbox's own filesystem is there
 /// for the next and for the snapshot. Its mounts are fixed when it is made;
@@ -728,10 +812,41 @@ impl Held {
         image: &str,
         mounts: &[Mount],
     ) -> Result<Held, String> {
+        Held::start_as(
+            provider,
+            files,
+            server,
+            name,
+            image,
+            mounts,
+            crate::runner::RunKind::Check,
+        )
+        .await
+    }
+
+    /// [`Held::start`], its trees taken back at the end as a run of `kind`
+    /// takes them: a check's never, a preparation's whole.
+    pub async fn start_as(
+        provider: Arc<dyn SandboxProvider>,
+        files: Option<&crate::runner::sandbox_files::FilesStore>,
+        server: Arc<SandboxServer>,
+        name: &str,
+        image: &str,
+        mounts: &[Mount],
+        kind: crate::runner::RunKind,
+    ) -> Result<Held, String> {
         let (mounts, plan) = match files {
-            Some(store) => store
-                .plan(mounts)
-                .map_err(|e| format!("sandbox {name}: {e}"))?,
+            // A tree sent in lands in the image's own filesystem rather than
+            // on storage of the sandbox's own: what the image holds there
+            // (a snapshot's prepared `/work`) is under it, and a commit of
+            // the sandbox carries what was done to it.
+            Some(store) => {
+                let (provided, plan) = store
+                    .plan(mounts)
+                    .map_err(|e| format!("sandbox {name}: {e}"))?;
+                let provided = provided.into_iter().filter(|m| !m.is_local()).collect();
+                (provided, plan)
+            }
             None => (mounts.to_vec(), None),
         };
         let run = format!("{name}:{}", uuid::Uuid::now_v7().simple());
@@ -766,11 +881,12 @@ impl Held {
             .connect(&handle, &server, crate::runner::protocol::CONNECT_WITHIN)
             .await
             .map_err(|error| format!("connect to sandbox {name}: {error}"));
-        // Sent in, never taken back: what a preparation leaves is in the
-        // sandbox's own filesystem, for the snapshot.
+        // Taken back as a run of `kind` would be: a warm-up's (a check's)
+        // never, since what it leaves is in the sandbox's own filesystem,
+        // for the snapshot.
         let sent = match (&connected, plan) {
             (Ok(conn), Some(plan)) => plan
-                .attach(conn, name, crate::runner::RunKind::Check)
+                .attach(conn, name, kind)
                 .await
                 .map(Some)
                 .map_err(|error| format!("send files to sandbox {name}: {error}")),
@@ -814,6 +930,98 @@ impl Held {
             &[Mount::volume(work.to_string(), "/work", false)],
         )
         .await
+    }
+
+    /// A sandbox from `snapshot` in which a session's own `prepare` runs,
+    /// every step in it, on the session's `workspace` at `/work` and the
+    /// snapshot's warm `/cache`. Nothing of the node's cache is sent in or
+    /// taken back; the workspace is taken back whole at [`Held::take_back`].
+    pub async fn for_session(
+        preparer: &Preparer,
+        name: &str,
+        snapshot: &str,
+        workspace: &str,
+    ) -> Result<Held, String> {
+        let server = crate::runner::protocol::node_server().map_err(|e| e.to_string())?;
+        let held = Held::start_as(
+            preparer.provider.clone(),
+            preparer.files.as_ref(),
+            server,
+            name,
+            snapshot,
+            &[Mount::volume(workspace.to_string(), "/work", false)],
+            crate::runner::RunKind::Prepare,
+        )
+        .await?;
+        if !preparer.tunnels.is_empty() {
+            if let Err(error) = held.open_tunnels(&preparer.tunnels).await {
+                held.finish().await;
+                return Err(error);
+            }
+        }
+        Ok(held)
+    }
+
+    /// Take the sandbox's trees back, once, and remove it: a preparation
+    /// whose tree did not come back has prepared nothing.
+    pub async fn take_back(self) -> Result<(), String> {
+        let taken = match &self.files {
+            Some(files) => files
+                .conclude()
+                .await
+                .map_err(|error| format!("take the prepared tree back: {error}")),
+            None => Ok(()),
+        };
+        self.finish().await;
+        taken
+    }
+
+    /// Remove `tracked` (paths relative to `/work`) from the sandbox's
+    /// `/work`, leaving what a preparation added beside them: a run's own
+    /// tree is sent over a snapshot's `/work`, and a file the default branch
+    /// tracks that the run's commit deleted must not come back with it.
+    pub async fn remove_tracked(&self, tracked: &[std::path::PathBuf]) -> Result<(), String> {
+        use std::os::unix::ffi::OsStrExt as _;
+        if tracked.is_empty() {
+            return Ok(());
+        }
+        const LISTED: &str = "/tmp/tracon-tracked";
+        let list = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let mut names = Vec::new();
+        for path in tracked {
+            names.extend_from_slice(path.as_os_str().as_bytes());
+            names.push(0);
+        }
+        std::fs::write(list.path().join("list"), names).map_err(|e| e.to_string())?;
+        self.conn
+            .import_dir(
+                list.path(),
+                LISTED,
+                tracon_sandbox::protocol::Exclusions::None,
+            )
+            .await
+            .map_err(|error| format!("send the tracked files' list: {error}"))?;
+        let script = format!("cd /work && xargs -0 rm -f -- < {LISTED}/list && rm -rf {LISTED}");
+        let output = self
+            .conn
+            .spawn(SpawnSpec {
+                argv: vec!["sh".into(), "-c".into(), script],
+                stdout: true,
+                stderr: true,
+                ..SpawnSpec::default()
+            })
+            .await
+            .map_err(|e| format!("remove the tracked files: {e}"))?
+            .output()
+            .await
+            .map_err(|e| format!("remove the tracked files: {e}"))?;
+        match exit_code(output.status) {
+            0 => Ok(()),
+            code => Err(format!(
+                "remove the tracked files (exit {code}): {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
+        }
     }
 
     /// After a preparation: on success, the sandbox snapshotted as
@@ -1103,6 +1311,93 @@ mod tests {
         let before = made_count(repo);
         record_made(repo, "k1", None);
         assert_eq!(failed_since(repo, "k1", before), None);
+    }
+
+    /// Only a session at the very commit its snapshot was prepared from
+    /// skips `prepare`; another commit, a resumed workspace whose start is
+    /// unknown, or a snapshot with no recorded commit prepares again.
+    #[test]
+    fn prepare_is_skipped_only_at_the_snapshots_commit() {
+        assert!(skips_prepare(Some("c1"), Some("c1")));
+        assert!(!skips_prepare(Some("c1"), Some("c2")));
+        assert!(!skips_prepare(Some("c1"), None));
+        assert!(!skips_prepare(None, Some("c1")));
+        assert!(!skips_prepare(Some(""), Some("")));
+    }
+
+    /// The commit is read from the repository's newest ready snapshot, and
+    /// only while that is the one a session starts from: a snapshot a newer
+    /// one superseded (a stale one) says nothing.
+    #[test]
+    fn the_commit_is_the_current_snapshots_own() {
+        let store = Store::open_in_memory().unwrap();
+        let repo = Path::new("/src/b3-app");
+        let made = |key: &str, commit: &str, image: &str| {
+            let row = store
+                .start_repo_image(&RepoImageStart {
+                    repo_path: &repo.to_string_lossy(),
+                    kind: SNAPSHOT,
+                    recipe_hash: key,
+                    source_ref: "",
+                    source_commit: commit,
+                    parent_image: "base@sha256:aa",
+                })
+                .unwrap();
+            store.finish_repo_image(&row, Ok(image), "", &[]).unwrap();
+        };
+        assert_eq!(prepared_from(&store, repo, "snap@sha256:01"), None);
+        made("k1", "c1", "snap@sha256:01");
+        assert_eq!(
+            prepared_from(&store, repo, "snap@sha256:01").as_deref(),
+            Some("c1")
+        );
+        assert_eq!(
+            prepared_from(&store, Path::new("/src/other"), "snap@sha256:01"),
+            None
+        );
+        std::thread::sleep(Duration::from_millis(5));
+        made("k2", "c2", "snap@sha256:02");
+        assert_eq!(prepared_from(&store, repo, "snap@sha256:01"), None, "stale");
+        assert_eq!(
+            prepared_from(&store, repo, "snap@sha256:02").as_deref(),
+            Some("c2")
+        );
+        std::thread::sleep(Duration::from_millis(5));
+        made("k3", "", "snap@sha256:03");
+        assert_eq!(prepared_from(&store, repo, "snap@sha256:03"), None);
+    }
+
+    #[test]
+    fn a_snapshot_is_known_by_its_name() {
+        let snapshot = format!("{}@sha256:aa", snapshot_repository(Path::new("/src/app")));
+        assert!(is_snapshot(&snapshot));
+        assert!(!is_snapshot("localhost/tracon-repo-app-0123:1"));
+        assert!(!is_snapshot(
+            "ghcr.io/cosmicspork/tracon-sandbox-base@sha256:aa"
+        ));
+        assert!(!is_snapshot(""));
+    }
+
+    /// What is removed from a snapshot's `/work`: every file and link of the
+    /// commit's tree, never a directory, which may also hold what `prepare`
+    /// installed.
+    #[test]
+    fn the_tracked_files_are_every_file_and_link_of_the_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src/deep")).unwrap();
+        std::fs::write(root.join("package.json"), "{}").unwrap();
+        std::fs::write(root.join("src/deep/a.js"), "").unwrap();
+        std::os::unix::fs::symlink("deep/a.js", root.join("src/link")).unwrap();
+        std::fs::create_dir_all(root.join("empty")).unwrap();
+        let mut files = tracked_files(root).unwrap();
+        files.sort();
+        assert_eq!(
+            files,
+            ["package.json", "src/deep/a.js", "src/link"]
+                .map(std::path::PathBuf::from)
+                .to_vec()
+        );
     }
 
     #[test]

@@ -355,6 +355,7 @@ async fn a_kubernetes_sessions_workspace_is_prepared_through_its_grant() {
         ("tracon-workspace-a", Ok("tracon-cache-s-app-personal")),
         "tracon-s-app",
         &tracon::review::checks::RunToCompletion,
+        None,
     )
     .await
     .expect("the entry prepares");

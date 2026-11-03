@@ -390,6 +390,12 @@ pub enum PrepareOutcome {
     Cancelled(String),
     /// Nothing ran, and why.
     NotRun(String),
+    /// Nothing ran because nothing needed to: the session's sandbox starts
+    /// from a snapshot prepared at its own commit, which already holds what
+    /// `prepare` installs.
+    FromSnapshot {
+        commit: String,
+    },
 }
 
 impl PrepareOutcome {
@@ -400,6 +406,7 @@ impl PrepareOutcome {
             PrepareOutcome::TimedOut { .. } => "timed_out",
             PrepareOutcome::Cancelled(_) => "cancelled",
             PrepareOutcome::NotRun(_) => "not_run",
+            PrepareOutcome::FromSnapshot { .. } => "from_snapshot",
         }
     }
 }
@@ -420,6 +427,7 @@ impl WorkspacePreparation {
             PrepareOutcome::Cancelled(reason) | PrepareOutcome::NotRun(reason) => {
                 payload["reason"] = reason.as_str().into()
             }
+            PrepareOutcome::FromSnapshot { commit } => payload["commit"] = commit.as_str().into(),
             PrepareOutcome::Prepared => {}
         }
         payload

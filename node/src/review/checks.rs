@@ -144,7 +144,7 @@ pub struct PrepareFailure {
 }
 
 impl PrepareFailure {
-    fn said(message: impl Into<String>) -> Self {
+    pub(crate) fn said(message: impl Into<String>) -> Self {
         Self {
             command: None,
             exit: None,

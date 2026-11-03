@@ -445,9 +445,31 @@ impl FilesStore {
     /// of the sandbox's own ([`Mount::local`]), unless it is inside another
     /// that does.
     pub fn plan(&self, mounts: &[Mount]) -> Result<(Vec<Mount>, Option<Plan>), FilesError> {
+        self.plan_from(mounts, "", None)
+    }
+
+    /// [`Self::plan`] for a run of `kind` in `image`. From a prepared
+    /// snapshot, a run's `/work` is sent over the snapshot's own, which holds
+    /// what its preparation installed (`node_modules`, `vendor/`) and none of
+    /// the default branch's tracked files; and a session is not sent the
+    /// node's copy of a cache, since the snapshot's `/cache` is what its
+    /// preparation filled and the node's copy would be sent whole at every
+    /// start only to lie over it. A session's workspace is sent as the node
+    /// holds it: the checkout alone, unless its own `prepare` ran.
+    pub fn plan_from(
+        &self,
+        mounts: &[Mount],
+        image: &str,
+        kind: Option<RunKind>,
+    ) -> Result<(Vec<Mount>, Option<Plan>), FilesError> {
+        let from_snapshot = crate::sandbox_images::is_snapshot(image);
+        let image_holds_caches = from_snapshot && kind == Some(RunKind::Session);
         let mut provided = Vec::new();
         let mut placed = Vec::new();
         for mount in mounts {
+            if image_holds_caches && is_cache(&mount.volume) && self.tree(&mount.volume).is_some() {
+                continue;
+            }
             if self.withheld.contains(&mount.volume) {
                 provided.push(mount.clone());
                 continue;
@@ -494,6 +516,13 @@ impl FilesStore {
             if !inside_another && !local.contains(target) {
                 local.push(target.clone());
             }
+        }
+        // A snapshot's `/work` is its preparation's tree, made by the
+        // sandbox's own user: a tree sent there lands on it in place, where
+        // storage of the sandbox's own would first be filled with a copy of
+        // it (Podman copies what the image holds into a new volume).
+        if from_snapshot {
+            local.retain(|target| target != crate::sandbox_images::PREPARED_TREE);
         }
         provided.extend(local.into_iter().map(Mount::local));
         Ok((

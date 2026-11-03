@@ -1383,6 +1383,10 @@ fn push_preparation(
         PrepareOutcome::Prepared => {
             format!("they ran in `{worktree}` before you started ({secs}s).{warm}")
         }
+        PrepareOutcome::FromSnapshot { .. } => format!(
+            "they ran on this commit when the repository was prepared, and what they installed \
+             is already in `{worktree}`.{warm}"
+        ),
         PrepareOutcome::Failed(detail) => format!(
             "they ran in `{worktree}` before you started and failed, so what they install \
              may be missing: {} Run them yourself to see the whole output.{warm}",
