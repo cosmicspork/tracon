@@ -2156,7 +2156,7 @@ async fn build_steps(
     let empty = stage.path().join("empty");
     std::fs::create_dir_all(&empty).map_err(|e| staged(e.to_string()))?;
     let built = builder
-        .build_with_egress(
+        .build_steps(
             ImageBuild {
                 tag: &format!("{}:{}", image_name(repo), &recipe.hash[..12]),
                 containerfile: &containerfile,
@@ -2164,7 +2164,11 @@ async fn build_steps(
                 labels: &[(RECIPE_LABEL.to_string(), recipe.hash.clone())],
                 timeout: BUILD_TIMEOUT,
             },
-            &recipe.steps_egress,
+            &crate::boundary::StepsBuild {
+                base: &recipe.steps_base,
+                steps: &recipe.steps,
+                hosts: &recipe.steps_egress,
+            },
         )
         .await?;
     // No source image: the base is not this node's to remove with it.

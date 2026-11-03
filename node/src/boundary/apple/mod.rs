@@ -38,6 +38,9 @@ use crate::runner::{Mount, Runner, RunnerCommand, RunnerError, Spawned};
 /// where the tunnels listen.
 pub const GATEWAY_HOST: &str = "127.0.0.1";
 
+/// Where a build's steps reach their grant, on the build sandbox's loopback.
+const BUILD_PROXY_PORT: u16 = 3128;
+
 pub struct AppleBackend {
     cfg: Config,
     cli: Arc<dyn ContainerCli>,
@@ -114,8 +117,70 @@ impl AppleBackend {
                 .iter()
                 .filter_map(|service| Some((service.bundle.clone()?, service.bundle_target())))
                 .collect(),
+            user: None,
         };
         AppleProvider::with_cli(options, Box::new(Shared(self.cli.clone())))
+    }
+
+    /// The provider a repository's build steps run with: as root, with no
+    /// environment of the node's (the steps get the base's own, and the
+    /// grant's proxy per command), and no service bundles.
+    fn build_provider(&self) -> AppleProvider {
+        let apple = &self.cfg.runtime.apple;
+        let options = AppleOptions {
+            bin: apple.container.clone(),
+            bundle: crate::bundle::effective(&self.cfg).unwrap_or_default(),
+            socket_dir: AppleOptions::default_socket_dir(),
+            limit: None,
+            env: Vec::new(),
+            cpus: apple.cpus,
+            memory: apple.memory.clone(),
+            service_bundles: Vec::new(),
+            user: Some("0:0".into()),
+        };
+        AppleProvider::with_cli(options, Box::new(Shared(self.cli.clone())))
+    }
+
+    /// Run `steps` in `held`, in turn, each with the grant's `proxy`; what
+    /// they printed, and the first that failed.
+    async fn run_steps(
+        held: &crate::sandbox_images::Held,
+        steps: &[String],
+        proxy: &str,
+        name: &str,
+    ) -> (String, Option<String>) {
+        let mut log = String::new();
+        for (at, step) in steps.iter().enumerate() {
+            let number = at + 1;
+            log.push_str(&format!("#{number} RUN {step}\n"));
+            let cmd = RunnerCommand {
+                argv: vec!["/bin/sh".into(), "-ec".into(), step.clone()],
+                secret_env: crate::runner::SecretEnv::new(
+                    crate::boundary::BUILD_PROXY_VARS
+                        .iter()
+                        .map(|var| (var.to_string(), proxy.to_string()))
+                        .collect(),
+                ),
+                workdir: Some("/work".into()),
+                name: format!("{name}-{number}"),
+                ..Default::default()
+            };
+            match held.run_capture(cmd).await {
+                Ok(out) => {
+                    log.push_str(&String::from_utf8_lossy(&out.stdout));
+                    log.push_str(&String::from_utf8_lossy(&out.stderr));
+                    if !out.status.success() {
+                        let code = out.status.code().unwrap_or(-1);
+                        return (
+                            log,
+                            Some(format!("build step {number} failed (exit {code})")),
+                        );
+                    }
+                }
+                Err(error) => return (log, Some(format!("build step {number}: {error}"))),
+            }
+        }
+        (log, None)
     }
 
     fn runner_with(&self, harness_id: &str, image: String, mounts: Vec<Mount>) -> Arc<dyn Runner> {
@@ -401,6 +466,81 @@ impl ImageBuilder for AppleBackend {
             None => Err(failure(
                 format!("container reported no digest for {}", build.tag),
                 &log,
+            )),
+        }
+    }
+
+    /// `container build` runs in a builder VM with a network of its own,
+    /// which nothing here can hold to a list. So the steps run instead in a
+    /// sandbox from the base, as root, whose one way out is a tunnel to a
+    /// listener of this build's own serving a grant of exactly the steps'
+    /// hosts; the sandbox is then committed and configured as the base is.
+    async fn build_steps(
+        &self,
+        build: ImageBuild<'_>,
+        steps: &crate::boundary::StepsBuild<'_>,
+    ) -> Result<BuiltImage, BuildFailure> {
+        if let Some(why) = AppleBackend::unavailable(self).await {
+            return Err(BuildFailure::transient(why));
+        }
+        let failure = |error: String, log: &str| BuildFailure {
+            error,
+            log_tail: log_tail(log.as_bytes()),
+            ..Default::default()
+        };
+        let serving = crate::boundary::BuildEgress::serve(
+            &self.grants,
+            Backend::egress_refusal(self),
+            steps.hosts,
+        )
+        .await?;
+        let server = crate::runner::protocol::node_server()
+            .map_err(|error| BuildFailure::transient(format!("build sandbox: {error}")))?;
+        let id = uuid::Uuid::now_v7().simple().to_string();
+        let name = crate::config::resource_name(&format!("b-{}", &id[id.len() - 12..]));
+        let built = async {
+            let held = crate::sandbox_images::Held::start(
+                Arc::new(self.build_provider()),
+                None,
+                server,
+                &name,
+                steps.base,
+                &[],
+            )
+            .await
+            .map_err(|error| failure(error, ""))?;
+            let tunnel = crate::runner::tunnels::TunnelSpec::loopback(
+                "build-egress",
+                BUILD_PROXY_PORT,
+                tracon_sandbox::node::Endpoint::Tcp(format!("127.0.0.1:{}", serving.port)),
+            );
+            if let Err(error) = held.open_tunnels(&[tunnel]).await {
+                held.finish().await;
+                return Err(failure(format!("build egress tunnel: {error}"), ""));
+            }
+            let (log, failed) =
+                Self::run_steps(&held, steps.steps, &serving.proxy(BUILD_PROXY_PORT), &name).await;
+            let image = match failed {
+                Some(error) => Err(error),
+                None => held.snapshot(build.tag, build.labels).await,
+            };
+            held.finish().await;
+            image
+                .map(|image| BuiltImage {
+                    image,
+                    log_tail: log_tail(log.as_bytes()),
+                })
+                .map_err(|error| failure(error, &log))
+        };
+        // The sandbox is removed when its future is dropped at the deadline.
+        match tokio::time::timeout(build.timeout, built).await {
+            Ok(built) => built,
+            Err(_) => Err(failure(
+                format!(
+                    "the build did not finish in {} minutes",
+                    build.timeout.as_secs() / 60
+                ),
+                "",
             )),
         }
     }

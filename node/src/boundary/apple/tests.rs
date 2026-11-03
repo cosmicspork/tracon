@@ -368,13 +368,166 @@ async fn a_repository_is_prepared_once_and_its_sessions_start_from_the_snapshot(
     );
     assert!(snapshots.contains(&snapshot), "{snapshots:?}");
     assert!(!b.exists(&snapshot).await);
+    // Only this repository's: the store may hold a running node's own.
+    let ours = image_name(&snapshot).to_string();
     let left: Vec<_> = b
         .references()
         .await
         .into_iter()
-        .filter(|(name, _)| name.starts_with(&crate::sandbox_images::snapshot_repo()))
+        .filter(|(name, _)| image_name(name) == ours || name.starts_with(&format!("{ours}-commit")))
         .collect();
     assert!(left.is_empty(), "{left:?}");
+}
+
+/// Against a real `container`, as above, and Ubuntu's apt sources: a
+/// repository's `build` steps run as root on the base and reach only their
+/// egress; its `prepare` then runs as the base's user and is snapshotted, and
+/// a sandbox from the snapshot has what both left.
+#[tokio::test]
+#[ignore = "needs Apple's container, a bundle, a base image and the network"]
+async fn build_steps_reach_only_their_egress_and_end_as_the_bases_user() {
+    let (Ok(bundle), Ok(base)) = (
+        std::env::var("TRACON_E2E_APPLE_BUNDLE"),
+        std::env::var("TRACON_E2E_APPLE_BASE"),
+    ) else {
+        eprintln!("skipped: no bundle or base named");
+        return;
+    };
+    let repo_dir = tempfile::tempdir().unwrap();
+    let repo = repo_dir.path().join("e2e-steps");
+    std::fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=e2e",
+                "-c",
+                "user.email=e2e@example.invalid",
+            ])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("data.json"), "{\"answer\": 42}\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "one"]);
+
+    let mut cfg = Config::default();
+    cfg.runtime.kind = crate::config::RuntimeKind::Apple;
+    cfg.sandbox.bundle = Some(bundle.into());
+    cfg.sandbox.base_image = Some(base);
+    // `jq` is in the base; `tree` is not, so its presence is the build's.
+    cfg.repo = vec![crate::config::Repo {
+        path: repo.clone(),
+        build: vec![
+            "apt-get update".into(),
+            "apt-get install -y --no-install-recommends tree".into(),
+            "rm -rf /var/lib/apt/lists/*".into(),
+            "if curl -fsS --max-time 10 https://example.com >/dev/null; then echo reached-$((1+1)); fi".into(),
+            "if curl -fsS --noproxy '*' --max-time 10 https://1.1.1.1 >/dev/null; then echo direct-$((1+1)); fi".into(),
+            "curl -sS --max-time 10 -o /dev/null -w 'mirror %{http_code}\\n' https://archive.ubuntu.com/ubuntu/".into(),
+            "id -u > /built-by".into(),
+        ],
+        egress: vec!["apt".into()],
+        prepare: vec![
+            "jq -r .answer data.json > /cache/answer && id -u > /cache/prepared-by".into(),
+        ],
+        ..Default::default()
+    }];
+    crate::config::validate_repos(&cfg.repo).unwrap();
+    crate::config::validate_repo_builds(&cfg).unwrap();
+    let b = AppleBackend::new(&cfg);
+    b.converge_images().await.unwrap();
+    let store = crate::store::Store::open_in_memory().unwrap();
+
+    let began = std::time::Instant::now();
+    let ensured = crate::repo_image::ensure_base(&b, &cfg, &store, &repo, false).await;
+    let built_in = began.elapsed();
+    let row = store
+        .latest_repo_image(&repo.to_string_lossy(), crate::repo_image::BASE)
+        .unwrap();
+    let image = match &ensured {
+        crate::repo_image::Ensured::Rebuilt(image) => image.clone(),
+        other => panic!("not built: {other:?}\n{row:?}"),
+    };
+    let log = row.map(|row| row.log_tail).unwrap_or_default();
+    let environment = crate::environment::environment_for(&cfg, &store, Some(&repo));
+    let snapshot =
+        crate::sandbox_images::snapshot_for(&b, &cfg, &store, &repo, &environment, false).await;
+    eprintln!("built in {built_in:?}: {image} -> {snapshot:?}\n{log}");
+    let inspected = b
+        .container(&["image", "inspect", &image])
+        .await
+        .unwrap_or_default();
+
+    let run = |image: String| {
+        let cmd = crate::runner::RunnerCommand {
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                "id -u; cat /built-by; tree --version; cat /cache/answer /cache/prepared-by; claude --version".into(),
+            ],
+            image: Some(image),
+            name: crate::config::resource_name("e2e-steps-session"),
+            labels: crate::runner::RunLabels::of(crate::runner::RunKind::Probe),
+            ..Default::default()
+        };
+        let runner = crate::boundary::Backend::runner(&b, Vec::new());
+        async move { runner.run_capture(cmd).await }
+    };
+    let out = match &snapshot {
+        Some(snapshot) => Some(run(snapshot.clone()).await),
+        None => None,
+    };
+    if let Some(snapshot) = &snapshot {
+        b.remove(snapshot).await;
+    }
+    b.remove(&image).await;
+
+    assert!(!log.contains("reached-2"), "{log}");
+    assert!(!log.contains("direct-2"), "{log}");
+    assert!(log.contains("returned error: 403"), "{log}");
+    assert!(log.contains("mirror 200"), "{log}");
+    let parsed: serde_json::Value = serde_json::from_str(&inspected).unwrap();
+    let config = parsed[0]["variants"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|v| v["platform"]["architecture"] == "arm64")
+        .map(|v| v["config"]["config"].clone())
+        .unwrap_or_default();
+    assert_eq!(config["User"], "65532:65532", "{config}");
+    assert_eq!(config["WorkingDir"], "/work", "{config}");
+    assert!(config["Labels"]["io.tracon.recipe"].is_string(), "{config}");
+    let env = config["Env"].to_string();
+    assert!(env.contains("HOME=/home/harness"), "{env}");
+    assert!(!env.to_ascii_lowercase().contains("_proxy"), "{env}");
+    assert!(
+        !inspected.contains("build:"),
+        "the grant is in the image: {inspected}"
+    );
+    let out = out.expect("a snapshot").unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{said}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let lines: Vec<&str> = said.lines().collect();
+    assert_eq!(lines[0], "65532", "{said}");
+    assert_eq!(lines[1], "0", "the steps ran as root: {said}");
+    assert!(lines[2].starts_with("tree v"), "{said}");
+    assert_eq!(lines[3], "42", "{said}");
+    assert_eq!(lines[4], "65532", "{said}");
+    assert!(said.contains("Claude Code"), "{said}");
 }
 
 /// A session from a snapshot finds its cache in the snapshot, and one with

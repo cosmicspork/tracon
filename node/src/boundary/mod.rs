@@ -96,6 +96,79 @@ impl Drop for EgressGrant {
     }
 }
 
+/// What a build step is told when it asks for a host the repository's
+/// entry does not name.
+pub(crate) const BUILD_REFUSAL: &str =
+    "not reachable from this repository's build steps; add it to its egress";
+
+/// The proxy variables a build's steps are given, in both spellings: curl
+/// reads only the lowercase ones, apt and most package managers either.
+pub(crate) const BUILD_PROXY_VARS: [&str; 4] =
+    ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"];
+
+/// One build's listener on the node's loopback, serving a grant of the
+/// node's egress proxy for exactly the build's hosts. Both go when it is
+/// dropped, a build abandoned at its deadline included.
+pub(crate) struct BuildEgress {
+    task: tokio::task::JoinHandle<()>,
+    grants: crate::gateway::proxy::Grants,
+    token: String,
+    /// The listener's port on the node's loopback.
+    pub port: u16,
+}
+
+impl BuildEgress {
+    pub(crate) async fn serve(
+        grants: &crate::gateway::proxy::Grants,
+        refusal: crate::gateway::proxy::Refusal,
+        hosts: &[String],
+    ) -> Result<Self, BuildFailure> {
+        let unready = |error: std::io::Error| {
+            BuildFailure::transient(format!("build egress listener: {error}"))
+        };
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .map_err(unready)?;
+        let port = listener.local_addr().map_err(unready)?.port();
+        let token = grants
+            .issue(crate::gateway::proxy::GrantSpec {
+                client: "build".into(),
+                hosts: hosts.to_vec(),
+                refusal: BUILD_REFUSAL.into(),
+                ..Default::default()
+            })
+            .map_err(|error| BuildFailure::transient(format!("build egress grant: {error}")))?;
+        let granted = crate::gateway::proxy::Granted::refusing(grants.clone(), refusal);
+        Ok(BuildEgress {
+            task: tokio::spawn(crate::gateway::proxy::serve_granted(listener, granted)),
+            grants: grants.clone(),
+            token,
+            port,
+        })
+    }
+
+    /// The grant's proxy URL, as a step reaches it at loopback `port`.
+    pub(crate) fn proxy(&self, port: u16) -> String {
+        format!("http://build:{}@127.0.0.1:{port}", self.token)
+    }
+}
+
+impl Drop for BuildEgress {
+    fn drop(&mut self) {
+        self.task.abort();
+        self.grants.revoke(&self.token);
+    }
+}
+
+/// A repository's `build` steps: run as root on `base`, each in turn,
+/// reaching only `hosts`.
+pub struct StepsBuild<'a> {
+    /// The stock base, pinned by digest.
+    pub base: &'a str,
+    pub steps: &'a [String],
+    pub hosts: &'a [String],
+}
+
 /// One image to build: a Containerfile and the directory it may copy from.
 pub struct ImageBuild<'a> {
     /// `name:tag`. The built image is reported by digest, under `name`.
@@ -158,13 +231,24 @@ pub trait ImageBuilder: Send + Sync {
     /// `build`, with the network its `RUN` steps get held to `hosts`,
     /// through a grant on the node's egress proxy, where this builder can
     /// hold it there (Podman's). One that cannot builds on its own network,
-    /// as it builds a Dockerfile: Apple's builder VM, a cluster's BuildKit.
+    /// as it builds a Dockerfile: a cluster's BuildKit.
     async fn build_with_egress(
         &self,
         build: ImageBuild<'_>,
         _hosts: &[String],
     ) -> Result<BuiltImage, BuildFailure> {
         self.build(build).await
+    }
+    /// A repository's `build` steps, as `build`'s Containerfile (written
+    /// from them) has them, with their network held to the steps' hosts
+    /// where the builder can. A builder whose own build reaches the network
+    /// however it likes runs the steps some other way (Apple's).
+    async fn build_steps(
+        &self,
+        build: ImageBuild<'_>,
+        steps: &StepsBuild<'_>,
+    ) -> Result<BuiltImage, BuildFailure> {
+        self.build_with_egress(build, steps.hosts).await
     }
     /// Whether the runtime still holds this image. One it pruned has to be
     /// built again before anything can run in it.
