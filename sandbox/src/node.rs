@@ -246,6 +246,29 @@ impl TokenRegistry {
             .any(|i| i.run == run && !i.resume && i.until.is_none_or(|until| until > now))
     }
 
+    /// The digest of `run`'s resume secret: what a node keeps so the next
+    /// process can take the run's sandbox back, never the secret itself.
+    pub fn resume_digest(&self, run: &str) -> Option<[u8; 32]> {
+        self.issued
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, i)| i.run == run && i.resume)
+            .map(|(digest, _)| *digest)
+    }
+
+    /// Know `run`'s resume secret again by its digest.
+    pub fn restore_resume(&self, run: &str, digest: [u8; 32]) {
+        self.issued.lock().unwrap().insert(
+            digest,
+            Issued {
+                run: run.to_string(),
+                until: None,
+                resume: true,
+            },
+        );
+    }
+
     /// Whether `run` holds a resume secret.
     pub fn resumable(&self, run: &str) -> bool {
         self.issued
@@ -430,16 +453,23 @@ impl SandboxServer {
             connection,
         } = handshaken;
         if let Some(inner) = resumes {
+            *inner.info.lock().unwrap() = info;
             if !inner.attach(send, connection) {
                 return Err(SandboxError::Lost);
             }
             tracing::info!(%run, connections = inner.connections.load(Ordering::SeqCst), "a sandbox came back");
             return Ok(Accepted::Resumed(SandboxConn { inner }));
         }
+        let inner = self.register(&run, info, resumable);
+        inner.attach(send, connection);
+        Ok(Accepted::New(SandboxConn { inner }))
+    }
+
+    fn register(&self, run: &str, info: SandboxInfo, resumable: bool) -> Arc<Inner> {
         let (link, _) = watch::channel(Link::Down(0));
         let inner = Arc::new(Inner {
-            run: run.clone(),
-            info,
+            run: run.to_string(),
+            info: Mutex::new(info),
             resumable,
             link,
             ended: CancellationToken::new(),
@@ -453,9 +483,26 @@ impl SandboxServer {
         self.runs
             .lock()
             .unwrap()
-            .insert(run, Arc::downgrade(&inner));
-        inner.attach(send, connection);
-        Ok(Accepted::New(SandboxConn { inner }))
+            .insert(run.to_string(), Arc::downgrade(&inner));
+        inner
+    }
+
+    /// A run an earlier node process started, known again by its resume
+    /// secret's digest (as [`TokenRegistry::resume_digest`] gave it): away
+    /// until its sandbox redials with the secret, and lost if that does not
+    /// happen within [`ServerOptions::resume_within`]. Its carrier is the
+    /// provider's to set up again.
+    pub fn restore(&self, run: &str, digest: [u8; 32]) -> SandboxConn {
+        self.tokens.restore_resume(run, digest);
+        let info = SandboxInfo {
+            version: "unknown".into(),
+            arch: String::new(),
+            pid: 0,
+            init: false,
+        };
+        let inner = self.register(run, info, true);
+        inner.await_return(0);
+        SandboxConn { inner }
     }
 
     async fn handshake(
@@ -558,10 +605,17 @@ impl SandboxServer {
         let ended = conn.inner.ended.clone();
         Some(tokio::spawn(async move {
             loop {
+                // A run that has ended takes nothing more, however soon its
+                // sandbox redials: on the same carrier, a later node process
+                // may be the one to take it back.
                 let io = tokio::select! {
-                    io = listener.accept() => io,
+                    biased;
                     _ = ended.cancelled() => return,
+                    io = listener.accept() => io,
                 };
+                if ended.is_cancelled() {
+                    return;
+                }
                 let io = match io {
                     Ok(io) => io,
                     Err(error) => {
@@ -571,8 +625,9 @@ impl SandboxServer {
                     }
                 };
                 let accepted = tokio::select! {
-                    accepted = server.accept_bound(io, Some(&run)) => accepted,
+                    biased;
                     _ = ended.cancelled() => return,
+                    accepted = server.accept_bound(io, Some(&run)) => accepted,
                 };
                 if let Err(error) = accepted {
                     tracing::warn!(%run, %error, "refused a connection on a sandbox's carrier");
@@ -638,7 +693,7 @@ enum Link {
 
 struct Inner {
     run: String,
-    info: SandboxInfo,
+    info: Mutex<SandboxInfo>,
     /// The sandbox holds a resume secret.
     resumable: bool,
     link: watch::Sender<Link>,
@@ -720,17 +775,23 @@ impl Inner {
             Some(Link::Lost) => self.end(),
             Some(_) => {
                 tracing::warn!(run = %self.run, within_s = self.resume_within.as_secs(), "lost a sandbox's connection; waiting for it to redial");
-                let weak = Arc::downgrade(self);
-                let within = self.resume_within;
-                tokio::spawn(async move {
-                    tokio::time::sleep(within).await;
-                    if let Some(inner) = weak.upgrade() {
-                        inner.expire(generation);
-                    }
-                });
+                self.await_return(generation);
             }
             None => {}
         }
+    }
+
+    /// Lose the run unless a connection after `generation` carries it
+    /// within the resume window.
+    fn await_return(self: &Arc<Self>, generation: u64) {
+        let weak = Arc::downgrade(self);
+        let within = self.resume_within;
+        tokio::spawn(async move {
+            tokio::time::sleep(within).await;
+            if let Some(inner) = weak.upgrade() {
+                inner.expire(generation);
+            }
+        });
     }
 
     /// The window for the connection of `generation` to come back has
@@ -876,8 +937,8 @@ impl SandboxConn {
 
     /// What the sandbox says about itself. Unverified: display it, never
     /// decide on it.
-    pub fn info(&self) -> &SandboxInfo {
-        &self.inner.info
+    pub fn info(&self) -> SandboxInfo {
+        self.inner.info.lock().unwrap().clone()
     }
 
     /// Whether the sandbox holds a resume secret, so a dropped connection
@@ -1211,6 +1272,41 @@ impl SandboxConn {
         })
     }
 
+    /// A process an earlier node process started in this sandbox, by the
+    /// id the sandbox gave it ([`Process::id`]), with every stream piped.
+    pub fn process(&self, id: u64) -> Process {
+        Process {
+            conn: self.clone(),
+            spawned: Spawned { id, pid: 0 },
+            stdin: true,
+            stdout: true,
+            stderr: true,
+        }
+    }
+
+    /// Take the connections of a tunnel already listening in the sandbox at
+    /// `listen` (one an earlier node process opened) to `endpoint`.
+    pub fn adopt_tunnel(
+        &self,
+        name: impl Into<String>,
+        listen: ListenAddr,
+        endpoint: Endpoint,
+    ) -> Tunnel {
+        let name = name.into();
+        let acceptor = tokio::spawn(accept_loop(self.clone(), name.clone(), endpoint));
+        Tunnel {
+            conn: self.clone(),
+            name,
+            bound: listen,
+            acceptor,
+        }
+    }
+
+    /// Wait for a connection to carry the run: `false` if it is lost first.
+    pub async fn connected(&self) -> bool {
+        self.live().await.is_ok()
+    }
+
     pub fn services(&self) -> Services {
         Services { conn: self.clone() }
     }
@@ -1302,11 +1398,17 @@ impl Process {
     /// Its stdout, from the start; carried on from where it was cut off
     /// when the sandbox comes back.
     pub async fn stdout(&self) -> Result<OutputReader, SandboxError> {
-        OutputReader::open(&self.conn, path::STDOUT, self.spawned.id).await
+        self.stdout_from(0).await
     }
 
     pub async fn stderr(&self) -> Result<OutputReader, SandboxError> {
-        OutputReader::open(&self.conn, path::STDERR, self.spawned.id).await
+        OutputReader::open(&self.conn, path::STDERR, self.spawned.id, 0).await
+    }
+
+    /// Its stdout from byte `offset` on: where a reader in an earlier node
+    /// process had got to ([`OutputReader::offset`]).
+    pub async fn stdout_from(&self, offset: u64) -> Result<OutputReader, SandboxError> {
+        OutputReader::open(&self.conn, path::STDOUT, self.spawned.id, offset).await
     }
 
     pub async fn stdio(&self) -> Result<Stdio, SandboxError> {
@@ -1440,15 +1542,23 @@ pub struct OutputReader {
 }
 
 impl OutputReader {
-    async fn open(conn: &SandboxConn, path: &'static str, id: u64) -> Result<Self, SandboxError> {
+    async fn open(
+        conn: &SandboxConn,
+        path: &'static str,
+        id: u64,
+        from: u64,
+    ) -> Result<Self, SandboxError> {
         let live = conn.live().await?;
-        let args = protocol::encode_args(&ProcRef { id, from: Some(0) });
+        let args = protocol::encode_args(&ProcRef {
+            id,
+            from: Some(from),
+        });
         let reader = conn.open_read_on(&live, path, args).await?;
         Ok(OutputReader {
             conn: conn.clone(),
             path,
             id,
-            offset: 0,
+            offset: from,
             state: ReadState::Open(reader, live),
         })
     }

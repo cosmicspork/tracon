@@ -33,6 +33,12 @@ use crate::{
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
 const COMMAND_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+/// What a session the node stopped under in the middle of a turn is told
+/// when it carries on in the sandbox it ran in.
+const CARRY_ON_AFTER_RESTART: &str = "The node restarted during the last turn, which was cut \
+     off; the conversation was restored, and the workspace and anything still running in it \
+     are as they were. Tool calls that were running when it stopped may not have finished: check \
+     what they changed before repeating them, then carry on with the task.";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NewSession {
@@ -1080,6 +1086,12 @@ impl Manager {
     /// other. Not a continuation: `continued_from` stays empty and nothing is
     /// added to the lineage.
     pub async fn ask(&self, id: &str, ask: Ask) -> Result<SessionRow, SessionError> {
+        self.reopen_as(id, Some(ask)).await
+    }
+
+    /// [`Self::ask`], or with `None` reopened with nothing asked: its
+    /// harness started again on its conversation, waiting for a turn.
+    async fn reopen_as(&self, id: &str, ask: Option<Ask>) -> Result<SessionRow, SessionError> {
         self.refuse_while_restarting()?;
         // Held from the checks to the reopening, so two asks of sessions on
         // one workspace, or an ask and a Continue, cannot each find it free.
@@ -1089,7 +1101,7 @@ impl Manager {
         let adapter = self.reopenable(&was).await.map_err(|why| {
             SessionError::Rejected(format!("its conversation cannot be restored: {why}"))
         })?;
-        if matches!(ask, Ask::Compact) && !adapter.compacts() {
+        if matches!(ask, Some(Ask::Compact)) && !adapter.compacts() {
             return Err(SessionError::Rejected(format!(
                 "the `{}` harness does not compact on request",
                 adapter.id()
@@ -1100,11 +1112,11 @@ impl Manager {
             .clone()
             .ok_or_else(|| SessionError::Rejected("its harness never started".into()))?;
         let message = match &ask {
-            Ask::Message(text) if text.trim().is_empty() => {
+            Some(Ask::Message(text)) if text.trim().is_empty() => {
                 return Err(SessionError::Rejected("say what to ask it".into()))
             }
-            Ask::Message(text) => Some(text.clone()),
-            Ask::Compact => None,
+            Some(Ask::Message(text)) => Some(text.clone()),
+            Some(Ask::Compact) | None => None,
         };
         if !self.store.reopen_session(id, &was.state)? {
             return Err(SessionError::Rejected(
@@ -1145,7 +1157,7 @@ impl Manager {
                 last_seq: 0,
             },
             from: was.clone(),
-            compact: matches!(ask, Ask::Compact),
+            compact: matches!(ask, Some(Ask::Compact)),
         };
         let this = self.clone();
         let id = id.to_string();
@@ -4670,6 +4682,47 @@ impl Manager {
                 Ok(())
             }
             other => other,
+        }
+    }
+
+    /// Carry on the sessions the node stopped under whose sandboxes it left
+    /// running (`runner::reattach`): each is reopened on its own
+    /// conversation, in the sandbox it ran in, and one that was in a turn
+    /// is told to carry on with it. A sandbox no session can be carried on
+    /// in is removed. Once, at start.
+    pub async fn carry_on_after_restart(&self) {
+        let rows = self.store.list_sessions(None).unwrap_or_default();
+        for record in crate::runner::reattach::all() {
+            let row = rows.iter().find(|s| {
+                s.node_id == self.node_id && s.container_name.as_deref() == Some(&record.name)
+            });
+            let carried = match row {
+                Some(row)
+                    if row.state == SessionState::Closed.as_str()
+                        && row.end_reason.as_deref()
+                            == Some(state::EndReason::NodeRestart.as_str()) =>
+                {
+                    let ask = record
+                        .in_turn
+                        .then(|| Ask::Message(CARRY_ON_AFTER_RESTART.into()));
+                    self.reopen_as(&row.id, ask).await.map(|_| ())
+                }
+                _ => Err(SessionError::Rejected(
+                    "no session the node stopped under ran in it".into(),
+                )),
+            };
+            match carried {
+                Ok(()) => {
+                    tracing::info!(sandbox = %record.name, "carrying a session on in the sandbox the node left running")
+                }
+                Err(error) => {
+                    tracing::warn!(sandbox = %record.name, %error, "not carrying on in a sandbox the node left running; it is removed");
+                    crate::runner::reattach::forget(&record.name);
+                    self.backend
+                        .reconcile(std::slice::from_ref(&record.name))
+                        .await;
+                }
+            }
         }
     }
 

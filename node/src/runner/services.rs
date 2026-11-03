@@ -69,6 +69,44 @@ fn find(sandbox: &str) -> Option<Arc<Live>> {
     live().lock().unwrap().get(sandbox).cloned()
 }
 
+/// The sandbox `name` was taken back from an earlier node process: the
+/// services still running in it are this process's to watch and stop.
+pub(super) async fn adopt(sandbox: &str) {
+    let Some(live) = find(sandbox) else {
+        return;
+    };
+    let running = match live.conn.services().status().await {
+        Ok(status) => status,
+        Err(error) => {
+            tracing::warn!(%sandbox, %error, "could not ask a sandbox taken back about its services");
+            return;
+        }
+    };
+    let names: Vec<String> = running
+        .into_iter()
+        .filter(|s| !matches!(s.state, ServiceState::Stopped | ServiceState::Failed { .. }))
+        .map(|s| s.name)
+        .collect();
+    if names.is_empty() {
+        return;
+    }
+    let _ = live.watch(sandbox).await;
+    live.started.lock().unwrap().extend(names);
+}
+
+/// The sandbox running the service a sidecar name stands for, if one does.
+pub(super) fn sandbox_of(name: &str) -> Option<String> {
+    let map = live().lock().unwrap();
+    map.iter().find_map(|(sandbox, live)| {
+        live.started
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|service| sidecar_name(sandbox, service) == name)
+            .then(|| sandbox.clone())
+    })
+}
+
 /// What the supervisor is asked to run for `sidecar`.
 pub fn service_spec(sidecar: &Sidecar, spec: &InSandbox) -> ServiceSpec {
     let addr = format!("127.0.0.1:{}", sidecar.port);

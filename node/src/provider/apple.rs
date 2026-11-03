@@ -724,6 +724,18 @@ impl SandboxProvider for AppleProvider {
         Ok(conn)
     }
 
+    /// Its supervisor is listening again by now (it did when its
+    /// connection dropped), so connecting in is all there is.
+    async fn reattach(
+        &self,
+        handle: &Handle,
+        server: &SandboxServer,
+        conn: &SandboxConn,
+    ) -> Result<(), ProviderError> {
+        server.keep_connecting(self.node_socket(handle), conn);
+        Ok(())
+    }
+
     async fn destroy(&self, handle: &Handle) -> Result<(), ProviderError> {
         match self.cli(&["delete", "--force", &handle.0]).await {
             Ok(_) => {}

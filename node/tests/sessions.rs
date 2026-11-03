@@ -6794,3 +6794,70 @@ async fn a_suspended_session_is_asked_again_rather_than_continued() {
     );
     tracon::session::materialize::remove(&id);
 }
+
+/// At start, a session the node stopped under whose sandbox it left running
+/// is carried on: the same row reopened on its own conversation, and told to
+/// carry on when it was in a turn. A kept sandbox no session stopped with
+/// the node ran in is removed, and its record forgotten.
+#[tokio::test]
+async fn at_start_a_session_left_in_its_sandbox_is_carried_on_and_any_other_removed() {
+    use tracon::runner::reattach::{self, Record};
+    state::isolate();
+    let (o, adapter, _operator) = reopening("carry-on").await;
+    let id = o.row.id.clone();
+    o.manager.shutdown_all().await;
+    let stopped = until_row(&o.store, &id, "stopped with the node", |s| {
+        s.state == "closed" && !tracon::session::materialize::holds_state(&s.id)
+    })
+    .await;
+    assert_eq!(stopped.end_reason.as_deref(), Some("node_restart"));
+    let container = stopped.container_name.clone().unwrap();
+    let kept = |name: &str, in_turn: bool| Record {
+        name: name.into(),
+        run: format!("{name}:run"),
+        handle: name.into(),
+        digest: "ab".repeat(32),
+        harness: Some(1),
+        in_turn,
+    };
+    reattach::keep(&kept(&container, true)).unwrap();
+    reattach::keep(&kept("tracon-h-nobody", false)).unwrap();
+
+    o.manager.carry_on_after_restart().await;
+
+    let carried = until_row(&o.store, &id, "carried on", |s| {
+        s.state == "running"
+            && events_of(&o.store, &s.id, "user_prompt").iter().any(|p| {
+                p["text"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("node restarted"))
+            })
+    })
+    .await;
+    assert_eq!(carried.continued_from, None, "the same session");
+    assert_eq!(
+        adapter
+            .resumed
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .flatten()
+            .as_deref(),
+        Some("fake"),
+        "on its own conversation"
+    );
+    assert_eq!(
+        o.store.list_sessions(None).unwrap().len(),
+        1,
+        "nothing was added to the lineage"
+    );
+    let left: Vec<String> = reattach::all().into_iter().map(|r| r.name).collect();
+    assert_eq!(
+        left,
+        vec![container.clone()],
+        "the runner takes the session's own record; the other is gone"
+    );
+    reattach::forget(&container);
+    tracon::session::materialize::remove(&id);
+}

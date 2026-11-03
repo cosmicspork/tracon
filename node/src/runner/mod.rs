@@ -8,6 +8,7 @@
 pub mod kube;
 pub mod podman;
 pub mod protocol;
+pub mod reattach;
 pub mod sandbox_files;
 pub mod services;
 pub mod tunnels;

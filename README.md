@@ -1998,6 +1998,32 @@ A run over the sandbox protocol (Podman with `sandbox_protocol`, Kubernetes with
   this (no `resumable` in its hello) is given no secret, and its run ends with its first
   connection, as it always did.
 
+#### When the node restarts
+
+A stop and a restart are the same to the node: on SIGTERM it ends its live sessions
+(`node_restart`) and takes their trees back as at any end, but leaves each session's
+sandbox that can resume running, with its services and its tunnels' listeners, and
+records it in `<state>/sandbox-runs/` (its run, the provider's handle, the digest of
+its resume secret, its harness process, whether a turn was running; never the secret).
+Its harness goes as the node closes its stdin.
+
+On the next start the node carries each of those sessions on, on the same row: it
+reopens the session's own conversation (as **Ask** does), and the runner takes the
+sandbox back instead of making one. It knows the run again by the digest, sets the
+provider's carrier up again (Podman binds its socket again in the directory the
+container mounts, Apple connects in, Kubernetes expects the pod's address again,
+DigitalOcean's listener takes it as it is), waits for the sandbox to redial, and starts
+the harness in it, on the workspace and harness state the sandbox kept. A session that
+was in a turn is told the node restarted during it and to carry on.
+
+A sandbox the next start does not take back goes: one whose session cannot be reopened,
+one that does not redial within `resume_within_secs`, or one the provider reports gone
+leaves its session closed as `node_restart`, to be continued as before. A node that does
+not come back is never waited for: each sandbox ends itself once its redials run out
+(twice `resume_within_secs`), and the next start removes what is left. A node started
+with `resume_within_secs = 0` leaves nothing running when it stops. Services that run beside a
+sandbox as containers of their own (not under `sandbox_services`) are stopped as before.
+
 ### The hub
 
 `tracon-hub` ships as a static Linux binary and as `ghcr.io/cosmicspork/tracon-hub`,

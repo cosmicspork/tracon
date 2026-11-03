@@ -14,8 +14,10 @@ Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=tracon=info
 Environment="PATH=__PATH__"
-# The node ends its sessions and tears down harness containers on SIGTERM;
-# killing it sooner orphans them.
+# The node ends its sessions on SIGTERM and tears down their harness
+# containers, except a sandbox over the sandbox protocol that can resume,
+# which it leaves for the next start to carry its session on in ([sandbox]
+# resume_within_secs). Killing it sooner orphans the containers.
 KillSignal=SIGTERM
 TimeoutStopSec=90
 

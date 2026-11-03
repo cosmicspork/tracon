@@ -1275,6 +1275,29 @@ impl SandboxProvider for KubeSandboxProvider {
         }
     }
 
+    /// Expect the pod at its addresses again, as `connect` did once it had
+    /// connected: its resume secret is taken from there alone.
+    async fn reattach(
+        &self,
+        handle: &Handle,
+        server: &SandboxServer,
+        conn: &SandboxConn,
+    ) -> Result<(), ProviderError> {
+        let pod = self
+            .pods()
+            .get_opt(&handle.0)
+            .await
+            .map_err(|e| failed(format!("get pod {}: {e}", handle.0)))?
+            .ok_or_else(|| ProviderError::NotFound(handle.0.clone()))?;
+        let ips = pod_ips(&pod.status.unwrap_or_default());
+        if ips.is_empty() {
+            return Err(failed(format!("pod {} has no address", handle.0)));
+        }
+        let expected = self.dispatcher().await?.expect(&ips);
+        take_back(server.clone(), expected, conn);
+        Ok(())
+    }
+
     async fn destroy(&self, handle: &Handle) -> Result<(), ProviderError> {
         self.pending.lock().unwrap().remove(&handle.0);
         match self

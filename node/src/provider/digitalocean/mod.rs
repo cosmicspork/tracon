@@ -653,6 +653,22 @@ impl SandboxProvider for DoProvider {
         }
     }
 
+    /// Its supervisor redials the node's one listener, which takes any live
+    /// run's secret: nothing to set up beyond the identity being this one.
+    async fn reattach(
+        &self,
+        _handle: &Handle,
+        server: &SandboxServer,
+        _conn: &SandboxConn,
+    ) -> Result<(), ProviderError> {
+        if server.pin() != self.listener.pin() {
+            return Err(failed(
+                "the node's sandbox listener holds another identity than this run's",
+            ));
+        }
+        Ok(())
+    }
+
     async fn destroy(&self, handle: &Handle) -> Result<(), ProviderError> {
         let client = self.client()?;
         let made = self.made.lock().unwrap().remove(&handle.0);

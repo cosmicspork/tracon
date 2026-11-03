@@ -131,6 +131,21 @@ pub async fn open(conn: &SandboxConn, specs: &[TunnelSpec]) -> Result<Vec<Tunnel
     Ok(open)
 }
 
+/// Take back every tunnel of a sandbox an earlier node process opened them
+/// in: its listeners are still there, so only the node's side starts again.
+pub fn adopt(conn: &SandboxConn, specs: &[TunnelSpec]) -> Vec<Tunnel> {
+    specs
+        .iter()
+        .map(|spec| {
+            conn.adopt_tunnel(
+                spec.name.clone(),
+                spec.listen.clone(),
+                spec.endpoint.clone(),
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
