@@ -24,8 +24,23 @@ test('an entry survives the form unchanged', () => {
     { path: 'github.com/owner/notes', checks: [], prepare: [], egress: [] },
     { path: 'owner/pinned', image: 'localhost/tc@sha256:abc', prepare: [], egress: ['example.org'] },
     { path: '/src/plain', prepare: [], egress: [] },
+    {
+      path: 'github.com/owner/stepped',
+      build: ['apt-get update', 'apt-get install -y --no-install-recommends jq'],
+      prepare: ['uv sync --frozen'],
+      egress: ['apt', 'pypi'],
+    },
   ]
   for (const entry of entries) expect(toEntry(toForm(entry))).toEqual(entry)
+})
+
+test('build steps are one per line, and an entry that builds from them names nothing else', () => {
+  const form = { ...blankForm(), path: '/src/app', source: 'build' as const, build: 'apt-get update\n\n  apt-get install -y jq \n' }
+  expect(toEntry(form)).toEqual({ path: '/src/app', build: ['apt-get update', 'apt-get install -y jq'], prepare: [], egress: [] })
+  expect(toForm(toEntry(form)).source).toBe('build')
+  expect(problems([{ ...form, build: ' \n' }])).toEqual(['/src/app: give at least one build step.'])
+  // Steps typed and then abandoned for a Dockerfile are not sent.
+  expect(toEntry({ ...form, source: 'dockerfile' }).build).toBeUndefined()
 })
 
 test('what the form does not edit is saved back as it came', () => {

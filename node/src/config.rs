@@ -1265,6 +1265,16 @@ pub struct Repo {
     /// Left out, it is the directory the Dockerfile is in.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
+    /// Shell steps run as root, at image build time, on the pinned stock
+    /// base (`[sandbox] base_image`), in place of `image` or `dockerfile`:
+    /// `apt-get install -y php8.5-cli`, or installing uv or rustup into
+    /// `/usr/local`. Each step is one `RUN` of `sh -ec`; the image ends as the
+    /// base's own user (65532) in `/work`, and `prepare` runs in it after.
+    /// The steps reach only `egress`. Only where sandboxes run on the stock
+    /// base: `[runtime.podman] sandbox_images`, Apple, or Kubernetes with
+    /// `sandbox_protocol`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub build: Vec<String>,
     /// This repository's required checks, in place of `[supervision] checks`.
     /// An empty list is explicit, as it is there.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1279,7 +1289,7 @@ pub struct Repo {
     /// `bun install`, `composer install` and `cargo fetch` belong: the checks
     /// that follow have neither.
     pub prepare: Vec<String>,
-    /// What preparation may reach: a preset (`crates`, `npm`, `pypi`,
+    /// What preparation and `build` may reach: a preset (`apt`, `crates`, `npm`, `pypi`,
     /// `packagist`, `github`) or a literal host name. Empty means preparation
     /// runs with no egress at all.
     pub egress: Vec<String>,
@@ -1333,6 +1343,19 @@ const EGRESS_PRESETS: &[(&str, &[&str])] = &[
     (
         "github",
         &["github.com", "api.github.com", "codeload.github.com"],
+    ),
+    // The stock base's own apt sources (Ubuntu's snapshot service and the
+    // PHP PPA), and Ubuntu's mirrors for a step that adds them back, arm64's
+    // included. Only over HTTPS: the proxy carries nothing else.
+    (
+        "apt",
+        &[
+            "snapshot.ubuntu.com",
+            "ppa.launchpadcontent.net",
+            "archive.ubuntu.com",
+            "security.ubuntu.com",
+            "ports.ubuntu.com",
+        ],
     ),
 ];
 
@@ -1435,6 +1458,7 @@ pub fn validate_repos(repos: &[Repo]) -> Result<(), String> {
         if entry.context.is_some() && entry.dockerfile.is_none() {
             return Err(format!("repo {named}: context has no dockerfile to build"));
         }
+        validate_build_steps(entry)?;
         for (field, value) in [
             ("dockerfile", &entry.dockerfile),
             ("context", &entry.context),
@@ -1481,11 +1505,11 @@ pub fn validate_repos(repos: &[Repo]) -> Result<(), String> {
             // The only preparation that is lent them is the one that warms
             // the base cache from the default branch, and the node runs that
             // only after building the image an entry's Dockerfile names.
-            if entry.dockerfile.is_none() {
+            if entry.dockerfile.is_none() && entry.build.is_empty() {
                 return Err(format!(
                     "repo {named}: prepare_credentials are lent only to the default branch's \
                      preparation, which runs when the node builds this repository's image; \
-                     name a dockerfile"
+                     name a dockerfile or build steps"
                 ));
             }
             if entry.prepare.is_empty() {
@@ -1504,6 +1528,55 @@ pub fn validate_repos(repos: &[Repo]) -> Result<(), String> {
         seen.push(path);
     }
     Ok(())
+}
+
+/// An entry's `build` steps, as written: on the stock base alone, so never
+/// beside an image of its own, and no step empty.
+fn validate_build_steps(entry: &Repo) -> Result<(), String> {
+    if entry.build.is_empty() {
+        return Ok(());
+    }
+    let named = entry.path.display();
+    if entry.image.is_some() || entry.dockerfile.is_some() {
+        return Err(format!(
+            "repo {named}: build steps run on the stock base, so the entry names no image or \
+             dockerfile beside them; keep build and drop the other"
+        ));
+    }
+    if entry.build.iter().any(|step| step.trim().is_empty()) {
+        return Err(format!("repo {named}: build has an empty step"));
+    }
+    Ok(())
+}
+
+/// Whether this node's sandboxes run on the stock base, which is what an
+/// entry's `build` steps are layered on.
+pub fn builds_on_base(config: &Config) -> bool {
+    match config.runtime.kind {
+        RuntimeKind::Podman => config.runtime.podman.sandbox_images,
+        RuntimeKind::Apple => true,
+        RuntimeKind::Kubernetes => config.runtime.kubernetes.sandbox_protocol,
+    }
+}
+
+/// Refuse `build` steps on a node whose sandboxes do not run the stock base:
+/// the harness image they would have to stand on is retired with them.
+pub fn validate_repo_builds(config: &Config) -> Result<(), String> {
+    if builds_on_base(config) {
+        return Ok(());
+    }
+    let setting = match config.runtime.kind {
+        RuntimeKind::Kubernetes => "runtime.kubernetes.sandbox_protocol",
+        _ => "runtime.podman.sandbox_images",
+    };
+    match config.repo.iter().find(|entry| !entry.build.is_empty()) {
+        Some(entry) => Err(format!(
+            "repo {}: build steps stand on the stock sandbox base, which this node runs only \
+             with {setting} = true",
+            entry.path.display()
+        )),
+        None => Ok(()),
+    }
 }
 
 /// The pod-hosted boundary: one harness Pod per session, created by the node
@@ -3152,6 +3225,7 @@ impl Config {
             .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_metrics(&config).map_err(|error| format!("{}: {error}", path.display()))?;
         validate_sandbox(&config).map_err(|error| format!("{}: {error}", path.display()))?;
+        validate_repo_builds(&config).map_err(|error| format!("{}: {error}", path.display()))?;
         validate_priorities(&config.work.priority)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         upstreams::validate_upstreams(&config.upstreams)
@@ -3800,6 +3874,72 @@ mod tests {
         }])
         .unwrap_err()
         .contains("no dockerfile"));
+    }
+
+    /// Build steps stand on the stock base, never beside an image of the
+    /// entry's own, and only on a node whose sandboxes run that base.
+    #[test]
+    fn build_steps_stand_on_the_stock_base_alone() {
+        let stepped = || Repo {
+            path: PathBuf::from("/srv/code/app"),
+            build: vec!["apt-get update".into()],
+            egress: vec!["apt".into()],
+            ..Default::default()
+        };
+        validate_repos(&[stepped()]).unwrap();
+        let pinned = format!("localhost/tc@sha256:{}", "a".repeat(64));
+        for beside in [
+            Repo {
+                image: Some(pinned),
+                ..stepped()
+            },
+            Repo {
+                dockerfile: Some("Dockerfile".into()),
+                ..stepped()
+            },
+        ] {
+            let error = validate_repos(&[beside]).unwrap_err();
+            assert!(error.contains("keep build and drop the other"), "{error}");
+        }
+        let empty = Repo {
+            build: vec!["apt-get update".into(), " ".into()],
+            ..stepped()
+        };
+        assert!(validate_repos(&[empty]).unwrap_err().contains("empty step"));
+        // Credentials can be lent to the preparation that follows the build.
+        validate_repos(&[Repo {
+            prepare: vec!["composer install".into()],
+            prepare_credentials: vec!["nova".into()],
+            ..stepped()
+        }])
+        .unwrap();
+        assert!(EGRESS_PRESETS
+            .iter()
+            .any(|(name, hosts)| *name == "apt" && hosts.contains(&"snapshot.ubuntu.com")));
+
+        let toml = |runtime: &str| {
+            format!("{runtime}\n[[repo]]\npath = \"/srv/code/app\"\nbuild = [\"apt-get update\"]\n")
+        };
+        let legacy = Config::from_toml(&toml(""), Path::new("node.toml")).unwrap_err();
+        assert!(
+            legacy.contains("runtime.podman.sandbox_images = true"),
+            "{legacy}"
+        );
+        Config::from_toml(
+            &toml("[runtime.podman]\nsandbox_protocol = true\nsandbox_images = true"),
+            Path::new("node.toml"),
+        )
+        .unwrap();
+        Config::from_toml(&toml("[runtime]\nkind = \"apple\""), Path::new("node.toml")).unwrap();
+        let kube = Config::from_toml(
+            &toml("[runtime]\nkind = \"kubernetes\""),
+            Path::new("node.toml"),
+        )
+        .unwrap_err();
+        assert!(
+            kube.contains("runtime.kubernetes.sandbox_protocol = true"),
+            "{kube}"
+        );
     }
 
     /// Credentials are lent only to the default branch's preparation, which

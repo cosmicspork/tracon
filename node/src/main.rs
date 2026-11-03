@@ -145,6 +145,8 @@ enum SandboxCommand {
 }
 
 #[derive(Subcommand)]
+// Parsed once per invocation; boxing `Set` would buy nothing.
+#[allow(clippy::large_enum_variant)]
 enum RepoCommand {
     /// The `[[repo]]` entries and the image each repository last built into.
     Ls,
@@ -176,6 +178,11 @@ enum RepoCommand {
         /// The build context, when it is not the Dockerfile's directory.
         #[arg(long)]
         context: Option<String>,
+        /// A step run as root on the stock base, in place of an image or a
+        /// Dockerfile; repeat for several. Replaces the list; one empty value
+        /// clears it.
+        #[arg(long = "build", conflicts_with_all = ["image", "dockerfile"])]
+        build: Vec<String>,
         /// A required check; repeat for several. Replaces the entry's list.
         #[arg(long = "check")]
         checks: Vec<String>,
@@ -190,7 +197,7 @@ enum RepoCommand {
         /// repeat for several. Replaces the list; one empty value clears it.
         #[arg(long = "prepare-credential")]
         prepare_credentials: Vec<String>,
-        /// A preset (crates, npm, pypi, packagist, github) or a host name;
+        /// A preset (crates, npm, pypi, packagist, github, apt) or a host name;
         /// repeat for several. Replaces the list; one empty value clears it.
         #[arg(long = "egress")]
         egress: Vec<String>,
@@ -1328,7 +1335,9 @@ async fn repo_command(command: RepoCommand) -> Result<()> {
             }
             for item in &entries {
                 let entry = &item["entry"];
+                let steps = entry["build"].as_array().map_or(0, Vec::len);
                 let image = match (entry["dockerfile"].as_str(), entry["image"].as_str()) {
+                    _ if steps > 0 => format!("builds {steps} step(s) on the stock base"),
                     (Some(dockerfile), _) => format!("builds {dockerfile}"),
                     (None, Some(image)) => image.to_string(),
                     (None, None) => "harness image".into(),
@@ -1366,6 +1375,7 @@ async fn repo_command(command: RepoCommand) -> Result<()> {
             image,
             dockerfile,
             context,
+            build,
             checks,
             inherit_checks,
             prepare,
@@ -1383,16 +1393,27 @@ async fn repo_command(command: RepoCommand) -> Result<()> {
                 None => serde_json::json!({ "path": path, "prepare": [], "egress": [] }),
             };
             let fields = entry.as_object_mut().expect("an entry is a table");
-            // An image and a Dockerfile answer the same question; naming one
-            // withdraws the other.
+            // An image, a Dockerfile and build steps answer the same
+            // question; naming one withdraws the others.
             if let Some(image) = image {
                 fields.insert("image".into(), image.into());
                 fields.remove("dockerfile");
                 fields.remove("context");
+                fields.remove("build");
             }
             if let Some(dockerfile) = dockerfile {
                 fields.insert("dockerfile".into(), dockerfile.into());
                 fields.remove("image");
+                fields.remove("build");
+            }
+            if !build.is_empty() {
+                let steps = flag_list(build);
+                if steps.as_array().is_some_and(|steps| !steps.is_empty()) {
+                    fields.remove("image");
+                    fields.remove("dockerfile");
+                    fields.remove("context");
+                }
+                fields.insert("build".into(), steps);
             }
             if let Some(context) = context {
                 fields.insert("context".into(), context.into());

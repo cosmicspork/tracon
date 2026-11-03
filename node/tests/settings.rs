@@ -1819,7 +1819,7 @@ async fn repository_environments_are_listed_and_built_only_from_this_machine() {
         // builds matches it, so nothing is fetched for one no entry names.
         (
             "github.com/owner/unknown",
-            "no [[repo]] entry with a dockerfile matches",
+            "no [[repo]] entry with a dockerfile or build steps matches",
         ),
     ] {
         let (s, v) = call(

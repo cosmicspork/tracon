@@ -7,11 +7,14 @@ import type { ConfigOp, RepoEntry, RepoImageBuild } from './types'
 
 export interface RepoForm {
   path: string
-  /** Where the image comes from: the harness's own, one pinned by hand, or built. */
-  source: 'harness' | 'image' | 'dockerfile'
+  /** Where the image comes from: the harness's own, one pinned by hand, or
+   *  built from a Dockerfile or from root steps on the stock base. */
+  source: 'harness' | 'image' | 'dockerfile' | 'build'
   image: string
   dockerfile: string
   context: string
+  /** One root step per line. */
+  build: string
   /** Off: the node-wide checks. On: `checks`, which may be empty on purpose. */
   ownChecks: boolean
   /** One command per line. */
@@ -49,6 +52,7 @@ export function blankForm(): RepoForm {
     image: '',
     dockerfile: '.devcontainer/Dockerfile',
     context: '',
+    build: '',
     ownChecks: false,
     checks: '',
     timeout: '',
@@ -61,13 +65,14 @@ export function blankForm(): RepoForm {
 }
 
 export function toForm(entry: RepoEntry): RepoForm {
-  const { path, image, dockerfile, context, checks, timeout_secs, prepare, egress, session_egress, ...kept } = entry
+  const { path, image, dockerfile, context, build, checks, timeout_secs, prepare, egress, session_egress, ...kept } = entry
   return {
     path,
-    source: dockerfile ? 'dockerfile' : image ? 'image' : 'harness',
+    source: build?.length ? 'build' : dockerfile ? 'dockerfile' : image ? 'image' : 'harness',
     image: image ?? '',
     dockerfile: dockerfile ?? '',
     context: context ?? '',
+    build: (build ?? []).join('\n'),
     ownChecks: checks !== undefined && checks !== null,
     checks: (checks ?? []).join('\n'),
     timeout: timeout_secs ? String(timeout_secs) : '',
@@ -93,6 +98,7 @@ export function toEntry(form: RepoForm): RepoEntry {
     entry.dockerfile = form.dockerfile.trim()
     if (form.context.trim()) entry.context = form.context.trim()
   }
+  if (form.source === 'build' && lines(form.build).length) entry.build = lines(form.build)
   if (form.ownChecks) entry.checks = lines(form.checks)
   const timeout = Number(form.timeout)
   if (form.timeout.trim() && Number.isFinite(timeout) && timeout > 0) entry.timeout_secs = Math.floor(timeout)
@@ -113,6 +119,7 @@ export function problems(forms: RepoForm[]): string[] {
     else if (seen.has(path)) found.push(`${path} is named twice; the first entry would always win.`)
     else if (form.source === 'image' && !form.image.trim()) found.push(`${named}: name the image, or choose another source.`)
     else if (form.source === 'dockerfile' && !form.dockerfile.trim()) found.push(`${named}: name the Dockerfile to build.`)
+    else if (form.source === 'build' && lines(form.build).length === 0) found.push(`${named}: give at least one build step.`)
     else if (form.sessionEgress && words(form.egress).length === 0)
       found.push(`${named}: sessions are given its egress, and its egress is empty.`)
     seen.add(path)
@@ -177,7 +184,7 @@ export function writtenRepos(document: Record<string, unknown>): RepoEntry[] {
 }
 
 /// What the form says, one field at a time.
-const FORM_FIELDS = ['path', 'source', 'image', 'dockerfile', 'context', 'ownChecks', 'checks', 'timeout', 'prepare', 'egress', 'sessionEgress', 'kept'] as const
+const FORM_FIELDS = ['path', 'source', 'image', 'dockerfile', 'context', 'build', 'ownChecks', 'checks', 'timeout', 'prepare', 'egress', 'sessionEgress', 'kept'] as const
 
 /// The forms, carried onto the table as the node has it now (`now`), when
 /// they were edited against `seeded`. Only what the operator changed in a
@@ -231,4 +238,4 @@ export function replayRepos(
 }
 
 /// The fields of entry `index` as a refusal may name them.
-export const REPO_FIELDS = ['path', 'image', 'dockerfile', 'context', 'checks', 'timeout_secs', 'prepare', 'egress', 'session_egress']
+export const REPO_FIELDS = ['path', 'image', 'dockerfile', 'context', 'build', 'checks', 'timeout_secs', 'prepare', 'egress', 'session_egress']

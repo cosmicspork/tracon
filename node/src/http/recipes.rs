@@ -947,7 +947,9 @@ fn same_path(configured: &Path, given: &Path) -> bool {
 /// runtime builds, and the repository it names is on this node. The first
 /// session or check would build it otherwise, and wait.
 fn start_build(s: &AppState, entry: &Repo) -> bool {
-    if entry.dockerfile.is_none() || s.manager.backend().image_builder().is_none() {
+    if (entry.dockerfile.is_none() && entry.build.is_empty())
+        || s.manager.backend().image_builder().is_none()
+    {
         return false;
     }
     let Ok(repo) = super::environments::repo_root(&entry.path.to_string_lossy()) else {
