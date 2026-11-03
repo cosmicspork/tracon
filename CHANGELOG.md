@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.45.0](https://github.com/cosmicspork/tracon/compare/v0.44.0...v0.45.0) (2026-11-03)
+
+
+### Features
+
+* **agent:** compact a tracon-agent session on request ([#796](https://github.com/cosmicspork/tracon/issues/796)) ([3d70443](https://github.com/cosmicspork/tracon/commit/3d70443626c8b922b580a2697b3be4fffc216ff3))
+* **approvals:** bind answers to the arguments read and audit each session's calls ([#784](https://github.com/cosmicspork/tracon/issues/784)) ([7fda927](https://github.com/cosmicspork/tracon/commit/7fda927600c64553e0826756d345f80f4a84658a))
+* **approvals:** show a held issue_update against the issue as it is now ([#768](https://github.com/cosmicspork/tracon/issues/768)) ([6f100fc](https://github.com/cosmicspork/tracon/commit/6f100fcaccc668465a45b6d709ad46e0a48cffc8))
+* **boundary:** set up the boundary itself at start and drop the setup button ([#779](https://github.com/cosmicspork/tracon/issues/779)) ([3154511](https://github.com/cosmicspork/tracon/commit/3154511cfefdcc526b8caaa66777c4ca87059e95))
+* **do-harness:** add a DigitalOcean Harness Runtime API client ([#782](https://github.com/cosmicspork/tracon/issues/782)) ([859ee75](https://github.com/cosmicspork/tracon/commit/859ee7550397b2cd4cbdfedcc38b5cc3b79e65d6))
+* **gateway:** attach declared credentials to upstream requests ([#786](https://github.com/cosmicspork/tracon/issues/786)) ([1b1be2c](https://github.com/cosmicspork/tracon/commit/1b1be2cb055e060b594bf79495b3b7e70a6ab0ea))
+* **hub:** relay sandbox TLS to a node by SNI over its outbound connection ([#785](https://github.com/cosmicspork/tracon/issues/785)) ([0caa956](https://github.com/cosmicspork/tracon/commit/0caa9566b9fc7558d661dece94a6889d632ddd71))
+* **images:** mount the harness bundle and prepare once, then fork ([#809](https://github.com/cosmicspork/tracon/issues/809)) ([eae371c](https://github.com/cosmicspork/tracon/commit/eae371c690d1666769252fecc655f67d4d0e2ba9))
+* **jira:** add add_labels and remove_labels to issue_update ([#766](https://github.com/cosmicspork/tracon/issues/766)) ([aaccb13](https://github.com/cosmicspork/tracon/commit/aaccb13be0cbbd890273d58a786613f14c052ba7))
+* **jira:** add issue_link to link two issues through the broker ([#767](https://github.com/cosmicspork/tracon/issues/767)) ([a7643ab](https://github.com/cosmicspork/tracon/commit/a7643abe90cffe0189a61ce9b2dda1a9b74e917c))
+* **jira:** create a related set of issues under one approval ([#790](https://github.com/cosmicspork/tracon/issues/790)) ([fc01420](https://github.com/cosmicspork/tracon/commit/fc0142008c2d30ab506257558bb09212b6be4b26))
+* **kube:** label harness pods by kind, sizing, repo, channel, harness and phase ([#791](https://github.com/cosmicspork/tracon/issues/791)) ([e8ac475](https://github.com/cosmicspork/tracon/commit/e8ac475bdc6ee8536537c5be1285c2d57b64b79c))
+* **kube:** run Kubernetes sessions over the sandbox protocol ([#810](https://github.com/cosmicspork/tracon/issues/810)) ([c7664ac](https://github.com/cosmicspork/tracon/commit/c7664acf194fe89962c2f648af04c66812d4d7d5))
+* **mcp:** fetch_branch brings any origin branch up to date in a session's workspace ([#797](https://github.com/cosmicspork/tracon/issues/797)) ([bf9e3cc](https://github.com/cosmicspork/tracon/commit/bf9e3cc6950e81abab32f898c40c50005d53087f))
+* **mcp:** offer upstream MCP servers' tools behind policy ([#780](https://github.com/cosmicspork/tracon/issues/780)) ([78f82c3](https://github.com/cosmicspork/tracon/commit/78f82c30b579b2783deabdf635e20dd731a0d820))
+* **metrics:** serve a Prometheus /metrics endpoint on [metrics] listen ([#793](https://github.com/cosmicspork/tracon/issues/793)) ([61761ff](https://github.com/cosmicspork/tracon/commit/61761ff18757b5cd60ea42651332c74b5daf1aad))
+* **provider:** add sandbox providers, capabilities and placement ([#783](https://github.com/cosmicspork/tracon/issues/783)) ([38de204](https://github.com/cosmicspork/tracon/commit/38de20463dde217167020f0b2aaa2fbd95cc4116))
+* **provider:** Apple Containerization provider and `tracon sandbox probe` ([#802](https://github.com/cosmicspork/tracon/issues/802)) ([61f10bd](https://github.com/cosmicspork/tracon/commit/61f10bd68953ebdf14e1d67a2865605c2a55bb90))
+* **provider:** place sessions on DigitalOcean Harness Runtime ([#811](https://github.com/cosmicspork/tracon/issues/811)) ([8d522cf](https://github.com/cosmicspork/tracon/commit/8d522cfc7aa75b608c98a2bb0119c1328ce79f87))
+* **review:** agents draft their review's change unasked and a new revision drafts it ([#799](https://github.com/cosmicspork/tracon/issues/799)) ([b8cb471](https://github.com/cosmicspork/tracon/commit/b8cb471c8fdd594d692aac0bd42904ff8d3426c5))
+* **review:** publish marks a draft ready and only an approval makes one mergeable ([#798](https://github.com/cosmicspork/tracon/issues/798)) ([ed1db98](https://github.com/cosmicspork/tracon/commit/ed1db988e4f95870909569de4b613479f017027d))
+* **review:** the review page says why a change is a draft and marks it ready or back ([#800](https://github.com/cosmicspork/tracon/issues/800)) ([ba4bab9](https://github.com/cosmicspork/tracon/commit/ba4bab9a99e8e0e1145e8361190e4fd6d0bce46c))
+* **runner:** move workspaces and harness state over the sandbox protocol ([#807](https://github.com/cosmicspork/tracon/issues/807)) ([b139a87](https://github.com/cosmicspork/tracon/commit/b139a8720fa8fbd59cdfd14c63bc931a9c6b7092))
+* **runner:** move workspaces and harness state over the sandbox protocol ([#807](https://github.com/cosmicspork/tracon/issues/807)) ([681c165](https://github.com/cosmicspork/tracon/commit/681c1657da8057b88a60990c39e1283ebe290b2b))
+* **runner:** reach the gateways through sandbox tunnels ([#806](https://github.com/cosmicspork/tracon/issues/806)) ([badd645](https://github.com/cosmicspork/tracon/commit/badd645ca1211c2b6d921b90c74c8034e3224092))
+* **runner:** run Podman sessions over the sandbox protocol ([#804](https://github.com/cosmicspork/tracon/issues/804)) ([1ec8e62](https://github.com/cosmicspork/tracon/commit/1ec8e6261e5ebe2df715d3aa40015592ad58efa6))
+* **sandbox:** add a stock multi-arch base image and the harness bundle ([#781](https://github.com/cosmicspork/tracon/issues/781)) ([b7e842b](https://github.com/cosmicspork/tracon/commit/b7e842b9433a29d03c64f50c40d9d391dff4a8b9))
+* **sandbox:** add tracon-sandbox and its protocol client ([#777](https://github.com/cosmicspork/tracon/issues/777)) ([eea3792](https://github.com/cosmicspork/tracon/commit/eea3792e4b224cf8b6150b33a72785f06f6a01ef))
+* **services:** run session services under tracon-sandbox ([#808](https://github.com/cosmicspork/tracon/issues/808)) ([8a136e5](https://github.com/cosmicspork/tracon/commit/8a136e5d9c5112ee38df7409e98b2f2d697d63fa))
+* **session:** show a compaction while it runs ([#794](https://github.com/cosmicspork/tracon/issues/794)) ([140cbe0](https://github.com/cosmicspork/tracon/commit/140cbe08363be065c6316fbeb77d967a954874dc))
+
+
+### Bug Fixes
+
+* **boundary:** name the harness-state volume and probe per node ([#805](https://github.com/cosmicspork/tracon/issues/805)) ([3220815](https://github.com/cosmicspork/tracon/commit/322081565a46261b63a4836fe21a1637b90888ec))
+* build main again after [#791](https://github.com/cosmicspork/tracon/issues/791), [#797](https://github.com/cosmicspork/tracon/issues/797) and [#798](https://github.com/cosmicspork/tracon/issues/798) crossed ([#801](https://github.com/cosmicspork/tracon/issues/801)) ([f340926](https://github.com/cosmicspork/tracon/commit/f340926d89059279b41bbabb07f4afb170a1fb57))
+* **kube:** report a pod refused for capacity as a classified refusal ([#792](https://github.com/cosmicspork/tracon/issues/792)) ([1cbdccf](https://github.com/cosmicspork/tracon/commit/1cbdccfff18883a206301de0691d79ec6ad4735a))
+* **session:** count a Claude compaction's tokens instead of reporting zero ([#795](https://github.com/cosmicspork/tracon/issues/795)) ([e14dcc4](https://github.com/cosmicspork/tracon/commit/e14dcc44ecc26e5167fe8e9f08c250cf62ab3909))
+
 ## [0.44.0](https://github.com/cosmicspork/tracon/compare/v0.43.0...v0.44.0) (2026-10-31)
 
 
