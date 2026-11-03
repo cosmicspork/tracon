@@ -814,9 +814,10 @@ async fn readiness_probes_and_teardown() {
     assert!(status.success());
 }
 
-#[tokio::test]
-async fn a_lost_connection_tears_the_sandbox_down() {
-    let sandbox = start().await;
+/// A sandbox started with `resume_within` and a service that writes its pid;
+/// the pid once written.
+async fn with_a_service(options: ServerOptions) -> (support::Sandbox, i32) {
+    let sandbox = start_with(Carrier::Tcp, options, |_| {}).await;
     let dir = support::scratch();
     let pidfile = dir.path().join("pid");
     let script = format!("echo $$ > {}; exec sleep 30", pidfile.display());
@@ -837,14 +838,78 @@ async fn a_lost_connection_tears_the_sandbox_down() {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    let pid = pid.expect("the service wrote its pid");
+    // The scratch directory may go; the service has written its pid.
+    (sandbox, pid.expect("the service wrote its pid"))
+}
+
+#[tokio::test]
+async fn a_lost_connection_tears_down_a_sandbox_that_cannot_resume() {
+    let (sandbox, pid) = with_a_service(ServerOptions {
+        resume_within: Duration::ZERO,
+        ..ServerOptions::default()
+    })
+    .await;
+    assert!(!sandbox.conn.is_resumable());
     let support::Sandbox {
         node,
         conn,
         mut child,
         ..
     } = sandbox;
+    conn.sever();
+    assert!(conn.is_closed(), "nothing to wait for");
+    let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.code(), Some(3), "lost, not shut down");
+    assert_ne!(unsafe { libc::kill(pid, 0) }, 0, "the service went with it");
+    drop(node);
+}
+
+#[tokio::test]
+async fn a_run_the_node_has_ended_refuses_its_sandbox_back() {
+    let (sandbox, pid) = with_a_service(ServerOptions::default()).await;
+    assert!(sandbox.conn.is_resumable());
+    let support::Sandbox {
+        node,
+        conn,
+        mut child,
+        ..
+    } = sandbox;
+    // The node lets go of the run without a shutdown: its resume secret is
+    // revoked with it, so the sandbox's redial is refused and it tears
+    // itself down rather than waiting out its window.
     drop(conn);
+    assert!(matches!(node.accept().await, Err(SandboxError::BadToken)));
+    let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.code(), Some(3), "lost, not shut down");
+    assert_ne!(unsafe { libc::kill(pid, 0) }, 0, "the service went with it");
+}
+
+#[tokio::test]
+async fn a_sandbox_the_node_does_not_take_back_in_time_tears_itself_down() {
+    let (sandbox, pid) = with_a_service(ServerOptions {
+        resume_within: Duration::from_millis(300),
+        ..ServerOptions::default()
+    })
+    .await;
+    let support::Sandbox {
+        node,
+        conn,
+        mut child,
+        ..
+    } = sandbox;
+    conn.sever();
+    assert!(!conn.is_closed(), "waiting for the sandbox to come back");
+    // Nobody takes its redials: it keeps trying for twice the node's
+    // window, then gives up.
+    tokio::time::timeout(Duration::from_secs(5), conn.closed())
+        .await
+        .expect("the node gives up after its window");
     let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
         .await
         .unwrap()
@@ -924,9 +989,13 @@ async fn keepalive_notices_a_frozen_sandbox() {
     assert!(!sandbox.conn.is_closed());
     let pid = sandbox.child.id().unwrap() as i32;
     unsafe { libc::kill(pid, libc::SIGSTOP) };
-    tokio::time::timeout(Duration::from_secs(3), sandbox.conn.closed())
+    tokio::time::timeout(Duration::from_secs(3), sandbox.conn.disconnected())
         .await
         .expect("a missing pong closes the connection");
+    assert!(
+        !sandbox.conn.is_closed(),
+        "the run waits for the sandbox to come back"
+    );
     unsafe { libc::kill(pid, libc::SIGKILL) };
 }
 

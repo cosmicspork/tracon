@@ -379,6 +379,7 @@ pub const KEYS: &[KeySpec] = &[
     restart("sandbox.bundle").host_only(),
     restart("sandbox.base_image").host_only(),
     restart("sandbox.release_url").host_only(),
+    restart("sandbox.resume_within_secs"),
     // [work]
     live("work.default_priority"),
     // [[work.priority]]

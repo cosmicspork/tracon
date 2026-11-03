@@ -12,9 +12,15 @@
 //! sandbox (TLS client)                         node (TLS server)
 //!   dial TCP or a unix socket  ───────────────▶  accept
 //!   TLS 1.3, ALPN tracon-sandbox/1, the node's certificate pinned by SHA-256
-//!   hello {token, version, pid, ...}  ────────▶  token checked, consumed
-//!                                   ◀────────── ack {ok}
+//!   hello {token, version, pid, resumable, ...} ▶  token checked, consumed
+//!                                   ◀────────── ack {ok, resume: {secret, within}}
 //!   HTTP/2 server                ◀═══════════▶  HTTP/2 client
+//!
+//!   ...the connection drops; everything inside keeps running...
+//!   dial again                 ───────────────▶  accept
+//!   hello {token: secret, ...}       ────────▶  the run's secret, kept
+//!                                   ◀────────── ack {ok}
+//!   HTTP/2 again; the node carries each stream on from where it stopped
 //! ```
 //!
 //! The sandbox dials out because that is the one direction every provider

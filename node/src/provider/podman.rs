@@ -11,9 +11,11 @@
 //! `container_file_t`. The other way round (the supervisor listening in a
 //! mounted directory, the node connecting in, as on Apple) needs no socket
 //! label, but the socket then belongs to whatever user the image runs as,
-//! and the node may not connect to one a subordinate uid made; and the
-//! supervisor stops listening after one connection, where a node listener
-//! can take the supervisor's connection again.
+//! and the node may not connect to one a subordinate uid made.
+//!
+//! **Redial.** The node keeps accepting on the socket after the first
+//! connection, for that run alone: a supervisor whose connection dropped
+//! dials it again with its resume secret.
 //!
 //! **Network.** By default unchanged from a harness container: the
 //! boundary's internal network, the gateway its only peer, the same proxy
@@ -808,7 +810,7 @@ impl SandboxProvider for PodmanProvider {
                 }
             }
         };
-        tokio::select! {
+        let accepted = tokio::select! {
             accepted = tokio::time::timeout_at(deadline, accept) => match accepted {
                 Ok(Ok(conn)) => Ok(conn),
                 Ok(Err(error)) => Err(ProviderError::Failed(format!("{}: {error}", handle.0))),
@@ -824,7 +826,14 @@ impl SandboxProvider for PodmanProvider {
                 handle.0,
                 self.logs(handle)
             ))),
+        };
+        // The socket stays the sandbox's way back: a supervisor whose
+        // connection dropped dials it again, with its run's resume secret
+        // and nothing else's, until the run ends.
+        if let Ok(conn) = &accepted {
+            server.keep_accepting(listener, conn);
         }
+        accepted
     }
 
     /// Stop (the supervisor tears its processes down on the stop signal,

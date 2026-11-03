@@ -33,7 +33,8 @@ pub enum Dial {
     /// `host:port`.
     Tcp(String),
     Unix(PathBuf),
-    /// Listen on this unix socket and take the first connection.
+    /// Listen on this unix socket and take the first connection; after a
+    /// dropped connection, listen there again.
     Listen(PathBuf),
 }
 

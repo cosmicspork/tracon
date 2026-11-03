@@ -12,7 +12,7 @@ use serde::Serialize;
 use tokio::io::AsyncWriteExt as _;
 use tokio_util::sync::CancellationToken;
 
-use super::procs::{ProcError, Procs, Stream};
+use super::procs::{OutputError, ProcError, Procs, Stream};
 use super::services::{ServiceError, Supervisor};
 use super::tunnels::{TunnelError, Tunnels};
 use crate::files::{self, FilesError};
@@ -45,6 +45,17 @@ impl From<ProcError> for Failure {
             ProcError::NotFound(_) => StatusCode::NOT_FOUND,
             ProcError::Taken => StatusCode::CONFLICT,
             ProcError::Io(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        };
+        Failure(status, error.to_string())
+    }
+}
+
+impl From<OutputError> for Failure {
+    fn from(error: OutputError) -> Self {
+        let status = match error {
+            OutputError::Gone(_) => StatusCode::GONE,
+            OutputError::Beyond(_) => StatusCode::RANGE_NOT_SATISFIABLE,
+            OutputError::Failed(_) => StatusCode::UNPROCESSABLE_ENTITY,
         };
         Failure(status, error.to_string())
     }
@@ -138,14 +149,18 @@ struct Done {
 
 const DONE: Done = Done { ok: true };
 
+/// Answer one request. `gone` is cancelled when the connection it came on
+/// is lost, so nothing waits on a stream that can no longer be answered.
 pub async fn handle(
     state: Arc<State>,
+    gone: CancellationToken,
     request: Request<RecvStream>,
     mut respond: SendResponse<Bytes>,
 ) {
     let method = request.method().clone();
     let path = request.uri().path().to_string();
-    if let Err(Failure(status, error)) = route(&state, &method, &path, request, &mut respond).await
+    if let Err(Failure(status, error)) =
+        route(&state, &gone, &method, &path, request, &mut respond).await
     {
         reply(&mut respond, status, &ErrorBody { error });
     }
@@ -153,6 +168,7 @@ pub async fn handle(
 
 async fn route(
     state: &Arc<State>,
+    gone: &CancellationToken,
     method: &Method,
     path: &str,
     request: Request<RecvStream>,
@@ -166,20 +182,70 @@ async fn route(
         }
         (&Method::POST, path::STDIN) => {
             let target: ProcRef = args(&request)?;
-            let mut stdin = state.procs.take(target.id, Stream::Stdin)?;
-            let mut body = H2Reader::new(request.into_body());
-            // A process that closed its stdin ends the copy early; the node's
-            // writer then sees its stream end, as a pipe writer sees EPIPE.
-            let copied = tokio::io::copy(&mut body, &mut stdin).await;
-            let _ = stdin.shutdown().await;
-            drop(stdin);
-            match copied {
-                Ok(bytes) => reply_ok(respond, &serde_json::json!({ "bytes": bytes })),
-                Err(error) => reply(
-                    respond,
-                    StatusCode::OK,
-                    &serde_json::json!({ "closed": error.to_string() }),
-                ),
+            let input = state.procs.input(target.id)?;
+            let mut stdin = tokio::select! {
+                stdin = input.lock() => stdin,
+                _ = gone.cancelled() => return Ok(()),
+            };
+            if let Some(why) = &stdin.closed {
+                reply_ok(respond, &serde_json::json!({ "closed": why }));
+                return Ok(());
+            }
+            let from = target.from.unwrap_or(stdin.written);
+            if from > stdin.written {
+                return Err(Failure(
+                    StatusCode::RANGE_NOT_SATISFIABLE,
+                    format!(
+                        "stdin from byte {from}: only {} were written",
+                        stdin.written
+                    ),
+                ));
+            }
+            // What a body resent over a new connection repeats.
+            let mut skip = stdin.written - from;
+            let mut body = request.into_body();
+            loop {
+                let next = tokio::select! {
+                    next = body.data() => next,
+                    // Lost with the connection: stdin stays open for the
+                    // node to carry on over the next.
+                    _ = gone.cancelled() => return Ok(()),
+                };
+                let mut chunk = match next {
+                    None => {
+                        stdin.close("the node ended it").await;
+                        reply_ok(respond, &serde_json::json!({ "bytes": stdin.written }));
+                        return Ok(());
+                    }
+                    Some(Ok(chunk)) => chunk,
+                    Some(Err(error)) => {
+                        // The node ending the stream on purpose closes stdin
+                        // as a pipe's writer closing it would; a connection
+                        // that failed leaves it open.
+                        if error.is_reset() && error.is_remote() {
+                            stdin.close("the node reset it").await;
+                        }
+                        return Ok(());
+                    }
+                };
+                let _ = body.flow_control().release_capacity(chunk.len());
+                let repeated = (skip.min(chunk.len() as u64)) as usize;
+                skip -= repeated as u64;
+                let _ = chunk.split_to(repeated);
+                if chunk.is_empty() {
+                    continue;
+                }
+                let written = tokio::select! {
+                    written = stdin.write(&chunk) => written,
+                    _ = gone.cancelled() => return Ok(()),
+                };
+                if let Err(error) = written {
+                    // The process closed its stdin. The node's writer then
+                    // sees its stream end, as a pipe writer sees EPIPE.
+                    stdin.close(error.to_string()).await;
+                    reply_ok(respond, &serde_json::json!({ "closed": error.to_string() }));
+                    return Ok(());
+                }
             }
         }
         (&Method::GET, path::STDOUT | path::STDERR) => {
@@ -189,15 +255,44 @@ async fn route(
             } else {
                 Stream::Stderr
             };
-            let mut stream = state.procs.take(target.id, which)?;
+            let output = state.procs.output(target.id, which)?;
+            let mut from = target.from.unwrap_or(0);
+            output.check(from)?;
+            let attachment = output.attach();
             let Ok(mut writer) = start_stream(respond) else {
                 return Ok(());
             };
-            match tokio::io::copy(&mut stream, &mut writer).await {
-                Ok(_) => {
-                    let _ = writer.shutdown().await;
+            loop {
+                let chunk = tokio::select! {
+                    chunk = output.read_at(from) => chunk,
+                    _ = gone.cancelled() => return Ok(()),
+                };
+                if !output.is_current(attachment) {
+                    writer.reset();
+                    return Ok(());
                 }
-                Err(_) => writer.reset(),
+                match chunk {
+                    Ok(chunk) if chunk.is_empty() => {
+                        let _ = writer.shutdown().await;
+                        return Ok(());
+                    }
+                    Ok(chunk) => {
+                        let sent = tokio::select! {
+                            sent = writer.write_all(&chunk) => sent,
+                            _ = gone.cancelled() => return Ok(()),
+                        };
+                        if sent.is_err() {
+                            return Ok(());
+                        }
+                        from += chunk.len() as u64;
+                        output.sent(from);
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "output stream failed");
+                        writer.reset();
+                        return Ok(());
+                    }
+                }
             }
         }
         (&Method::POST, path::SIGNAL) => {
@@ -215,6 +310,7 @@ async fn route(
             tokio::select! {
                 status = state.procs.wait(target.id) => reply_ok(respond, &status?),
                 _ = reset(respond) => {}
+                _ = gone.cancelled() => {}
             }
         }
         (&Method::POST, path::IMPORT) => {
@@ -262,6 +358,7 @@ async fn route(
             let connection = tokio::select! {
                 connection = state.tunnels.accept(&tunnel.name) => connection?,
                 _ = reset(respond) => return Ok(()),
+                _ = gone.cancelled() => return Ok(()),
             };
             let Ok(mut to_node) = start_stream(respond) else {
                 return Ok(());
@@ -308,7 +405,11 @@ async fn route(
                 return Ok(());
             };
             loop {
-                let event = match events.recv().await {
+                let received = tokio::select! {
+                    received = events.recv() => received,
+                    _ = gone.cancelled() => return Ok(()),
+                };
+                let event = match received {
                     Ok(event) => event,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
                         Event::Lagged { missed }

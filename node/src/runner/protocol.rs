@@ -9,6 +9,7 @@
 //! it the way they always have.
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -20,7 +21,7 @@ use tracon_sandbox::tls::NodeIdentity;
 use super::tunnels::TunnelSpec;
 use super::{Mount, Runner, RunnerCommand, RunnerError, Sidecar, Spawned};
 use crate::provider::{
-    Bootstrap, CreateSpec, Handle, ProviderError, Resources, SandboxProvider, Shape,
+    Bootstrap, CreateSpec, Handle, ProviderError, Resources, SandboxProvider, Shape, Status,
 };
 use crate::telemetry::{run_kind, telemetry};
 
@@ -31,32 +32,118 @@ pub const CONNECT_WITHIN: Duration = Duration::from_secs(60);
 /// removed regardless.
 const SHUTDOWN_WITHIN: Duration = Duration::from_secs(5);
 
+/// Where the serving node keeps its sandbox identity, under its state
+/// directory.
+pub const IDENTITY_DIR: &str = "sandbox-identity";
+
+/// What `tracon serve` settles before any sandbox is made.
+struct Settings {
+    identity_dir: PathBuf,
+    resume_within: Duration,
+}
+
+fn settings() -> &'static OnceLock<Settings> {
+    static SETTINGS: OnceLock<Settings> = OnceLock::new();
+    &SETTINGS
+}
+
+/// For the serving node: keep the sandbox identity under the state
+/// directory, so the pin every sandbox holds survives a restart, and wait
+/// `[sandbox] resume_within_secs` for a dropped sandbox to redial. Called
+/// before anything asks for [`node_server`]; other processes (a CLI check)
+/// get an identity of their own that dies with them.
+pub fn configure(cfg: &crate::config::Config) {
+    let _ = settings().set(Settings {
+        identity_dir: crate::config::Config::state_dir().join(IDENTITY_DIR),
+        resume_within: cfg.sandbox.resume_within(),
+    });
+}
+
 /// The node's side of every sandbox connection in this process: one
-/// identity, and the registry of each run's token.
+/// identity, and the registry of each run's tokens.
 ///
-/// The certificate is made when the process first needs it, so its pin
-/// changes with every restart; a sandbox outliving the node that started
-/// it cannot reconnect to the next one. Keeping it across restarts is for
-/// when sandboxes can resume.
+/// For the serving node the identity is kept (see [`configure`]): made once,
+/// loaded at every start. Rotating it is removing the directory; sandboxes
+/// started before refuse the next node's certificate and end their runs.
 pub fn node_server() -> Result<Arc<SandboxServer>, RunnerError> {
     static SERVER: OnceLock<Arc<SandboxServer>> = OnceLock::new();
     if let Some(server) = SERVER.get() {
         return Ok(server.clone());
     }
-    let identity = NodeIdentity::generate()
-        .map_err(|e| RunnerError::Other(format!("sandbox identity: {e}")))?;
-    let server = SandboxServer::new(&identity, ServerOptions::default())
-        .map_err(|e| RunnerError::Other(format!("sandbox identity: {e}")))?;
+    let failed =
+        |e: tracon_sandbox::tls::TlsError| RunnerError::Other(format!("sandbox identity: {e}"));
+    let mut options = ServerOptions::default();
+    let identity = match settings().get() {
+        Some(settings) => {
+            options.resume_within = settings.resume_within;
+            let (identity, made) =
+                NodeIdentity::load_or_generate(&settings.identity_dir).map_err(failed)?;
+            if made {
+                tracing::info!(pin = %identity.pin(), dir = %settings.identity_dir.display(), "made the node's sandbox identity");
+            }
+            identity
+        }
+        None => NodeIdentity::generate().map_err(failed)?,
+    };
+    let server = SandboxServer::new(&identity, options).map_err(failed)?;
     Ok(SERVER.get_or_init(|| Arc::new(server)).clone())
 }
 
 /// Which sandbox each running command's name is in, for `kill`. Process-wide
 /// because a runner is made afresh for each call, and the call that kills is
 /// rarely the one that started.
-fn running() -> &'static Mutex<HashMap<String, Handle>> {
-    static RUNNING: OnceLock<Mutex<HashMap<String, Handle>>> = OnceLock::new();
+fn running() -> &'static Mutex<HashMap<String, (Handle, String)>> {
+    static RUNNING: OnceLock<Mutex<HashMap<String, (Handle, String)>>> = OnceLock::new();
     RUNNING.get_or_init(|| Mutex::new(HashMap::new()))
 }
+
+/// While a run's connection is down, ask the provider after its sandbox:
+/// one that has stopped or gone will never redial, so its run ends now
+/// rather than at the end of the resume window.
+fn end_if_gone(
+    provider: Arc<dyn SandboxProvider>,
+    server: Arc<SandboxServer>,
+    handle: Handle,
+    conn: &SandboxConn,
+) {
+    if !conn.is_resumable() {
+        return;
+    }
+    let weak = conn.downgrade();
+    let run = conn.run().to_string();
+    let ended = conn.ended();
+    tokio::spawn(async move {
+        tokio::pin!(ended);
+        loop {
+            tokio::select! {
+                _ = weak.disconnected() => {}
+                _ = &mut ended => return,
+            }
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(AWAY_POLL) => {}
+                    _ = &mut ended => return,
+                }
+                match weak.upgrade() {
+                    None => return,
+                    Some(conn) if conn.is_connected() => break,
+                    Some(_) => {}
+                }
+                match provider.status(&handle).await {
+                    Ok(Status::Exited { .. } | Status::Lost) | Err(ProviderError::NotFound(_)) => {
+                        tracing::warn!(sandbox = %handle.0, %run, "a sandbox stopped while its connection was down; its run is over");
+                        server.end_run(&run);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+}
+
+/// How often a sandbox whose connection is down is looked for.
+const AWAY_POLL: Duration = Duration::from_secs(2);
 
 pub struct ProtocolRunner {
     provider: Arc<dyn SandboxProvider>,
@@ -267,7 +354,7 @@ impl ProtocolRunner {
         running()
             .lock()
             .unwrap()
-            .insert(name.to_string(), handle.clone());
+            .insert(name.to_string(), (handle.clone(), teardown.run.clone()));
         let conn = match self
             .provider
             .connect(&handle, &server, self.connect_within)
@@ -279,6 +366,7 @@ impl ProtocolRunner {
                 return Err(failed(error, || format!("connect to sandbox {name}")));
             }
         };
+        end_if_gone(self.provider.clone(), server.clone(), handle.clone(), &conn);
         let mut teardown = teardown;
         teardown.conn = Some(conn.clone());
         if let Some(requirements) = &self.requirements {
@@ -474,9 +562,9 @@ async fn teardown(
     conn: Option<SandboxConn>,
     files: Option<super::sandbox_files::Attached>,
 ) -> Result<(), super::sandbox_files::FilesError> {
-    server.tokens().revoke(&run);
     super::services::unregister(&name, &run);
-    // While the sandbox is still there to read from.
+    // While the sandbox is still there to read from, and may still come
+    // back to be read from: its resume secret goes after.
     let taken_back = match files {
         Some(files) => files.conclude().await,
         None => Ok(()),
@@ -486,9 +574,10 @@ async fn teardown(
         // before the provider's removal makes sure of it.
         let _ = tokio::time::timeout(SHUTDOWN_WITHIN, conn.shutdown()).await;
     }
+    server.end_run(&run);
     {
         let mut map = running().lock().unwrap();
-        if map.get(&name) == Some(&handle) {
+        if map.get(&name).is_some_and(|(held, _)| *held == handle) {
             map.remove(&name);
         }
     }
@@ -564,10 +653,15 @@ impl Runner for ProtocolRunner {
         }
         // What it changed comes back before it goes.
         super::sandbox_files::finish_named(name).await;
-        let handle = running()
-            .lock()
-            .unwrap()
-            .remove(name)
+        let running = running().lock().unwrap().remove(name);
+        // Gone on purpose: nothing waits for it to redial.
+        if let Some((_, run)) = &running {
+            if let Ok(server) = self.server() {
+                server.end_run(run);
+            }
+        }
+        let handle = running
+            .map(|(handle, _)| handle)
             .unwrap_or_else(|| Handle(name.to_string()));
         self.provider
             .destroy(&handle)

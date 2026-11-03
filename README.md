@@ -1421,6 +1421,10 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node, or
                                     # a repository Dockerfile stands on it with
                                     # FROM ${TRACON_SANDBOX_BASE}
 # release_url = "https://github.com/cosmicspork/tracon/releases/download" # where bundles come from
+# resume_within_secs = 120          # how long a run over the sandbox protocol whose connection
+                                    # dropped waits for its sandbox to redial (see "When a
+                                    # sandbox's connection drops"); 0 ends the run with the
+                                    # connection, as before resuming existed
 # [runtime.kubernetes]              # namespace, harness_image,
                                     # state_claim, state_mount, harness_home, uid, gateway_host
 # start_timeout_secs = 900          # (under [runtime.kubernetes]) how long a pod may take to be
@@ -1942,6 +1946,36 @@ action the node reads it for, not one already dispatched.
 directory holding `node.toml`. `TRACON_LISTEN` or `serve --listen` moves the API off
 `127.0.0.1:7420`. A node beside a real one needs all three and its own runtime names
 (see "A scratch node" under From source).
+
+### When a sandbox's connection drops
+
+A run over the sandbox protocol (Podman with `sandbox_protocol`, Kubernetes with
+`sandbox_protocol`, Apple, DigitalOcean) outlives a dropped connection:
+
+- **The node's identity is kept.** The serving node keeps the certificate its sandboxes
+  pin in `<state>/sandbox-identity/` (`cert.der` and `key.der`, 0600), made on the
+  first start that needs it. To rotate it, stop the node and remove the directory: the
+  next start makes another, and every sandbox started before it refuses the new
+  certificate and ends its run (its processes are stopped and its trees were last taken
+  back at the last sync).
+- **The sandbox comes back.** With its first ack the node gives the sandbox a resume
+  secret, inside TLS, bound to that run (and on Kubernetes, as the token is, to the
+  pod's address). When the connection drops, everything in the sandbox keeps running
+  and the sandbox redials with the secret, with backoff, for twice
+  `[sandbox] resume_within_secs`; on Apple it listens again and the node connects in
+  again. The node waits `resume_within_secs` (default 120) before the run is lost and
+  ended as before. The secret is revoked when the run ends, and a sandbox the node
+  refuses (the run is over, or the certificate is not the one it pinned) tears itself
+  down at once.
+- **Nothing is lost or repeated.** Output written while the node is away waits in the
+  sandbox, up to 4 MiB a stream; past that the process blocks writing, as on a pipe
+  nobody reads. The node asks again from the byte it had reached. Stdin is sent again
+  from the last 2 MiB the node keeps, and the sandbox skips what it had written. An
+  exit while the node is away is told when it is back. A service's log lines and
+  state changes from the gap are not resent; its state can be asked for.
+- **Compatibility.** The bundle is the node's own version. A sandbox binary from before
+  this (no `resumable` in its hello) is given no secret, and its run ends with its first
+  connection, as it always did.
 
 ### The hub
 

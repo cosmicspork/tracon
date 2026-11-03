@@ -32,7 +32,10 @@
 //! address of the pod the token was issued to (any other is closed before a
 //! byte of it is read, so it can neither use nor burn the token); and it is
 //! revoked when the run ends or its sandbox fails to connect in time. Only a
-//! `tracon-sandbox` pod may reach the port at all.
+//! `tracon-sandbox` pod may reach the port at all. After a dropped
+//! connection the supervisor redials with the resume secret the node gave
+//! it inside TLS, which binds the same way: taken only from that pod's
+//! address, and only for its run.
 //!
 //! Isolation is read back from the API (the admitted pod, the policies),
 //! never from inside.
@@ -452,6 +455,37 @@ impl Expected {
     pub async fn next(&mut self) -> Option<TcpStream> {
         self.receive.recv().await
     }
+}
+
+/// Keep expecting the pod at its addresses once it has connected: its
+/// supervisor redials after a dropped connection, from the same pod, with
+/// its run's resume secret, which nothing from any other address can
+/// present. Until the run ends.
+fn take_back(server: SandboxServer, mut expected: Expected, conn: &SandboxConn) {
+    if !conn.is_resumable() {
+        return;
+    }
+    let run = conn.run().to_string();
+    let ended = conn.ended();
+    tokio::spawn(async move {
+        tokio::pin!(ended);
+        loop {
+            let stream = tokio::select! {
+                stream = expected.next() => match stream {
+                    Some(stream) => stream,
+                    None => return,
+                },
+                _ = &mut ended => return,
+            };
+            let accepted = tokio::select! {
+                accepted = server.accept_for(stream, &run) => accepted,
+                _ = &mut ended => return,
+            };
+            if let Err(error) = accepted {
+                tracing::warn!(%run, %error, "refused a connection from a sandbox's address");
+            }
+        }
+    });
 }
 
 impl Drop for Expected {
@@ -1164,6 +1198,9 @@ impl SandboxProvider for KubeSandboxProvider {
                         Ok(conn) => {
                             if connect_deadline.is_none() {
                                 telemetry().pod_started(kind, sizing_label, pending.begun.elapsed());
+                            }
+                            if let Some(expected) = expected.take() {
+                                take_back(server.clone(), expected, &conn);
                             }
                             return Ok(conn);
                         }

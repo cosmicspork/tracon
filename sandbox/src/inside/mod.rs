@@ -1,6 +1,14 @@
 //! What runs inside the sandbox: dial the node, prove the run's token, then
-//! serve the node's requests until it says stop, the connection is lost, or
-//! a signal arrives — and tear everything down either way.
+//! serve the node's requests until it says stop, the run is lost, or a
+//! signal arrives — and tear everything down either way.
+//!
+//! A dropped connection does not end the run when the node gave a resume
+//! secret: everything started keeps running, output piles up in each
+//! process's bounded log (and the process blocks once that is full), and the
+//! sandbox redials with the secret, with backoff, for as long as the node
+//! said it would wait. A listening sandbox listens again. The node refusing
+//! the secret (the run is over, or it no longer knows it) or presenting
+//! another certificate ends the run at once; so does the window passing.
 
 mod fd;
 mod procs;
@@ -15,10 +23,14 @@ use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::signal::unix::{signal, SignalKind};
+use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::carrier::Dial;
-use crate::protocol::{Ack, Hello, DEFAULT_KEEPALIVE, DEFAULT_SERVER_NAME, MAX_HELLO_BYTES};
+use crate::carrier::{BoxedIo, Dial};
+use crate::protocol::{
+    Ack, Hello, Resume, DEFAULT_KEEPALIVE, DEFAULT_SERVER_NAME, MAX_HELLO_BYTES,
+};
 use crate::tls::{self, CertPin};
 use server::State;
 use spawner::Spawner;
@@ -70,7 +82,8 @@ pub enum RunError {
 pub enum Ending {
     /// The node asked it to.
     Shutdown,
-    /// The connection closed or stopped answering pings.
+    /// The connection closed or stopped answering pings, and the node did
+    /// not take it back.
     Lost,
     /// A terminating signal arrived.
     Signal(i32),
@@ -90,24 +103,26 @@ pub fn become_subreaper() {
     }
 }
 
-async fn dial(config: &Config) -> Result<crate::carrier::BoxedIo, RunError> {
-    if let Dial::Listen(_) = config.dial {
-        return match tokio::time::timeout(config.connect_timeout, config.dial.connect()).await {
+/// The node's stream within `within`: dialled, retried with backoff, or for
+/// a listening sandbox, the next connection in.
+async fn dial(target: &Dial, within: Duration) -> Result<BoxedIo, RunError> {
+    if let Dial::Listen(_) = target {
+        return match tokio::time::timeout(within, target.connect()).await {
             Ok(Ok(io)) => Ok(io),
-            Ok(Err(error)) => Err(RunError::Dial(config.dial.to_string(), error)),
+            Ok(Err(error)) => Err(RunError::Dial(target.to_string(), error)),
             Err(_) => Err(RunError::Dial(
-                config.dial.to_string(),
+                target.to_string(),
                 io::Error::new(io::ErrorKind::TimedOut, "the node did not connect"),
             )),
         };
     }
-    let deadline = tokio::time::Instant::now() + config.connect_timeout;
+    let deadline = Instant::now() + within;
     let mut delay = Duration::from_millis(50);
     loop {
-        match config.dial.connect().await {
+        match target.connect().await {
             Ok(io) => return Ok(io),
-            Err(error) if tokio::time::Instant::now() + delay >= deadline => {
-                return Err(RunError::Dial(config.dial.to_string(), error));
+            Err(error) if Instant::now() + delay >= deadline => {
+                return Err(RunError::Dial(target.to_string(), error));
             }
             Err(error) => {
                 tracing::debug!(%error, "node not answering yet");
@@ -155,6 +170,9 @@ pub(crate) const CONNECTION_WINDOW: u32 = 8 * 1024 * 1024;
 pub(crate) const MAX_FRAME: u32 = 256 * 1024;
 pub(crate) const MAX_STREAMS: u32 = 4096;
 
+/// How long one TLS handshake, hello and HTTP/2 setup may take.
+const HANDSHAKE_WITHIN: Duration = Duration::from_secs(30);
+
 /// Ping every `interval`; resolve when a pong fails to come back within it.
 pub(crate) async fn keepalive(mut ping_pong: h2::PingPong, interval: Duration) {
     let mut tick = tokio::time::interval(interval);
@@ -176,79 +194,127 @@ pub(crate) async fn keepalive(mut ping_pong: h2::PingPong, interval: Duration) {
     }
 }
 
-/// Dial, prove the token, serve until the end, tear down. Must run inside a
-/// Tokio runtime, in a process where nothing else waits for children.
-pub async fn run(config: Config) -> Result<Ending, RunError> {
-    let spawner = Spawner::new();
-    // Installed before anything is started, so no exit goes unnoticed.
-    let _reaper = spawner
-        .start_reaper()
-        .map_err(|e| RunError::Handshake(format!("install SIGCHLD handler: {e}")))?;
-    let mut terminate = Signals::install()
-        .map_err(|e| RunError::Handshake(format!("install signal handlers: {e}")))?;
+type Connection = h2::server::Connection<tokio_rustls::client::TlsStream<BoxedIo>, bytes::Bytes>;
 
-    let client = tls::client_config(config.pin).map_err(|e| RunError::Tls(e.to_string()))?;
+/// A connection that has passed the hello, and what the node said of
+/// coming back.
+struct Connected {
+    connection: Connection,
+    resume: Option<Resume>,
+}
+
+/// TLS against the pin, the hello with `credential`, the node's ack, then
+/// HTTP/2 with the roles reversed.
+async fn handshake(
+    config: &Config,
+    client: Arc<rustls::ClientConfig>,
+    io: BoxedIo,
+    credential: &str,
+) -> Result<Connected, RunError> {
     let server_name = rustls::pki_types::ServerName::try_from(config.server_name.clone())
         .map_err(|e| RunError::Tls(e.to_string()))?;
-    let io = tokio::select! {
-        io = dial(&config) => io?,
-        signal = terminate.next() => return Ok(Ending::Signal(signal)),
-    };
-    let handshake = async {
-        let mut tls = tokio_rustls::TlsConnector::from(client)
-            .connect(server_name, io)
-            .await
-            .map_err(|e| RunError::Tls(e.to_string()))?;
-        if tls.get_ref().1.alpn_protocol() != Some(crate::protocol::ALPN) {
-            return Err(RunError::Tls("the node did not agree the protocol".into()));
-        }
-        let hello = Hello {
-            token: config.token.clone(),
-            version: env!("CARGO_PKG_VERSION").into(),
-            arch: std::env::consts::ARCH.into(),
-            pid: std::process::id(),
-            init: is_init(),
-        };
-        write_frame(&mut tls, &hello)
-            .await
-            .map_err(|e| RunError::Handshake(e.to_string()))?;
-        let ack: Ack = read_frame(&mut tls)
-            .await
-            .map_err(|e| RunError::Handshake(format!("no answer to hello: {e}")))?;
-        if !ack.ok {
-            return Err(RunError::Refused(ack.error.unwrap_or_default()));
-        }
-        h2::server::Builder::new()
-            .initial_window_size(STREAM_WINDOW)
-            .initial_connection_window_size(CONNECTION_WINDOW)
-            .max_frame_size(MAX_FRAME)
-            .max_concurrent_streams(MAX_STREAMS)
-            .handshake::<_, bytes::Bytes>(tls)
-            .await
-            .map_err(|e| RunError::Handshake(e.to_string()))
-    };
-    let mut connection = tokio::time::timeout(Duration::from_secs(30), handshake)
+    let mut tls = tokio_rustls::TlsConnector::from(client)
+        .connect(server_name, io)
         .await
-        .map_err(|_| RunError::Handshake("timed out".into()))??;
-    tracing::info!(node = %config.dial, "connected");
+        .map_err(|e| match pin_refused(&e) {
+            true => RunError::Refused(format!("the node's certificate does not match: {e}")),
+            false => RunError::Tls(e.to_string()),
+        })?;
+    if tls.get_ref().1.alpn_protocol() != Some(crate::protocol::ALPN) {
+        return Err(RunError::Tls("the node did not agree the protocol".into()));
+    }
+    let hello = Hello {
+        token: credential.to_string(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        arch: std::env::consts::ARCH.into(),
+        pid: std::process::id(),
+        init: is_init(),
+        resumable: true,
+    };
+    write_frame(&mut tls, &hello)
+        .await
+        .map_err(|e| RunError::Handshake(e.to_string()))?;
+    let ack: Ack = read_frame(&mut tls)
+        .await
+        .map_err(|e| RunError::Handshake(format!("no answer to hello: {e}")))?;
+    if !ack.ok {
+        return Err(RunError::Refused(ack.error.unwrap_or_default()));
+    }
+    let connection = h2::server::Builder::new()
+        .initial_window_size(STREAM_WINDOW)
+        .initial_connection_window_size(CONNECTION_WINDOW)
+        .max_frame_size(MAX_FRAME)
+        .max_concurrent_streams(MAX_STREAMS)
+        .handshake::<_, bytes::Bytes>(tls)
+        .await
+        .map_err(|e| RunError::Handshake(e.to_string()))?;
+    Ok(Connected {
+        connection,
+        resume: ack.resume,
+    })
+}
 
-    let state = Arc::new(State {
-        procs: procs::Procs::new(spawner.clone()),
-        tunnels: tunnels::Tunnels::default(),
-        services: services::Supervisor::new(spawner.clone()),
-        shutdown: CancellationToken::new(),
-    });
+/// Whether the TLS failure is the node's certificate not matching the pin:
+/// a node whose identity changed, which redialling cannot fix.
+fn pin_refused(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<rustls::Error>())
+        .is_some_and(|e| matches!(e, rustls::Error::InvalidCertificate(_)))
+}
+
+/// Dial and prove `credential` once: the dial within `within`, the rest
+/// within `handshake_within`.
+async fn connect(
+    config: &Config,
+    client: Arc<rustls::ClientConfig>,
+    credential: &str,
+    within: Duration,
+    handshake_within: Duration,
+) -> Result<Connected, RunError> {
+    let io = dial(&config.dial, within).await?;
+    tokio::time::timeout(handshake_within, handshake(config, client, io, credential))
+        .await
+        .map_err(|_| RunError::Handshake("timed out".into()))?
+}
+
+/// How one connection ended.
+enum Served {
+    Shutdown {
+        drive: JoinHandle<()>,
+        closing: CancellationToken,
+    },
+    Signal {
+        signal: i32,
+        drive: JoinHandle<()>,
+        closing: CancellationToken,
+    },
+    Lost,
+}
+
+/// Serve the node's requests on `connection` until it is lost, the node
+/// asks for a shutdown, or a terminating signal arrives. Signals that do
+/// not terminate are passed on meanwhile.
+async fn serve(
+    state: &Arc<State>,
+    mut connection: Connection,
+    keepalive_every: Duration,
+    terminate: &mut Signals,
+) -> Served {
     let ping_pong = connection.ping_pong().expect("ping_pong taken once");
     let closing = CancellationToken::new();
-    let drive = {
+    // Every request answered on this connection gives up when it is lost.
+    let gone = CancellationToken::new();
+    let mut drive = {
         let state = state.clone();
         let closing = closing.clone();
+        let gone = gone.clone();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     accepted = connection.accept() => match accepted {
                         Some(Ok((request, respond))) => {
-                            tokio::spawn(server::handle(state.clone(), request, respond));
+                            tokio::spawn(server::handle(state.clone(), gone.clone(), request, respond));
                         }
                         Some(Err(error)) => {
                             tracing::debug!(%error, "connection error");
@@ -266,25 +332,158 @@ pub async fn run(config: Config) -> Result<Ending, RunError> {
             }
         })
     };
-    let mut drive = drive;
-    let alive = keepalive(ping_pong, config.keepalive);
+    let alive = keepalive(ping_pong, keepalive_every);
     tokio::pin!(alive);
-
-    let mut driven = false;
-    let ending = loop {
+    let served = loop {
         tokio::select! {
-            _ = state.shutdown.cancelled() => break Ending::Shutdown,
-            _ = &mut drive => {
-                driven = true;
-                break Ending::Lost;
+            _ = state.shutdown.cancelled() => break Served::Shutdown { drive, closing },
+            _ = &mut drive => break Served::Lost,
+            _ = &mut alive => {
+                // Dropping the connection fails every stream still open on
+                // it, so their handlers let go of what they hold.
+                drive.abort();
+                break Served::Lost;
             }
-            _ = &mut alive => break Ending::Lost,
             signal = terminate.next() => {
                 if Signals::TERMINATING.contains(&signal) {
-                    break Ending::Signal(signal);
+                    break Served::Signal { signal, drive, closing };
                 }
                 state.procs.forward(signal);
                 state.services.forward(signal);
+            }
+        }
+    };
+    if let Served::Lost = served {
+        gone.cancel();
+    }
+    served
+}
+
+/// How a redial ended.
+enum Redialled {
+    Connected(Box<Connection>),
+    Signal(i32),
+    Shutdown,
+    GaveUp(String),
+}
+
+/// Redial with the resume secret until the node takes the sandbox back or
+/// `resume.within_ms` has passed. A refusal ends it at once: the node no
+/// longer knows the run, or is not the node this sandbox trusts.
+async fn redial(
+    config: &Config,
+    client: &Arc<rustls::ClientConfig>,
+    resume: &Resume,
+    state: &Arc<State>,
+    terminate: &mut Signals,
+) -> Redialled {
+    let deadline = Instant::now() + Duration::from_millis(resume.within_ms);
+    let mut delay = Duration::from_millis(100);
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Redialled::GaveUp(format!(
+                "the node did not take it back within {} s",
+                resume.within_ms / 1000
+            ));
+        }
+        let attempt = tokio::select! {
+            attempt = connect(
+                config,
+                client.clone(),
+                &resume.secret,
+                left,
+                HANDSHAKE_WITHIN.min(left.max(Duration::from_secs(1))),
+            ) => attempt,
+            _ = state.shutdown.cancelled() => return Redialled::Shutdown,
+            signal = terminate.next() => {
+                if Signals::TERMINATING.contains(&signal) {
+                    return Redialled::Signal(signal);
+                }
+                state.procs.forward(signal);
+                state.services.forward(signal);
+                continue;
+            }
+        };
+        match attempt {
+            Ok(connected) => return Redialled::Connected(Box::new(connected.connection)),
+            Err(RunError::Refused(why)) => return Redialled::GaveUp(why),
+            Err(error) => {
+                tracing::debug!(%error, "redial failed");
+                let pause = delay.min(deadline.saturating_duration_since(Instant::now()));
+                tokio::select! {
+                    _ = tokio::time::sleep(pause) => {}
+                    _ = state.shutdown.cancelled() => return Redialled::Shutdown,
+                }
+                delay = (delay * 2).min(Duration::from_secs(5));
+            }
+        }
+    }
+}
+
+/// Dial, prove the token, serve until the end (redialling when the node
+/// allows it), tear down. Must run inside a Tokio runtime, in a process where
+/// nothing else waits for children.
+pub async fn run(config: Config) -> Result<Ending, RunError> {
+    let spawner = Spawner::new();
+    // Installed before anything is started, so no exit goes unnoticed.
+    let _reaper = spawner
+        .start_reaper()
+        .map_err(|e| RunError::Handshake(format!("install SIGCHLD handler: {e}")))?;
+    let mut terminate = Signals::install()
+        .map_err(|e| RunError::Handshake(format!("install signal handlers: {e}")))?;
+
+    let client = tls::client_config(config.pin).map_err(|e| RunError::Tls(e.to_string()))?;
+    let first = tokio::select! {
+        connected = connect(
+            &config,
+            client.clone(),
+            &config.token,
+            config.connect_timeout,
+            HANDSHAKE_WITHIN,
+        ) => connected?,
+        signal = terminate.next() => return Ok(Ending::Signal(signal)),
+    };
+    tracing::info!(node = %config.dial, resumable = first.resume.is_some(), "connected");
+    let resume = first.resume;
+
+    let state = Arc::new(State {
+        procs: procs::Procs::new(spawner.clone()),
+        tunnels: tunnels::Tunnels::default(),
+        services: services::Supervisor::new(spawner.clone()),
+        shutdown: CancellationToken::new(),
+    });
+
+    let mut connection = first.connection;
+    let (ending, last) = loop {
+        match serve(&state, connection, config.keepalive, &mut terminate).await {
+            Served::Shutdown { drive, closing } => {
+                break (Ending::Shutdown, Some((drive, closing)))
+            }
+            Served::Signal {
+                signal,
+                drive,
+                closing,
+            } => break (Ending::Signal(signal), Some((drive, closing))),
+            Served::Lost => {}
+        }
+        let Some(resume) = &resume else {
+            break (Ending::Lost, None);
+        };
+        tracing::warn!(
+            within_s = resume.within_ms / 1000,
+            "lost the node; everything keeps running while it redials"
+        );
+        match redial(&config, &client, resume, &state, &mut terminate).await {
+            Redialled::Connected(next) => {
+                tracing::info!(node = %config.dial, "reconnected");
+                connection = *next;
+            }
+            Redialled::Signal(signal) => break (Ending::Signal(signal), None),
+            Redialled::Shutdown => break (Ending::Shutdown, None),
+            Redialled::GaveUp(why) => {
+                tracing::warn!(%why, "the node did not take this sandbox back");
+                break (Ending::Lost, None);
             }
         }
     };
@@ -295,8 +494,8 @@ pub async fn run(config: Config) -> Result<Ending, RunError> {
     let _ = state.services.stop(&[]).await;
     state.procs.terminate_all(config.stop_grace).await;
     state.tunnels.close_all();
-    closing.cancel();
-    if !driven {
+    if let Some((mut drive, closing)) = last {
+        closing.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(2), &mut drive).await;
         drive.abort();
     }
