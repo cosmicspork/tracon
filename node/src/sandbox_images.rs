@@ -96,6 +96,14 @@ pub fn enabled(cfg: &Config) -> bool {
         && crate::boundary::podman::uses_sandbox_protocol(cfg)
 }
 
+/// Whether this node's sandboxes run harnesses from the bundle on the stock
+/// base or a repository's image, with no harness images: Podman's with the
+/// setting, and an Apple node's always. Snapshots ([`enabled`]) are
+/// Podman's alone so far.
+pub fn bundled(cfg: &Config) -> bool {
+    enabled(cfg) || cfg.runtime.kind == crate::config::RuntimeKind::Apple
+}
+
 /// The base image as configured, and as this process pinned it.
 static PINNED: RwLock<Option<(String, String)>> = RwLock::new(None);
 
@@ -126,7 +134,7 @@ pub fn active_base() -> Option<String> {
         .map(|(_, pinned)| pinned.clone())
 }
 
-fn pin(configured: &str, pinned: &str) {
+pub(crate) fn pin(configured: &str, pinned: &str) {
     *PINNED.write().unwrap() = Some((configured.to_string(), pinned.to_string()));
 }
 

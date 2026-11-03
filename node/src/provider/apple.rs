@@ -48,8 +48,9 @@ use crate::runner::Mount;
 pub const BUNDLE_TARGET: &str = "/opt/tracon";
 /// The supervisor, inside the bundle.
 pub const SANDBOX_BIN: &str = "/opt/tracon/bin/tracon-sandbox";
-/// Where `tracon-sandbox` listens for the node, inside.
-pub const SOCKET_INSIDE: &str = "/run/tracon/node.sock";
+/// Where `tracon-sandbox` listens for the node, inside: somewhere the
+/// image's own user may bind, which `/run` is not for the base's 65532.
+pub const SOCKET_INSIDE: &str = "/tmp/tracon-node.sock";
 /// Marks what this provider made, for [`AppleProvider::capacity`].
 const LABEL: &str = "tracon.provider=apple";
 /// The runtime that gives every container a VM of its own.
@@ -95,7 +96,7 @@ impl ContainerCli for SystemCli {
     async fn run(&self, args: &[String]) -> Result<String, CliError> {
         let fallback = [Path::new("/usr/local/bin/container")];
         let bin = match crate::config::path_guard::resolve(
-            "provider.apple.container",
+            "runtime.apple.container",
             &self.bin,
             &fallback,
         ) {
@@ -123,8 +124,10 @@ impl ContainerCli for SystemCli {
 }
 
 /// What the provider is configured with.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AppleOptions {
+    /// The `container` CLI; empty for where Apple's installer puts it.
+    pub bin: String,
     /// The bundle for `linux/arm64`, holding `bin/tracon-sandbox`.
     pub bundle: PathBuf,
     /// Where the published sockets go on the host. Short, because a socket
@@ -132,6 +135,17 @@ pub struct AppleOptions {
     pub socket_dir: PathBuf,
     /// Most sandboxes at once; `None` for no limit of the provider's own.
     pub limit: Option<u32>,
+    /// Every sandbox's environment besides its bootstrap: its home, its
+    /// proxies, where its harness keeps state. Never a secret: `container`
+    /// keeps it in the sandbox's configuration.
+    pub env: Vec<(String, String)>,
+    /// What a sandbox gets when its spec says nothing: CPUs, and memory as
+    /// `container` takes it (`4G`).
+    pub cpus: Option<u32>,
+    pub memory: String,
+    /// Each catalogue service's bundle and where it is mounted, read-only,
+    /// for services run under the sandbox's supervisor.
+    pub service_bundles: Vec<(PathBuf, String)>,
 }
 
 impl AppleOptions {
@@ -149,7 +163,14 @@ pub struct AppleProvider {
 
 impl AppleProvider {
     pub fn new(options: AppleOptions) -> Self {
-        Self::with_cli(options, Box::new(SystemCli::default()))
+        let cli = SystemCli {
+            bin: options.bin.clone(),
+        };
+        Self::with_cli(options, Box::new(cli))
+    }
+
+    pub fn options(&self) -> &AppleOptions {
+        &self.options
     }
 
     pub fn with_cli(options: AppleOptions, cli: Box<dyn ContainerCli>) -> Self {
@@ -240,19 +261,23 @@ impl AppleProvider {
         args.push(format!("{}:{SOCKET_INSIDE}", socket.display()));
         args.push("--mount".into());
         args.push(bind_mount(&self.options.bundle, BUNDLE_TARGET, true)?);
+        for (source, target) in &self.options.service_bundles {
+            args.push("--mount".into());
+            args.push(bind_mount(source, target, true)?);
+        }
         for mount in mounts {
-            let source = Path::new(&mount.volume);
-            if !source.is_absolute() {
-                return Err(ProviderError::Failed(format!(
-                    "apple mounts host directories only; {:?} is not an absolute path",
-                    mount.volume
-                )));
-            }
             if mount.target == BUNDLE_TARGET || mount.target.starts_with("/opt/tracon/") {
                 return Err(ProviderError::Failed(format!(
                     "{} is the bundle's",
                     mount.target
                 )));
+            }
+            // A tree the files channel fills, or a volume no sandbox is
+            // handed (the harness state every session once shared): the
+            // VM's own disk, empty, as a runtime's fresh volume would be.
+            let source = Path::new(&mount.volume);
+            if mount.is_local() || !source.is_absolute() {
+                continue;
             }
             let source = match mount.sub_path.is_empty() {
                 true => source.to_path_buf(),
@@ -261,13 +286,27 @@ impl AppleProvider {
             args.push("--mount".into());
             args.push(bind_mount(&source, &mount.target, mount.read_only)?);
         }
-        if let Some(millis) = resources.cpu_millis {
-            args.push("--cpus".into());
-            args.push(millis.div_ceil(1000).max(1).to_string());
+        match (resources.cpu_millis, self.options.cpus) {
+            (Some(millis), _) => {
+                args.push("--cpus".into());
+                args.push(millis.div_ceil(1000).max(1).to_string());
+            }
+            (None, Some(cpus)) => {
+                args.push("--cpus".into());
+                args.push(cpus.to_string());
+            }
+            (None, None) => {}
         }
-        if let Some(bytes) = resources.memory_bytes {
-            args.push("--memory".into());
-            args.push(format!("{}M", bytes.div_ceil(1 << 20).max(1)));
+        match (resources.memory_bytes, self.options.memory.as_str()) {
+            (Some(bytes), _) => {
+                args.push("--memory".into());
+                args.push(format!("{}M", bytes.div_ceil(1 << 20).max(1)));
+            }
+            (None, "") => {}
+            (None, memory) => {
+                args.push("--memory".into());
+                args.push(memory.into());
+            }
         }
         args.push("--env-file".into());
         args.push(env_file.to_string_lossy().into_owned());
@@ -277,18 +316,39 @@ impl AppleProvider {
         Ok(args)
     }
 
+    /// The name a sandbox is made under: the node's, where `container` and
+    /// the socket directory can take it, so a node that restarts finds what
+    /// it left by name; else one of the provider's own.
+    fn name_for(&self, asked: Option<&str>) -> String {
+        let fits = |name: &str| {
+            let socket = self.options.socket_dir.join(format!("{name}.sock"));
+            !name.is_empty()
+                && name.len() <= 63
+                && name.as_bytes()[0].is_ascii_alphanumeric()
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+                && socket.as_os_str().len() < SUN_PATH_MAX
+        };
+        match asked.filter(|name| fits(name)) {
+            Some(name) => name.to_string(),
+            None => format!(
+                "tracon-{}",
+                &uuid::Uuid::new_v4().simple().to_string()[..12]
+            ),
+        }
+    }
+
     async fn start(
         &self,
+        name: Option<&str>,
         image: &str,
         resources: &Resources,
         mounts: &[Mount],
         bootstrap: &Bootstrap,
     ) -> Result<Handle, ProviderError> {
         self.prepare_socket_dir()?;
-        let name = format!(
-            "tracon-{}",
-            &uuid::Uuid::new_v4().simple().to_string()[..12]
-        );
+        let name = self.name_for(name);
         let handle = Handle(name.clone());
         let socket = self.node_socket(&handle);
         if socket.as_os_str().len() >= SUN_PATH_MAX {
@@ -301,9 +361,12 @@ impl AppleProvider {
             .prefix(".env-")
             .tempfile_in(&self.options.socket_dir)
             .map_err(|e| ProviderError::Failed(format!("env file: {e}")))?;
-        std::fs::write(env.path(), env_file(bootstrap)?)
+        std::fs::write(env.path(), env_file(&self.options.env, bootstrap)?)
             .map_err(|e| ProviderError::Failed(format!("env file: {e}")))?;
         let args = self.run_args(&name, image, resources, mounts, env.path())?;
+        // One the node left under this name (a run it lost on a restart) is
+        // over: the name is this run's now.
+        self.destroy(&handle).await?;
         let started = self.cli.run(&args).await;
         drop(env);
         match started {
@@ -333,14 +396,26 @@ fn bind_mount(source: &Path, target: &str, read_only: bool) -> Result<String, Pr
     Ok(spec)
 }
 
-/// The bootstrap environment, as `--env-file` reads it.
-fn env_file(bootstrap: &Bootstrap) -> Result<String, ProviderError> {
+/// The sandbox's environment and then its bootstrap, as `--env-file` reads
+/// it. A bootstrap name in `env` is refused rather than overridden.
+fn env_file(env: &[(String, String)], bootstrap: &Bootstrap) -> Result<String, ProviderError> {
     let lines = [
         ("TRACON_SANDBOX_LISTEN", SOCKET_INSIDE),
         ("TRACON_SANDBOX_PIN", bootstrap.cert_pin.as_str()),
         ("TRACON_SANDBOX_TOKEN", bootstrap.token.as_str()),
     ];
     let mut text = String::new();
+    for (key, value) in env {
+        let named = !key.is_empty()
+            && !key.starts_with("TRACON_SANDBOX_")
+            && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+        if !named || value.contains(['\n', '\r', '\0']) {
+            return Err(ProviderError::Failed(format!(
+                "{key:?} cannot go in a sandbox's environment"
+            )));
+        }
+        text.push_str(&format!("{key}={value}\n"));
+    }
     for (key, value) in lines {
         if value.is_empty() || value.contains(['\n', '\r', '\0']) {
             return Err(ProviderError::Failed(format!("{key} must be one line")));
@@ -488,10 +563,15 @@ impl SandboxProvider for AppleProvider {
         ProviderKind::Apple
     }
 
-    /// The provider names the VM itself; `spec.name` is not used.
     async fn create(&self, spec: &CreateSpec<'_>) -> Result<Handle, ProviderError> {
-        self.start(spec.image, spec.resources, spec.mounts, spec.bootstrap)
-            .await
+        self.start(
+            spec.name,
+            spec.image,
+            spec.resources,
+            spec.mounts,
+            spec.bootstrap,
+        )
+        .await
     }
 
     async fn connect(
@@ -555,7 +635,8 @@ impl SandboxProvider for AppleProvider {
         resources: &Resources,
         bootstrap: &Bootstrap,
     ) -> Result<Handle, ProviderError> {
-        self.start(&snapshot.0, resources, &[], bootstrap).await
+        self.start(None, &snapshot.0, resources, &[], bootstrap)
+            .await
     }
 
     async fn image_identity(&self, handle: &Handle) -> Result<ImageIdentity, ProviderError> {
@@ -706,6 +787,7 @@ mod tests {
                 bundle: bundle.clone(),
                 socket_dir: dir.path().join("s"),
                 limit: Some(4),
+                ..AppleOptions::default()
             },
             Box::new(fake.clone()),
         );
@@ -786,7 +868,9 @@ mod tests {
             .await
             .unwrap();
         let calls = s.fake.calls.lock().unwrap().clone();
-        let run = &calls[0];
+        // Anything left under the name goes first.
+        assert_eq!(calls[0], ["delete", "--force", handle.0.as_str()]);
+        let run = &calls[1];
         let joined = run.join(" ");
         assert!(handle.0.starts_with("tracon-"), "{handle:?}");
         for expected in [
@@ -832,11 +916,69 @@ mod tests {
         assert_eq!(mode & 0o777, 0o700);
     }
 
+    /// The node's name where it fits, so a restarted node finds it; the
+    /// sandbox's environment, then its bootstrap; the configured size where
+    /// the spec names none.
+    #[tokio::test]
+    async fn create_takes_the_nodes_name_environment_and_size() {
+        let mut s = setup(Fake::default());
+        s.provider.options.env = vec![
+            ("HOME".into(), "/home/harness".into()),
+            ("HTTPS_PROXY".into(), "http://127.0.0.1:8888".into()),
+        ];
+        s.provider.options.cpus = Some(3);
+        s.provider.options.memory = "6G".into();
+        s.provider.options.service_bundles = vec![(
+            PathBuf::from("/srv/browser"),
+            "/opt/services/browser".into(),
+        )];
+        let (resources, boot, labels) = (
+            Resources::default(),
+            bootstrap(),
+            crate::runner::RunLabels::default(),
+        );
+        let spec = |name| CreateSpec {
+            name,
+            image: "img",
+            resources: &resources,
+            mounts: &[],
+            bootstrap: &boot,
+            labels: &labels,
+            shape: crate::provider::Shape::Session,
+        };
+        let handle = s
+            .provider
+            .create(&spec(Some("tracon-h-abc")))
+            .await
+            .unwrap();
+        assert_eq!(handle.0, "tracon-h-abc");
+        let run = s.fake.calls.lock().unwrap()[1].join(" ");
+        assert!(run.contains("--name tracon-h-abc"), "{run}");
+        assert!(run.contains("--cpus 3 --memory 6G"), "{run}");
+        assert!(
+            run.contains("type=bind,source=/srv/browser,target=/opt/services/browser,readonly"),
+            "{run}"
+        );
+        let env = s.fake.env_seen.lock().unwrap().clone().unwrap();
+        assert!(
+            env.starts_with(
+                "HOME=/home/harness\nHTTPS_PROXY=http://127.0.0.1:8888\nTRACON_SANDBOX_LISTEN="
+            ),
+            "{env}"
+        );
+        let long = "x".repeat(80);
+        for refused in ["bad name", "", long.as_str()] {
+            let handle = s.provider.create(&spec(Some(refused))).await.unwrap();
+            assert!(handle.0.starts_with("tracon-") && handle.0 != refused);
+        }
+        s.provider.options.env = vec![("TRACON_SANDBOX_TOKEN".into(), "mine".into())];
+        assert!(s.provider.create(&spec(None)).await.is_err());
+    }
+
     #[tokio::test]
     async fn create_refuses_what_it_cannot_mount() {
         let s = setup(Fake::default());
         for mount in [
-            Mount::volume("named-volume", "/work", false),
             Mount::volume("/tmp/x", "/opt/tracon/bin", false),
             Mount::volume("/tmp/a,b", "/work", false),
         ] {
@@ -856,6 +998,29 @@ mod tests {
         assert!(s.fake.calls.lock().unwrap().is_empty());
     }
 
+    /// What the files channel fills and what no sandbox is handed are the
+    /// VM's own disk: nothing of the node's is mounted there.
+    #[tokio::test]
+    async fn local_and_withheld_volumes_are_the_vms_own_disk() {
+        let s = setup(Fake::default());
+        s.provider
+            .create_with(
+                "img",
+                &Resources::default(),
+                &[
+                    Mount::local("/work"),
+                    Mount::volume("tracon-harness-state", "/home/harness/.claude", false),
+                ],
+                &bootstrap(),
+            )
+            .await
+            .unwrap();
+        let run = s.fake.calls.lock().unwrap()[1].join(" ");
+        assert!(!run.contains("target=/work"), "{run}");
+        assert!(!run.contains("harness-state"), "{run}");
+        assert_eq!(run.matches("--mount").count(), 1, "only the bundle: {run}");
+    }
+
     #[tokio::test]
     async fn a_failed_run_is_cleaned_up() {
         let s = setup(Fake {
@@ -869,7 +1034,8 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("no such image"), "{error}");
         let calls = s.fake.calls.lock().unwrap().clone();
-        assert_eq!(calls[1][..2], ["delete".to_string(), "--force".into()]);
+        assert_eq!(calls[1][0], "run");
+        assert_eq!(calls[2][..2], ["delete".to_string(), "--force".into()]);
     }
 
     #[tokio::test]
@@ -1021,7 +1187,7 @@ mod tests {
         assert_ne!(child, parent);
         let calls = s.fake.calls.lock().unwrap().clone();
         assert_eq!(calls[0], ["commit", "tracon-parent", snapshot.0.as_str()]);
-        let run = calls[1].join(" ");
+        let run = calls[2].join(" ");
         assert!(
             run.ends_with(&format!("--entrypoint {SANDBOX_BIN} {}", snapshot.0)),
             "{run}"

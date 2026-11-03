@@ -87,7 +87,9 @@ pub fn managed(cfg: &Config) -> bool {
 /// given none: Podman's with `sandbox_images`, and a pod-hosted node's with
 /// `[runtime.kubernetes] sandbox_protocol`, whose init containers copy it in.
 fn fetches_own(cfg: &Config) -> bool {
-    cfg.runtime.podman.sandbox_images || crate::boundary::kubernetes::uses_sandbox_protocol(cfg)
+    cfg.runtime.podman.sandbox_images
+        || crate::boundary::kubernetes::uses_sandbox_protocol(cfg)
+        || cfg.runtime.kind == crate::config::RuntimeKind::Apple
 }
 
 pub fn managed_dir(state_dir: &Path, version: &str, arch: &str) -> PathBuf {

@@ -2901,7 +2901,7 @@ impl Manager {
         let mut environment = crate::environment::session_environment(&self.cfg, &self.store, id);
         // Its workspace is prepared where the session runs: with
         // `sandbox_images`, the repository's prepared snapshot.
-        if crate::sandbox_images::enabled(&self.cfg) {
+        if crate::sandbox_images::bundled(&self.cfg) {
             if let Some(image) = &image.image {
                 environment.image = image.clone();
             }
@@ -3182,6 +3182,7 @@ impl Manager {
         let mut mounts = scratch.mounts;
         if crate::boundary::podman::uses_sandbox_files(&self.cfg)
             || crate::boundary::kubernetes::uses_sandbox_protocol(&self.cfg)
+            || self.cfg.runtime.kind == crate::config::RuntimeKind::Apple
         {
             materialize::own_state(&mut mounts, &scratch.volume);
         }

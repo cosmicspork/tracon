@@ -336,6 +336,7 @@ pub fn harness_image(cfg: &Config) -> String {
     match cfg.runtime.kind {
         crate::config::RuntimeKind::Podman => cfg.podman_harness_image(&cfg.harness.id),
         crate::config::RuntimeKind::Kubernetes => cfg.runtime.kubernetes.harness_image.clone(),
+        crate::config::RuntimeKind::Apple => crate::sandbox_images::base_image(cfg),
     }
 }
 

@@ -873,9 +873,12 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     }
     // Sandboxes with no network reach the allowlist proxy through a tunnel,
     // so the node serves it where the gateway container's tinyproxy would.
-    if cfg.runtime.kind == crate::config::RuntimeKind::Podman
-        && crate::boundary::podman::uses_sandbox_tunnels(&cfg)
-    {
+    let tunnelled = match cfg.runtime.kind {
+        crate::config::RuntimeKind::Podman => crate::boundary::podman::uses_sandbox_tunnels(&cfg),
+        crate::config::RuntimeKind::Apple => true,
+        crate::config::RuntimeKind::Kubernetes => false,
+    };
+    if tunnelled {
         let allow = crate::gateway::proxy::Allowlist::new(&cfg.gateway.allow_hosts)
             .map_err(|e| anyhow::anyhow!("allowlist: {e}"))?;
         let path = cfg.allow_proxy_socket();
@@ -963,13 +966,8 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
 
     // The scrape target, only when configured: its own router, so nothing of
     // the operator's is reachable through it.
-    crate::telemetry::telemetry().set_build_info(
-        env!("CARGO_PKG_VERSION"),
-        match cfg.runtime.kind {
-            crate::config::RuntimeKind::Podman => "podman",
-            crate::config::RuntimeKind::Kubernetes => "kubernetes",
-        },
-    );
+    crate::telemetry::telemetry()
+        .set_build_info(env!("CARGO_PKG_VERSION"), cfg.runtime.kind.as_str());
     crate::telemetry::telemetry().set_catalogue(&cfg);
     if let Some(metrics_listen) = cfg.metrics.listen {
         if metrics_listen.port() == listen.port() {

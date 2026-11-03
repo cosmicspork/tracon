@@ -44,6 +44,7 @@ pub async fn run(options: ProbeOptions) -> Result<()> {
             bundle,
             socket_dir: AppleOptions::default_socket_dir(),
             limit: None,
+            ..AppleOptions::default()
         })),
         // The boundary this node's configuration describes: its network,
         // gateway and proxy, as a session's sandbox gets them.

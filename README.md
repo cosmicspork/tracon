@@ -1296,7 +1296,15 @@ suspend_published_after_secs = 1800 # a published session idle this long is susp
 # worktree_root = "/private/tmp"    # on macOS; the system temp directory elsewhere
 
 [runtime]
-kind = "podman"                     # or "kubernetes", for a pod-hosted node
+kind = "podman"                     # or "kubernetes", for a pod-hosted node, or "apple", for a
+                                    # Mac whose sandboxes are VMs (see "On a Mac with Apple
+                                    # Containerization")
+# [runtime.apple]
+# container = ""                    # Apple's container CLI; empty for /usr/local/bin/container
+# limit = 4                         # most sandboxes at once; unset for no limit of its own
+# cpus = 4                          # each sandbox VM's CPUs and memory ("4G"); unset or empty
+# memory = ""                       # for container's defaults
+# build_timeout_secs = 1800         # how long one container build of a repository image may take
 # [runtime.podman]
 # sandbox_protocol = false          # run each harness, check and preparation under tracon-sandbox
                                     # from [sandbox] bundle, with control and stdio over the sandbox
@@ -2054,6 +2062,37 @@ with `do_token_file`, or the credential's password. Deleting a manifest frees no
 until the registry's garbage collection runs; schedule it with
 `doctl registry garbage-collection start --include-untagged-manifests`, so the
 untagged manifests a rebuild under the same tag leaves behind go too.
+
+### On a Mac with Apple Containerization
+
+On Apple silicon with macOS 26, `[runtime] kind = "apple"` runs every harness, check and
+preparation in a lightweight VM of its own, made with Apple's
+[`container`](https://github.com/apple/container) CLI. No Podman is involved. Install
+`container`'s signed package, then run `container system start --enable-kernel-install`
+once. Without that flag, starting it prompts for a kernel and fails when there is no TTY.
+
+- **Route.** Each VM has `--network none` and no resolver. Its only way out is the
+  sandbox protocol's socket, which `container` publishes from the VM to a socket under
+  `/tmp/tracon-<uid>`. The MCP and model gateway, the allowlist proxy and the per-client
+  egress proxy are tunnels on the VM's loopback, and the harness reaches them at
+  `127.0.0.1` because `container` cannot add a hosts entry.
+- **Files.** Every volume is a tree in the node's `<state>/sandbox-files`. It is sent into
+  a sandbox when the sandbox starts and taken back as on a Kubernetes node over the
+  protocol.
+- **Images.** Harnesses come from the bundle (`[sandbox] bundle`, else the release's
+  arm64 bundle), mounted read-only at `/opt/tracon`. They run on the stock base
+  (`[sandbox] base_image`), which is pulled and pinned at start, or on a repository's
+  image, which `container build` makes in `container`'s own builder VM and keeps in its
+  image store. Sandboxes run as the base's user 65532 with home `/home/harness`.
+  Prepared snapshots are Podman's alone so far, so a repository's `prepare` is not
+  snapshotted here.
+- **Placement.** The node reports its sandboxes as tier `microvm`, so work that
+  requires one (`tier = ["microvm"]`) stays on the Mac.
+
+The checks start one sandbox, run `id -u` and a write to the bundle in it, and read its
+isolation back from `container inspect`: no network, only the node's socket published,
+no SSH agent forwarding, no nested virtualisation, and the bundle mounted read-only.
+`--deep` runs the egress script in a sandbox through its tunnels.
 
 ### From source
 

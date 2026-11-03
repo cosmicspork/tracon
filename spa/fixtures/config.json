@@ -1242,7 +1242,8 @@
       "shape": {
         "choices": [
           "podman",
-          "kubernetes"
+          "kubernetes",
+          "apple"
         ],
         "kind": "enum",
         "optional": false
@@ -1358,6 +1359,86 @@
       "secret": false,
       "shape": {
         "kind": "bool",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": true,
+      "fs_path": false,
+      "key": "runtime.apple.container",
+      "path": "executable",
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.apple.limit",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.apple.cpus",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.apple.memory",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.apple.build_timeout_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
         "optional": false
       }
     },

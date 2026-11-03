@@ -5964,7 +5964,12 @@ pub async fn connect_provider(
 /// on this machine, so it is offered only to a [local](super::auth::is_local)
 /// caller.
 fn callback_allowed(s: &AppState, local: bool, requested: bool) -> bool {
-    requested && local && s.cfg.runtime.kind == crate::config::RuntimeKind::Podman
+    requested
+        && local
+        && matches!(
+            s.cfg.runtime.kind,
+            crate::config::RuntimeKind::Podman | crate::config::RuntimeKind::Apple
+        )
 }
 
 async fn connect_local(

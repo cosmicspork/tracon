@@ -326,12 +326,11 @@ impl DoRuntime {
     /// its side (trees over the files channel, gateways over tunnels), the
     /// template, and the relay's name when it is the way in.
     pub fn health(&self, cfg: &Config) -> Result<(), String> {
-        if !crate::boundary::podman::uses_sandbox_files(cfg)
-            || !crate::boundary::podman::uses_sandbox_tunnels(cfg)
-        {
+        if !crate::boundary::sandboxes_over_protocol(cfg) {
             return Err(
                 "a DigitalOcean sandbox needs [runtime.podman] sandbox_protocol, sandbox_files and \
-                 sandbox_tunnels on this node: it mounts nothing and has no gateway of its own"
+                 sandbox_tunnels on this node, or runtime.kind = \"apple\": it mounts nothing \
+                 and has no gateway of its own"
                     .into(),
             );
         }

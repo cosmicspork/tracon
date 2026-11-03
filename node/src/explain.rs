@@ -245,6 +245,7 @@ fn channel_bindings(store: &Store, channel: &str) -> Value {
 fn execution_image(cfg: &Config) -> String {
     match cfg.runtime.kind {
         crate::config::RuntimeKind::Kubernetes => cfg.runtime.kubernetes.harness_image.clone(),
-        _ => cfg.podman_harness_image(&cfg.harness.id),
+        crate::config::RuntimeKind::Apple => crate::sandbox_images::base_image(cfg),
+        crate::config::RuntimeKind::Podman => cfg.podman_harness_image(&cfg.harness.id),
     }
 }

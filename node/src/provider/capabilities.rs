@@ -228,18 +228,27 @@ pub fn from_checks(provider: ProviderKind, report: &BoundaryReport) -> Capabilit
         },
     };
 
-    let lines = vec![
-        kind_line(
-            "tier",
-            Tier::Container.as_str(),
-            "runs each harness as a container",
+    // A Mac's sandboxes are each a VM, whose root is the VM's own.
+    let (tier, tier_what, privilege) = match provider {
+        ProviderKind::Apple => (
+            Tier::Microvm,
+            "runs each harness in a VM of its own",
+            Privilege::RootInVm,
         ),
+        _ => (
+            Tier::Container,
+            "runs each harness as a container",
+            Privilege::Unprivileged,
+        ),
+    };
+    let lines = vec![
+        kind_line("tier", tier.as_str(), tier_what),
         route,
         held("dns", CheckId::NetworkIsolated, Dns::None.as_str()),
         held(
             "privilege",
             CheckId::HarnessUnprivileged,
-            Privilege::Unprivileged.as_str(),
+            privilege.as_str(),
         ),
         held(
             "runtime_socket",
@@ -256,14 +265,14 @@ pub fn from_checks(provider: ProviderKind, report: &BoundaryReport) -> Capabilit
         .iter()
         .all(|line| line.value.is_some())
         .then_some(Capabilities {
-            tier: Tier::Container,
+            tier,
             route: if route_ok {
                 Route::NodeOnly
             } else {
                 Route::Unverified
             },
             dns: Dns::None,
-            privilege: Privilege::Unprivileged,
+            privilege,
             runtime_socket: RuntimeSocket::Absent,
             image_identity: ImageIdentityKind::Exact,
         });
@@ -308,6 +317,15 @@ mod tests {
             .find(|l| l.capability == capability)
             .unwrap()
             .value
+    }
+
+    #[test]
+    fn a_macs_checks_read_as_a_vm() {
+        let r = from_checks(ProviderKind::Apple, &all_ok());
+        let caps = r.capabilities.unwrap();
+        assert_eq!(caps.tier, Tier::Microvm);
+        assert_eq!(caps.privilege, Privilege::RootInVm);
+        assert_eq!(caps.route, Route::NodeOnly);
     }
 
     #[test]
