@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.46.0](https://github.com/cosmicspork/tracon/compare/v0.45.0...v0.46.0) (2026-11-03)
+
+
+### Features
+
+* **apple:** prepare a repository once and start its runs from a container commit ([#815](https://github.com/cosmicspork/tracon/issues/815)) ([2593fe0](https://github.com/cosmicspork/tracon/commit/2593fe08fdc3999e8fbc3792506ceeab49714d23))
+* **apple:** run a Mac node's sessions in Apple Containerization VMs ([#813](https://github.com/cosmicspork/tracon/issues/813)) ([1743942](https://github.com/cosmicspork/tracon/commit/1743942471da6e4cdea37e8e87dc41dc00e7820a))
+
 ## [0.45.0](https://github.com/cosmicspork/tracon/compare/v0.44.0...v0.45.0) (2026-11-03)
 
 
