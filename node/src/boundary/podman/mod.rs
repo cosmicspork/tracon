@@ -963,6 +963,13 @@ impl super::ImageBuilder for PodmanBackend {
     }
 }
 
+/// Whether `image` can only be in this host's store: Podman's name for what
+/// it built or committed. One that is missing is not anywhere, yet Podman
+/// asks `https://localhost/v2/` for it unless told not to pull.
+pub(crate) fn local_only(image: &str) -> bool {
+    image.starts_with("localhost/")
+}
+
 /// `image` as `name@sha256:…`, the reference a later tag cannot move, if
 /// the store has it.
 pub(crate) async fn image_identity(image: &str) -> Option<String> {

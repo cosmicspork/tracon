@@ -274,6 +274,13 @@ impl PodmanProvider {
         ];
         let text = match self.cli(&inspect).await {
             Ok(text) => text,
+            Err(_) if crate::boundary::podman::local_only(image) => {
+                return Err(ProviderError::Failed(format!(
+                    "{image} is no longer in Podman's store: a rebuild of its tag replaced \
+                     it, or it was removed. No registry holds a localhost/ image, so it is \
+                     not pulled; start again to use the image that stands now"
+                )))
+            }
             // Not here yet: `podman run` would have pulled it, so pull it.
             Err(_) => {
                 self.cli(&["pull", "--quiet", image])
@@ -1152,10 +1159,19 @@ mod tests {
     }
 
     async fn create(s: &Setup, name: &str, mounts: &[Mount]) -> Result<Handle, ProviderError> {
+        create_from(s, name, mounts, "localhost/harness@sha256:aa").await
+    }
+
+    async fn create_from(
+        s: &Setup,
+        name: &str,
+        mounts: &[Mount],
+        image: &str,
+    ) -> Result<Handle, ProviderError> {
         s.provider
             .create(&CreateSpec {
                 name: Some(name),
-                image: "localhost/harness@sha256:aa",
+                image,
                 resources: &Resources::default(),
                 mounts,
                 bootstrap: &bootstrap(),
@@ -1280,7 +1296,9 @@ mod tests {
             pulled: Some(Arc::new(Mutex::new(false))),
             ..Fake::default()
         });
-        create(&s, "tracon-h-6", &[]).await.unwrap();
+        create_from(&s, "tracon-h-6", &[], "ghcr.io/acme/harness@sha256:aa")
+            .await
+            .unwrap();
         let calls: Vec<String> = s
             .fake
             .calls
@@ -1291,6 +1309,44 @@ mod tests {
             .collect();
         let at = |what: &str| calls.iter().position(|c| c == what).unwrap();
         assert!(at("pull") < at("run"), "{calls:?}");
+    }
+
+    /// An image only this host could hold (one the node built or committed)
+    /// that is gone is said to be gone, at once: never a pull from
+    /// `https://localhost/v2/`, and never a run Podman would pull it for.
+    #[tokio::test]
+    async fn a_missing_local_image_is_refused_and_never_pulled() {
+        let s = setup(Fake {
+            pulled: Some(Arc::new(Mutex::new(false))),
+            ..Fake::default()
+        });
+        let image = "localhost/tracon-repo-app-1a2b3c4d5e@sha256:a970";
+        let Err(ProviderError::Failed(error)) = create_from(&s, "tracon-h-7", &[], image).await
+        else {
+            panic!("a missing local image starts nothing");
+        };
+        assert!(error.contains("no longer in Podman's store"), "{error}");
+        assert!(error.contains(image), "{error}");
+        let calls = s.fake.calls.lock().unwrap();
+        assert!(
+            calls.iter().all(|(a, _)| a[0] != "pull" && a[0] != "run"),
+            "{calls:?}"
+        );
+    }
+
+    /// A local image is run with Podman told never to pull it, so one removed
+    /// between the check and the run fails as missing; a registry's may still
+    /// be pulled.
+    #[tokio::test]
+    async fn only_a_local_image_is_run_without_pulling() {
+        let s = setup(Fake::default());
+        create(&s, "tracon-h-8", &[]).await.unwrap();
+        assert!(run_call(&s).0.contains(&"--pull=never".to_string()));
+        let s = setup(Fake::default());
+        create_from(&s, "tracon-h-9", &[], "ghcr.io/acme/harness@sha256:aa")
+            .await
+            .unwrap();
+        assert!(!run_call(&s).0.contains(&"--pull=never".to_string()));
     }
 
     #[tokio::test]
