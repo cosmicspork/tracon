@@ -56,6 +56,9 @@ struct Loopback {
     relays: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
     created: Mutex<Vec<Vec<Mount>>>,
+    /// Every sandbox made gets a socket of its own: one cut off before is
+    /// still redialling its own, as a removed container's never could.
+    made: std::sync::atomic::AtomicUsize,
     /// Lost or destroyed, until made again.
     gone: Mutex<std::collections::HashSet<String>>,
 }
@@ -102,12 +105,10 @@ impl SandboxProvider for Loopback {
         let name = spec.name.unwrap().to_string();
         self.created.lock().unwrap().push(spec.mounts.to_vec());
         self.gone.lock().unwrap().remove(&name);
-        let path = self
-            .dir
-            .as_ref()
-            .unwrap()
-            .path()
-            .join(format!("{name}.sock"));
+        let path = self.dir.as_ref().unwrap().path().join(format!(
+            "{name}-{}.sock",
+            self.made.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         let _ = std::fs::remove_file(&path);
         let listener = tokio::net::UnixListener::bind(&path).unwrap();
         let config = inside::Config::new(

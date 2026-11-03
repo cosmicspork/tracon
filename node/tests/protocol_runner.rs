@@ -62,6 +62,9 @@ struct Loopback {
     gone: Mutex<std::collections::HashSet<String>>,
     /// Present a token other than the one issued.
     wrong_token: bool,
+    /// Every sandbox made gets a socket of its own: one cut off before is
+    /// still redialling its own, as a removed container's never could.
+    made: std::sync::atomic::AtomicUsize,
 }
 
 impl Loopback {
@@ -74,11 +77,10 @@ impl Loopback {
     }
 
     fn path(&self, name: &str) -> PathBuf {
-        self.dir
-            .as_ref()
-            .unwrap()
-            .path()
-            .join(format!("{name}.sock"))
+        self.dir.as_ref().unwrap().path().join(format!(
+            "{name}-{}.sock",
+            self.made.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ))
     }
 
     /// Wait for every sandbox to have ended, so no reaper outlives its test.
