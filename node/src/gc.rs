@@ -30,6 +30,11 @@
 //! never mounted again; a repository's prepared snapshot (an image) belongs
 //! to the repository while it is the latest one prepared, and is otherwise
 //! superseded.
+//!
+//! Images on Podman are swept by `crate::image_gc`: only those carrying this
+//! node's owner labels, by class (superseded bases, repository images,
+//! snapshots, dangling builds, and with `--legacy` what sandbox images
+//! retired), with what each would free.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -82,6 +87,8 @@ pub struct Owners {
     pub snapshots: HashSet<String>,
     /// The version whose harness bundle this node mounts.
     pub version: String,
+    /// Images this node's current builds, snapshots and open sessions name.
+    pub kept_images: Vec<crate::image_gc::Kept>,
 }
 
 impl Default for Owners {
@@ -97,6 +104,7 @@ impl Default for Owners {
             caches: false,
             snapshots: HashSet::new(),
             version: String::new(),
+            kept_images: Vec::new(),
         }
     }
 }
@@ -148,8 +156,67 @@ impl Owners {
                 owners.snapshots.insert(row.image);
             }
         }
+        owners.kept_images = kept_images(store, &owners)?;
         Ok(owners)
     }
+}
+
+/// What a repository's work runs in now: the newest finished build of each
+/// kind (a stale one still stands while its successor fails) and what it
+/// was built on, the current snapshots, and the images open sessions
+/// started from.
+fn kept_images(
+    store: &Store,
+    owners: &Owners,
+) -> Result<Vec<crate::image_gc::Kept>, crate::store::StoreError> {
+    use crate::image_gc::Kept;
+    let mut kept = Vec::new();
+    let repos: std::collections::BTreeSet<String> = store
+        .repo_images()?
+        .into_iter()
+        .map(|row| row.repo_path)
+        .collect();
+    for repo in repos {
+        let mut kinds = HashSet::new();
+        for row in store.ready_repo_images(&repo)? {
+            if row.kind == crate::sandbox_images::SNAPSHOT || !kinds.insert(row.kind.clone()) {
+                continue;
+            }
+            let legacy = row.kind.starts_with("session:");
+            let why = format!("the current {} build of {repo}", row.kind);
+            for reference in [&row.image, &row.parent_image] {
+                if !reference.is_empty() {
+                    kept.push(Kept {
+                        reference: reference.clone(),
+                        why: why.clone(),
+                        legacy,
+                    });
+                }
+            }
+        }
+    }
+    for snapshot in &owners.snapshots {
+        kept.push(Kept {
+            reference: snapshot.clone(),
+            why: "a repository's current prepared snapshot".into(),
+            legacy: false,
+        });
+    }
+    for session in &owners.open_sessions {
+        let Some(started) = store.last_event_payload(session, "session_started")? else {
+            continue;
+        };
+        for field in ["image", "toolchain_image"] {
+            if let Some(image) = started[field].as_str().filter(|i| !i.is_empty()) {
+                kept.push(Kept {
+                    reference: image.to_string(),
+                    why: format!("session {session} is open and started from it"),
+                    legacy: false,
+                });
+            }
+        }
+    }
+    Ok(kept)
 }
 
 /// A workspace id as its volume name and host directories carry it.
@@ -164,8 +231,7 @@ fn workspace_key(id: &str) -> String {
 /// One piece of runtime storage and what the sweep makes of it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Item {
-    /// `volume`, `directory`, `file` (a publication's bundle), or `image` (a
-    /// prepared snapshot).
+    /// `volume`, `directory`, `file` (a publication's bundle), or `image`.
     pub kind: &'static str,
     /// The volume name, or the directory relative to the node's state dir.
     pub name: String,
@@ -175,6 +241,12 @@ pub struct Item {
     pub removed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// An image's class (`crate::image_gc::Class`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class: Option<&'static str>,
+    /// About what removing an image frees, in bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
 }
 
 fn verdict(remove: bool, reason: impl Into<String>) -> (bool, String) {
@@ -417,6 +489,118 @@ fn item(kind: &'static str, name: String, remove: bool, reason: String) -> Item 
         reason,
         removed: false,
         error: None,
+        class: None,
+        size: None,
+    }
+}
+
+/// What a sweep is asked to do.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Sweep {
+    /// Dependency caches are candidates too.
+    pub caches: bool,
+    pub apply: bool,
+    /// What sandbox images retired (harness images, layered and `-src`
+    /// repository images) is a candidate too.
+    pub legacy: bool,
+    /// Unlabelled images named as this node's are taken as its own.
+    pub adopt_unlabelled: bool,
+}
+
+/// The legacy images' repositories: every harness image this node's
+/// `[boundary] harness_image` names, as `Config::podman_harness_image` derives
+/// them, and the gateway's once tunnels have retired it.
+fn legacy_repositories(cfg: &Config) -> Vec<String> {
+    use crate::image_gc::repository_of;
+    let configured = repository_of(&cfg.boundary.harness_image).to_string();
+    let stem = configured
+        .strip_suffix(&format!("-{}", cfg.harness.id))
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or("localhost/tracon-harness")
+        .to_string();
+    let mut out = vec![configured];
+    for id in ["claude", "native", "opencode"] {
+        out.push(format!("{stem}-{id}"));
+    }
+    if crate::boundary::podman::uses_sandbox_tunnels(cfg) {
+        out.push(repository_of(&cfg.boundary.gateway_image).to_string());
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// What the image sweep knows of this node.
+pub fn image_knowledge(
+    cfg: &Config,
+    owners: &Owners,
+    node_id: &str,
+    sweep: &Sweep,
+) -> crate::image_gc::Knowledge {
+    let bundled = crate::sandbox_images::enabled(cfg);
+    crate::image_gc::Knowledge {
+        prefix: owners.prefix.clone(),
+        node_id: node_id.to_string(),
+        base_repository: bundled
+            .then(|| crate::image_gc::repository_of(&cfg.sandbox.base_image_ref()).to_string()),
+        pinned_base: bundled.then(crate::sandbox_images::active_base).flatten(),
+        bases_are_ours: owners.prefix == crate::config::DEFAULT_RESOURCE_PREFIX,
+        kept: owners.kept_images.clone(),
+        bundled,
+        legacy_repositories: legacy_repositories(cfg),
+        now_ms: owners.now_ms,
+        legacy: sweep.legacy,
+        adopt_unlabelled: sweep.adopt_unlabelled,
+    }
+}
+
+/// Say in the node's log how much of the image store is reclaimable, without
+/// removing anything: run after the boundary converges.
+pub async fn note_reclaimable_images(
+    backend: &dyn Backend,
+    cfg: &Config,
+    store: &Store,
+    node_id: &str,
+) {
+    if backend.kind() != "podman" {
+        return;
+    }
+    let owners = match Owners::read(store, node_id, false) {
+        Ok(owners) => owners,
+        Err(error) => {
+            tracing::debug!(%error, "could not read what this node's images serve");
+            return;
+        }
+    };
+    let knowledge = image_knowledge(cfg, &owners, node_id, &Sweep::default());
+    match crate::image_gc::podman::sweep(&knowledge, false).await {
+        Ok(swept) => log_reclaimable(&swept, false),
+        Err(error) => tracing::debug!(%error, "could not list the image store"),
+    }
+}
+
+fn log_reclaimable(swept: &[crate::image_gc::Swept], applied: bool) {
+    let going: Vec<_> = swept.iter().filter(|s| s.remove).collect();
+    if going.is_empty() {
+        return;
+    }
+    let bytes: u64 = going.iter().map(|s| s.reclaim).sum();
+    let mut classes: Vec<&str> = going.iter().map(|s| s.class.as_str()).collect();
+    classes.dedup();
+    let classes = classes.join(",");
+    match applied {
+        true => tracing::info!(
+            images = going.len(),
+            bytes,
+            %classes,
+            "removed reclaimable images"
+        ),
+        false => tracing::info!(
+            images = going.len(),
+            bytes,
+            %classes,
+            "images are reclaimable; `tracon gc` lists them and `tracon gc --apply` removes them"
+        ),
     }
 }
 
@@ -425,11 +609,12 @@ fn item(kind: &'static str, name: String, remove: bool, reason: String) -> Item 
 /// backend and reported, not forced.
 pub async fn sweep(
     backend: &dyn Backend,
+    cfg: &Config,
     store: &Store,
     node_id: &str,
-    caches: bool,
-    apply: bool,
+    sweep: Sweep,
 ) -> Result<Vec<Item>, String> {
+    let Sweep { caches, apply, .. } = sweep;
     let owners = Owners::read(store, node_id, caches).map_err(|e| e.to_string())?;
     let volumes = backend.list_volumes().await.map_err(|e| e.to_string())?;
     let mut items = Vec::new();
@@ -447,16 +632,17 @@ pub async fn sweep(
         items.push(item);
     }
     if backend.kind() == "podman" {
-        for (pinned, reference) in crate::sandbox_images::snapshot_images().await {
-            let (remove, reason) = classify_snapshot(&pinned, &owners);
-            let mut item = item("image", pinned, remove, reason);
-            if apply && remove {
-                match crate::boundary::podman::podman(&["image", "rm", &reference]).await {
-                    Ok(_) => item.removed = true,
-                    Err(error) => item.error = Some(error.to_string()),
-                }
-            }
-            items.push(item);
+        let knowledge = image_knowledge(cfg, &owners, node_id, &sweep);
+        let swept = crate::image_gc::podman::sweep(&knowledge, apply).await?;
+        log_reclaimable(&swept, apply);
+        for image in swept {
+            items.push(Item {
+                removed: image.removed,
+                error: image.error,
+                class: Some(image.class.as_str()),
+                size: Some(image.reclaim),
+                ..item("image", image.name, image.remove, image.reason)
+            });
         }
     } else if let Some(builder) = backend.image_builder() {
         for pinned in backend.prepared_snapshots().await {

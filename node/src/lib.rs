@@ -24,6 +24,7 @@ pub mod gc;
 pub mod git_remote;
 pub mod git_tree;
 pub mod http;
+pub mod image_gc;
 pub mod legacy;
 pub mod manifest;
 pub mod mcp;

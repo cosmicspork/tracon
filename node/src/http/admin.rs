@@ -621,11 +621,17 @@ pub struct StorageSweep {
     /// Dependency caches are candidates too.
     #[serde(default)]
     caches: bool,
+    /// Images sandbox images retired are candidates too.
+    #[serde(default)]
+    legacy: bool,
+    /// Unlabelled images named as this node's are taken as its own.
+    #[serde(default)]
+    adopt_unlabelled: bool,
 }
 
-/// `POST /api/maintenance/storage`: runtime volumes and host directories
-/// whose owner is over, removed only with `apply`. Done at the node, like
-/// everything else that deletes what the node holds.
+/// `POST /api/maintenance/storage`: runtime volumes, host directories and
+/// images whose owner is over, removed only with `apply`. Done at the node,
+/// like everything else that deletes what the node holds.
 pub async fn storage(
     _local: Loopback,
     State(s): State<AppState>,
@@ -634,10 +640,15 @@ pub async fn storage(
     let body = body.map(|Json(body)| body).unwrap_or_default();
     let items = crate::gc::sweep(
         s.manager.backend().as_ref(),
+        &s.cfg,
         s.store(),
         &s.node_id,
-        body.caches,
-        body.apply,
+        crate::gc::Sweep {
+            caches: body.caches,
+            apply: body.apply,
+            legacy: body.legacy,
+            adopt_unlabelled: body.adopt_unlabelled,
+        },
     )
     .await
     .map_err(|error| ApiError::new(StatusCode::BAD_GATEWAY, error))?;

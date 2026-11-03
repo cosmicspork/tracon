@@ -53,8 +53,9 @@ const WORKERS_TIMEOUT: Duration = Duration::from_secs(10);
 /// before every build.
 const CHECK_BOUND: Duration = Duration::from_secs(15);
 
-/// The stem every node names its repository images with locally
-/// (`repo_image`), shared because a tag is keyed on what it is built from.
+/// The stem a node with the default prefix names its repository images with
+/// locally (`repo_image`), and every node did before names carried the
+/// prefix; a name already under this node's own stem is left as it is.
 const SHARED_STEM: &str = "tracon-repo-";
 
 /// What this node pushes, by name under the registry: `<prefix>-repo-`

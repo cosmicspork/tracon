@@ -1203,6 +1203,7 @@ async fn init_node(
 ) -> Result<(String, proto::keys::Identity)> {
     let (identity, fresh) = crate::mesh::identity::load_or_generate().context("node identity")?;
     let id = identity.node_id();
+    crate::image_gc::set_node_id(&id);
     if fresh {
         tracing::info!(node_id = %id, "generated this node's identity");
     }
@@ -1417,6 +1418,8 @@ async fn converge_and_check(s: &AppState, backend: &dyn boundary::Backend) {
         Ok(false) => tracing::info!("boundary already in step with this build"),
         Err(error) => tracing::warn!(%error, "could not set up the boundary"),
     }
+    // Only said, never acted on: removing images is the operator's `tracon gc`.
+    crate::gc::note_reclaimable_images(backend, &s.cfg, s.store(), &s.node_id).await;
     let ready = s
         .store()
         .get_node(&s.node_id)

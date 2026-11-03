@@ -404,7 +404,10 @@ pub(crate) async fn default_commit(repo: &Path) -> Result<(String, String), Stri
 }
 
 /// `localhost/tracon-repo-<name>-<hash>`: readable in `podman images`, and
-/// distinct for two repositories that share a directory name.
+/// distinct for two repositories that share a directory name. A node with a
+/// `[boundary] resource_prefix` of its own names them `<prefix>-repo-…`, so
+/// a second node on one store never moves the first's tags; the default
+/// prefix keeps the name every image was built under.
 pub(crate) fn image_name(repo: &Path) -> String {
     let slug: String = repo
         .file_name()
@@ -415,10 +418,23 @@ pub(crate) fn image_name(repo: &Path) -> String {
         .collect();
     let slug = slug.trim_matches('-');
     let hash = hex::encode(Sha256::digest(repo.as_os_str().as_encoded_bytes()));
+    let stem = image_stem();
     match slug.is_empty() {
-        true => format!("localhost/tracon-repo-{}", &hash[..10]),
-        false => format!("localhost/tracon-repo-{slug}-{}", &hash[..10]),
+        true => format!("{stem}{}", &hash[..10]),
+        false => format!("{stem}{slug}-{}", &hash[..10]),
     }
+}
+
+/// What every repository image of this node's is named under:
+/// `localhost/<prefix>-repo-`.
+pub(crate) fn image_stem() -> String {
+    format!("localhost/{}", crate::config::resource_name("repo-"))
+}
+
+/// A build's labels: its recipe, and this node as its owner
+/// (`crate::image_gc`).
+fn build_labels(recipe_hash: &str) -> Vec<(String, String)> {
+    crate::image_gc::with_owner(&[(RECIPE_LABEL.to_string(), recipe_hash.to_string())])
 }
 
 /// Who a run in a repository's image is, which decides what the node's layer
@@ -1262,7 +1278,7 @@ async fn build_session_layer(
             tag: &format!("{}-{}:{}", image_name(repo), harness.id, &key[..12]),
             containerfile: &containerfile,
             context: &empty,
-            labels: &[(RECIPE_LABEL.to_string(), key.to_string())],
+            labels: &build_labels(key),
             timeout: BUILD_TIMEOUT,
         })
         .await
@@ -1986,7 +2002,7 @@ async fn build_base(
     )
     .await
     .map_err(|e| staged(format!("build context: {e}")))?;
-    let labels = [(RECIPE_LABEL.to_string(), recipe.hash.clone())];
+    let labels = build_labels(&recipe.hash);
     let source = builder
         .build(ImageBuild {
             tag: &source_tag(repo, &recipe.hash),
@@ -2161,7 +2177,7 @@ async fn build_steps(
                 tag: &format!("{}:{}", image_name(repo), &recipe.hash[..12]),
                 containerfile: &containerfile,
                 context: &empty,
-                labels: &[(RECIPE_LABEL.to_string(), recipe.hash.clone())],
+                labels: &build_labels(&recipe.hash),
                 timeout: BUILD_TIMEOUT,
             },
             &crate::boundary::StepsBuild {
