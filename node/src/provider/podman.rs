@@ -579,10 +579,7 @@ pub fn service_bundles(cfg: &crate::config::Config) -> Vec<(PathBuf, String)> {
     if !crate::boundary::podman::uses_sandbox_services(cfg) {
         return Vec::new();
     }
-    cfg.service
-        .iter()
-        .filter_map(|service| Some((service.bundle.clone()?, service.bundle_target())))
-        .collect()
+    crate::service_bundle::mounts(cfg)
 }
 
 /// What `podman inspect` shows of a container's boundary, as the checks read

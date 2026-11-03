@@ -15,6 +15,38 @@ fn main() {
         .expect("write placeholder index.html");
     }
     build_id();
+    browser_version();
+}
+
+/// `TRACON_BROWSER_VERSION`: the Chrome version of the `browser` service
+/// bundle a release attaches, read from the headless-shell tag pinned in
+/// `containers/browser/Containerfile`, which `scripts/browser-bundle.sh`
+/// builds that bundle from. Empty when the file is not in the source tree.
+fn browser_version() {
+    let containerfile =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../containers/browser/Containerfile");
+    println!("cargo:rerun-if-changed={}", containerfile.display());
+    let version = fs::read_to_string(&containerfile)
+        .ok()
+        .and_then(|text| {
+            text.lines().find_map(|line| {
+                let rest = line.strip_prefix("FROM docker.io/chromedp/headless-shell:")?;
+                let tag = rest.split('@').next()?.trim();
+                let numeric = tag.split('.').count() == 4
+                    && tag
+                        .split('.')
+                        .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
+                numeric.then(|| tag.to_string())
+            })
+        })
+        .unwrap_or_default();
+    if version.is_empty() {
+        println!(
+            "cargo:warning=no pinned headless-shell tag in {}; this build fetches no browser bundle",
+            containerfile.display()
+        );
+    }
+    println!("cargo:rustc-env=TRACON_BROWSER_VERSION={version}");
 }
 
 /// `TRACON_BUILD`: the commit this binary was built from, unless that commit

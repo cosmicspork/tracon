@@ -212,14 +212,20 @@ async fn steps(cfg: &Config, rebuild: bool, restart_gateway: bool) -> Result<boo
         .await
         .map_err(BoundaryError::Other)?;
     std::fs::create_dir_all(Config::harness_state_dir())?;
-    if let GatewayPlan::Retire(gateway) = gateway_plan(cfg) {
-        let retired = retire_gateway(&SystemHost, &gateway).await?;
-        return Ok(built || fetched || retired);
-    }
-    let created = ensure_network(cfg).await?;
-    let rewritten = write_allowlist(cfg)?;
-    let restarted = ensure_gateway(cfg, restart_gateway).await?;
-    Ok(built || fetched || created || rewritten || restarted)
+    let gateway = match gateway_plan(cfg) {
+        GatewayPlan::Retire(gateway) => retire_gateway(&SystemHost, &gateway).await?,
+        GatewayPlan::Keep => {
+            let created = ensure_network(cfg).await?;
+            let rewritten = write_allowlist(cfg)?;
+            let restarted = ensure_gateway(cfg, restart_gateway).await?;
+            created || rewritten || restarted
+        }
+    };
+    // Last: a browser that cannot be fetched leaves sessions their gateway.
+    let browser = crate::service_bundle::converge(cfg)
+        .await
+        .map_err(BoundaryError::Other)?;
+    Ok(built || fetched || gateway || browser)
 }
 
 /// A digest of everything [`converge`] builds images from, cheap enough to

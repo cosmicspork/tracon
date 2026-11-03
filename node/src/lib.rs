@@ -45,6 +45,7 @@ pub mod review;
 pub mod runner;
 pub mod sandbox_images;
 pub mod service;
+pub mod service_bundle;
 pub mod session;
 pub mod sidecars;
 pub mod store;

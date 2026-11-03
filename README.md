@@ -1577,12 +1577,18 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node, or
 # port = 9222                       # where the session reaches it
 # ready = "/json/version"           # an HTTP path answering 2xx once ready; left out, a TCP connect
 # timeout_secs = 60                 # how long it may take to answer before it is reported failed
-# bundle = "/path/to/<version>/amd64" # with [runtime.podman] sandbox_services: a directory of
-                                    # binaries (scripts/browser-bundle.sh for `browser`; each release
-                                    # attaches tracon-browser-<chrome>-<arch>.tar.gz) mounted
-                                    # read-only at /opt/tracon-services/<name> in every sandbox. The
-                                    # session's sandbox runs it under its supervisor, on its loopback,
+# bundle = "release"                # with [runtime.podman] sandbox_services (and on Apple): what is
+                                    # mounted read-only at /opt/tracon-services/<name> in every
+                                    # sandbox, whose supervisor runs it on the sandbox's loopback
                                     # instead of a container from `image`, which may then be left out.
+                                    # "release", on `browser` only: the browser bundle of the node's
+                                    # own release (tracon-browser-<chrome>-<arch>.tar.gz, <chrome> the
+                                    # headless-shell containers/browser/Containerfile pins), which the
+                                    # node fetches from [sandbox] release_url when it sets up its
+                                    # boundary, checks against its .sha256 and manifest, and keeps in
+                                    # <state>/bundles/browser/<chrome>/<arch>, removing other Chromes.
+                                    # Otherwise an absolute path to a directory of binaries for this
+                                    # host (one <version>/<arch> of scripts/browser-bundle.sh, say).
                                     # Set at the node only
 # run = []                          # with bundle: what to start; default /opt/tracon-services/<name>/run,
                                     # followed by `command`

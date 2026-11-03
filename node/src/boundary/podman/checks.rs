@@ -123,6 +123,9 @@ async fn check_runtime(cfg: &Config) -> CheckResult {
                 },
             );
         }
+        if let Some(missing) = crate::service_bundle::missing(cfg, building) {
+            return CheckResult::fail(CheckId::Runtime, missing);
+        }
         if crate::sandbox_images::enabled(cfg) {
             let base = crate::sandbox_images::base_image(cfg);
             if podman(&["image", "exists", &base]).await.is_err() {
@@ -139,19 +142,6 @@ async fn check_runtime(cfg: &Config) -> CheckResult {
                 format!(
                     "podman {version}, rootless, images present; sandboxes run {base} with the harnesses from {}",
                     bundle.display()
-                ),
-            );
-        }
-        if let Some(missing) = crate::provider::podman::service_bundles(cfg)
-            .into_iter()
-            .map(|(bundle, _)| bundle)
-            .find(|bundle| !bundle.is_dir())
-        {
-            return CheckResult::fail(
-                CheckId::Runtime,
-                format!(
-                    "[runtime.podman] sandbox_services is on, and service bundle {:?} is not a directory",
-                    missing.display().to_string()
                 ),
             );
         }

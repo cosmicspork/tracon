@@ -35,11 +35,11 @@ use crate::config::Config;
 pub const DIR: &str = "bundles";
 
 /// How long one download may take: a bundle is a few hundred megabytes.
-const FETCH_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+pub(crate) const FETCH_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Debug, thiserror::Error)]
 pub enum BundleError {
-    #[error("no harness bundle is published for {0}")]
+    #[error("no bundle is published for {0}")]
     UnsupportedArch(String),
     #[error("fetch {url}: {error}")]
     Fetch { url: String, error: String },
@@ -113,7 +113,7 @@ pub struct ManifestComponent {
     pub sha256: String,
 }
 
-fn sha256_file(path: &Path) -> std::io::Result<String> {
+pub(crate) fn sha256_file(path: &Path) -> std::io::Result<String> {
     let mut file = std::fs::File::open(path)?;
     let mut hash = Sha256::new();
     let mut buf = vec![0u8; 1 << 16];
@@ -128,7 +128,7 @@ fn sha256_file(path: &Path) -> std::io::Result<String> {
 }
 
 /// A path inside a bundle: relative, and made of plain names only.
-fn plain(path: &Path) -> bool {
+pub(crate) fn plain(path: &Path) -> bool {
     !path.as_os_str().is_empty() && path.components().all(|c| matches!(c, Component::Normal(_)))
 }
 
@@ -186,7 +186,7 @@ pub fn verify_dir(dir: &Path, version: &str, arch: &str) -> Result<Manifest, Bun
 
 /// The `.sha256` beside a tarball: its digest, held to the tarball's name
 /// when it names one.
-fn expected_digest(text: &str, name: &str) -> Result<String, BundleError> {
+pub(crate) fn expected_digest(text: &str, name: &str) -> Result<String, BundleError> {
     let mut fields = text.split_whitespace();
     let digest = fields.next().unwrap_or_default();
     if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -257,7 +257,11 @@ fn unpack(tarball: &Path, into: &Path, version: &str, arch: &str) -> Result<(), 
     Ok(())
 }
 
-async fn download(client: &reqwest::Client, url: &str, to: &Path) -> Result<(), BundleError> {
+pub(crate) async fn download(
+    client: &reqwest::Client,
+    url: &str,
+    to: &Path,
+) -> Result<(), BundleError> {
     use tokio::io::AsyncWriteExt as _;
     let failed = |error: String| BundleError::Fetch {
         url: url.to_string(),
@@ -358,7 +362,8 @@ pub async fn ensure_at(
 
 /// Every fetched bundle but `keep_version`'s: what a node of this version
 /// will never mount again. A sandbox does not outlive the node process that
-/// started it, so none is still using one.
+/// started it, so none is still using one. The service bundles beside them
+/// are superseded on their own (`crate::service_bundle`).
 pub fn superseded(state_dir: &Path, keep_version: &str) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(state_dir.join(DIR)) else {
         return Vec::new();
@@ -366,6 +371,7 @@ pub fn superseded(state_dir: &Path, keep_version: &str) -> Vec<PathBuf> {
     entries
         .flatten()
         .filter(|entry| entry.file_name().to_string_lossy() != keep_version)
+        .filter(|entry| entry.file_name() != crate::service_bundle::DIR)
         .filter(|entry| entry.path().is_dir())
         .map(|entry| entry.path())
         .collect()

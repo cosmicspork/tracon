@@ -514,7 +514,7 @@ pub fn host_only_reason(key: &str) -> &'static str {
             "is where the node downloads the binaries every sandbox runs, so it is changed at the node, not from elsewhere"
         }
         "service.bundle" => {
-            "is a directory of binaries mounted into every sandbox, which Podman relabels for containers when it mounts it, so it is changed at the node, not from elsewhere"
+            "is a directory of binaries mounted into every sandbox (or `release`, the browser bundle the node fetches for its release), which Podman relabels for containers when it mounts it, so it is changed at the node, not from elsewhere"
         }
         "sandbox.bundle" => {
             "is the directory whose binaries every sandbox runs, which Podman relabels for containers when it mounts it, so it is changed at the node, not from elsewhere"
