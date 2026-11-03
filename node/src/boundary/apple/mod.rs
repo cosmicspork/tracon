@@ -41,6 +41,11 @@ pub const GATEWAY_HOST: &str = "127.0.0.1";
 /// Where a build's steps reach their grant, on the build sandbox's loopback.
 const BUILD_PROXY_PORT: u16 = 3128;
 
+/// The only platform a Mac's VMs run: an index's other variants are never
+/// pulled.
+const VM_ARCH: &str = "arm64";
+const VM_PLATFORM: &str = "linux/arm64";
+
 pub struct AppleBackend {
     cfg: Config,
     cli: Arc<dyn ContainerCli>,
@@ -279,22 +284,71 @@ impl AppleBackend {
             Err(error) => return Err(format!("harness bundle: {error}")),
         };
         let configured = self.cfg.sandbox.base_image_ref();
-        let mut pulled = false;
-        if self.image_identity(&configured).await.is_none() {
-            tracing::info!(image = %configured, "pulling the sandbox base image");
-            // Only the VM's own platform: an index's every variant would be
-            // unpacked otherwise.
-            self.container(&["image", "pull", "--platform", "linux/arm64", &configured])
-                .await
-                .map_err(|error| format!("pull {configured}: {error}"))?;
-            pulled = true;
-        }
-        let pinned = self
-            .pin_locally(&configured)
+        let registry = crate::boundary::registry::Registry::new(None);
+        let resolved = match crate::sandbox_images::resolve_base(&registry, &configured, VM_ARCH)
             .await
-            .ok_or_else(|| format!("{configured} has no digest to pin"))?;
+        {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                tracing::warn!(image = %configured, %error, "could not resolve the sandbox base's {VM_PLATFORM} manifest; pinning it as container holds it");
+                None
+            }
+        };
+        let (pinned, pulled) = match resolved {
+            Some(target) => self.pull_platform(&configured, &target).await?,
+            None => {
+                let mut pulled = false;
+                if self.image_identity(&configured).await.is_none() {
+                    tracing::info!(image = %configured, "pulling the sandbox base image");
+                    self.container(&["image", "pull", "--platform", VM_PLATFORM, &configured])
+                        .await
+                        .map_err(|error| format!("pull {configured}: {error}"))?;
+                    pulled = true;
+                }
+                let pinned = self
+                    .pin_locally(&configured)
+                    .await
+                    .ok_or_else(|| format!("{configured} has no digest to pin"))?;
+                (pinned, pulled)
+            }
+        };
         crate::sandbox_images::pin(&configured, &pinned);
         Ok(fetched || pulled)
+    }
+
+    /// `target`, the arm64 manifest `configured` resolved to, held under its
+    /// own digest; `true` when it pulled. Pulled by that digest, so nothing
+    /// of another platform comes with it. A `container` that cannot pull a
+    /// platform's manifest by digest pulls `configured` for the platform and
+    /// names it by `target`.
+    async fn pull_platform(
+        &self,
+        configured: &str,
+        target: &str,
+    ) -> Result<(String, bool), String> {
+        if self.container(&["image", "inspect", target]).await.is_ok() {
+            return Ok((target.to_string(), false));
+        }
+        tracing::info!(image = %target, "pulling the sandbox base image for {VM_PLATFORM}");
+        let by_digest = self
+            .container(&["image", "pull", "--platform", VM_PLATFORM, target])
+            .await;
+        if let Err(error) = by_digest {
+            tracing::warn!(image = %target, %error, "could not pull the base by its platform's digest; pulling it as configured");
+            self.container(&["image", "pull", "--platform", VM_PLATFORM, configured])
+                .await
+                .map_err(|error| format!("pull {configured}: {error}"))?;
+            self.container(&["image", "tag", configured, target])
+                .await
+                .map_err(|error| format!("tag {configured} as {target}: {error}"))?;
+        } else if !configured.contains('@') {
+            // Named as configured too, so a start that cannot reach the
+            // registry still finds it.
+            if let Err(error) = self.container(&["image", "tag", target, configured]).await {
+                tracing::warn!(image = %target, %error, "could not name the base as configured");
+            }
+        }
+        Ok((target.to_string(), true))
     }
 
     fn store_error(volume: &str, error: files::FilesError) -> BoundaryError {
@@ -370,6 +424,12 @@ async fn identity(cli: &dyn ContainerCli, image: &str) -> Option<String> {
         .await
         .ok()?;
     let inspected: Vec<InspectedImage> = serde_json::from_str(&text).ok()?;
+    // A digest reference the store holds is its own identity: the base is
+    // pinned by its platform's manifest, which the store may keep under an
+    // index of its own making.
+    if image.contains('@') && crate::config::immutable_image(image).is_ok() {
+        return Some(image.to_string());
+    }
     let digest = &inspected.first()?.configuration.descriptor.digest;
     let name = image_name(image);
     let identity = format!("{name}@{digest}");

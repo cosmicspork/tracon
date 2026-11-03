@@ -474,7 +474,9 @@ checks = ["just check"]
 ```
 
 - **`build`** runs as root at image build time, each step one `RUN` of `sh -ec`, on the
-  base pinned by digest when the node starts. The node writes the Containerfile itself
+  base pinned by digest when the node starts: the digest of the host architecture's own
+  manifest, not the release's multi-platform index, so a release that ships the same base
+  image keeps every image and snapshot keyed on it. The node writes the Containerfile itself
   (`FROM` the base, the steps, then back to user 65532, `HOME=/home/harness`, `/work`)
   and builds one image per repository: no build context and no layer over it. The image
   is keyed on the base's digest, the steps and the egress, so a new base, an edited step
@@ -1395,7 +1397,11 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node, or
                                     # set at the node only. With sandbox_images and no bundle, the
                                     # node fetches its release's bundle into <state>/bundles,
                                     # checked against its .sha256 and manifest
-# base_image = "ghcr.io/cosmicspork/tracon-sandbox-base:<version>" # pinned by digest once pulled;
+# base_image = "ghcr.io/cosmicspork/tracon-sandbox-base:<version>" # pulled for this host's
+                                    # architecture only and pinned by that platform's manifest
+                                    # digest (asked of the registry; an image it cannot resolve is
+                                    # pinned as the runtime holds it); a single-platform digest is
+                                    # used as given;
                                     # a repository Dockerfile stands on it with
                                     # FROM ${TRACON_SANDBOX_BASE}
 # release_url = "https://github.com/cosmicspork/tracon/releases/download" # where bundles come from
@@ -2153,7 +2159,8 @@ once. Without that flag, starting it prompts for a kernel and fails when there i
   protocol.
 - **Images.** Harnesses come from the bundle (`[sandbox] bundle`, else the release's
   arm64 bundle), mounted read-only at `/opt/tracon`. They run on the stock base
-  (`[sandbox] base_image`), which is pulled and pinned at start, or on a repository's
+  (`[sandbox] base_image`), which is pulled and pinned at start by its linux/arm64
+  manifest (only that platform is pulled), or on a repository's
   image, which `container build` makes in `container`'s own builder VM and keeps in its
   image store. Sandboxes run as the base's user 65532 with home `/home/harness`.
 - **Prepared snapshots.** A repository's `prepare` runs once on its default branch in one

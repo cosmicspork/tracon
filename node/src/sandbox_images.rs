@@ -4,7 +4,8 @@
 //! layered for a harness:
 //!
 //! - **Images.** A session, check or preparation runs the stock base image
-//!   (`[sandbox] base_image`, pulled and pinned by digest when the boundary
+//!   (`[sandbox] base_image`, pulled for the host's architecture alone and
+//!   pinned by that architecture's manifest digest when the boundary
 //!   converges) or its repository's image. A repository's Dockerfile may
 //!   stand on the base: `FROM ${TRACON_SANDBOX_BASE}` names the pinned base
 //!   (`repo_image::build_base`), and a new base rebuilds it; one that does
@@ -156,22 +157,82 @@ pub async fn converge(cfg: &Config) -> Result<bool, String> {
         Err(error) => return Err(format!("harness bundle: {error}")),
     };
     let configured = cfg.sandbox.base_image_ref();
-    let mut pulled = false;
-    if crate::boundary::podman::podman(&["image", "exists", &configured])
-        .await
-        .is_err()
-    {
-        tracing::info!(image = %configured, "pulling the sandbox base image");
-        crate::boundary::podman::podman(&["pull", "--quiet", &configured])
-            .await
-            .map_err(|error| format!("pull {configured}: {error}"))?;
-        pulled = true;
-    }
-    let pinned = crate::boundary::podman::image_identity(&configured)
-        .await
-        .ok_or_else(|| format!("{configured} has no digest to pin"))?;
+    let (pinned, pulled) = pin_base_podman(&configured).await?;
     pin(&configured, &pinned);
     Ok(fetched || pulled)
+}
+
+/// `configured` as `name@sha256:…` of the manifest its registry has for
+/// Linux on `arch`: an index's entry for it, or the manifest itself when the
+/// reference names a single platform's image. Pinned by that and not by the
+/// index, a base a new release carries over unchanged keeps its digest, and
+/// with it every snapshot and repository image keyed on it. `None` for an
+/// image only this host's store can hold.
+pub async fn resolve_base(
+    registry: &crate::boundary::registry::Registry,
+    configured: &str,
+    arch: &str,
+) -> Result<Option<String>, String> {
+    if crate::boundary::podman::local_only(configured) {
+        return Ok(None);
+    }
+    registry
+        .platform_identity(configured, arch)
+        .await
+        .map_err(|error| error.to_string())?
+        .map(Some)
+        .ok_or_else(|| format!("{configured} is not in its registry"))
+}
+
+/// The base pulled into Podman for this host's architecture alone, pinned
+/// by that architecture's manifest; `true` when it pulled. A registry that
+/// cannot be asked (offline, or a credential only Podman holds) leaves it to
+/// Podman to pull as configured, and what it holds is pinned.
+pub async fn pin_base_podman(configured: &str) -> Result<(String, bool), String> {
+    use crate::boundary::podman::{image_identity, podman};
+    async fn held(image: &str) -> bool {
+        podman(&["image", "exists", image]).await.is_ok()
+    }
+    let arch = crate::boundary::registry::host_architecture();
+    let platform = format!("linux/{arch}");
+    let registry = crate::boundary::registry::Registry::new(None);
+    let resolved = match resolve_base(&registry, configured, arch).await {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            tracing::warn!(image = %configured, %error, "could not resolve the sandbox base's {platform} manifest; pinning it as Podman holds it");
+            None
+        }
+    };
+    let Some(target) = resolved else {
+        let mut pulled = false;
+        if !held(configured).await {
+            tracing::info!(image = %configured, "pulling the sandbox base image");
+            podman(&["pull", "--quiet", "--platform", &platform, configured])
+                .await
+                .map_err(|error| format!("pull {configured}: {error}"))?;
+            pulled = true;
+        }
+        let pinned = image_identity(configured)
+            .await
+            .ok_or_else(|| format!("{configured} has no digest to pin"))?;
+        return Ok((pinned, pulled));
+    };
+    let mut pulled = false;
+    if !held(&target).await {
+        tracing::info!(image = %target, "pulling the sandbox base image for {platform}");
+        podman(&["pull", "--quiet", "--platform", &platform, &target])
+            .await
+            .map_err(|error| format!("pull {target}: {error}"))?;
+        pulled = true;
+    }
+    // Named as configured too, so a start that cannot reach the registry
+    // still finds it.
+    if !configured.contains('@') {
+        podman(&["tag", &target, configured])
+            .await
+            .map_err(|error| format!("tag {target} as {configured}: {error}"))?;
+    }
+    Ok((target, pulled))
 }
 
 /// What [`converge`] depends on, for `Backend::definitions`: a change is a
@@ -922,6 +983,61 @@ mod tests {
             prepare: vec!["npm ci".into()],
             egress: vec!["registry.npmjs.org".into()],
         }
+    }
+
+    /// Two releases whose indexes differ (their attestations do) over the
+    /// same image pin the same base, so a snapshot keyed on it is kept.
+    #[tokio::test]
+    async fn an_unchanged_platform_manifest_keeps_the_key_across_indexes() {
+        use crate::boundary::registry::tests::{docker_config, oci_index, serve, AMD64, ARM64};
+        let (fake, host) = serve().await;
+        let older = fake.put_manifest("ns/base", "0.45.0", oci_index('a').as_bytes());
+        let newer = fake.put_manifest("ns/base", "0.46.0", oci_index('b').as_bytes());
+        assert_ne!(older, newer);
+        let config = docker_config(&host);
+        let registry = crate::boundary::registry::Registry::new(Some(config.path().into()))
+            .for_test("unused", "unused");
+        let resolve = |tag: &'static str, arch: &'static str| {
+            let registry = registry.clone();
+            let configured = format!("{host}/ns/base:{tag}");
+            async move {
+                resolve_base(&registry, &configured, arch)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }
+        };
+        let (base_45, base_46) = (
+            resolve("0.45.0", "amd64").await,
+            resolve("0.46.0", "amd64").await,
+        );
+        assert_eq!(base_45, format!("{host}/ns/base@{AMD64}"));
+        assert_eq!(base_45, base_46);
+        assert_eq!(
+            resolve("0.46.0", "arm64").await,
+            format!("{host}/ns/base@{ARM64}")
+        );
+        let keyed = |base: &str| {
+            SnapshotInputs {
+                base: base.to_string(),
+                image: base.to_string(),
+                ..inputs()
+            }
+            .key()
+        };
+        assert_eq!(keyed(&base_45), keyed(&base_46));
+        // Pinned by the index, as before, each release had a key of its own.
+        assert_ne!(
+            keyed(&format!("{host}/ns/base@{older}")),
+            keyed(&format!("{host}/ns/base@{newer}"))
+        );
+        // An image only this host can hold is not asked of any registry.
+        assert_eq!(
+            resolve_base(&registry, "localhost/spike-base:1", "amd64")
+                .await
+                .unwrap(),
+            None
+        );
     }
 
     #[test]
