@@ -106,6 +106,9 @@ impl RunSpec {
             // inspected.
             a.retain(|x| x != "--rm");
         }
+        if crate::boundary::podman::local_only(cmd.image.as_deref().unwrap_or(&self.image)) {
+            a.push("--pull=never".into());
+        }
         if self.selinux_label_disable {
             a.push("--security-opt".into());
             a.push("label=disable".into());
@@ -366,6 +369,9 @@ impl RunSpec {
         if let Some(bytes) = launch.memory_bytes {
             a.push("--memory".into());
             a.push(bytes.to_string());
+        }
+        if crate::boundary::podman::local_only(image) {
+            a.push("--pull=never".into());
         }
         match launch.entry {
             SandboxEntry::Pid1 | SandboxEntry::UnderInit => {
@@ -737,6 +743,22 @@ mod tests {
             "registry:5000/a/b"
         );
         assert_eq!(image_repository("registry:5000/a/b"), "registry:5000/a/b");
+    }
+
+    /// What only this host's store can hold is run without pulling, so one
+    /// that is gone fails as missing instead of asking `localhost` for it.
+    #[test]
+    fn a_local_image_is_never_pulled_for_a_run() {
+        let run = |image: &str| {
+            let cmd = RunnerCommand {
+                image: Some(image.into()),
+                ..Default::default()
+            };
+            spec().podman_args("tracon-c-1", &cmd, false)
+        };
+        let never = "--pull=never".to_string();
+        assert!(run("localhost/tracon-repo-app-1a2b@sha256:aa").contains(&never));
+        assert!(!run("ghcr.io/acme/app@sha256:aa").contains(&never));
     }
 
     #[test]

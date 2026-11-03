@@ -444,6 +444,62 @@ pub async fn warm(
     environment: &RepoEnvironment,
     secrets: &crate::environment::PrepareSecrets,
 ) -> Result<Option<String>, String> {
+    let seen = made_count(repo);
+    warm_after(backend, cfg, store, repo, environment, secrets, seen).await
+}
+
+/// The last warm-up each repository finished: how many have finished, the
+/// key the last was for, and what it failed with, if it did.
+type Made = HashMap<std::path::PathBuf, (u64, String, Option<String>)>;
+
+fn made() -> &'static Mutex<Made> {
+    static MADE: std::sync::OnceLock<Mutex<Made>> = std::sync::OnceLock::new();
+    MADE.get_or_init(Default::default)
+}
+
+/// How many of `repo`'s warm-ups have finished, read before waiting for its
+/// warm-up lock, so [`warm_after`] can tell one that finished meanwhile.
+pub(crate) fn made_count(repo: &Path) -> u64 {
+    made()
+        .lock()
+        .unwrap()
+        .get(repo)
+        .map_or(0, |(count, _, _)| *count)
+}
+
+/// What the preparation of `key` that finished after `seen` failed with, if
+/// that is how the last one ended.
+fn failed_since(repo: &Path, key: &str, seen: u64) -> Option<String> {
+    made()
+        .lock()
+        .unwrap()
+        .get(repo)
+        .filter(|(count, made_for, _)| *count != seen && made_for == key)
+        .and_then(|(_, _, failed)| failed.clone())
+}
+
+fn record_made(repo: &Path, key: &str, failed: Option<&str>) {
+    let mut made = made().lock().unwrap();
+    let count = made.get(repo).map_or(0, |(count, _, _)| *count) + 1;
+    made.insert(
+        repo.to_path_buf(),
+        (count, key.to_string(), failed.map(str::to_string)),
+    );
+}
+
+/// [`warm`] for a caller that counted `seen` before waiting its turn: a
+/// preparation of the same key that failed while it waited is its answer
+/// too, rather than a second preparation of the same thing.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn warm_after(
+    backend: &dyn Backend,
+    cfg: &Config,
+    store: &Store,
+    repo: &Path,
+    environment: &RepoEnvironment,
+    secrets: &crate::environment::PrepareSecrets,
+    seen: u64,
+) -> Result<Option<String>, String> {
     let inputs = inputs(backend, cfg, repo, environment).await?;
     let key = inputs.key();
     let Some(preparer) = backend.preparer() else {
@@ -453,6 +509,38 @@ pub async fn warm(
         record_seed(&environment.cache_volume, &snapshot);
         return Ok(Some(snapshot));
     }
+    if let Some(error) = failed_since(repo, &key, seen) {
+        return Err(error);
+    }
+    let made = make_snapshot(
+        backend,
+        cfg,
+        store,
+        repo,
+        environment,
+        secrets,
+        &inputs,
+        &key,
+        &preparer,
+    )
+    .await;
+    record_made(repo, &key, made.as_ref().err().map(String::as_str));
+    made
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn make_snapshot(
+    backend: &dyn Backend,
+    cfg: &Config,
+    store: &Store,
+    repo: &Path,
+    environment: &RepoEnvironment,
+    secrets: &crate::environment::PrepareSecrets,
+    inputs: &SnapshotInputs,
+    key: &str,
+    preparer: &Preparer,
+) -> Result<Option<String>, String> {
+    let key = key.to_string();
     let repo_path = repo.to_string_lossy().into_owned();
     let row = store
         .start_repo_image(&RepoImageStart {
@@ -480,7 +568,7 @@ pub async fn warm(
             .map_err(|error| error.to_string())?;
         let reference = format!("{}:{}", snapshot_repository(repo), &key[..12]);
         let name = crate::config::resource_name(&format!("w-{}", &id[..12]));
-        let mut held = Held::for_preparation(&preparer, &name, &inputs.image, &work).await;
+        let mut held = Held::for_preparation(preparer, &name, &inputs.image, &work).await;
         if let Ok(opened) = &held {
             if !preparer.tunnels.is_empty() {
                 if let Err(error) = opened.open_tunnels(&preparer.tunnels).await {
@@ -880,6 +968,25 @@ mod tests {
         for changed in changes {
             assert_ne!(changed.key(), key, "{changed:?}");
         }
+    }
+
+    /// A warm-up that waited while another prepared the same key takes that
+    /// one's failure rather than preparing again; one that started after it,
+    /// or for another key, prepares.
+    #[test]
+    fn a_failed_preparation_is_the_answer_to_whoever_waited_for_it() {
+        let repo = Path::new("/src/a3-waited");
+        let before = made_count(repo);
+        record_made(repo, "k1", Some("npm ci exited 1"));
+        assert_eq!(
+            failed_since(repo, "k1", before).as_deref(),
+            Some("npm ci exited 1")
+        );
+        assert_eq!(failed_since(repo, "k2", before), None);
+        assert_eq!(failed_since(repo, "k1", made_count(repo)), None);
+        let before = made_count(repo);
+        record_made(repo, "k1", None);
+        assert_eq!(failed_since(repo, "k1", before), None);
     }
 
     #[test]

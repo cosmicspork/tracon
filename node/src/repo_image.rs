@@ -177,18 +177,47 @@ pub(crate) fn forget_warmed(repo: &Path) {
 }
 
 /// When the build of `recipe_hash` now running for `repo` started, if one
-/// is: a forced build asked for meanwhile joins it rather than starting
-/// another, and whoever asked follows that one.
+/// is, its warm-up included: a forced build asked for meanwhile joins it
+/// rather than starting another, and whoever asked follows that one.
 pub fn in_flight(store: &Store, repo: &Path, recipe_hash: &str) -> Option<i64> {
     if build_lock(repo).try_lock().is_ok() {
         return None;
     }
+    let settling = settling().lock().unwrap().get(repo).map(String::as_str) == Some(recipe_hash);
     store
         .latest_repo_image(&repo.to_string_lossy(), BASE)
         .ok()
         .flatten()
-        .filter(|row| row.status == "building" && row.recipe_hash == recipe_hash)
+        .filter(|row| row.recipe_hash == recipe_hash)
+        .filter(|row| row.status == "building" || (settling && row.status == "ready"))
         .map(|row| row.started_ms)
+}
+
+/// The recipe each repository's just-built image is being warmed for, under
+/// the build lock.
+fn settling() -> &'static StdMutex<HashMap<PathBuf, String>> {
+    static SETTLING: std::sync::LazyLock<StdMutex<HashMap<PathBuf, String>>> =
+        std::sync::LazyLock::new(Default::default);
+    &SETTLING
+}
+
+/// Marks `repo`'s build as warming until dropped, however the warm-up ends.
+struct Settling<'a>(&'a Path);
+
+impl<'a> Settling<'a> {
+    fn start(repo: &'a Path, recipe_hash: &str) -> Self {
+        settling()
+            .lock()
+            .unwrap()
+            .insert(repo.to_path_buf(), recipe_hash.to_string());
+        Self(repo)
+    }
+}
+
+impl Drop for Settling<'_> {
+    fn drop(&mut self) {
+        settling().lock().unwrap().remove(self.0);
+    }
 }
 
 /// How long a builder that could not build is left alone for one recipe.
@@ -1291,7 +1320,7 @@ pub async fn ensure_base(
         .into_iter()
         .chain(commands.prepare)
         .collect();
-    let ensured = ensure_with(
+    ensure_with(
         builder,
         runner.as_ref(),
         cfg,
@@ -1300,12 +1329,9 @@ pub async fn ensure_base(
         &entry,
         &commands,
         force,
+        Some(backend),
     )
-    .await;
-    if matches!(ensured, Ensured::Rebuilt(_)) {
-        warm_base_cache(backend, cfg, store, repo).await;
-    }
-    ensured
+    .await
 }
 
 /// Fill the repository's base dependency cache by preparing its default
@@ -1336,6 +1362,7 @@ pub(crate) async fn warm_base_cache(
     repo: &Path,
 ) {
     let lock = warm_lock(repo);
+    let seen = crate::sandbox_images::made_count(repo);
     let _warming = lock.lock().await;
     let environment = crate::environment::environment_for(cfg, store, Some(repo));
     if environment.prepare.is_empty() {
@@ -1380,9 +1407,16 @@ pub(crate) async fn warm_base_cache(
                 return;
             }
         };
-        if let Err(error) =
-            crate::sandbox_images::warm(backend, cfg, store, repo, &environment, &secrets).await
-        {
+        let warmed = crate::sandbox_images::warm_after(
+            backend,
+            cfg,
+            store,
+            repo,
+            &environment,
+            &secrets,
+            seen,
+        );
+        if let Err(error) = warmed.await {
             tracing::warn!(repo = %repo.display(), %error, "no snapshot made");
         }
         return;
@@ -1492,6 +1526,11 @@ pub async fn environment(
     Ok(environment)
 }
 
+/// `warm_in` warms the base cache in an image this builds, before the build
+/// counts as finished and with its lock still held: a request that comes
+/// during the warm-up joins this build instead of building the recipe again
+/// and moving its tag off the image the warm-up, and whoever asked first,
+/// were given.
 #[allow(clippy::too_many_arguments)]
 async fn ensure_with(
     builder: &dyn ImageBuilder,
@@ -1502,6 +1541,7 @@ async fn ensure_with(
     entry: &Repo,
     commands: &[String],
     force: bool,
+    warm_in: Option<&dyn Backend>,
 ) -> Ensured {
     let lock = build_lock(repo);
     let seen = finished_count(repo);
@@ -1609,6 +1649,10 @@ async fn ensure_with(
             let _ = store.set_repo_image_parent(&id, &built.source);
             warm(repo, &recipe.hash);
             supersede(builder, store, repo, BASE).await;
+            if let Some(backend) = warm_in {
+                let _settling = Settling::start(repo, &recipe.hash);
+                warm_base_cache(backend, cfg, store, repo).await;
+            }
             let ensured = Ensured::Rebuilt(built.image.image);
             record_finished(repo, &recipe.hash, &ensured);
             ensured
@@ -2057,6 +2101,10 @@ mod tests {
         missing: StdMutex<bool>,
         /// Take this long over every build, as a real one does.
         slow: StdMutex<Option<Duration>>,
+        /// How many warm-ups `Pulling` imported a tree for, and how long
+        /// each import takes.
+        warms: StdMutex<usize>,
+        warming: Option<Duration>,
     }
 
     #[async_trait]
@@ -2186,6 +2234,7 @@ mod tests {
             &entry(repo),
             &[],
             force,
+            None,
         )
         .await
     }
@@ -2297,6 +2346,52 @@ mod tests {
         assert!(in_flight(&store, repo, &base_row(&store, repo).recipe_hash).is_none());
         let again = ensure(&builder, &store, repo, true).await;
         assert!(matches!(again, Ensured::Rebuilt(_)), "{again:?}");
+    }
+
+    /// A build asked for while the last build of the same recipe is still
+    /// warming the base cache in the image it made: the request waits for the
+    /// warm-up and takes that image. Building again would move the tag off
+    /// the image the warm-up and the session that asked first were given,
+    /// and Podman resolves `name@digest` only while the name is on it.
+    #[tokio::test]
+    async fn a_build_asked_for_while_the_last_one_warms_joins_it() {
+        let tmp = checkout();
+        let repo = tmp.path();
+        let store = Store::open_in_memory().unwrap();
+        let pulling = Pulling {
+            builder: FakeBuilder {
+                warming: Some(Duration::from_millis(400)),
+                ..Default::default()
+            },
+        };
+        let cfg = Config {
+            repo: vec![Repo {
+                prepare: vec!["npm ci".into()],
+                ..entry(repo)
+            }],
+            ..Default::default()
+        };
+        let warms = || *pulling.builder.warms.lock().unwrap();
+
+        let (first, forced) =
+            tokio::join!(ensure_base(&pulling, &cfg, &store, repo, false), async {
+                while warms() == 0 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                let recipe = base_row(&store, repo).recipe_hash;
+                assert!(
+                    in_flight(&store, repo, &recipe).is_some(),
+                    "the warm-up is part of the build a forced one joins"
+                );
+                ensure_base(&pulling, &cfg, &store, repo, true).await
+            });
+        let Ensured::Rebuilt(image) = first else {
+            panic!("the first request builds: {first:?}");
+        };
+        assert_eq!(forced, Ensured::Current(image));
+        assert_eq!(pulling.builder.builds.lock().unwrap().len(), 2);
+        assert_eq!(warms(), 1, "warmed once, in the one image");
+        assert!(in_flight(&store, repo, &base_row(&store, repo).recipe_hash).is_none());
     }
 
     fn base_row(store: &Store, repo: &Path) -> crate::store::RepoImageRow {
@@ -2637,6 +2732,7 @@ mod tests {
             &missing,
             &[],
             false,
+            None,
         )
         .await;
         let Ensured::Unavailable { reason } = unavailable else {
@@ -2931,6 +3027,10 @@ mod tests {
             _volume: &str,
             _source: &Path,
         ) -> Result<(), crate::boundary::BoundaryError> {
+            *self.builder.warms.lock().unwrap() += 1;
+            if let Some(warming) = self.builder.warming {
+                tokio::time::sleep(warming).await;
+            }
             Ok(())
         }
         async fn export_volume(
@@ -3406,6 +3506,7 @@ ENTRYPOINT []
             &entry(repo),
             &[],
             false,
+            None,
         )
         .await
         else {
