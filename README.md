@@ -383,7 +383,7 @@ removes them with `--apply`; dependency caches only with `--caches`, and the
 node-wide volumes, any name it does not recognize, and another node's volumes (named with
 that node's `[boundary] resource_prefix`) never.
 
-On Podman it lists images too, class by class with about what each frees and a total.
+On Podman and Apple it lists images too, class by class with about what each frees and a total.
 Every image a node builds or commits (a repository's image, the `-src` image under it, a
 layered `-claude`/`-native` image, a build-steps image, a prepared snapshot) carries two
 labels naming its owner, `io.tracon.node.prefix` (the `resource_prefix`) and
@@ -401,6 +401,9 @@ labels naming its owner, `io.tracon.node.prefix` (the `resource_prefix`) and
 Nothing a container uses (running or stopped, any node's) is removed, nothing an image
 that stays is built on, and nothing made in the last hour, whose build may not have
 recorded it yet. A replaced snapshot is still removed as soon as the new one is made.
+On Apple, whose store records no parent image, an image stands only on the build its
+snapshot label names, every tag of the build the node pins is kept, and what an image
+frees is its arm64 manifests that no image that stays shares.
 After the boundary converges the node logs how much is reclaimable, and removes nothing
 itself.
 Dependency preparation runs first as its own credential-free command in an
@@ -2265,7 +2268,9 @@ once. Without that flag, starting it prompts for a kernel and fails when there i
   (`[sandbox] base_image`), which is pulled and pinned at start by its linux/arm64
   manifest (only that platform is pulled), or on a repository's
   image, which `container build` makes in `container`'s own builder VM and keeps in its
-  image store. Sandboxes run as the base's user 65532 with home `/home/harness`.
+  image store. The builder VM holds 2 CPUs and 2 GB while it runs, so the builds that
+  started it stop it when the last of them is done; a builder that was already running is
+  left alone. Sandboxes run as the base's user 65532 with home `/home/harness`.
 - **Prepared snapshots.** A repository's `prepare` runs once on its default branch in one
   sandbox, which is then committed (`container commit`) as
   `localhost/<prefix>-snapshot-<repo>`. Its sessions and checks start from that image.
@@ -2273,7 +2278,8 @@ once. Without that flag, starting it prompts for a kernel and fails when there i
   with the base's configuration, the preparation's token emptied and the snapshot's
   labels, among them the commit it was prepared from. A session at that commit skips
   `prepare`. A commit is one flattened layer, so each snapshot costs about the base's
-  size on disk. `tracon gc` removes snapshots that a newer one superseded.
+  size on disk. `tracon gc` removes snapshots that a newer one superseded, with the
+  other image classes (see [Starting work](#starting-work)).
 - **Placement.** The node reports its sandboxes as tier `microvm`, so work that
   requires one (`tier = ["microvm"]`) stays on the Mac.
 

@@ -43,7 +43,7 @@ const BUILD_PROXY_PORT: u16 = 3128;
 
 /// The only platform a Mac's VMs run: an index's other variants are never
 /// pulled.
-const VM_ARCH: &str = "arm64";
+pub(crate) const VM_ARCH: &str = "arm64";
 const VM_PLATFORM: &str = "linux/arm64";
 
 pub struct AppleBackend {
@@ -496,7 +496,11 @@ impl ImageBuilder for AppleBackend {
             ..Default::default()
         };
         // The CLI is killed when its future is dropped at the deadline.
-        let log = match tokio::time::timeout(build.timeout, self.cli.run(&args)).await {
+        let run = tokio::time::timeout(build.timeout, self.cli.run(&args));
+        let log = match crate::provider::apple::BUILDER
+            .building(self.cli.as_ref(), run)
+            .await
+        {
             Ok(Ok(out)) => out,
             Ok(Err(CliError::Failed(log))) => {
                 return Err(failure("container build failed".into(), &log))

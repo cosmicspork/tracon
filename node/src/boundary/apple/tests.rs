@@ -20,6 +20,9 @@ impl ContainerCli for Fake {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         match args.as_slice() {
             ["system", "status"] => Ok("apiserver is running".into()),
+            ["builder", "status", ..] => {
+                Ok(r#"[{"id":"buildkit","status":{"state":"running"}}]"#.into())
+            }
             ["build", .., "-t", tag, _context] => match self.fail_build {
                 true => Err(CliError::Failed(
                     "#5 ERROR: process did not complete".into(),
@@ -99,8 +102,11 @@ async fn a_build_is_tagged_and_reported_by_digest() {
     let calls = fake.calls.lock().unwrap().clone();
     let containerfile = containerfile.to_string_lossy().into_owned();
     let context = dir.path().to_string_lossy().into_owned();
+    // A running builder is someone else's to stop.
+    assert!(!calls.iter().any(|c| c[0] == "builder" && c[1] == "stop"));
+    let build = calls.iter().find(|c| c[0] == "build").unwrap();
     assert_eq!(
-        calls[0],
+        *build,
         [
             "build",
             "--progress",
@@ -542,4 +548,143 @@ async fn a_session_cache_is_not_copied_from_a_base_cache_the_snapshot_holds() {
     assert!(!b.seeds_session_cache(&base, true).await);
     assert!(!b.seeds_session_cache(&base, false).await);
     assert!(fake.calls.lock().unwrap().is_empty(), "no runtime involved");
+}
+
+/// Against a real `container`, under a prefix and node id of the test's own
+/// so a node's images in the same store are never this sweep's: a superseded
+/// build and snapshot go by every name, the current build and another node's
+/// image stay, and a builder the builds started is stopped after them.
+#[tokio::test]
+#[ignore = "needs Apple's container"]
+async fn a_sweep_removes_only_this_nodes_superseded_images() {
+    use crate::image_gc::{Kept, Knowledge, NODE_LABEL, PREFIX_LABEL};
+
+    async fn status(cli: &crate::provider::apple::SystemCli) -> String {
+        let args = ["builder", "status", "--format", "json"].map(String::from);
+        let text = cli.run(&args).await.unwrap_or_default();
+        serde_json::from_str::<serde_json::Value>(&text).unwrap_or_default()[0]["status"]["state"]
+            .as_str()
+            .unwrap_or("none")
+            .to_string()
+    }
+    let cli = crate::provider::apple::SystemCli::default();
+    let mut cfg = Config::default();
+    cfg.runtime.kind = crate::config::RuntimeKind::Apple;
+    let b = AppleBackend::new(&cfg);
+    if let Some(why) = AppleBackend::unavailable(&b).await {
+        panic!("{why}");
+    }
+    let builder_before = status(&cli).await;
+
+    let id = uuid::Uuid::now_v7().simple().to_string();
+    let run = &id[id.len() - 8..];
+    let prefix = "gce2e";
+    let node = format!("gce2e-node-{run}");
+    let repo = format!("localhost/{prefix}-repo-app-{run}");
+    let snap = format!("localhost/{prefix}-snapshot-app-{run}");
+    let owner = |node: &str| {
+        vec![
+            (PREFIX_LABEL.to_string(), prefix.to_string()),
+            (NODE_LABEL.to_string(), node.to_string()),
+        ]
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let build = |tag: String, labels: Vec<(String, String)>| {
+        let dir = dir.path().join(tag.replace(['/', ':'], "_"));
+        std::fs::create_dir(&dir).unwrap();
+        // Content of its own, so each is an image of its own.
+        std::fs::write(dir.join("made"), &tag).unwrap();
+        std::fs::write(dir.join("Containerfile"), "FROM scratch\nCOPY made /made\n").unwrap();
+        let b = &b;
+        async move {
+            b.build(ImageBuild {
+                tag: &tag,
+                containerfile: &dir.join("Containerfile"),
+                context: &dir,
+                labels: &labels,
+                timeout: std::time::Duration::from_secs(600),
+            })
+            .await
+            .unwrap_or_else(|failure| panic!("{tag}: {failure:?}"))
+            .image
+        }
+    };
+    let current = build(format!("{repo}:cur"), owner(&node)).await;
+    let old = build(format!("{repo}:old"), owner(&node)).await;
+    let mut snapshot_labels = owner(&node);
+    snapshot_labels.push((crate::sandbox_images::KEY_LABEL.into(), "k".into()));
+    snapshot_labels.push((crate::sandbox_images::FROM_LABEL.into(), current.clone()));
+    let snapshot = build(format!("{snap}:old"), snapshot_labels).await;
+    let theirs = build(format!("{repo}:theirs"), owner("another-node")).await;
+    let builder_after = status(&cli).await;
+
+    let knowledge = Knowledge {
+        prefix: prefix.into(),
+        node_id: node.clone(),
+        kept: vec![Kept {
+            reference: current.clone(),
+            why: "the current build".into(),
+            legacy: false,
+        }],
+        bundled: true,
+        // Past the grace an image just made has.
+        now_ms: crate::store::now_ms() + 2 * crate::image_gc::GRACE_MS,
+        ..Default::default()
+    };
+    let dry = crate::image_gc::apple::sweep(&cli, &knowledge, false).await;
+    let applied = crate::image_gc::apple::sweep(&cli, &knowledge, true).await;
+    let held: Vec<String> = b
+        .references()
+        .await
+        .into_iter()
+        .map(|(name, _)| name)
+        .filter(|name| name.starts_with(&repo) || name.starts_with(&snap))
+        .collect();
+    for image in [&current, &old, &snapshot, &theirs] {
+        b.remove(image).await;
+    }
+    eprintln!("builder {builder_before} -> {builder_after}\n{dry:#?}\n{held:#?}");
+
+    let dry = dry.unwrap();
+    let mut going: Vec<&str> = dry
+        .iter()
+        .filter(|s| s.remove)
+        .map(|s| s.name.as_str())
+        .collect();
+    going.sort();
+    assert_eq!(going, [format!("{repo}:old"), format!("{snap}:old")]);
+    assert!(dry.iter().all(|s| !s.removed));
+    assert!(dry.iter().all(|s| !s.name.contains("theirs")), "{dry:#?}");
+    let current_listed = dry.iter().find(|s| s.name == format!("{repo}:cur"));
+    assert!(
+        current_listed.is_some_and(|s| !s.remove && s.reason == "the current build"),
+        "{dry:#?}"
+    );
+    let applied = applied.unwrap();
+    assert!(
+        applied
+            .iter()
+            .filter(|s| s.remove)
+            .all(|s| s.removed && s.error.is_none()),
+        "{applied:#?}"
+    );
+    let mut held = held;
+    held.sort();
+    let expected = {
+        let mut names = vec![
+            format!("{repo}:cur"),
+            current.clone(),
+            format!("{repo}:theirs"),
+            theirs.clone(),
+        ];
+        names.sort();
+        names
+    };
+    assert_eq!(held, expected, "every name of what went, and nothing else");
+    if builder_before != "running" {
+        assert_eq!(
+            builder_after, "stopped",
+            "the builds stop what they started"
+        );
+    }
 }

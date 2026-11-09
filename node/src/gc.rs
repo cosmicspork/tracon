@@ -31,10 +31,10 @@
 //! to the repository while it is the latest one prepared, and is otherwise
 //! superseded.
 //!
-//! Images on Podman are swept by `crate::image_gc`: only those carrying this
-//! node's owner labels, by class (superseded bases, repository images,
-//! snapshots, dangling builds, and with `--legacy` what sandbox images
-//! retired), with what each would free.
+//! Images on Podman and in Apple's `container` store are swept by
+//! `crate::image_gc`: only those carrying this node's owner labels, by class
+//! (superseded bases, repository images, snapshots, dangling builds, and with
+//! `--legacy` what sandbox images retired), with what each would free.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -351,17 +351,6 @@ pub fn classify_volume(name: &str, created_ms: Option<i64>, owners: &Owners) -> 
     verdict(false, "not a volume this node recognizes")
 }
 
-/// Whether a prepared snapshot image is still a repository's.
-pub fn classify_snapshot(pinned: &str, owners: &Owners) -> (bool, String) {
-    match owners.snapshots.contains(pinned) {
-        true => verdict(false, "a repository's current prepared snapshot"),
-        false => verdict(
-            true,
-            "a superseded prepared snapshot; the next session prepares again if it needs one",
-        ),
-    }
-}
-
 /// Whether a host directory under the state dir is still needed. `area` is
 /// the directory it sits in, `entry` its own name.
 pub fn classify_directory(
@@ -537,7 +526,7 @@ pub fn image_knowledge(
     node_id: &str,
     sweep: &Sweep,
 ) -> crate::image_gc::Knowledge {
-    let bundled = crate::sandbox_images::enabled(cfg);
+    let bundled = crate::sandbox_images::bundled(cfg);
     crate::image_gc::Knowledge {
         prefix: owners.prefix.clone(),
         node_id: node_id.to_string(),
@@ -554,6 +543,24 @@ pub fn image_knowledge(
     }
 }
 
+/// The image store `backend` keeps, swept.
+async fn sweep_images(
+    backend: &dyn Backend,
+    cfg: &Config,
+    knowledge: &crate::image_gc::Knowledge,
+    apply: bool,
+) -> Result<Vec<crate::image_gc::Swept>, String> {
+    match backend.kind() {
+        "apple" => {
+            let cli = crate::provider::apple::SystemCli {
+                bin: cfg.runtime.apple.container.clone(),
+            };
+            crate::image_gc::apple::sweep(&cli, knowledge, apply).await
+        }
+        _ => crate::image_gc::podman::sweep(knowledge, apply).await,
+    }
+}
+
 /// Say in the node's log how much of the image store is reclaimable, without
 /// removing anything: run after the boundary converges.
 pub async fn note_reclaimable_images(
@@ -562,7 +569,7 @@ pub async fn note_reclaimable_images(
     store: &Store,
     node_id: &str,
 ) {
-    if backend.kind() != "podman" {
+    if !matches!(backend.kind(), "podman" | "apple") {
         return;
     }
     let owners = match Owners::read(store, node_id, false) {
@@ -573,7 +580,7 @@ pub async fn note_reclaimable_images(
         }
     };
     let knowledge = image_knowledge(cfg, &owners, node_id, &Sweep::default());
-    match crate::image_gc::podman::sweep(&knowledge, false).await {
+    match sweep_images(backend, cfg, &knowledge, false).await {
         Ok(swept) => log_reclaimable(&swept, false),
         Err(error) => tracing::debug!(%error, "could not list the image store"),
     }
@@ -631,9 +638,9 @@ pub async fn sweep(
         }
         items.push(item);
     }
-    if backend.kind() == "podman" {
+    if matches!(backend.kind(), "podman" | "apple") {
         let knowledge = image_knowledge(cfg, &owners, node_id, &sweep);
-        let swept = crate::image_gc::podman::sweep(&knowledge, apply).await?;
+        let swept = sweep_images(backend, cfg, &knowledge, apply).await?;
         log_reclaimable(&swept, apply);
         for image in swept {
             items.push(Item {
@@ -643,16 +650,6 @@ pub async fn sweep(
                 size: Some(image.reclaim),
                 ..item("image", image.name, image.remove, image.reason)
             });
-        }
-    } else if let Some(builder) = backend.image_builder() {
-        for pinned in backend.prepared_snapshots().await {
-            let (remove, reason) = classify_snapshot(&pinned, &owners);
-            let mut item = item("image", pinned, remove, reason);
-            if apply && remove {
-                builder.remove(&item.name).await;
-                item.removed = !builder.exists(&item.name).await;
-            }
-            items.push(item);
         }
     }
     for (mut item, path) in directory_items(&Config::state_dir(), &owners) {
@@ -693,13 +690,9 @@ mod tests {
     }
 
     #[test]
-    fn only_the_current_snapshot_and_bundle_stay() {
+    fn only_the_current_bundle_stays() {
         let mut o = owners();
         o.version = "1.2.0".into();
-        o.snapshots
-            .insert("localhost/tracon-repo-app-1-snapshot@sha256:aa".into());
-        assert!(!classify_snapshot("localhost/tracon-repo-app-1-snapshot@sha256:aa", &o).0);
-        assert!(classify_snapshot("localhost/tracon-repo-app-1-snapshot@sha256:bb", &o).0);
         assert!(!classify_directory("bundles", "1.2.0", None, &o).unwrap().0);
         assert!(classify_directory("bundles", "1.1.0", None, &o).unwrap().0);
         assert!(
