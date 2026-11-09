@@ -8,7 +8,7 @@
 #
 # Dependabot moves the tag and digest together; `browser.yml` rejects a build
 # that listens beyond loopback before anything is published.
-FROM docker.io/chromedp/headless-shell:157.0.8103.15@sha256:f76fce2964611eb1e25b90d906727884db12a8918a6d85a0df2619a9ef845c7c
+FROM docker.io/chromedp/headless-shell:158.0.8127.2@sha256:84fc19d85ada48c6bfa850cb648f01a9f93153872a9a405ea322d79fcc98ef3a
 
 LABEL org.opencontainers.image.source="https://github.com/cosmicspork/tracon" \
       org.opencontainers.image.description="Headless Chrome for tracon's browser service, on loopback only"
