@@ -64,6 +64,8 @@ pub struct Fake {
     /// Each request takes the next reply.
     script: Arc<Mutex<Vec<Reply>>>,
     pub requests: Arc<Mutex<Vec<Value>>>,
+    /// When each request arrived, in the order of `requests`.
+    pub arrived: Arc<Mutex<Vec<std::time::Instant>>>,
 }
 
 /// In a reply's body, replaced by a quarter of the request's bytes: a prompt
@@ -72,6 +74,7 @@ pub const MEASURED: &str = "\"$measured\"";
 
 async fn completions(State(fake): State<Fake>, Json(body): Json<Value>) -> Response {
     let measured = (body.to_string().len() / 4).to_string();
+    fake.arrived.lock().unwrap().push(std::time::Instant::now());
     fake.requests.lock().unwrap().push(body);
     let mut reply = {
         let mut script = fake.script.lock().unwrap();
