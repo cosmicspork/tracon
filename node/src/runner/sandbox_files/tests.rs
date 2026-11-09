@@ -386,6 +386,18 @@ fn a_plan_mounts_only_what_the_store_does_not_keep() {
     assert!(at("/root/.claude") < at("/root/.claude/plugin"));
     assert!(at("/root/.claude") < at("/root/.claude/orientation.md"));
     assert_eq!(targets.len(), 5);
+    // Taken back after a node restart, a sandbox is sent again what the node
+    // writes for each launch, and keeps what it writes itself.
+    let mut resent = plan.resent();
+    resent.sort_unstable();
+    assert_eq!(
+        resent,
+        vec![
+            "/root/.claude/orientation.md",
+            "/root/.claude/plugin",
+            "/root/.gitconfig",
+        ]
+    );
 
     // Nothing kept: everything is mounted as before.
     let (provided, plan) = FilesStore::new(dir.path().join("empty"))

@@ -2621,23 +2621,42 @@ impl Manager {
         from: Option<FromSnapshot<'_>>,
         started: Instant,
     ) -> Option<crate::environment::WorkspacePreparation> {
-        let preparation = prepare_session_workspace(
-            self.backend.as_ref(),
-            environment,
-            (&workspace.volume, cache),
-            &crate::config::resource_name(&format!("s-{slug}")),
-            &Stopping {
-                store: &self.store,
-                id,
+        // Carried on in the sandbox the node's previous process left running
+        // (`runner::reattach`): the workspace there is the one the session
+        // had, prepared, and newer than the node's copy, which is all a
+        // preparation here would reach.
+        let carried_on =
+            crate::runner::reattach::is_kept(&crate::config::resource_name(&format!("h-{slug}")));
+        let preparation = match carried_on {
+            true if !environment.prepare.is_empty() => crate::environment::WorkspacePreparation {
+                commands: environment.prepare.clone(),
+                outcome: crate::environment::PrepareOutcome::NotRun(
+                    "the session carries on in its sandbox, whose workspace is as it was".into(),
+                ),
+                elapsed_ms: 0,
             },
-            from,
-        )
-        .await?;
-        if !matches!(
-            preparation.outcome,
-            crate::environment::PrepareOutcome::Prepared
-                | crate::environment::PrepareOutcome::FromSnapshot { .. }
-        ) {
+            _ => {
+                prepare_session_workspace(
+                    self.backend.as_ref(),
+                    environment,
+                    (&workspace.volume, cache),
+                    &crate::config::resource_name(&format!("s-{slug}")),
+                    &Stopping {
+                        store: &self.store,
+                        id,
+                    },
+                    from,
+                )
+                .await?
+            }
+        };
+        if !carried_on
+            && !matches!(
+                preparation.outcome,
+                crate::environment::PrepareOutcome::Prepared
+                    | crate::environment::PrepareOutcome::FromSnapshot { .. }
+            )
+        {
             tracing::warn!(
                 session = %id,
                 outcome = preparation.outcome.as_str(),

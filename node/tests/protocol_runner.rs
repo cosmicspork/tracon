@@ -266,10 +266,14 @@ async fn the_protocol_runner_over_a_loopback_sandbox() {
 
 /// The node stops with a session's harness in a sandbox that can resume:
 /// the sandbox stays, with a record, and the next process's runner takes it
-/// back for the session's next harness rather than making another.
+/// back for the session's next harness rather than making another. What the
+/// node writes for each launch (the harness's configuration, with that
+/// launch's gateway token) is sent in again; the old one would be refused.
 async fn a_sandbox_left_running_is_taken_back_by_the_next_node_process() {
     let provider = Loopback::new(false);
     let identity = tracon_sandbox::tls::NodeIdentity::generate().unwrap();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = tracon::runner::sandbox_files::FilesStore::new(store_dir.path().join("store"));
     let process = || {
         let options = tracon_sandbox::node::ServerOptions {
             resume_within: Duration::from_secs(10),
@@ -278,19 +282,38 @@ async fn a_sandbox_left_running_is_taken_back_by_the_next_node_process() {
         ProtocolRunner::new(provider.clone(), "img@sha256:aa")
             .with_server(Arc::new(SandboxServer::new(&identity, options).unwrap()))
             .with_connect_within(Duration::from_secs(10))
+            .with_files(store.clone())
     };
     let marks = tempfile::tempdir().unwrap();
     let mark = marks.path().join("first");
+    let config = marks.path().join("config");
+    let launch = |token: &str| {
+        let seed = store_dir.path().join(format!("seed-{token}"));
+        std::fs::create_dir_all(&seed).unwrap();
+        std::fs::write(seed.join("config"), format!("{token}\n")).unwrap();
+        store.import("tracon-scratch-adopt", &seed).unwrap();
+    };
+    let with_config = |mut cmd: RunnerCommand| {
+        cmd.mounts = vec![Mount::at(
+            "tracon-scratch-adopt",
+            "config",
+            config.to_str().unwrap(),
+            true,
+        )];
+        cmd
+    };
     let name = "tracon-h-adopt";
+    launch("one");
     let first = process();
     let spawned = first
-        .spawn(sh(
+        .spawn(with_config(sh(
             &format!(
-                "touch {}; while read -r line; do echo \"first $line\"; done",
+                "grep -qx one {} || exit 7; touch {}; while read -r line; do echo \"first $line\"; done",
+                config.display(),
                 mark.display()
             ),
             name,
-        ))
+        )))
         .await
         .unwrap();
     let mut stdin = spawned.stdin;
@@ -314,16 +337,18 @@ async fn a_sandbox_left_running_is_taken_back_by_the_next_node_process() {
         "left running"
     );
 
-    // The next process.
+    // The next process, which stages the next launch's configuration.
+    launch("two");
     let next = process();
     let again = next
-        .spawn(sh(
+        .spawn(with_config(sh(
             &format!(
-                "test -e {} || exit 9; while read -r line; do echo \"again $line\"; done",
+                "grep -qx two {} || exit 8; test -e {} || exit 9; while read -r line; do echo \"again $line\"; done",
+                config.display(),
                 mark.display()
             ),
             name,
-        ))
+        )))
         .await
         .unwrap();
     assert_eq!(
