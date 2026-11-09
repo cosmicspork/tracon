@@ -722,6 +722,37 @@ impl Plan {
         Ok(self.adopt(conn, name, kind))
     }
 
+    /// The targets [`Self::readopt`] sends again: what the sandbox is never
+    /// asked to give back, read-only trees and files, which the node writes
+    /// afresh for every launch. The harness's MCP configuration is one, and
+    /// it carries the launch's own gateway token.
+    pub fn resent(&self) -> Vec<&str> {
+        self.placed
+            .iter()
+            .filter(|p| p.read_only || p.file)
+            .map(|p| p.target.as_str())
+            .collect()
+    }
+
+    /// Take a sandbox an earlier node process sent its trees into and left
+    /// running back for a new launch: what the sandbox writes stays as it is
+    /// there, the newer copy, and what the node writes for each launch
+    /// ([`Self::resent`]) is sent again, so the new harness reads this
+    /// launch's configuration rather than the last one's.
+    pub async fn readopt(
+        self,
+        conn: &SandboxConn,
+        name: &str,
+        kind: RunKind,
+    ) -> Result<Attached, FilesError> {
+        for p in self.placed.iter().filter(|p| p.read_only || p.file) {
+            let lock = crate::workspace::volume_lock(&p.volume);
+            let _guard = lock.lock().await;
+            send(conn, p).await?;
+        }
+        Ok(self.adopt(conn, name, kind))
+    }
+
     /// Begin taking back what a run of `kind` takes back from a sandbox
     /// whose trees are there already: one an earlier node process sent them
     /// into and left running. Nothing is sent; the sandbox's copy is the

@@ -93,6 +93,12 @@ pub fn take(name: &str) -> Option<Record> {
     record.filter(|r| r.name == name)
 }
 
+/// Whether a record for `name` is kept: the sandbox is still to be taken
+/// back.
+pub fn is_kept(name: &str) -> bool {
+    path(name).exists()
+}
+
 /// Forget `name`'s record, if there is one.
 pub fn forget(name: &str) {
     let _ = std::fs::remove_file(path(name));
@@ -120,9 +126,11 @@ mod tests {
             .mode();
         assert_eq!(mode & 0o777, 0o600);
         assert!(all().contains(&record));
+        assert!(is_kept(&record.name));
         assert_eq!(record.digest(), Some([7u8; 32]));
         assert_eq!(take(&record.name), Some(record.clone()));
         assert_eq!(take(&record.name), None);
+        assert!(!is_kept(&record.name));
         assert!(!all().contains(&record));
     }
 }

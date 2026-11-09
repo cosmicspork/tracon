@@ -416,7 +416,7 @@ impl ProtocolRunner {
                 false => super::RunKind::Probe,
             });
             let attached = match adopted {
-                true => Ok(files.adopt(&conn, name, kind)),
+                true => files.readopt(&conn, name, kind).await,
                 false => files.attach(&conn, name, kind).await,
             };
             match attached {
