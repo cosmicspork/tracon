@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.48.0](https://github.com/cosmicspork/tracon/compare/v0.47.0...v0.48.0) (2026-11-09)
+
+
+### Features
+
+* **gc:** sweep Apple's image store by class and stop the builder VM after builds ([#837](https://github.com/cosmicspork/tracon/issues/837)) ([5d4f99d](https://github.com/cosmicspork/tracon/commit/5d4f99d8b69e9ace7da2a1eeb958f93cee8ea3e7))
+
 ## [0.47.0](https://github.com/cosmicspork/tracon/compare/v0.46.0...v0.47.0) (2026-11-03)
 
 
