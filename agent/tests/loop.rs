@@ -441,15 +441,16 @@ async fn spawned_subagents_run_together_and_return_shaped_results() {
         answer("both have 3 lines"),
     ])
     .await;
-    let started = std::time::Instant::now();
-
     let r = run(&base, dir.path(), &[]).await;
 
     assert_eq!(r.code, 0, "{:#?}", r.events);
+    // Timed at the server, not around the run: the first process a test
+    // binary spawns can take a second to start on macOS.
+    let arrived = fake.arrived.lock().unwrap().clone();
     assert!(
-        started.elapsed() < std::time::Duration::from_millis(2300),
-        "the children ran one after the other: {:?}",
-        started.elapsed()
+        arrived[2] - arrived[1] < std::time::Duration::from_millis(1000),
+        "the second child asked only after the first was answered: {:?}",
+        arrived[2] - arrived[1]
     );
     let requests = fake.requests.lock().unwrap();
     assert_eq!(requests.len(), 4);

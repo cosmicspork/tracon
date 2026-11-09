@@ -101,6 +101,17 @@ async fn exchange(addr: std::net::SocketAddr, request: &str) -> String {
     String::from_utf8_lossy(&buf[..n]).into_owned()
 }
 
+/// Waits for an upstream's accept count to reach `n`, then checks it is
+/// exactly `n`. The proxy answers once the kernel completes the handshake,
+/// which can be before the upstream's accept loop runs (routinely on macOS).
+async fn dialled(count: &Mutex<usize>, n: usize) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while *count.lock().unwrap() < n && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(*count.lock().unwrap(), n, "upstream connections accepted");
+}
+
 fn connect(host: &str, credentials: &str) -> String {
     format!("CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n{credentials}\r\n")
 }
@@ -498,7 +509,7 @@ async fn a_name_is_resolved_once_and_only_what_was_checked_is_dialled() {
     let first = exchange(addr, &request).await;
     assert!(first.starts_with("HTTP/1.1 200"), "{first}");
     assert_eq!(names.lock().unwrap().len(), 1, "asked once");
-    assert_eq!(*accepted.lock().unwrap(), 1);
+    dialled(&accepted, 1).await;
 
     // Rebound: the next connection is checked against its own answer.
     let second = exchange(addr, &request).await;
@@ -514,7 +525,7 @@ async fn a_name_is_resolved_once_and_only_what_was_checked_is_dialled() {
 
     let mixed = exchange(addr, &request).await;
     assert!(mixed.starts_with("HTTP/1.1 200"), "{mixed}");
-    assert_eq!(*accepted.lock().unwrap(), 2);
+    dialled(&accepted, 2).await;
     assert_eq!(names.lock().unwrap().len(), 3, "one lookup per connection");
 
     // The cluster's refusal looks the name up as absolute.
@@ -597,7 +608,7 @@ async fn the_allowlist_proxy_in_a_cluster_refuses_what_the_cluster_holds() {
     ));
     let mixed = exchange(mixed_addr, &plain("api.example.test")).await;
     assert!(mixed.starts_with("HTTP/1.1 200"), "{mixed}");
-    assert_eq!(*accepted.lock().unwrap(), 1);
+    dialled(&accepted, 1).await;
     assert_eq!(names.lock().unwrap().len(), 1, "looked up once");
 
     // Unrefused, a listed private literal is dialled as before.
