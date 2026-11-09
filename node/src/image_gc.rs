@@ -31,7 +31,7 @@
 //! Nothing a container uses (running or stopped, any node's) is removed, and
 //! nothing any remaining image is built on. The classification is pure, over
 //! an image list a provider reads ([`Image`]); [`podman`] reads and removes
-//! Podman's.
+//! Podman's, and [`apple`] `container`'s.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -677,6 +677,256 @@ pub mod podman {
     }
 }
 
+/// Apple's `container` image store. It lists one entry per name, so an image
+/// is every entry with its id (the index digest). It records no parent: a
+/// snapshot or a build there is a flat image of its own, sharing blobs by
+/// content rather than standing on another image, so what an image is built
+/// on is only what its snapshot label names. A Mac's VMs run only arm64, so
+/// an image's size, and what removing it frees, is its arm64 manifests'.
+pub mod apple {
+    use super::*;
+    use crate::provider::apple::{CliError, ContainerCli};
+
+    /// One image, and its arm64 manifests with their sizes: what removing
+    /// it frees is the manifests no image that stays also holds.
+    #[derive(Debug, Clone, Default)]
+    pub struct Listed {
+        pub image: Image,
+        pub manifests: Vec<(String, u64)>,
+    }
+
+    async fn container(cli: &dyn ContainerCli, args: &[&str]) -> Result<String, CliError> {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        cli.run(&args).await
+    }
+
+    pub async fn list(cli: &dyn ContainerCli) -> Result<Vec<Listed>, String> {
+        let images = container(cli, &["image", "list", "--format", "json"])
+            .await
+            .map_err(|error| format!("container image list: {error}"))?;
+        let containers = container(cli, &["list", "--all", "--format", "json"])
+            .await
+            .map_err(|error| format!("container list: {error}"))?;
+        parse(&images, &containers)
+    }
+
+    /// `container image list --format json` and `container list --all
+    /// --format json`.
+    pub fn parse(images: &str, containers: &str) -> Result<Vec<Listed>, String> {
+        let rows = |text: &str, what: &str| -> Result<Vec<serde_json::Value>, String> {
+            match text.trim() {
+                "" => Ok(Vec::new()),
+                text => serde_json::from_str(text).map_err(|e| format!("{what}: {e}")),
+            }
+        };
+        let mut listed: Vec<Listed> = Vec::new();
+        for row in rows(images, "container image list")? {
+            let configuration = &row["configuration"];
+            let digest = configuration["descriptor"]["digest"]
+                .as_str()
+                .unwrap_or_default();
+            let id = row["id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .unwrap_or_else(|| digest.strip_prefix("sha256:").unwrap_or(digest))
+                .to_string();
+            let Some(name) = configuration["name"].as_str().filter(|n| !n.is_empty()) else {
+                continue;
+            };
+            if id.is_empty() {
+                continue;
+            }
+            if let Some(seen) = listed.iter_mut().find(|l| l.image.id == id) {
+                if !seen.image.names.iter().any(|n| n == name) {
+                    seen.image.names.push(name.to_string());
+                }
+                continue;
+            }
+            let variants: Vec<&serde_json::Value> = row["variants"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|v| {
+                    v["platform"]["os"] == "linux"
+                        && v["platform"]["architecture"] == crate::boundary::apple::VM_ARCH
+                })
+                .collect();
+            let manifests: Vec<(String, u64)> = variants
+                .iter()
+                .filter_map(|v| Some((v["digest"].as_str()?.to_string(), v["size"].as_u64()?)))
+                .collect();
+            let mut digests = vec![format!("sha256:{id}")];
+            digests.extend(manifests.iter().map(|(digest, _)| digest.clone()));
+            digests.sort();
+            digests.dedup();
+            let labels = variants
+                .iter()
+                .find_map(|v| v["config"]["config"]["Labels"].as_object())
+                .map(|labels| {
+                    labels
+                        .iter()
+                        .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let created_ms = configuration["creationDate"]
+                .as_str()
+                .or_else(|| {
+                    variants
+                        .iter()
+                        .find_map(|v| v["config"]["created"].as_str())
+                })
+                .and_then(crate::session::exhaustion::rfc3339_ms)
+                .unwrap_or(0);
+            listed.push(Listed {
+                image: Image {
+                    id,
+                    parent: None,
+                    names: vec![name.to_string()],
+                    digests,
+                    labels,
+                    size: manifests.iter().map(|(_, size)| size).sum(),
+                    containers: 0,
+                    created_ms,
+                },
+                manifests,
+            });
+        }
+        for row in rows(containers, "container list")? {
+            let image = &row["configuration"]["image"];
+            let digest = image["descriptor"]["digest"].as_str().unwrap_or_default();
+            let reference = image["reference"].as_str().unwrap_or_default();
+            let used = listed.iter_mut().find(|l| {
+                (!digest.is_empty() && l.image.digests.iter().any(|d| d == digest))
+                    || l.image.names.iter().any(|n| n == reference)
+            });
+            if let Some(used) = used {
+                used.image.containers += 1;
+            }
+        }
+        // A tag first, so a list shows the name a person gave it.
+        for l in &mut listed {
+            l.image.names.sort_by_key(|n| n.contains('@'));
+        }
+        Ok(listed)
+    }
+
+    /// The digest `name` names now, as `sha256:…`.
+    async fn digest_of(cli: &dyn ContainerCli, name: &str) -> Option<String> {
+        let text = container(cli, &["image", "inspect", name]).await.ok()?;
+        let inspected: Vec<serde_json::Value> = serde_json::from_str(&text).ok()?;
+        inspected
+            .first()?
+            .pointer("/configuration/descriptor/digest")?
+            .as_str()
+            .map(str::to_string)
+    }
+
+    /// Remove one image by every name it has. `container` deletes by name
+    /// only, so a tag is checked to still name this image first: a tag that
+    /// moved since the list is left to the image it names now.
+    async fn remove(cli: &dyn ContainerCli, image: &Image) -> Result<(), String> {
+        let id = format!("sha256:{}", image.id);
+        for name in &image.names {
+            if !name.contains('@') {
+                match digest_of(cli, name).await {
+                    Some(digest) if digest == id => {}
+                    Some(_) => return Err(format!("{name} now names another image; left it")),
+                    None => continue,
+                }
+            }
+            container(cli, &["image", "delete", name])
+                .await
+                .map_err(|e| format!("delete {name}: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// List this node's images in `container`'s store and what each is, and
+    /// with `apply`, remove those that go.
+    pub async fn sweep(
+        cli: &dyn ContainerCli,
+        k: &Knowledge,
+        apply: bool,
+    ) -> Result<Vec<Swept>, String> {
+        let listed = list(cli).await?;
+        let images: Vec<Image> = listed.iter().map(|l| l.image.clone()).collect();
+        let mut k = k.clone();
+        // The base is pinned by its arm64 manifest, which a base of another
+        // tag can hold too (the same build released twice): every image
+        // holding it is the pinned base.
+        if let Some(pinned) = k.pinned_base.as_deref() {
+            let digest = pinned
+                .split_once('@')
+                .map_or(pinned, |(_, d)| d)
+                .to_string();
+            for image in images.iter().filter(|i| i.digests.contains(&digest)) {
+                k.kept.push(Kept {
+                    reference: image.id.clone(),
+                    why: "holds the stock base this node pins".into(),
+                    legacy: false,
+                });
+            }
+        }
+        let mut verdicts = classify(&images, &k);
+        // A manifest an image that stays also holds frees nothing.
+        let removing: HashSet<usize> = verdicts
+            .iter()
+            .filter(|v| v.remove)
+            .map(|v| v.index)
+            .collect();
+        let mut staying: HashMap<&str, Vec<usize>> = HashMap::new();
+        for (at, l) in listed.iter().enumerate() {
+            if !removing.contains(&at) {
+                for (digest, _) in &l.manifests {
+                    staying.entry(digest.as_str()).or_default().push(at);
+                }
+            }
+        }
+        for verdict in &mut verdicts {
+            let at = verdict.index;
+            verdict.reclaim = listed[at]
+                .manifests
+                .iter()
+                .filter(|(digest, _)| {
+                    !staying
+                        .get(digest.as_str())
+                        .is_some_and(|holders| holders.iter().any(|h| *h != at))
+                })
+                .map(|(_, size)| size)
+                .sum();
+        }
+        let mut outcome: HashMap<usize, Result<(), String>> = HashMap::new();
+        if apply {
+            // A snapshot before the build its label names.
+            let mut order: Vec<&Verdict> = verdicts.iter().filter(|v| v.remove).collect();
+            order.sort_by_key(|v| {
+                !images[v.index]
+                    .labels
+                    .contains_key(crate::sandbox_images::FROM_LABEL)
+            });
+            for verdict in order {
+                outcome.insert(verdict.index, remove(cli, &images[verdict.index]).await);
+            }
+        }
+        Ok(verdicts
+            .into_iter()
+            .map(|v| {
+                let done = outcome.remove(&v.index);
+                Swept {
+                    name: display_name(&images[v.index]),
+                    class: v.class,
+                    remove: v.remove,
+                    reason: v.reason,
+                    reclaim: v.reclaim,
+                    removed: matches!(done, Some(Ok(()))),
+                    error: done.and_then(Result::err),
+                }
+            })
+            .collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1043,5 +1293,318 @@ mod tests {
         assert_eq!(images[1].parent.as_deref(), Some("aa"));
         assert!(images[1].names.is_empty());
         assert!(podman::parse("").unwrap().is_empty());
+    }
+
+    mod apple_store {
+        use std::sync::Mutex;
+
+        use async_trait::async_trait;
+
+        use super::*;
+        use crate::provider::apple::{CliError, ContainerCli};
+
+        /// One entry of `container image list`: a name, the image it names,
+        /// that image's arm64 manifest and its labels.
+        #[derive(Clone)]
+        struct Entry {
+            name: String,
+            id: String,
+            manifest: String,
+            labels: BTreeMap<String, String>,
+        }
+
+        #[derive(Default)]
+        struct Store {
+            entries: Mutex<Vec<Entry>>,
+            /// The image references containers were made from.
+            containers: Vec<String>,
+            deleted: Mutex<Vec<String>>,
+        }
+
+        const CREATED: &str = "2026-01-01T00:00:00Z";
+
+        fn row(e: &Entry) -> serde_json::Value {
+            let variant = |arch: &str, digest: String, size: u64| {
+                serde_json::json!({
+                    "digest": digest, "size": size,
+                    "platform": {"os": "linux", "architecture": arch},
+                    "config": {"config": {"Labels": e.labels}},
+                })
+            };
+            serde_json::json!({
+                "id": e.id,
+                "configuration": {
+                    "name": e.name,
+                    "creationDate": CREATED,
+                    "descriptor": {"digest": format!("sha256:{}", e.id)},
+                },
+                "variants": [
+                    variant("arm64", e.manifest.clone(), 100),
+                    variant("amd64", format!("{}-amd64", e.manifest), 7),
+                ],
+            })
+        }
+
+        #[async_trait]
+        impl ContainerCli for Store {
+            async fn run(&self, args: &[String]) -> Result<String, CliError> {
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                let entries = self.entries.lock().unwrap().clone();
+                match args.as_slice() {
+                    ["image", "list", "--format", "json"] => {
+                        Ok(serde_json::Value::Array(entries.iter().map(row).collect()).to_string())
+                    }
+                    ["list", "--all", "--format", "json"] => Ok(serde_json::Value::Array(
+                        self.containers
+                            .iter()
+                            .map(|reference| {
+                                serde_json::json!({"configuration": {"image": {
+                                    "reference": reference,
+                                    "descriptor": {"digest": "sha256:unrelated"},
+                                }}})
+                            })
+                            .collect(),
+                    )
+                    .to_string()),
+                    ["image", "inspect", name] => match entries.iter().find(|e| e.name == *name) {
+                        Some(e) => Ok(serde_json::json!([row(e)]).to_string()),
+                        None => Err(CliError::Failed(format!("image not found: {name}"))),
+                    },
+                    ["image", "delete", name] => {
+                        self.entries.lock().unwrap().retain(|e| e.name != *name);
+                        self.deleted.lock().unwrap().push(name.to_string());
+                        Ok(String::new())
+                    }
+                    other => panic!("unexpected container {other:?}"),
+                }
+            }
+        }
+
+        /// An image under its tag and, as `container` keeps a pinned one,
+        /// its digest name.
+        fn pinned(
+            tag: &str,
+            id: &str,
+            manifest: &str,
+            labels: &BTreeMap<String, String>,
+        ) -> [Entry; 2] {
+            let entry = |name: String| Entry {
+                name,
+                id: id.into(),
+                manifest: format!("sha256:{manifest}"),
+                labels: labels.clone(),
+            };
+            [
+                entry(tag.to_string()),
+                entry(format!("{}@sha256:{id}", repository_of(tag))),
+            ]
+        }
+
+        fn store() -> Store {
+            let none = BTreeMap::new();
+            let snapshot = snapshot_labels(&format!("{REPO}@sha256:rcur"));
+            let theirs = {
+                let mut l = ours();
+                l.insert(NODE_LABEL.into(), "node-b".into());
+                l
+            };
+            let mut entries = Vec::new();
+            // 0.45.0 and 0.46.0 are one build: the same arm64 manifest.
+            entries.extend(pinned(&format!("{BASE}:0.45.0"), "i45", "m46", &none));
+            entries.extend(pinned(&format!("{BASE}:0.46.0"), "i46", "m46", &none));
+            entries.extend(pinned(&format!("{BASE}:0.44.0"), "i44", "m44", &none));
+            entries.extend(pinned(&format!("{REPO}:cur"), "rcur", "mrcur", &ours()));
+            entries.extend(pinned(&format!("{REPO}:old"), "rold", "mrold", &ours()));
+            entries.extend(pinned(&format!("{SNAP}:cur"), "scur", "mscur", &snapshot));
+            entries.extend(pinned(&format!("{SNAP}:old"), "sold", "msold", &snapshot));
+            entries.extend(pinned(&format!("{REPO}:used"), "rused", "mrused", &ours()));
+            entries.extend(pinned(
+                &format!("{REPO}:unlabelled"),
+                "runl",
+                "mrunl",
+                &none,
+            ));
+            entries.extend(pinned(
+                &format!("{REPO}:theirs"),
+                "rtheirs",
+                "mrtheirs",
+                &theirs,
+            ));
+            entries.extend(pinned(
+                "docker.io/library/ubuntu:24.04",
+                "ubuntu",
+                "mu",
+                &none,
+            ));
+            Store {
+                entries: Mutex::new(entries),
+                containers: vec![format!("{REPO}@sha256:rused")],
+                deleted: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn knowledge() -> Knowledge {
+            let mut k = super::knowledge();
+            k.now_ms = crate::session::exhaustion::rfc3339_ms(CREATED).unwrap() + 2 * GRACE_MS;
+            // Pinned by its arm64 manifest, as `converge_images` pins it.
+            k.pinned_base = Some(format!("{BASE}@sha256:m46"));
+            k.kept = vec![
+                Kept {
+                    reference: format!("{REPO}@sha256:rcur"),
+                    why: "the current build of app".into(),
+                    legacy: false,
+                },
+                Kept {
+                    reference: format!("{SNAP}@sha256:scur"),
+                    why: "app's current snapshot".into(),
+                    legacy: false,
+                },
+            ];
+            k
+        }
+
+        fn sorted(mut names: Vec<String>) -> Vec<String> {
+            names.sort();
+            names
+        }
+
+        #[test]
+        fn an_image_is_every_name_it_has_and_only_its_arm64_manifests() {
+            let store = store();
+            let images: Vec<_> = store.entries.lock().unwrap().iter().map(row).collect();
+            let containers = serde_json::json!([{"configuration": {"image": {
+                "reference": "elsewhere", "descriptor": {"digest": "sha256:rused"}}}}]);
+            let listed = apple::parse(
+                &serde_json::Value::Array(images).to_string(),
+                &containers.to_string(),
+            )
+            .unwrap();
+            assert_eq!(listed.len(), 11);
+            let base = &listed.iter().find(|l| l.image.id == "i46").unwrap().image;
+            assert_eq!(
+                base.names,
+                [format!("{BASE}:0.46.0"), format!("{BASE}@sha256:i46")],
+                "the tag first"
+            );
+            assert_eq!(base.size, 100, "amd64 is not a Mac's");
+            assert!(base.digests.contains(&"sha256:m46".to_string()));
+            assert!(base.digests.contains(&"sha256:i46".to_string()));
+            assert_eq!(
+                Some(base.created_ms),
+                crate::session::exhaustion::rfc3339_ms(CREATED)
+            );
+            let repo = &listed.iter().find(|l| l.image.id == "rcur").unwrap().image;
+            assert_eq!(
+                repo.labels.get(NODE_LABEL).map(String::as_str),
+                Some("node-a")
+            );
+            let used = &listed.iter().find(|l| l.image.id == "rused").unwrap().image;
+            assert_eq!(used.containers, 1, "by the digest it was made from");
+            assert!(apple::parse("", "").unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_sweep_removes_what_goes_by_every_name_and_nothing_else() {
+            let store = store();
+            let swept = apple::sweep(&store, &knowledge(), false).await.unwrap();
+            let get = |name: String| {
+                swept
+                    .iter()
+                    .find(|s| s.name == name)
+                    .unwrap_or_else(|| panic!("{name} not listed: {swept:#?}"))
+                    .clone()
+            };
+            let going = |swept: &[Swept]| {
+                sorted(
+                    swept
+                        .iter()
+                        .filter(|s| s.remove)
+                        .map(|s| s.name.clone())
+                        .collect(),
+                )
+            };
+            let goes = sorted(vec![
+                format!("{BASE}:0.44.0"),
+                format!("{REPO}:old"),
+                format!("{SNAP}:old"),
+            ]);
+            assert_eq!(going(&swept), goes, "{swept:#?}");
+            // Both tags of the pinned build stay.
+            assert!(get(format!("{BASE}:0.45.0")).reason.contains("pins"));
+            assert!(get(format!("{BASE}:0.46.0")).reason.contains("pins"));
+            assert!(get(format!("{REPO}:used")).reason.contains("container"));
+            assert_eq!(get(format!("{REPO}:unlabelled")).class, Class::Unowned);
+            assert!(!swept
+                .iter()
+                .any(|s| s.name.contains("theirs") || s.name.contains("ubuntu")));
+            assert_eq!(get(format!("{REPO}:old")).reclaim, 100);
+            assert!(store.deleted.lock().unwrap().is_empty(), "a dry run");
+
+            let swept = apple::sweep(&store, &knowledge(), true).await.unwrap();
+            assert!(
+                swept
+                    .iter()
+                    .filter(|s| s.remove)
+                    .all(|s| s.removed && s.error.is_none()),
+                "{swept:#?}"
+            );
+            let every_name = sorted(
+                [
+                    (format!("{BASE}:0.44.0"), "i44"),
+                    (format!("{REPO}:old"), "rold"),
+                    (format!("{SNAP}:old"), "sold"),
+                ]
+                .into_iter()
+                .flat_map(|(tag, id)| {
+                    let digest = format!("{}@sha256:{id}", repository_of(&tag));
+                    [tag, digest]
+                })
+                .collect(),
+            );
+            assert_eq!(sorted(store.deleted.lock().unwrap().clone()), every_name);
+            let left = apple::sweep(&store, &knowledge(), false).await.unwrap();
+            assert!(going(&left).is_empty(), "{left:#?}");
+        }
+
+        #[tokio::test]
+        async fn a_tag_that_moved_since_the_list_is_left_to_its_new_image() {
+            /// Moves the old build's tag to the current build once the sweep
+            /// has listed the store.
+            struct Moving(Store);
+            #[async_trait]
+            impl ContainerCli for Moving {
+                async fn run(&self, args: &[String]) -> Result<String, CliError> {
+                    let out = self.0.run(args).await;
+                    if args[0] == "list" {
+                        for e in self.0.entries.lock().unwrap().iter_mut() {
+                            if e.name == format!("{REPO}:old") {
+                                e.id = "rcur".into();
+                            }
+                        }
+                    }
+                    out
+                }
+            }
+            let store = Moving(store());
+            let swept = apple::sweep(&store, &knowledge(), true).await.unwrap();
+            let old = swept
+                .iter()
+                .find(|s| s.name == format!("{REPO}:old"))
+                .unwrap();
+            assert!(!old.removed, "{old:?}");
+            assert!(
+                old.error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("another image"),
+                "{old:?}"
+            );
+            assert!(!store
+                .0
+                .deleted
+                .lock()
+                .unwrap()
+                .contains(&format!("{REPO}:old")));
+        }
     }
 }

@@ -373,9 +373,9 @@ pub trait Backend: Send + Sync {
     fn preparer(&self) -> Option<crate::sandbox_images::Preparer> {
         None
     }
-    /// Every prepared snapshot of this node's that the runtime holds, pinned,
-    /// for `tracon gc`; its image builder removes one. Podman's are listed
-    /// by `sandbox_images::snapshot_images`.
+    /// Every prepared snapshot of this node's that the runtime holds, pinned;
+    /// its image builder removes one. Podman's are listed by
+    /// `sandbox_images::snapshot_images`.
     async fn prepared_snapshots(&self) -> Vec<String> {
         Vec::new()
     }

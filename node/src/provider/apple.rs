@@ -131,6 +131,97 @@ impl ContainerCli for SystemCli {
     }
 }
 
+/// Who is using `container`'s builder VM. `container build` starts BuildKit's
+/// builder (two CPUs and 2 GB, held for good) and leaves it running; the
+/// builds that started it stop it when the last of them is over. A builder
+/// that was running before them, someone else's, is left as it was.
+#[derive(Default)]
+pub struct BuilderUse(std::sync::Mutex<BuilderState>);
+
+#[derive(Default)]
+struct BuilderState {
+    builds: usize,
+    stop_after: bool,
+}
+
+/// Every build this process runs; a test holds a use of its own.
+pub static BUILDER: BuilderUse = BuilderUse(std::sync::Mutex::new(BuilderState {
+    builds: 0,
+    stop_after: false,
+}));
+
+/// One build's share of the builder: a build dropped before it finishes
+/// leaves the builder to the next one to finish.
+struct BuilderLease<'a>(&'a BuilderUse);
+
+impl Drop for BuilderLease<'_> {
+    fn drop(&mut self) {
+        let mut state = self.0 .0.lock().unwrap_or_else(|e| e.into_inner());
+        state.builds = state.builds.saturating_sub(1);
+    }
+}
+
+impl BuilderUse {
+    /// Run `build`, a `container build`, and stop the builder after it when
+    /// it is the last build and the builder was stopped when the first began.
+    pub async fn building<T>(
+        &self,
+        cli: &dyn ContainerCli,
+        build: impl std::future::Future<Output = T>,
+    ) -> T {
+        // A build dropped before it finished (its deadline) leaves
+        // `stop_after` to the next build, which stops what it started.
+        let ask = {
+            let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            state.builds += 1;
+            state.builds == 1 && !state.stop_after
+        };
+        let lease = BuilderLease(self);
+        if ask && !builder_running(cli).await {
+            self.0.lock().unwrap_or_else(|e| e.into_inner()).stop_after = true;
+        }
+        let out = build.await;
+        let stop = {
+            let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            let last = state.builds == 1;
+            let stop = last && std::mem::take(&mut state.stop_after);
+            drop(state);
+            stop
+        };
+        drop(lease);
+        if stop {
+            let args = ["builder".to_string(), "stop".to_string()];
+            match cli.run(&args).await {
+                Ok(_) => tracing::debug!("stopped container's builder after the build"),
+                Err(error) => tracing::warn!(%error, "could not stop container's builder"),
+            }
+        }
+        out
+    }
+}
+
+/// Whether `container`'s builder VM is running. One that cannot be read is
+/// taken as running, so it is never stopped on a guess.
+async fn builder_running(cli: &dyn ContainerCli) -> bool {
+    let args: Vec<String> = ["builder", "status", "--format", "json"]
+        .iter()
+        .map(|a| a.to_string())
+        .collect();
+    match cli.run(&args).await {
+        Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(status) => status
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|builder| builder["status"]["state"] != "stopped"),
+            Err(_) => true,
+        },
+        // No builder yet: the build makes one.
+        Err(CliError::Failed(text)) if text.contains("not found") => false,
+        Err(_) => true,
+    }
+}
+
 /// What the provider is configured with.
 #[derive(Debug, Clone, Default)]
 pub struct AppleOptions {
@@ -299,8 +390,11 @@ impl AppleProvider {
             reference,
             &dir,
         ];
-        let build = self.cli(&args);
-        match tokio::time::timeout(SNAPSHOT_BUILD_WITHIN, build).await {
+        let build = BUILDER.building(
+            self.cli.as_ref(),
+            tokio::time::timeout(SNAPSHOT_BUILD_WITHIN, self.cli(&args)),
+        );
+        match build.await {
             Ok(built) => {
                 built.map_err(|e| ProviderError::Failed(format!("build {reference}: {e}")))?
             }
@@ -1016,6 +1110,7 @@ mod tests {
                         .push(std::fs::read_to_string(&args[at + 1]).unwrap());
                     Ok("#4 DONE 0.1s\n".into())
                 }
+                "builder" => Ok(builder_status(args, "running")),
                 "list" => Ok(serde_json::json!([
                     {"configuration": {"labels": {"tracon.provider": "apple"}}, "status": {"state": "running"}},
                     {"configuration": {"labels": {"tracon.provider": "apple"}}, "status": {"state": "stopped"}},
@@ -1025,6 +1120,90 @@ mod tests {
                 other => panic!("unexpected container {other}"),
             }
         }
+    }
+
+    /// `container builder status --format json` with the builder `state`, or
+    /// nothing for `builder stop`.
+    fn builder_status(args: &[String], state: &str) -> String {
+        match args[1].as_str() {
+            "status" => {
+                serde_json::json!([{"id": "buildkit", "status": {"state": state}}]).to_string()
+            }
+            "stop" => String::new(),
+            other => panic!("unexpected container builder {other}"),
+        }
+    }
+
+    /// A builder whose state the builds change, as `container`'s does.
+    #[derive(Default)]
+    struct Builder {
+        running: Mutex<bool>,
+        calls: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl ContainerCli for Builder {
+        async fn run(&self, args: &[String]) -> Result<String, CliError> {
+            self.calls.lock().unwrap().push(args[..2].join(" "));
+            let state = match *self.running.lock().unwrap() {
+                true => "running",
+                false => "stopped",
+            };
+            if args[1] == "stop" {
+                *self.running.lock().unwrap() = false;
+            }
+            Ok(builder_status(args, state))
+        }
+    }
+
+    #[tokio::test]
+    async fn the_builds_that_started_the_builder_stop_it_and_leave_a_running_one() {
+        let builder = Builder::default();
+        let using = BuilderUse::default();
+        // Two builds at once: the builder stops after the second, not the
+        // first.
+        let (first_done, first_go) = tokio::sync::oneshot::channel::<()>();
+        let build = |wait: Option<tokio::sync::oneshot::Receiver<()>>| async {
+            *builder.running.lock().unwrap() = true;
+            if let Some(wait) = wait {
+                wait.await.unwrap();
+            }
+        };
+        let (second, ()) = tokio::join!(using.building(&builder, build(Some(first_go))), async {
+            using.building(&builder, build(None)).await;
+            assert!(
+                !builder
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .contains(&"builder stop".into()),
+                "another build is still running"
+            );
+            first_done.send(()).unwrap();
+        });
+        let _: () = second;
+        let calls = builder.calls.lock().unwrap().clone();
+        assert_eq!(calls, ["builder status", "builder stop"], "{calls:?}");
+        assert!(!*builder.running.lock().unwrap());
+
+        // Running before: someone else's, left running.
+        *builder.running.lock().unwrap() = true;
+        builder.calls.lock().unwrap().clear();
+        using.building(&builder, build(None)).await;
+        assert_eq!(*builder.calls.lock().unwrap(), ["builder status"]);
+        assert!(*builder.running.lock().unwrap());
+
+        // A build dropped before it finished leaves no count behind.
+        *builder.running.lock().unwrap() = false;
+        builder.calls.lock().unwrap().clear();
+        let (_never, wait) = tokio::sync::oneshot::channel::<()>();
+        let dropped = using.building(&builder, build(Some(wait)));
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(20), dropped).await;
+        using.building(&builder, build(None)).await;
+        // The next build stops the builder the dropped one started.
+        let calls = builder.calls.lock().unwrap().clone();
+        assert_eq!(calls, ["builder status", "builder stop"], "{calls:?}");
+        assert!(!*builder.running.lock().unwrap());
     }
 
     struct Setup {
