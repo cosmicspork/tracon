@@ -222,6 +222,34 @@ async fn builder_running(cli: &dyn ContainerCli) -> bool {
     }
 }
 
+/// Run as root in a sandbox before it is committed (see `densify`): every
+/// regular file on the root filesystem that holds fewer blocks than its size
+/// is copied densely over itself, keeping owner, mode and times. `-xdev` keeps
+/// to what a commit takes, so mounts (the bundle, a cache volume) are left
+/// alone. Paths travel NUL-separated; only the two leading numbers are split
+/// off, so any name survives. A hard link becomes a file of its own.
+pub(crate) const DENSIFY: &str = r#"n=0 failed=0
+while IFS= read -r -d '' line; do
+  blocks=${line%% *}; rest=${line#* }; size=${rest%% *}; path=${rest#* }
+  [ "$((blocks * 512))" -lt "$size" ] || continue
+  tmp="$path.tracon-dense"
+  if cp -p --sparse=never -- "$path" "$tmp" && mv -f -- "$tmp" "$path"; then
+    n=$((n + 1))
+  else
+    rm -f -- "$tmp"; failed=$((failed + 1))
+  fi
+done < <(find / -xdev -type f -size +4k -printf '%b %s %p\0' 2>/dev/null)
+echo "densified $n failed $failed""#;
+
+/// `DENSIFY`'s last word: files rewritten and files that could not be.
+fn parse_densified(out: &str) -> Option<(u64, u64)> {
+    let line = out.lines().rev().find(|l| l.starts_with("densified "))?;
+    match line.split_whitespace().collect::<Vec<_>>().as_slice() {
+        ["densified", n, "failed", f] => Some((n.parse().ok()?, f.parse().ok()?)),
+        _ => None,
+    }
+}
+
 /// What the provider is configured with.
 #[derive(Debug, Clone, Default)]
 pub struct AppleOptions {
@@ -287,6 +315,45 @@ impl AppleProvider {
     async fn cli(&self, args: &[&str]) -> Result<String, CliError> {
         let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
         self.cli.run(&args).await
+    }
+
+    /// Rewrites the sandbox's sparse files densely, just before a commit.
+    ///
+    /// `container commit` (1.6.1) drops a file's holes rather than keeping
+    /// them: the file keeps its size but every byte after a hole moves up, so
+    /// a linker's or `install`'s sparse output (PECL's `oci8.so`) comes back
+    /// corrupt from the image. That is apple/container's bug; remove this
+    /// once a release keeps holes. A failure is logged, not fatal: the
+    /// commit is what it was before this pass.
+    async fn densify(&self, handle: &Handle) {
+        let args = [
+            "exec",
+            "--user",
+            "0:0",
+            &handle.0,
+            "/bin/bash",
+            "-c",
+            DENSIFY,
+        ];
+        match self.cli(&args).await {
+            Ok(out) => match parse_densified(&out) {
+                Some((0, 0)) => {}
+                Some((rewrote, 0)) => {
+                    tracing::info!(sandbox = %handle.0, rewrote, "rewrote sparse files densely before a commit")
+                }
+                Some((rewrote, failed)) => tracing::warn!(
+                    sandbox = %handle.0, rewrote, failed,
+                    "some sparse files could not be rewritten before a commit; they may be corrupt in the image"
+                ),
+                None => {
+                    tracing::warn!(sandbox = %handle.0, output = %out.trim(), "sparse-file pass before a commit said nothing usable")
+                }
+            },
+            Err(error) => tracing::warn!(
+                sandbox = %handle.0, %error,
+                "could not rewrite sparse files before a commit; any in the sandbox may be corrupt in the image"
+            ),
+        }
     }
 
     async fn inspect(&self, handle: &Handle) -> Result<Inspected, ProviderError> {
@@ -859,6 +926,7 @@ impl SandboxProvider for AppleProvider {
     }
 
     async fn snapshot(&self, handle: &Handle) -> Result<SnapshotId, ProviderError> {
+        self.densify(handle).await;
         let reference = format!(
             "tracon-snapshot/{}:{}",
             handle.0,
@@ -890,6 +958,7 @@ impl SandboxProvider for AppleProvider {
             .and_then(|rest| rest.strip_prefix(':'))
             .unwrap_or("latest");
         let committed = format!("{name}-commit:{tag}");
+        self.densify(handle).await;
         self.cli(&["commit", &handle.0, &committed])
             .await
             .map_err(|e| ProviderError::Failed(format!("commit {}: {e}", handle.0)))?;
@@ -1024,6 +1093,8 @@ mod tests {
         inspect: Arc<Mutex<Option<String>>>,
         env_seen: Arc<Mutex<Option<String>>>,
         fail_run: bool,
+        /// `container exec` fails, as it does for a sandbox that is not running.
+        fail_exec: bool,
         /// The Containerfile each build was given.
         built: Arc<Mutex<Vec<String>>>,
         /// Images the store does not hold.
@@ -1094,6 +1165,10 @@ mod tests {
                 },
                 "delete" => Err(CliError::Failed("Error: container not found: x".into())),
                 "commit" => Ok(String::new()),
+                "exec" => match self.fail_exec {
+                    true => Err(CliError::Failed("Error: container is not running".into())),
+                    false => Ok("densified 1 failed 0\n".into()),
+                },
                 "image" => match args[1].as_str() {
                     "inspect" if self.missing.lock().unwrap().contains(&args[2]) => Err(
                         CliError::Failed(format!("Error: image not found: {}", args[2])),
@@ -1687,11 +1762,21 @@ mod tests {
         );
         let calls = s.fake.calls.lock().unwrap().clone();
         let has = |call: &[&str]| calls.iter().any(|c| c == call);
-        assert!(has(&[
-            "commit",
+        let at = |call: &[&str]| calls.iter().position(|c| c == call).unwrap();
+        let densify = [
+            "exec",
+            "--user",
+            "0:0",
             "tracon-w-1",
-            "localhost/snap-app-commit:k1"
-        ]));
+            "/bin/bash",
+            "-c",
+            DENSIFY,
+        ];
+        let commit = ["commit", "tracon-w-1", "localhost/snap-app-commit:k1"];
+        assert!(
+            at(&densify) < at(&commit),
+            "sparse files are rewritten before the commit"
+        );
         assert!(has(&[
             "image",
             "tag",
@@ -1725,12 +1810,111 @@ mod tests {
             .unwrap();
         assert_ne!(child, parent);
         let calls = s.fake.calls.lock().unwrap().clone();
-        assert_eq!(calls[0], ["commit", "tracon-parent", snapshot.0.as_str()]);
-        let run = calls[2].join(" ");
+        assert_eq!(
+            calls[0],
+            [
+                "exec",
+                "--user",
+                "0:0",
+                "tracon-parent",
+                "/bin/bash",
+                "-c",
+                DENSIFY
+            ]
+        );
+        assert_eq!(calls[1], ["commit", "tracon-parent", snapshot.0.as_str()]);
+        let run = calls[3].join(" ");
         assert!(
             run.ends_with(&format!("--entrypoint {SANDBOX_BIN} {}", snapshot.0)),
             "{run}"
         );
         assert!(run.contains("target=/opt/tracon,readonly"), "{run}");
+    }
+
+    #[test]
+    fn the_sparse_pass_reports_what_it_rewrote() {
+        assert_eq!(parse_densified("densified 3 failed 0\n"), Some((3, 0)));
+        assert_eq!(parse_densified("noise\ndensified 0 failed 2"), Some((0, 2)));
+        assert_eq!(parse_densified(""), None);
+        assert_eq!(parse_densified("densified x failed 0"), None);
+    }
+
+    #[test]
+    fn the_sparse_pass_keeps_to_the_root_filesystem_and_any_name() {
+        assert!(DENSIFY.contains("find / -xdev -type f"));
+        assert!(DENSIFY.contains("\\0'"), "paths travel NUL-separated");
+        assert!(DENSIFY.contains("read -r -d ''"));
+        assert!(DENSIFY.contains("cp -p --sparse=never --"));
+        assert!(DENSIFY.contains("mv -f --"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_sparse_pass_still_commits() {
+        let s = setup(Fake {
+            fail_exec: true,
+            ..Fake::default()
+        });
+        let snapshot = s
+            .provider
+            .snapshot(&Handle("tracon-p".into()))
+            .await
+            .unwrap();
+        let calls = s.fake.calls.lock().unwrap().clone();
+        assert_eq!(calls[0][0], "exec");
+        assert_eq!(calls[1], ["commit", "tracon-p", snapshot.0.as_str()]);
+    }
+
+    /// Against a real `container`: a sparse file written in a running
+    /// sandbox comes back byte for byte from its snapshot, where a bare
+    /// `container commit` 1.6.1 shifts what follows the hole.
+    #[tokio::test]
+    #[ignore = "needs Apple's container and the release's sandbox base"]
+    async fn a_sparse_file_survives_a_snapshot() {
+        let cli = SystemCli::default();
+        let run = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            let cli = &cli;
+            async move { cli.run(&args).await }
+        };
+        let base = crate::config::Sandbox::default().base_image_ref();
+        let id = uuid::Uuid::now_v7().simple().to_string();
+        let name = format!("tracon-sparse-e2e-{}", &id[id.len() - 8..]);
+        run(&[
+            "run",
+            "-d",
+            "--name",
+            &name,
+            "--user",
+            "0:0",
+            "--entrypoint",
+            "sleep",
+            &base,
+            "infinity",
+        ])
+        .await
+        .unwrap();
+        let write = "head -c 100000 /dev/urandom > /tmp/a && head -c 65536 /dev/zero >> /tmp/a \
+             && head -c 100000 /dev/urandom >> /tmp/a && cp --sparse=always /tmp/a '/opt/sparse file' \
+             && [ \"$(( $(stat -c %b '/opt/sparse file') * 512 ))\" -lt 265536 ] \
+             && sha256sum < /tmp/a";
+        let want = run(&["exec", &name, "/bin/sh", "-c", write]).await;
+        let provider =
+            AppleProvider::with_cli(AppleOptions::default(), Box::new(SystemCli::default()));
+        let snapshot = provider.snapshot(&Handle(name.clone())).await;
+        let _ = run(&["delete", "--force", &name]).await;
+        let snapshot = snapshot.unwrap();
+        let got = run(&[
+            "run",
+            "--rm",
+            "--entrypoint",
+            "/bin/sh",
+            &snapshot.0,
+            "-c",
+            "sha256sum < '/opt/sparse file'",
+        ])
+        .await;
+        let _ = run(&["image", "delete", &snapshot.0]).await;
+        let want = want.expect("the sandbox wrote a sparse file");
+        assert_eq!(got.unwrap().trim(), want.trim());
     }
 }
