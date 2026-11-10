@@ -501,7 +501,8 @@ checks = ["just check"]
   base pinned by digest when the node starts: the digest of the host architecture's own
   manifest, not the release's multi-platform index, so a release that ships the same base
   image keeps every image and snapshot keyed on it. The node writes the Containerfile itself
-  (`FROM` the base, the steps, then back to user 65532, `HOME=/home/harness`, `/work`)
+  (`FROM` the base, the steps as root with `HOME=/root`, so nothing they cache lands in the
+  harness's home, then back to user 65532, `HOME=/home/harness`, `/work`)
   and builds one image per repository: no build context and no layer over it. The image
   is keyed on the base's digest, the steps and the egress, so a new base, an edited step
   or a host you add rebuilds it; a build that failed is not retried until one of those
