@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use super::listener::DoListener;
 use super::templates::{Source, TemplateState, Templates};
-use super::{upkeep, ClientSource, DoProvider, Options, Owner, ServerName, Settings};
+use super::{upkeep, ClientSource, DoProvider, HubRelay, Options, Owner, Settings};
 use crate::config::Config;
 use crate::provider::requirements::DoMode;
 use crate::provider::{Candidate, ProviderKind, Requirements, SandboxProvider as _};
@@ -95,7 +95,10 @@ impl DoRuntime {
             .await
             .map_err(|e| format!("digitalocean.listen {}: {e}", settings.listen))?;
         let client = client_source(settings.clone(), broker, node_id.to_string());
-        let server_name: ServerName = Arc::new(crate::mesh::sandbox_relay::current_host);
+        let relay = HubRelay {
+            host: Arc::new(crate::mesh::sandbox_relay::current_host),
+            hub_url: cfg.mesh.hub_url.clone(),
+        };
         let source = match settings.image.is_empty() {
             false => Source::Given(settings.image.clone()),
             true => Source::Built {
@@ -112,7 +115,7 @@ impl DoRuntime {
             Owner::new(crate::config::resource_prefix(), node_id),
             cfg.boundary.gateway_container.clone(),
             listener,
-            server_name,
+            relay,
         )?;
         let _ = RUNTIME.set(runtime.clone());
         tokio::spawn(runtime.clone().upkeep());
@@ -131,8 +134,9 @@ impl DoRuntime {
         owner: Owner,
         gateway_host: String,
         listener: Arc<DoListener>,
-        server_name: ServerName,
+        relay: HubRelay,
     ) -> Result<Arc<Self>, String> {
+        let reach = settings.reach(relay.hub_url.as_deref())?;
         let templates = Arc::new(Templates::new(
             source,
             &settings.base_template,
@@ -144,12 +148,13 @@ impl DoRuntime {
                 settings,
                 owner,
                 gateway_host,
+                reach,
                 ready_within: READY_WITHIN,
                 poll: Duration::from_secs(1),
             },
             listener,
             templates,
-            server_name,
+            relay.host,
         );
         Ok(Arc::new(DoRuntime {
             provider: Arc::new(provider),

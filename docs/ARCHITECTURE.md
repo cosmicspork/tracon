@@ -1483,19 +1483,47 @@ search meaningfully. The index is derived state — delete it and it rebuilds.
 
 ### Sandbox relay
 
-A sandbox on a remote provider can dial only a public, allowlisted address, and a
-laptop node has none. When the hub runs a relay listener (`TRACON_HUB_RELAY_ADDR`,
-443 behind a public address in production) and a node turns on
-`[mesh.sandbox_relay]`, the sandbox dials the hub instead, naming the node in SNI as
-`<label>.<domain>`: `label` is the first 32 hex characters of the node id (a whole
-id is longer than a DNS label), derived rather than chosen so no member can register
-another's name, and `domain` is `TRACON_HUB_RELAY_DOMAIN`, under a wildcard record
-pointing at the hub. The hub reads the ClientHello only as far as that name, then
-forwards every byte it read, unchanged, onto a WebSocket the node dialled out to it
-for that one connection, answering an `open` on the signed listen stream the node
-holds (`GET /v0/relay/listen`). The node bridges the WebSocket to its local sandbox
-listener. TLS is the sandbox's to the node, pinned to the node's certificate; the hub
-holds no key for it, so it relays ciphertext it cannot read or answer.
+A sandbox on a remote provider can dial only what its egress allowlist admits, and a
+laptop node has no public address at all. When the hub runs the relay
+(`TRACON_HUB_RELAY_DOMAIN`) and a node turns on `[mesh.sandbox_relay]`, the sandbox
+dials the hub instead, naming the node in SNI as `<label>.<domain>`: `label` is the
+first 32 hex characters of the node id (a whole id is longer than a DNS label),
+derived rather than chosen so no member can register another's name. The hub reads
+the ClientHello only as far as that name, then forwards every byte it read, unchanged,
+onto a WebSocket the node dialled out to it for that one connection, answering an
+`open` on the signed listen stream the node holds (`GET /v0/relay/listen`). The node
+bridges the WebSocket to its local sandbox listener. TLS is the sandbox's to the node,
+pinned to the node's certificate, and the first thing inside it is the run's one-time
+token; the hub holds no key for it, so it relays ciphertext it cannot read or answer.
+
+The sandbox reaches the hub by one of two carriers, which differ only outside that
+TLS:
+
+- **The hub's own URL** (the default). The sandbox opens a WebSocket to
+  `wss://<hub>/v0/relay/connect`, unauthenticated as a sandbox holds no member key,
+  and sends its TLS as binary messages; an empty message is a half-close. This works
+  wherever the hub's HTTPS does, including behind a proxy that terminates TLS and
+  passes only HTTP and WebSockets (a Cloudflare tunnel). The relay domain is then a
+  routing name only and needs no DNS record. On DigitalOcean the sandbox goes out
+  through the runtime's HTTP proxy (`HTTPS_PROXY`, `CONNECT`), and the egress
+  allowlist names the hub's host (`allow_hosts`); that proxy refuses `CONNECT` to
+  anything else and direct connections go nowhere.
+- **The relay listener** (`TRACON_HUB_RELAY_ADDR`): raw TLS to 443 on a public
+  address, with a wildcard record for the domain pointing at it. It needs a stable
+  address and its own TCP port (a load balancer), and cannot sit behind a proxy that
+  terminates TLS, but it is the route for a provider whose egress admits only
+  addresses or ranges.
+
+What the hub's-URL carrier cannot promise, stated plainly: DigitalOcean's proxy
+checks only the host name in `CONNECT`. A hub behind a shared front such as
+Cloudflare shares its addresses with every other site on that front, so a sandbox
+allowed to reach the hub can send TLS naming any of those sites through the same
+tunnel (domain fronting). That is a way out for data, not a way in: anything reaching
+the node still has to present the node's pinned certificate and the run's one-time
+token. DigitalOcean's resolver also answers any name, so names already carry data
+out regardless (`dns: provider-open`). For that reason a DigitalOcean sandbox reached
+this way reports its route as `unverified`, and work that requires `node-only` is not
+placed there.
 
 The mesh's own connection is signed requests and an SSE stream of pokes, which
 cannot carry a byte stream, so each relayed connection is its own dial-back rather
@@ -1503,7 +1531,8 @@ than a stream multiplexed inside one: no framing of our own, and each connection
 keeps TCP's flow control instead of sharing one window across sandboxes. Only a
 node member holding the listen stream is a target; a name nobody serves, a hello
 without SNI, a node at its stream limit (`TRACON_HUB_RELAY_MAX_STREAMS`, 16), or one
-that does not dial back in 15 seconds is closed without a byte written.
+that does not dial back in 15 seconds is closed without a byte written (on the
+WebSocket carrier, a close frame and nothing else).
 
 ### Mesh frames
 

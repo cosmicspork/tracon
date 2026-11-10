@@ -66,8 +66,9 @@
 //!
 //! - [`protocol`]: the wire types both sides share.
 //! - [`tls`]: the node's identity, the pin, and both TLS configurations.
-//! - [`carrier`]: TCP or unix socket, and the SELinux socket label a unix
-//!   listener needs to be reachable from a confined container.
+//! - [`carrier`]: TCP, a unix socket, or a WebSocket to the hub's relay
+//!   through an HTTP proxy, and the SELinux socket label a unix listener
+//!   needs to be reachable from a confined container.
 //! - [`files`]: tar packing (with the checkout exclusions) and validated
 //!   unpacking.
 //! - [`node`]: the node's API — [`node::SandboxServer`] and

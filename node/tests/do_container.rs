@@ -25,7 +25,7 @@ use tracon::config::{Config, HarnessListen};
 use tracon::provider::digitalocean::listener::DoListener;
 use tracon::provider::digitalocean::runtime::DoRuntime;
 use tracon::provider::digitalocean::templates::{Source, TemplateState};
-use tracon::provider::digitalocean::{images, ClientSource, Owner, Settings};
+use tracon::provider::digitalocean::{images, ClientSource, HubRelay, Owner, Settings};
 use tracon::provider::Requirements;
 use tracon::runner::sandbox_files::FilesStore;
 use tracon::runner::{Mount, RunnerCommand};
@@ -142,7 +142,7 @@ async fn the_template_image_runs_a_session_as_a_digitalocean_sandbox_would() {
         Owner::new("spike-p8", "abcd1234"),
         "tracon-gw".into(),
         listener.clone(),
-        Arc::new(|| None),
+        HubRelay::none(),
     )
     .unwrap();
     while !matches!(

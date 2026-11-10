@@ -1,5 +1,9 @@
-//! The sandbox relay: a TLS listener the hub does not terminate. It reads a
-//! connection's ClientHello only far enough to learn the server name, maps
+//! The sandbox relay: TLS the hub does not terminate. A sandbox reaches it two
+//! ways: a TCP connection to the relay listener (`TRACON_HUB_RELAY_ADDR`), or
+//! a WebSocket to [`proto::relay::CONNECT_PATH`] on the hub's own URL, which
+//! works behind a proxy that terminates TLS and passes only HTTP; that
+//! carries the same bytes in binary messages ([`ws_bytes`]). Either way the
+//! relay reads the ClientHello only far enough to learn the server name, maps
 //! `<label>.<domain>` to the node that registered that label, and splices the
 //! raw bytes, ClientHello included, onto a WebSocket that node dialled out to
 //! the hub for this one connection. The hub holds no certificate or key for
@@ -10,9 +14,11 @@
 //! Only a node that holds an authenticated `@mesh` membership can register,
 //! and only under the label derived from its own id. Anything else — a name
 //! nobody serves, no ClientHello, a node over its stream limit, a node that
-//! does not dial back in time — is closed without a byte written.
+//! does not dial back in time — is closed without a byte written (on the
+//! WebSocket carrier, nothing but a close).
 
 pub mod sni;
+pub mod ws_bytes;
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -32,8 +38,8 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use rand_core::{OsRng, RngCore};
 use serde_json::{json, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::Stream;
@@ -74,6 +80,10 @@ impl RelayConfig {
 const OFFER_BUFFER: usize = 64;
 /// One read from the client and one WebSocket message toward the node.
 const CHUNK: usize = 64 * 1024;
+/// The largest message a sandbox's WebSocket may send: twice what a sandbox
+/// sends, and the bound on what an unauthenticated one can make the hub
+/// buffer in one message before its ClientHello is read.
+const MAX_CLIENT_MESSAGE: usize = 2 * proto::relay::MAX_MESSAGE;
 
 struct Registration {
     node: [u8; 32],
@@ -215,10 +225,10 @@ impl SandboxRelay {
     pub async fn serve(self: Arc<Self>, listener: TcpListener) {
         loop {
             match listener.accept().await {
-                Ok((conn, peer)) => {
+                Ok((mut conn, peer)) => {
                     let relay = self.clone();
                     tokio::spawn(async move {
-                        if let Err(why) = relay.handle(conn).await {
+                        if let Err(why) = relay.handle(&mut conn).await {
                             tracing::debug!(%peer, why, "sandbox relay connection closed unanswered");
                         }
                     });
@@ -231,13 +241,19 @@ impl SandboxRelay {
         }
     }
 
-    async fn handle(self: Arc<Self>, mut conn: TcpStream) -> Result<(), &'static str> {
+    /// Route one sandbox connection, whichever carrier brought it, and
+    /// splice it to its node until it ends. An `Err` is a connection refused
+    /// before any byte of it was answered.
+    async fn handle<C>(self: Arc<Self>, conn: &mut C) -> Result<(), &'static str>
+    where
+        C: AsyncRead + AsyncWrite + Unpin + Send,
+    {
         let handshake = self
             .handshakes
             .clone()
             .try_acquire_owned()
             .map_err(|_| "too many connections in handshake")?;
-        let (head, host) = tokio::time::timeout(self.cfg.hello_timeout, read_hello(&mut conn))
+        let (head, host) = tokio::time::timeout(self.cfg.hello_timeout, read_hello(conn))
             .await
             .map_err(|_| "no ClientHello in time")??;
         let (node, label, offers) = self.route(&host).ok_or("no node serves that name")?;
@@ -275,7 +291,7 @@ impl SandboxRelay {
 
 /// Read until the bytes hold a whole ClientHello. Returns every byte read,
 /// to forward unchanged, and the server name.
-async fn read_hello(conn: &mut TcpStream) -> Result<(Vec<u8>, String), &'static str> {
+async fn read_hello<C: AsyncRead + Unpin>(conn: &mut C) -> Result<(Vec<u8>, String), &'static str> {
     let mut buf = Vec::with_capacity(2048);
     let mut chunk = [0u8; 4096];
     loop {
@@ -294,9 +310,12 @@ async fn read_hello(conn: &mut TcpStream) -> Result<(Vec<u8>, String), &'static 
 
 /// Copy bytes both ways until both directions end or either side aborts.
 /// Nothing here looks at what it copies.
-async fn splice(conn: TcpStream, head: Vec<u8>, socket: WebSocket) {
+async fn splice<C>(conn: &mut C, head: Vec<u8>, socket: WebSocket)
+where
+    C: AsyncRead + AsyncWrite + Unpin + Send,
+{
     let (mut ws_tx, mut ws_rx) = socket.split();
-    let (mut rd, mut wr) = conn.into_split();
+    let (mut rd, mut wr) = tokio::io::split(conn);
     let up = async {
         ws_tx
             .send(Message::Binary(Bytes::from(head)))
@@ -320,7 +339,11 @@ async fn splice(conn: TcpStream, head: Vec<u8>, socket: WebSocket) {
                     let _ = wr.shutdown().await;
                     return Ok(());
                 }
-                Message::Binary(b) => wr.write_all(&b).await.map_err(|_| ())?,
+                Message::Binary(b) => {
+                    wr.write_all(&b).await.map_err(|_| ())?;
+                    // A WebSocket client's bytes leave only on a flush.
+                    wr.flush().await.map_err(|_| ())?;
+                }
                 Message::Close(_) => return Err(()),
                 _ => {}
             }
@@ -333,6 +356,24 @@ async fn splice(conn: TcpStream, head: Vec<u8>, socket: WebSocket) {
 }
 
 // ------------------------------------------------------------------ routes
+
+/// `GET /v0/relay/connect`: a sandbox's WebSocket, unauthenticated as the
+/// relay listener is. It is routed and refused exactly as a TCP connection
+/// is; a refusal is a close and nothing else.
+pub async fn connect(State(s): State<AppState>, ws: WebSocketUpgrade) -> Response {
+    let Some(relay) = s.relay.clone() else {
+        return err(StatusCode::NOT_FOUND, "this hub has no sandbox relay").into_response();
+    };
+    ws.max_message_size(MAX_CLIENT_MESSAGE)
+        .max_frame_size(MAX_CLIENT_MESSAGE)
+        .on_upgrade(move |socket| async move {
+            let mut conn = ws_bytes::WsBytes::new(socket);
+            if let Err(why) = relay.handle(&mut conn).await {
+                tracing::debug!(why, "sandbox relay WebSocket closed unanswered");
+            }
+            conn.close().await;
+        })
+}
 
 fn err(status: StatusCode, msg: &str) -> (StatusCode, Json<Value>) {
     (status, Json(json!({"error": msg})))
@@ -431,6 +472,208 @@ mod tests {
         assert!(relay.take_pending("id", &b).is_none());
         assert!(relay.take_pending("id", &a).is_some());
         assert!(relay.take_pending("id", &a).is_none());
+    }
+
+    // ------------------------------------------- the WebSocket carrier
+
+    use proto::keys::Identity;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    type Client = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    const WAIT: Duration = Duration::from_secs(10);
+
+    fn node_key(id: &Identity) -> [u8; 32] {
+        hex::decode(id.node_id()).unwrap().try_into().unwrap()
+    }
+
+    /// The hub's router on a loopback port, with `relay`.
+    async fn serve_hub(relay: &Arc<SandboxRelay>) -> std::net::SocketAddr {
+        let mut state = crate::state_for(
+            Arc::new(crate::store::MemoryFrames::new()),
+            relay.members.clone(),
+            crate::HubConfig::default(),
+            Arc::new(crate::pokes::PokeHub::new()),
+            None,
+        );
+        state.relay = Some(relay.clone());
+        let app = crate::app_with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        addr
+    }
+
+    /// A node that dials back for every offer and plays a TLS server that
+    /// echoes each message, answers its client's half-close with `bye` and
+    /// one of its own, and records what it got.
+    fn fake_node(
+        hub: std::net::SocketAddr,
+        id: Identity,
+        mut offers: mpsc::Receiver<String>,
+    ) -> Arc<Mutex<Vec<u8>>> {
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let seen = got.clone();
+        let id = Arc::new(id);
+        tokio::spawn(async move {
+            while let Some(offer) = offers.recv().await {
+                let (id, seen) = (id.clone(), seen.clone());
+                tokio::spawn(async move {
+                    let path = proto::relay::stream_path(&offer);
+                    let mut req = format!("ws://{hub}{path}").into_client_request().unwrap();
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    for (k, v) in proto::auth::signed_headers(&id, "GET", &path, b"", now) {
+                        req.headers_mut().insert(k, v.parse().unwrap());
+                    }
+                    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+                    while let Some(Ok(msg)) = ws.next().await {
+                        match msg {
+                            WsMessage::Binary(b) if b.is_empty() => {
+                                ws.send(WsMessage::Binary(Bytes::from_static(b"bye")))
+                                    .await
+                                    .unwrap();
+                                ws.send(WsMessage::Binary(Bytes::new())).await.unwrap();
+                            }
+                            WsMessage::Binary(b) => {
+                                seen.lock().unwrap().extend_from_slice(&b);
+                                ws.send(WsMessage::Binary(b)).await.unwrap();
+                            }
+                            WsMessage::Close(_) => break,
+                            _ => {}
+                        }
+                    }
+                });
+            }
+        });
+        got
+    }
+
+    async fn sandbox(hub: std::net::SocketAddr) -> Client {
+        let url = format!("ws://{hub}{}", proto::relay::CONNECT_PATH);
+        tokio_tungstenite::connect_async(url).await.unwrap().0
+    }
+
+    /// Bytes until `want` have come, or what a close or end gave instead.
+    async fn read_bytes(ws: &mut Client, want: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        while out.len() < want {
+            match tokio::time::timeout(WAIT, ws.next())
+                .await
+                .expect("in time")
+            {
+                Some(Ok(WsMessage::Binary(b))) if b.is_empty() => break,
+                Some(Ok(WsMessage::Binary(b))) => out.extend_from_slice(&b),
+                Some(Ok(WsMessage::Close(_))) | None | Some(Err(_)) => break,
+                Some(Ok(_)) => {}
+            }
+        }
+        out
+    }
+
+    /// What the relay answers a sandbox that sends `first`: every message
+    /// up to the end, which must come.
+    async fn answered(hub: std::net::SocketAddr, first: &[u8]) -> Vec<WsMessage> {
+        let mut ws = sandbox(hub).await;
+        if !first.is_empty() {
+            ws.send(WsMessage::Binary(Bytes::copy_from_slice(first)))
+                .await
+                .unwrap();
+        }
+        let mut got = Vec::new();
+        loop {
+            match tokio::time::timeout(WAIT, ws.next())
+                .await
+                .expect("the relay ended the connection")
+            {
+                Some(Ok(msg)) => got.push(msg),
+                None | Some(Err(_)) => return got,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_sandbox_reaches_its_node_over_the_hubs_own_url() {
+        let node = Identity::from_seed(&[5; 32]);
+        let relay = relay_with(&[node_key(&node)]);
+        let hub = serve_hub(&relay).await;
+        let (host, offers, _listening) = relay.register(node_key(&node)).unwrap();
+        let got = fake_node(hub, node, offers);
+
+        let mut ws = sandbox(hub).await;
+        let hello = sni::tests::client_hello(&host);
+        // The hello in two messages: the relay reads on until it has it all.
+        let (a, b) = hello.split_at(20);
+        ws.send(WsMessage::Binary(Bytes::copy_from_slice(a)))
+            .await
+            .unwrap();
+        ws.send(WsMessage::Binary(Bytes::copy_from_slice(b)))
+            .await
+            .unwrap();
+        assert_eq!(read_bytes(&mut ws, hello.len()).await, hello);
+
+        let big = vec![7u8; 300_000];
+        for part in big.chunks(proto::relay::MAX_MESSAGE) {
+            ws.send(WsMessage::Binary(Bytes::copy_from_slice(part)))
+                .await
+                .unwrap();
+        }
+        assert_eq!(read_bytes(&mut ws, big.len()).await, big);
+
+        // Half-close: the node still answers, then ends its side.
+        ws.send(WsMessage::Binary(Bytes::new())).await.unwrap();
+        assert_eq!(read_bytes(&mut ws, 3).await, b"bye");
+        assert!(read_bytes(&mut ws, 1).await.is_empty(), "the node's end");
+        let mut all = hello.clone();
+        all.extend_from_slice(&big);
+        assert_eq!(
+            *got.lock().unwrap(),
+            all,
+            "the node got every byte, in order"
+        );
+    }
+
+    #[tokio::test]
+    async fn what_the_websocket_carrier_will_not_route_gets_only_a_close() {
+        let (node, stranger) = (Identity::from_seed(&[6; 32]), Identity::from_seed(&[7; 32]));
+        let mut cfg = RelayConfig::new("relay.example");
+        cfg.hello_timeout = Duration::from_millis(300);
+        let members = Arc::new(MemoryMembers::new());
+        let relay = SandboxRelay::new(cfg, members.clone());
+        members
+            .put(&Member {
+                node_id: node.node_id(),
+                x25519_pub: String::new(),
+                binding_sig: String::new(),
+                name: "n".into(),
+                channels: vec![proto::frame::MESH_CHANNEL.into()],
+                admitted_ms: 0,
+                admitted_by: "test".into(),
+                role: MemberRole::Node,
+            })
+            .unwrap();
+        let hub = serve_hub(&relay).await;
+        let (_host, _offers, _listening) = relay.register(node_key(&node)).unwrap();
+        // Registered, but not a member.
+        let (stranger_host, _s_offers, _s) = relay.register(node_key(&stranger)).unwrap();
+
+        let only_a_close = |got: &[WsMessage]| matches!(got, [WsMessage::Close(_)]);
+        for first in [
+            sni::tests::client_hello(&format!("{}.relay.example", "0".repeat(32))),
+            sni::tests::client_hello(&stranger_host),
+            sni::tests::client_hello("x.elsewhere.example"),
+            b"GET / HTTP/1.1\r\n\r\n".to_vec(),
+            // Nothing at all: no hello in time.
+            Vec::new(),
+        ] {
+            let got = answered(hub, &first).await;
+            assert!(only_a_close(&got), "{got:?}");
+        }
     }
 
     #[test]

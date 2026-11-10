@@ -38,3 +38,5 @@ tempfile = "3"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+# A sandbox's and a node's WebSockets against the relay, in tests.
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"] }

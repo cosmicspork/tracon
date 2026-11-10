@@ -5,13 +5,17 @@
 //! - **Create** starts a bare session (`harness: none`) from the node's
 //!   template ([`templates`]) with `keep_warm` (the runtime would pause it
 //!   15 minutes after its last exec otherwise) and an egress allowlist of
-//!   exactly the node's address: the runtime's proxy then lets the sandbox
-//!   reach that one IP and nothing by name. Then it delivers the run's
-//!   bootstrap by one `exec` ([`bootstrap`]), so nothing of the run is in
-//!   the manifest DigitalOcean stores.
+//!   exactly the way to the node ([`Reach`]): the node's address, which the
+//!   runtime's proxy then lets the sandbox reach and nothing by name, or the
+//!   hub's host name, which it lets the sandbox `CONNECT` to and nothing
+//!   else. Then it delivers the run's bootstrap by one `exec`
+//!   ([`bootstrap`]), so nothing of the run is in the manifest DigitalOcean
+//!   stores.
 //! - **Connect**: `tracon-sandbox`, a child of the runtime's own s6 init,
-//!   dials the node's address on 443 with TLS pinned to the node, directly
-//!   or through the hub relay (SNI routing, TLS end to end), and HTTP/2
+//!   dials the node with TLS pinned to the node: raw TLS to the node's
+//!   address on 443 (directly, or through the hub relay's listener), or the
+//!   same TLS inside a WebSocket to the hub's own URL through the runtime's
+//!   proxy. The hub routes by SNI and never holds a key for it. HTTP/2
 //!   pings every 20 seconds keep the runtime's proxy, which cuts a
 //!   connection after an hour of silence, from ever seeing one. The node's
 //!   one [`listener::DoListener`] hands each connection to the run whose
@@ -20,8 +24,11 @@
 //!   which removing the session does not.
 //! - **Isolation** is read back from DigitalOcean, never from inside: the
 //!   session must be a bare one and its stored manifest's egress exactly the
-//!   node. DNS is DigitalOcean's resolver, open to any name
-//!   (`dns: provider-open`), which is what keeps client work off it.
+//!   way to the node. DNS is DigitalOcean's resolver, open to any name
+//!   (`dns: provider-open`), which is what keeps client work off it. Through
+//!   the hub's URL the route is `unverified`: the proxy admits the hub by
+//!   the name in `CONNECT` alone, so behind a shared front (a CDN) the
+//!   sandbox can reach whatever else that front serves.
 //!
 //! Nothing on this provider is mounted from the node: a session's trees go
 //! over the files channel and its gateways through tunnels, as
@@ -35,7 +42,7 @@ pub mod templates;
 pub mod upkeep;
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -91,9 +98,9 @@ pub struct Settings {
     /// address forwards to (a load balancer's 443), or the hub relay's
     /// `[mesh.sandbox_relay] target`.
     pub listen: String,
-    /// What sandboxes dial, `ip:port`: an address, because the runtime's
-    /// egress allowlist admits addresses, never names. The node's public
-    /// address, or the hub relay's.
+    /// What sandboxes dial as raw TLS, `ip:port`: the node's public address,
+    /// or the hub relay listener's. Empty with `relay`: they dial the hub's
+    /// own URL (`[mesh] hub_url`) as a WebSocket instead.
     pub node_addr: String,
     /// The name sandboxes put in SNI. Empty: the hub relay's name for this
     /// node with `relay`, else `tracon-node`.
@@ -124,18 +131,87 @@ impl Default for Settings {
 /// What a sandbox sends in SNI when nothing else names the node.
 pub const DEFAULT_SERVER_NAME: &str = "tracon-node";
 
+/// How a sandbox there reaches the node, and so the one destination its
+/// egress admits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reach {
+    /// Raw TLS to `node_addr`; the egress admits that address.
+    Addr(SocketAddr),
+    /// TLS inside a WebSocket to the hub's relay URL, through the runtime's
+    /// proxy; the egress admits the hub's host.
+    HubUrl { url: String, host: String },
+}
+
+impl Reach {
+    /// The egress that admits this and nothing else: addresses, then names.
+    pub fn egress(&self) -> (Vec<String>, Vec<String>) {
+        match self {
+            Reach::Addr(addr) => (vec![addr.ip().to_string()], Vec::new()),
+            Reach::HubUrl { host, .. } => match host.parse::<IpAddr>() {
+                Ok(ip) => (vec![ip.to_string()], Vec::new()),
+                Err(_) => (Vec::new(), vec![host.clone()]),
+            },
+        }
+    }
+}
+
+/// The hub relay's WebSocket URL under `hub_url`, and the host a sandbox's
+/// egress must admit to reach it.
+pub fn relay_url(hub_url: &str) -> Result<(String, String), String> {
+    let mut url = url::Url::parse(hub_url).map_err(|e| format!("{hub_url:?}: {e}"))?;
+    let scheme = match url.scheme() {
+        "https" => "wss",
+        "http" => "ws",
+        other => return Err(format!("{hub_url:?} is {other}://, not http(s)://")),
+    };
+    let host = match url.host() {
+        Some(url::Host::Domain(name)) => name.to_string(),
+        Some(url::Host::Ipv4(ip)) => ip.to_string(),
+        Some(url::Host::Ipv6(ip)) => ip.to_string(),
+        None => return Err(format!("{hub_url:?} names no host")),
+    };
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(format!("{hub_url:?} carries credentials"));
+    }
+    url.set_scheme(scheme)
+        .map_err(|_| format!("{hub_url:?} cannot be a WebSocket URL"))?;
+    let base = url.path().trim_end_matches('/').to_string();
+    url.set_path(&format!("{base}{}", proto::relay::CONNECT_PATH));
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok((url.to_string(), host))
+}
+
 impl Settings {
     pub fn is_configured(&self) -> bool {
         !self.credential.trim().is_empty()
     }
 
-    pub fn node_addr(&self) -> Result<SocketAddr, String> {
-        self.node_addr.parse().map_err(|_| {
-            format!(
-                "digitalocean.node_addr {:?} is not ip:port; the runtime's egress admits addresses, not names",
-                self.node_addr
-            )
-        })
+    /// How sandboxes reach the node: `node_addr` when it is set, else the
+    /// hub's own URL with `relay`. `hub_url` is `[mesh] hub_url`.
+    pub fn reach(&self, hub_url: Option<&str>) -> Result<Reach, String> {
+        if !self.node_addr.is_empty() {
+            return self.node_addr.parse().map(Reach::Addr).map_err(|_| {
+                format!(
+                    "digitalocean.node_addr {:?} is not ip:port; the runtime's egress admits \
+                     addresses, not names. Leave it empty with relay = true to reach the node \
+                     through the hub's own URL",
+                    self.node_addr
+                )
+            });
+        }
+        if !self.relay {
+            return Err(
+                "digitalocean.node_addr is empty: set it to the ip:port sandboxes dial, or set \
+                 relay = true to reach the node through the hub's own URL"
+                    .into(),
+            );
+        }
+        let hub_url = hub_url.ok_or(
+            "digitalocean.relay with no node_addr dials the hub's own URL, and [mesh] hub_url is not set",
+        )?;
+        let (url, host) = relay_url(hub_url).map_err(|e| format!("[mesh] hub_url {e}"))?;
+        Ok(Reach::HubUrl { url, host })
     }
 
     pub fn listen_addr(&self) -> Result<SocketAddr, String> {
@@ -156,13 +232,13 @@ impl Settings {
 /// One with no credential is not in use and is not checked.
 pub fn validate(
     settings: &Settings,
-    relay_enabled: bool,
+    mesh: &crate::config::Mesh,
     sandbox_images: bool,
 ) -> Result<(), String> {
     if !settings.is_configured() {
         return Ok(());
     }
-    settings.node_addr()?;
+    settings.reach(mesh.hub_url.as_deref())?;
     settings.listen_addr()?;
     match (settings.image.is_empty(), settings.registry.is_empty()) {
         (false, true) => {
@@ -202,7 +278,7 @@ pub fn validate(
             settings.server_name
         ));
     }
-    if settings.relay && !relay_enabled {
+    if settings.relay && !mesh.sandbox_relay.enabled {
         return Err("digitalocean.relay needs [mesh.sandbox_relay] enabled".into());
     }
     Ok(())
@@ -230,6 +306,25 @@ pub type ClientSource = Arc<dyn Fn() -> Result<Client, String> + Send + Sync>;
 /// relay's name for this node changes only when its stream is re-held.
 pub type ServerName = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 
+/// What the provider knows of the hub relay: this node's name there, read
+/// when each sandbox is made, and the hub's URL (`[mesh] hub_url`), which
+/// sandboxes dial when `node_addr` is empty.
+#[derive(Clone)]
+pub struct HubRelay {
+    pub host: ServerName,
+    pub hub_url: Option<String>,
+}
+
+impl HubRelay {
+    /// No hub: sandboxes reach the node at `node_addr` alone.
+    pub fn none() -> Self {
+        HubRelay {
+            host: Arc::new(|| None),
+            hub_url: None,
+        }
+    }
+}
+
 /// One sandbox this provider made, while it is the node's.
 struct Made {
     run: String,
@@ -250,6 +345,8 @@ pub struct Options {
     /// The gateway's name, which the harness's configuration uses and the
     /// sandbox resolves to loopback, where the tunnels listen.
     pub gateway_host: String,
+    /// How sandboxes reach the node, settled at start.
+    pub reach: Reach,
     /// How long a new session may take to become ready.
     pub ready_within: Duration,
     /// How often its status is read while it does.
@@ -401,15 +498,6 @@ impl DoProvider {
         &self.listener
     }
 
-    /// The node's address as the sandbox's egress names it.
-    fn node_ip(&self) -> Result<String, ProviderError> {
-        self.options
-            .settings
-            .node_addr()
-            .map(|addr| addr.ip().to_string())
-            .map_err(ProviderError::Failed)
-    }
-
     fn server_name(&self) -> Result<String, ProviderError> {
         let settings = &self.options.settings;
         if !settings.server_name.is_empty() {
@@ -431,11 +519,14 @@ impl DoProvider {
             template: Some(template.to_string()),
             size: (!settings.size.is_empty()).then(|| settings.size.clone()),
             keep_warm: true,
-            egress: Some(Egress::Rules {
-                allow_hosts: Vec::new(),
-                allow_ips: vec![self.node_ip()?],
-                vpc_uuid: None,
-                subnet_uuid: None,
+            egress: Some({
+                let (allow_ips, allow_hosts) = self.options.reach.egress();
+                Egress::Rules {
+                    allow_hosts,
+                    allow_ips,
+                    vpc_uuid: None,
+                    subnet_uuid: None,
+                }
             }),
             ..Manifest::bare(self.options.owner.session_name(name))
         })
@@ -473,10 +564,13 @@ impl DoProvider {
         id: &str,
         bootstrap: &Bootstrap,
     ) -> Result<(), ProviderError> {
-        let addr = self.options.settings.node_addr.clone();
         let server_name = self.server_name()?;
+        let dial = match &self.options.reach {
+            Reach::Addr(_) => bootstrap::Dial::Addr(&self.options.settings.node_addr),
+            Reach::HubUrl { url, .. } => bootstrap::Dial::RelayUrl(url),
+        };
         let argv = bootstrap::Delivery {
-            addr: &addr,
+            dial,
             pin: &bootstrap.cert_pin,
             server_name: &server_name,
             token: &bootstrap.token,
@@ -796,7 +890,7 @@ impl SandboxProvider for DoProvider {
     }
 
     /// Read back from DigitalOcean: a bare session (no managed agent in it)
-    /// whose stored manifest lets it reach the node's address and nothing
+    /// whose stored manifest lets it reach the way to the node and nothing
     /// else. Anything else reads as an unverified route.
     async fn verify_isolation(&self, handle: &Handle) -> Result<Capabilities, ProviderError> {
         let client = self.client()?;
@@ -817,20 +911,23 @@ impl SandboxProvider for DoProvider {
         if stored.manifest.get("harness").and_then(|h| h.as_str()) != Some("none") {
             wrong.push("its manifest's harness is not none".to_string());
         }
-        let node = self.node_ip()?;
-        if egress.allow_ips != [node.clone()] {
+        let (ips, hosts) = self.options.reach.egress();
+        if egress.allow_ips != ips {
             wrong.push(format!(
-                "its egress admits {:?}, not exactly {node}",
+                "its egress admits addresses {:?}, not exactly {ips:?}",
                 egress.allow_ips
             ));
         }
-        if !egress.allow_hosts.is_empty() {
-            wrong.push(format!("its egress admits hosts {:?}", egress.allow_hosts));
+        if egress.allow_hosts != hosts {
+            wrong.push(format!(
+                "its egress admits hosts {:?}, not exactly {hosts:?}",
+                egress.allow_hosts
+            ));
         }
         if !egress.other.is_empty() {
             wrong.push(format!("its egress also has {}", egress.other.join(", ")));
         }
-        let mut caps = capabilities();
+        let mut caps = self.capabilities();
         if !wrong.is_empty() {
             tracing::warn!(session = %handle.0, why = %wrong.join("; "), "a DigitalOcean sandbox's route is not the node's alone");
             caps.route = Route::Unverified;
@@ -839,7 +936,13 @@ impl SandboxProvider for DoProvider {
     }
 
     fn capabilities(&self) -> Capabilities {
-        capabilities()
+        let mut caps = capabilities();
+        if let Reach::HubUrl { .. } = self.options.reach {
+            // The proxy admits the hub by the name in CONNECT alone, so what
+            // shares the hub's front is reachable too.
+            caps.route = Route::Unverified;
+        }
+        caps
     }
 
     async fn capacity(&self) -> Result<Capacity, ProviderError> {
@@ -923,13 +1026,25 @@ mod tests {
         }
     }
 
+    fn mesh(relay: bool, hub_url: Option<&str>) -> crate::config::Mesh {
+        let mut mesh = crate::config::Mesh::default();
+        mesh.sandbox_relay.enabled = relay;
+        mesh.hub_url = hub_url.map(str::to_string);
+        mesh
+    }
+
     #[test]
     fn settings_are_checked_only_when_in_use() {
-        assert!(validate(&Settings::default(), false, false).is_ok());
-        assert!(validate(&settings(), false, false).is_ok());
+        let standalone = mesh(false, None);
+        assert!(validate(&Settings::default(), &standalone, false).is_ok());
+        assert!(validate(&settings(), &standalone, false).is_ok());
         for bad in [
             Settings {
                 node_addr: "node.example.net:443".into(),
+                ..settings()
+            },
+            Settings {
+                node_addr: String::new(),
                 ..settings()
             },
             Settings {
@@ -949,14 +1064,26 @@ mod tests {
                 ..settings()
             },
         ] {
-            assert!(validate(&bad, false, true).is_err(), "{bad:?}");
+            assert!(validate(&bad, &standalone, true).is_err(), "{bad:?}");
         }
         let relayed = Settings {
             relay: true,
             ..settings()
         };
-        assert!(validate(&relayed, false, false).is_err());
-        assert!(validate(&relayed, true, false).is_ok());
+        assert!(validate(&relayed, &standalone, false).is_err());
+        assert!(validate(&relayed, &mesh(true, None), false).is_ok());
+        // Through the hub's own URL: the relay on, and a hub to dial.
+        let over_hub = Settings {
+            relay: true,
+            node_addr: String::new(),
+            ..settings()
+        };
+        let hub = Some("https://hub.example.net");
+        assert!(validate(&over_hub, &mesh(true, hub), false).is_ok());
+        assert!(validate(&over_hub, &mesh(false, hub), false).is_err());
+        let no_hub = validate(&over_hub, &mesh(true, None), false).unwrap_err();
+        assert!(no_hub.contains("hub_url"), "{no_hub}");
+        assert!(validate(&over_hub, &mesh(true, Some("ftp://hub")), false).is_err());
         // The node builds its own templates only from its own sandbox
         // images, and only one source is named.
         let built = Settings {
@@ -964,17 +1091,93 @@ mod tests {
             registry: "registry.digitalocean.com/acme".into(),
             ..settings()
         };
-        assert!(validate(&built, false, false).is_err());
-        assert!(validate(&built, false, true).is_ok());
+        assert!(validate(&built, &standalone, false).is_err());
+        assert!(validate(&built, &standalone, true).is_ok());
         let both = Settings {
             registry: "registry.digitalocean.com/acme".into(),
             ..settings()
         };
-        assert!(validate(&both, false, true).is_err());
+        assert!(validate(&both, &standalone, true).is_err());
         let neither = Settings {
             image: String::new(),
             ..settings()
         };
-        assert!(validate(&neither, false, true).is_err());
+        assert!(validate(&neither, &standalone, true).is_err());
+    }
+
+    #[test]
+    fn a_sandbox_reaches_the_node_by_its_address_or_the_hubs_url() {
+        let hub = Some("https://tracon-hub.0x69.xyz");
+        // node_addr set: raw TLS to it, whatever else is configured.
+        let addr = Settings {
+            relay: true,
+            ..settings()
+        };
+        let reach = addr.reach(hub).unwrap();
+        assert_eq!(reach, Reach::Addr("203.0.113.7:443".parse().unwrap()));
+        assert_eq!(reach.egress(), (vec!["203.0.113.7".into()], vec![]));
+
+        let over_hub = Settings {
+            relay: true,
+            node_addr: String::new(),
+            ..settings()
+        };
+        let reach = over_hub.reach(hub).unwrap();
+        assert_eq!(
+            reach,
+            Reach::HubUrl {
+                url: "wss://tracon-hub.0x69.xyz/v0/relay/connect".into(),
+                host: "tracon-hub.0x69.xyz".into(),
+            }
+        );
+        assert_eq!(reach.egress(), (vec![], vec!["tracon-hub.0x69.xyz".into()]));
+        assert!(over_hub.reach(None).is_err());
+        assert!(Settings {
+            relay: false,
+            ..over_hub.clone()
+        }
+        .reach(hub)
+        .is_err());
+    }
+
+    #[test]
+    fn the_relay_url_is_the_hubs_own() {
+        for (hub, url, host) in [
+            (
+                "https://Hub.Example.net/",
+                "wss://hub.example.net/v0/relay/connect",
+                "hub.example.net",
+            ),
+            (
+                "https://hub.example.net:8443/mesh/",
+                "wss://hub.example.net:8443/mesh/v0/relay/connect",
+                "hub.example.net",
+            ),
+            (
+                "http://127.0.0.1:8080",
+                "ws://127.0.0.1:8080/v0/relay/connect",
+                "127.0.0.1",
+            ),
+            (
+                "http://[::1]:8080",
+                "ws://[::1]:8080/v0/relay/connect",
+                "::1",
+            ),
+        ] {
+            assert_eq!(relay_url(hub).unwrap(), (url.into(), host.into()), "{hub}");
+        }
+        let ip = Reach::HubUrl {
+            url: "ws://127.0.0.1:8080/v0/relay/connect".into(),
+            host: "127.0.0.1".into(),
+        };
+        assert_eq!(ip.egress(), (vec!["127.0.0.1".into()], vec![]));
+        for bad in [
+            "hub.example.net",
+            "ftp://hub",
+            "https://u:p@hub",
+            "not a url",
+        ] {
+            assert!(relay_url(bad).is_err(), "{bad}");
+        }
     }
 }

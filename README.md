@@ -1585,8 +1585,9 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node, or
 
 # [digitalocean]                    # DigitalOcean's Harness Runtime, for sessions [placement] sends
                                     # there. Off without a credential. Each sandbox is a microVM whose
-                                    # only route is this node (egress admits node_addr alone; DNS is
-                                    # the runtime's, open, so client work never goes). Needs
+                                    # only route is this node (egress admits node_addr alone, or the
+                                    # hub's host alone; DNS is the runtime's, open, so client work
+                                    # never goes). Needs
                                     # [runtime.podman] sandbox_protocol, sandbox_files and
                                     # sandbox_tunnels: nothing is mounted there
 # credential = "do"                 # a broker credential holding DIGITALOCEAN_ACCESS_TOKEN
@@ -1604,10 +1605,15 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node, or
 # size = ""                         # a sandbox size slug; empty for the runtime's default
 # limit = 4                         # sandboxes there at once
 # listen = "0.0.0.0:8443"           # where the node takes its sandboxes' TLS connections
-# node_addr = "203.0.113.7:443"     # what they dial: an address, not a name. A load balancer's 443
-                                    # forwarding to listen, or the hub relay's address
+# node_addr = "203.0.113.7:443"     # what they dial as raw TLS: an address, not a name. A load
+                                    # balancer's 443 forwarding to listen, or the hub relay listener's
+                                    # address. Empty with relay: they dial the hub's own URL instead
 # relay = false                     # reached through the hub relay ([mesh.sandbox_relay], whose
-                                    # target is listen); its name for this node is the SNI
+                                    # target is listen); its name for this node is the SNI. With no
+                                    # node_addr, sandboxes open wss://<[mesh] hub_url host>/v0/relay/connect
+                                    # through the runtime's proxy, and egress admits that host alone.
+                                    # A hub behind a shared front (a CDN) is then not the only thing
+                                    # that host reaches, so the route reads as unverified
 # server_name = ""                  # SNI to send otherwise; empty is tracon-node
 
 # [[service]]                       # something a session may start beside itself by name
@@ -1714,7 +1720,9 @@ command_timeout_secs = 15
 # admin_peers = ["<node id>"]       # peers that may read and edit this node.toml and sign its providers in,
                                     # each action confirmed with a passkey there; changed here, never by a peer
 
-[mesh.sandbox_relay]                # reached by remote sandboxes through the hub; off unless enabled
+[mesh.sandbox_relay]                # reached by remote sandboxes through the hub; off unless enabled.
+                                    # They dial the hub's relay listener, or its own URL as a WebSocket;
+                                    # either way the TLS inside is theirs to this node
 # enabled = true
 # target = "127.0.0.1:7443"         # the local sandbox listener the hub's relayed TLS is bridged to
 # max_streams = 16
@@ -2048,7 +2056,8 @@ configured by environment:
 | `TRACON_HUB_PROMOTE_AT` | `03:00` | the hub-side promotion batch |
 | `TRACON_HUB_SNAPSHOT_ENDPOINT`, `_BUCKET`, `_ACCESS_KEY`, `_SECRET_KEY`, `_PREFIX`, `_EVERY_HOURS`, `_KEEP`, `_PUBKEY` | off; when on, every 24 hours, 14 kept | encrypted snapshots to S3-compatible storage; `tracon-hub snapshot-key` makes the key |
 | `TRACON_HUB_RESTORE_SEED` | — | for `tracon-hub restore` |
-| `TRACON_HUB_RELAY_ADDR`, `TRACON_HUB_RELAY_DOMAIN`, `TRACON_HUB_RELAY_MAX_STREAMS` | off; —; 16 per node | the sandbox relay: a TLS listener the hub does not terminate, routing `<node label>.<domain>` by SNI to a node that serves it over a connection it dialled out. Publish it on 443 at a public address with a wildcard DNS record for the domain; it cannot sit behind a proxy that terminates TLS |
+| `TRACON_HUB_RELAY_DOMAIN`, `TRACON_HUB_RELAY_MAX_STREAMS` | off; 16 per node | the sandbox relay: TLS the hub does not terminate, routed by its SNI, `<node label>.<domain>`, to a node that serves it over a connection it dialled out. The domain alone turns on `GET /v0/relay/connect`, a WebSocket on the hub's own address that carries that TLS, so it works behind a proxy that terminates TLS and passes WebSockets; the domain then needs no DNS record |
+| `TRACON_HUB_RELAY_ADDR` | off | also a raw TLS listener for the relay, for a provider whose egress admits only addresses: publish it on 443 at a public address with a wildcard DNS record for the domain. It cannot sit behind a proxy that terminates TLS. Needs `TRACON_HUB_RELAY_DOMAIN` |
 
 ### As a Kubernetes pod
 

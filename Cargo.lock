@@ -3712,6 +3712,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-stream",
+ "tokio-tungstenite",
  "tower",
  "tower-http",
  "tracing",
@@ -3746,6 +3747,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "bytes",
+ "futures-util",
  "h2",
  "hex",
  "http",
@@ -3763,9 +3765,11 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-rustls",
+ "tokio-tungstenite",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "webpki-roots",
 ]
 
 [[package]]

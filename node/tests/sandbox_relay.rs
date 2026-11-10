@@ -1,7 +1,8 @@
 //! The hub's sandbox relay, end to end: a scratch hub with a relay listener,
 //! a node with no listener anyone else can reach that serves the relay over
 //! a connection it dialled out, and a TLS client that knows only the hub's
-//! address and the node's pinned certificate.
+//! address and the node's pinned certificate: dialling the relay listener,
+//! or the hub's own URL as a WebSocket through `tracon-sandbox`'s carrier.
 
 #[path = "support/mod.rs"]
 mod support;
@@ -22,6 +23,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracon::config::SandboxRelay as NodeRelayConfig;
 use tracon::mesh::sandbox_relay::SandboxRelay;
+use tracon_sandbox::carrier::{BoxedIo, Dial, RelayUrl};
 
 const DOMAIN: &str = "relay.test";
 
@@ -309,7 +311,10 @@ async fn tls_to(
         .await
 }
 
-async fn round_trip(tls: &mut tokio_rustls::client::TlsStream<TcpStream>, line: &str) -> String {
+async fn round_trip<S>(tls: &mut tokio_rustls::client::TlsStream<S>, line: &str) -> String
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     tls.write_all(line.as_bytes()).await.unwrap();
     let want = format!("node got: {line}");
     let mut got = Vec::new();
@@ -511,4 +516,51 @@ async fn only_a_member_node_may_listen() {
         .await
         .unwrap();
     assert_ne!(res.status(), 101);
+}
+
+/// TLS to the node inside `tracon-sandbox`'s WebSocket carrier, dialled at
+/// the hub's own URL.
+async fn tls_over_ws(
+    url: &RelayUrl,
+    host: &str,
+    pin: &CertificateDer<'static>,
+) -> std::io::Result<tokio_rustls::client::TlsStream<BoxedIo>> {
+    let carrier = Dial::WebSocket(url.clone()).connect().await?;
+    tokio_rustls::TlsConnector::from(client_config(pin))
+        .connect(ServerName::try_from(host.to_string()).unwrap(), carrier)
+        .await
+}
+
+#[tokio::test]
+async fn a_sandbox_reaches_the_node_over_the_hubs_own_url() {
+    let node = identity(47);
+    let hub = start_hub(&[&node], 16).await;
+    let (cert, key) = self_signed("tracon-node");
+    let target = sandbox_listener(cert.clone(), key).await;
+    let host = serve_relay(node, &hub, target).await;
+    let url = RelayUrl::direct(&format!(
+        "{}{}",
+        hub.url.replacen("http://", "ws://", 1),
+        proto::relay::CONNECT_PATH
+    ))
+    .unwrap();
+
+    let mut tls = tls_over_ws(&url, &host, &cert).await.unwrap();
+    let peer = tls.get_ref().1.peer_certificates().unwrap()[0].clone();
+    assert_eq!(peer, cert, "the sandbox sees the node's certificate");
+    assert_eq!(round_trip(&mut tls, "hello\n").await, "node got: hello\n");
+    let big = format!("{}\n", "y".repeat(300_000));
+    assert_eq!(round_trip(&mut tls, &big).await, format!("node got: {big}"));
+    // A second carrier at once, and the first still works: one stream each.
+    let mut other = tls_over_ws(&url, &host, &cert).await.unwrap();
+    assert_eq!(round_trip(&mut other, "two\n").await, "node got: two\n");
+    assert_eq!(round_trip(&mut tls, "still\n").await, "node got: still\n");
+    tls.shutdown().await.unwrap();
+
+    // Pinned to another certificate: refused, as over the listener.
+    let (wrong, _) = self_signed("someone-else");
+    assert!(tls_over_ws(&url, &host, &wrong).await.is_err());
+    // A name nobody serves: the hub closes, and TLS never starts.
+    let nobody = format!("{}.{DOMAIN}", "0".repeat(32));
+    assert!(tls_over_ws(&url, &nobody, &cert).await.is_err());
 }
