@@ -697,7 +697,7 @@ async fn make_snapshot(
                 .map_err(|error| error.to_string())?,
         }
         let tracked = tracked_files(&tree.root);
-        let reference = format!("{}:{}", snapshot_repository(repo), &key[..12]);
+        let reference = crate::repo_image::build_tag(&snapshot_repository(repo), &key, &row);
         let name = crate::config::resource_name(&format!("w-{}", &id[..12]));
         let mut held = Held::for_preparation(preparer, &name, &inputs.image, &work).await;
         if let Ok(opened) = &held {

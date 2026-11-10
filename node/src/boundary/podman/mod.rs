@@ -1063,7 +1063,28 @@ impl super::ImageBuilder for PodmanBackend {
         image_identity(image).await
     }
 
+    /// A pinned `name@sha256:…` goes with every tag of that name on the
+    /// image. Each build has a tag of its own, so a cached rebuild that made
+    /// the same image again left it under two, and Podman refuses to remove
+    /// an image with more than one name by its digest. All but the last are
+    /// taken off first; the last goes with the image, or stays with it while
+    /// a container uses it, so the digest still resolves for that one.
     async fn remove(&self, image: &str) {
+        if let Some((name, _)) = image.split_once('@') {
+            let format = "{{.Id}}{{range .RepoTags}} {{.}}{{end}}";
+            if let Ok(out) = podman(&["image", "inspect", "--format", format, image]).await {
+                let mut fields = out.split_whitespace();
+                let id = fields.next().unwrap_or_default().to_string();
+                let tags: Vec<&str> = fields
+                    .filter(|tag| crate::image_gc::repository_of(tag) == name)
+                    .collect();
+                if let Some((_, rest)) = tags.split_last() {
+                    for tag in rest {
+                        let _ = podman(&["untag", &id, tag]).await;
+                    }
+                }
+            }
+        }
         let _ = podman(&["image", "rm", image]).await;
     }
 }
