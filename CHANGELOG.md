@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.49.0](https://github.com/cosmicspork/tracon/compare/v0.48.1...v0.49.0) (2026-11-10)
+
+
+### Features
+
+* **relay:** reach a node's sandboxes through the hub's own URL ([#857](https://github.com/cosmicspork/tracon/issues/857)) ([61eba2a](https://github.com/cosmicspork/tracon/commit/61eba2a4a604544fbc14403cab25a83b18fa9b48))
+
+
+### Bug Fixes
+
+* **node:** tag each repository image build uniquely ([#854](https://github.com/cosmicspork/tracon/issues/854)) ([1760d77](https://github.com/cosmicspork/tracon/commit/1760d7711caa38d3fefdd0bbac6abc3596b67773))
+
 ## [0.48.1](https://github.com/cosmicspork/tracon/compare/v0.48.0...v0.48.1) (2026-11-10)
 
 
