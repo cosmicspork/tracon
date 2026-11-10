@@ -18,6 +18,9 @@ Environment="PATH=__PATH__"
 # containers, except a sandbox over the sandbox protocol that can resume,
 # which it leaves for the next start to carry its session on in ([sandbox]
 # resume_within_secs). Killing it sooner orphans the containers.
+# KillMode stays control-group, so a stop still reaches everything the node
+# spawned; a left sandbox is outside this cgroup because the node runs
+# podman without INVOCATION_ID, which puts conmon in a scope of its own.
 KillSignal=SIGTERM
 TimeoutStopSec=90
 

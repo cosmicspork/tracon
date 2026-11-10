@@ -777,6 +777,23 @@ mod tests {
     }
 
     #[test]
+    fn a_stop_still_reaches_every_process_in_the_units_cgroup() {
+        let text = unit_text().unwrap();
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        // `process` or `none` would leave the node's podman clients, git and
+        // helpers behind; the sandboxes it leaves running are kept out of the
+        // unit's cgroup instead (`provider::podman::outside_the_service`).
+        let kill_mode = text
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("KillMode="))
+            .next_back()
+            .unwrap_or("control-group");
+        assert_eq!(kill_mode, "control-group", "{text}");
+    }
+
+    #[test]
     fn the_unit_names_the_binary_that_installed_it() {
         let exe = std::env::current_exe().unwrap();
         let text = unit_text().unwrap();
