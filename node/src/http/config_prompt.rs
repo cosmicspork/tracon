@@ -5,11 +5,12 @@
 //! could change what the node runs, trusts, reads, sends or reaches comes
 //! first, with its value in full, quoted: a list shows the elements it
 //! gains and loses, a single value what it was and what it becomes. A change
-//! too large to show that way has its lists' long elements cut short,
-//! visibly, each with its length, and each such list followed by how many
-//! elements and characters it holds and its digest; a build's steps are
-//! long, and a list replaced whole cannot be split. A single value is never
-//! cut: one too large to show is refused, to be split.
+//! too large to show that way has its scripts' long steps (`build`,
+//! `prepare`, `checks`) cut short, visibly, each with its length, and each
+//! such list followed by how many elements and characters it holds and its
+//! digest; a build's steps are long, and a list replaced whole cannot be
+//! split. Nothing else is ever cut: a host, path or single value too large
+//! to show is refused, to be split.
 //! Routine keys follow, as many as fit, and how many more. An entry of an
 //! array of tables is named by its own `path`, `name` or `id` as it was
 //! before the edit, never by an index alone, and its changed fields are
@@ -32,6 +33,20 @@ const MAX_SEGMENT: usize = 48;
 /// What a long element of a list is cut to, widest first, when the edit
 /// does not fit its prompt with every element whole.
 const CUTS: [usize; 4] = [160, 80, 40, 20];
+
+/// The only keys whose list elements may be cut short: scripts, long by
+/// nature and replaced whole. Hosts, paths, programs and names are always
+/// shown whole, so a long script in the same edit cannot push one out of
+/// sight; an edit too large to show them whole is refused, to be split.
+const CUTTABLE: &[&str] = &["repo.build", "repo.prepare", "repo.checks"];
+
+/// `fit` for a change at `key`: whole unless `key` is [`CUTTABLE`].
+fn fit_for(key: &[&str], fit: Fit) -> Fit {
+    match CUTTABLE.iter().any(|p| pattern_covers(p, key)) {
+        true => fit,
+        false => Fit::Whole,
+    }
+}
 
 /// How the elements of a list are shown: whole, or each string longer than
 /// so many characters cut short.
@@ -238,7 +253,7 @@ fn render(value: &toml::Value, fit: Fit) -> String {
             "{{{}}}",
             table
                 .iter()
-                .map(|(k, v)| format!("{} = {}", quote(k), render(v, fit)))
+                .map(|(k, v)| format!("{} = {}", quote(k), render(v, Fit::Whole)))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -255,13 +270,21 @@ fn too_long(value: &toml::Value, fit: Fit) -> bool {
 }
 
 /// An element of a list: whole, or a string cut short, visibly, with its
-/// length.
+/// length. Only a list's own strings are cut; anything nested is whole.
 fn element(value: &toml::Value, fit: Fit) -> String {
     match (value, fit) {
         (toml::Value::String(s), Fit::Cut(max)) if too_long(value, fit) => {
-            format!("\"{}\" ({} chars)", cut(s, max), s.chars().count())
+            let clear = s
+                .get(..7)
+                .is_some_and(|p| p.eq_ignore_ascii_case("http://"));
+            format!(
+                "\"{}\" ({} chars){}",
+                cut(s, max),
+                s.chars().count(),
+                if clear { " (cleartext)" } else { "" }
+            )
         }
-        _ => render(value, fit),
+        _ => render(value, Fit::Whole),
     }
 }
 
@@ -305,6 +328,7 @@ fn show_change(
     fit: Fit,
 ) -> String {
     let concealed = config_schema::lookup(at).secret || !config_schema::known(at);
+    let fit = fit_for(at, fit);
     match (was, now) {
         (_, None) => " removed".into(),
         (_, Some(_)) if concealed => " = (a new value, not shown)".into(),
@@ -854,6 +878,21 @@ mod tests {
         .unwrap();
         assert!(line.contains("build = [\"just setup\"]"), "{line}");
         assert!(!line.contains("sha256"), "{line}");
+
+        // A long script in the same edit never cuts a host short: hosts are
+        // shown whole, and an edit too large for that is refused.
+        let host = "objects.githubusercontent.com.cdn.attacker.example";
+        let line = prompt(
+            file,
+            &[
+                Op::remove(KeyPath::parse("repo[0].dockerfile").unwrap()),
+                set("repo[0].build", strings(&[RECIPE, RECIPE].concat())),
+                set("repo[0].egress", strings(&[host])),
+            ],
+        )
+        .unwrap();
+        assert!(line.contains(&format!("+ {}", quote(host))), "{line}");
+        assert!(line.contains("(6 items, "), "{line}");
     }
 
     /// Moving an entry to another repository moves what it lends: named by
