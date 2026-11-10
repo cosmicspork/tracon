@@ -1931,6 +1931,63 @@ async fn the_repo_commands_save_against_the_version_they_read() {
     server.abort();
 }
 
+/// `tracon repo set --build` with a realistic recipe (three steps, about
+/// 900 characters) moves an entry off its Dockerfile in one save: the
+/// confirmation's line shows a list that long cut short rather than
+/// refusing it as too large.
+#[tokio::test]
+async fn a_realistic_build_list_is_saved_in_one_repo_set() {
+    let _guard = state::config_lock().await;
+    let n = node();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app = n.app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let tracon = |args: Vec<&str>| {
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_tracon"))
+            .args(args)
+            .env("TRACON_URL", &url)
+            .env_remove("TRACON_TOKEN")
+            .output()
+    };
+    // Build steps stand on the stock base, which only sandbox images run.
+    let path = "github.com/cosmicspork/tracon";
+    std::fs::write(
+        Config::config_path(),
+        format!("[runtime.podman]\nsandbox_protocol = true\nsandbox_images = true\n\n[[repo]]\npath = \"{path}\"\ndockerfile = \"Dockerfile\"\n"),
+    )
+    .unwrap();
+
+    let steps = [
+        "apt-get update && apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev ca-certificates curl git jq unzip xz-utils uidmap fuse-overlayfs slirp4netns && rm -rf /var/lib/apt/lists/* && update-ca-certificates && git config --system --add safe.directory /work",
+        "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.91.0 --component clippy,rustfmt && . \"$HOME/.cargo/env\" && rustup target add x86_64-unknown-linux-gnu && cargo install --locked cargo-nextest just && cargo --version && rustc --version",
+        "curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash -s bun-v1.3.2 && ln -sf /usr/local/bin/bun /usr/local/bin/bunx && bun --version && mkdir -p /opt/tracon/spa && cd /opt/tracon/spa && printf '{}' > package.json && bun install || true && echo bun is ready for the interface build, its type check and its tests in every session",
+    ];
+    assert!(steps.iter().map(|s| s.len()).sum::<usize>() > 850);
+    let mut args = vec!["repo", "set", path];
+    for step in steps {
+        args.extend(["--build", step]);
+    }
+    let out = tracon(args).await.unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let file = Config::try_load().unwrap();
+    assert_eq!(file.repo.len(), 1);
+    assert_eq!(file.repo[0].build, steps);
+    assert_eq!(file.repo[0].dockerfile, None);
+    server.abort();
+}
+
 /// A save refused because `node.toml` changed after the command read it is
 /// reported as that, once: the change was decided against the file as it
 /// was, so the command does not quietly read again and overwrite.
