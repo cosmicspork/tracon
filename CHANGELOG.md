@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.48.1](https://github.com/cosmicspork/tracon/compare/v0.48.0...v0.48.1) (2026-11-10)
+
+
+### Bug Fixes
+
+* **config:** show a long list cut short in a confirmation instead of refusing it ([#851](https://github.com/cosmicspork/tracon/issues/851)) ([92371ea](https://github.com/cosmicspork/tracon/commit/92371eaabd9930435dfc735ef660f924d7e40c5d))
+* **gc:** remove leftover transfer containers and sweep images to a fixpoint ([#850](https://github.com/cosmicspork/tracon/issues/850)) ([d6fbf9c](https://github.com/cosmicspork/tracon/commit/d6fbf9c9baaf65772fd0cde379b2c4d10f2006e1))
+* **node:** keep left sandboxes out of tracon.service's cgroup ([#849](https://github.com/cosmicspork/tracon/issues/849)) ([0d5787e](https://github.com/cosmicspork/tracon/commit/0d5787e355f78100f088c870e190826f3dc138e1))
+* **node:** key a repository's snapshot only on the pinned sandbox base ([#848](https://github.com/cosmicspork/tracon/issues/848)) ([ff56417](https://github.com/cosmicspork/tracon/commit/ff5641752be4c9588598584064c4ab3640625072))
+* **node:** run build steps with HOME=/root ([#847](https://github.com/cosmicspork/tracon/issues/847)) ([7016988](https://github.com/cosmicspork/tracon/commit/7016988560ea5dbfea7dde6a84a86d8e51b1e583))
+
 ## [0.48.0](https://github.com/cosmicspork/tracon/compare/v0.47.0...v0.48.0) (2026-11-09)
 
 
