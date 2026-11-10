@@ -32,6 +32,10 @@
 //! container's configuration until the container is removed; it is spent
 //! once the supervisor has connected.
 //!
+//! **Cgroup.** A sandbox the node leaves running for its next process must
+//! not go down with this one, so `podman` runs without systemd's
+//! `INVOCATION_ID` ([`outside_the_service`]).
+//!
 //! Isolation is read back from `podman inspect`, never from inside.
 
 use std::collections::HashMap;
@@ -103,7 +107,9 @@ impl PodmanCli for SystemCli {
     async fn run(&self, args: &[String], env: &[(String, String)]) -> Result<String, CliError> {
         let bin = crate::config::path_guard::program("boundary.podman", &self.bin)
             .map_err(CliError::Spawn)?;
-        let out = tokio::process::Command::new(bin)
+        let mut command = tokio::process::Command::new(bin);
+        outside_the_service(&mut command);
+        let out = command
             .args(args)
             .envs(env.iter().cloned())
             .env("PATH", crate::config::path_guard::child_path())
@@ -120,6 +126,19 @@ impl PodmanCli for SystemCli {
             ))
         }
     }
+}
+
+/// Run `podman` so a sandbox's conmon gets a cgroup of its own rather than
+/// staying in the node's. Podman moves conmon into a `libpod-conmon-<id>.scope`
+/// unless `INVOCATION_ID` is set, which systemd sets for a service and Podman
+/// takes to mean the unit is meant to own the container. Under
+/// `tracon.service` that left conmon in the unit's cgroup, where stopping or
+/// restarting the unit killed it, and with it every sandbox `detach_all` had
+/// left for the next node process. Without it, the unit's stop still reaches
+/// the node and everything it spawned, and a left sandbox that is never taken
+/// back still ends itself once its redials run out (`--rm` removes it).
+pub fn outside_the_service(command: &mut tokio::process::Command) {
+    command.env_remove("INVOCATION_ID");
 }
 
 /// What the provider is configured with.
@@ -1246,6 +1265,16 @@ mod tests {
             .find(|(args, _)| args[0] == "run")
             .cloned()
             .unwrap()
+    }
+
+    #[test]
+    fn podman_runs_without_the_services_invocation_id_so_conmon_leaves_its_cgroup() {
+        let mut command = tokio::process::Command::new("podman");
+        command.env("INVOCATION_ID", "0123abcd");
+        outside_the_service(&mut command);
+        let envs: Vec<_> = command.as_std().get_envs().collect();
+        // `None` is a removal: the child does not inherit it either.
+        assert_eq!(envs, [(std::ffi::OsStr::new("INVOCATION_ID"), None)]);
     }
 
     #[tokio::test]
