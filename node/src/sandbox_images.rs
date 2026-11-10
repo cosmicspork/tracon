@@ -148,6 +148,21 @@ fn pinned_or(configured: String, pin: Option<&(String, String)>) -> String {
     }
 }
 
+/// The stock base by the digest this process pinned it to, as a snapshot is
+/// keyed on it: never the configured reference, which names the same image
+/// by another string. Before the boundary has converged (a session carried
+/// on right after a restart), or after the configured base changed, there is
+/// no pin yet, and a key made then would supersede the snapshot made for the
+/// pin and be superseded by the next one made after it.
+fn snapshot_base(configured: &str, pin: Option<&(String, String)>) -> Result<String, String> {
+    match pin {
+        Some((named, pinned)) if named == configured => Ok(pinned.clone()),
+        _ => Err(format!(
+            "the sandbox base {configured} is not pinned yet; the node is still setting up its boundary"
+        )),
+    }
+}
+
 /// The pinned base, when the setting is on and the base has been pinned: what
 /// a repository's recipe is built on.
 pub fn active_base() -> Option<String> {
@@ -424,9 +439,13 @@ pub async fn inputs(
         .identity(&environment.image)
         .await
         .ok_or_else(|| format!("the image {} is not here", environment.image))?;
+    let base = snapshot_base(
+        &cfg.sandbox.base_image_ref(),
+        PINNED.read().unwrap().as_ref(),
+    )?;
     let (_, commit) = crate::repo_image::default_commit(repo).await?;
     Ok(SnapshotInputs {
-        base: base_image(cfg),
+        base,
         image,
         lockfiles: lockfiles(repo, &commit).await,
         commit,
@@ -1296,6 +1315,34 @@ mod tests {
         for changed in changes {
             assert_ne!(changed.key(), key, "{changed:?}");
         }
+    }
+
+    /// A session carried on right after a restart, before the boundary has
+    /// pinned the base, makes no snapshot under the configured name: its key
+    /// would differ from the one `repo build` made, and from the one the next
+    /// session makes once the base is pinned.
+    #[test]
+    fn a_snapshot_is_keyed_on_the_pinned_base_only() {
+        let configured = "ghcr.io/cosmicspork/tracon-sandbox-base:0.48.0";
+        let pinned = "ghcr.io/cosmicspork/tracon-sandbox-base@sha256:aa";
+        let pin = (configured.to_string(), pinned.to_string());
+        assert!(snapshot_base(configured, None).is_err());
+        let other = (
+            "ghcr.io/cosmicspork/tracon-sandbox-base:0.47.0".to_string(),
+            pinned.to_string(),
+        );
+        assert!(snapshot_base(configured, Some(&other)).is_err());
+        let base = snapshot_base(configured, Some(&pin)).unwrap();
+        assert_eq!(base, pinned);
+        let keyed = |base: &str| {
+            SnapshotInputs {
+                base: base.to_string(),
+                ..inputs()
+            }
+            .key()
+        };
+        assert_eq!(keyed(&base), inputs().key());
+        assert_ne!(keyed(configured), keyed(&base));
     }
 
     /// A warm-up that waited while another prepared the same key takes that
