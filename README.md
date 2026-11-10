@@ -378,8 +378,10 @@ snapshot is the workspace as Git sees it: what its ignore rules exclude (a
 Nothing is removed on its own except a check run's copy once the check is over.
 `tracon gc` (or **Settings → Maintenance → Runtime storage**) lists the volumes
 and state directories whose owner is over (an archived or vanished session, a
-workspace no open session uses and older than a day, a finished check run) and
-removes them with `--apply`; dependency caches only with `--caches`, and the
+workspace no open session uses and older than a day, a finished check run, a
+copy's `tracon-transfer-…` container a day old) and removes them with `--apply`,
+the leftover containers first so what they held goes in the same run; a workspace's
+directory goes only with its volume; dependency caches only with `--caches`, and the
 node-wide volumes, any name it does not recognize, and another node's volumes (named with
 that node's `[boundary] resource_prefix`) never.
 
@@ -392,7 +394,7 @@ labels naming its owner, `io.tracon.node.prefix` (the `resource_prefix`) and
 | Class | Removed with `--apply` |
 |---|---|
 | `base` | a `tracon-sandbox-base` other than the one the node pins, once nothing is built on it. Pulled bases carry no owner label, so a node with a prefix of its own leaves them to the default node unless `--adopt-unlabelled` |
-| `repository` | a repository image no current build, snapshot or open session uses |
+| `repository` | a repository image no current build, snapshot or open session uses. A repository no `[[repo]]` entry names, and that is no managed clone, has no current build |
 | `snapshot` | a prepared snapshot that is no repository's current one |
 | `dangling` | a `<none>` image of this node's whose tag a later build took |
 | `legacy` | with `sandbox_images`, the harness images (and the gateway's under `sandbox_tunnels`) and the layered and `-src` repository images; only with `--legacy` |
@@ -401,6 +403,8 @@ labels naming its owner, `io.tracon.node.prefix` (the `resource_prefix`) and
 Nothing a container uses (running or stopped, any node's) is removed, nothing an image
 that stays is built on, and nothing made in the last hour, whose build may not have
 recorded it yet. A replaced snapshot is still removed as soon as the new one is made.
+An unnamed layer goes with the last image built on it, so the list names the whole chain
+a removal frees, and `--apply` lists and removes again until a pass removes nothing.
 On Apple, whose store records no parent image, an image stands only on the build its
 snapshot label names, every tag of the build the node pins is kept, and what an image
 frees is its arm64 manifests that no image that stays shares.

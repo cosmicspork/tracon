@@ -29,7 +29,12 @@
 //!   `-src` repository images nothing runs any more; only when asked for.
 //!
 //! Nothing a container uses (running or stopped, any node's) is removed, and
-//! nothing any remaining image is built on. The classification is pure, over
+//! nothing any remaining image is built on. An unnamed intermediate image (a
+//! build's layer) goes with the last image built on it, as the store prunes
+//! it, so it never holds what it stands on once those go. Removing can still
+//! free more than a list foresaw (a container gone in between), so an applied
+//! sweep lists and removes again until a pass removes nothing. The
+//! classification is pure, over
 //! an image list a provider reads ([`Image`]); [`podman`] reads and removes
 //! Podman's, and [`apple`] `container`'s.
 
@@ -156,6 +161,10 @@ pub struct Knowledge {
     pub legacy: bool,
     /// Take unlabelled images named as this node's for its own.
     pub adopt_unlabelled: bool,
+    /// The images of containers the sweep removes before it gets to images
+    /// (a transfer's, left after its copy): each one counts a container
+    /// fewer, so a dry run lists what the apply would free.
+    pub departing: Vec<String>,
 }
 
 impl Knowledge {
@@ -296,10 +305,10 @@ pub fn classify(images: &[Image], k: &Knowledge) -> Vec<Verdict> {
         .enumerate()
         .map(|(at, i)| (i.id.as_str(), at))
         .collect();
-    let mut children = vec![0usize; images.len()];
-    for image in images {
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); images.len()];
+    for (at, image) in images.iter().enumerate() {
         if let Some(parent) = image.parent.as_deref().and_then(|p| by_id.get(p)) {
-            children[*parent] += 1;
+            children[*parent].push(at);
         }
     }
     // What each image stands on: its parent, and the image a snapshot's
@@ -327,6 +336,12 @@ pub fn classify(images: &[Image], k: &Knowledge) -> Vec<Verdict> {
         }
     }
     let pinned = k.pinned_base.as_deref().and_then(|p| resolve_in(images, p));
+    let mut leaving: HashMap<usize, u64> = HashMap::new();
+    for reference in &k.departing {
+        if let Some(at) = resolve_in(images, reference) {
+            *leaving.entry(at).or_default() += 1;
+        }
+    }
 
     let mut verdicts = Vec::new();
     for (at, image) in images.iter().enumerate() {
@@ -334,10 +349,13 @@ pub fn classify(images: &[Image], k: &Knowledge) -> Vec<Verdict> {
         if owner == Owner::Theirs {
             continue;
         }
-        let Some(shape) = shape(image, k, owner, children[at] == 0) else {
+        let Some(shape) = shape(image, k, owner, children[at].is_empty()) else {
             continue;
         };
-        let (class, remove, reason) = judge(image, at, shape, owner, k, &kept, pinned);
+        let containers = image
+            .containers
+            .saturating_sub(leaving.get(&at).copied().unwrap_or(0));
+        let (class, remove, reason) = judge(image, at, containers, shape, owner, k, &kept, pinned);
         verdicts.push(Verdict {
             index: at,
             class,
@@ -349,13 +367,33 @@ pub fn classify(images: &[Image], k: &Knowledge) -> Vec<Verdict> {
 
     // Nothing anything that stays stands on goes: every image not removed,
     // listed or not, keeps what it is built on, and an image kept that way
-    // keeps what it stands on in turn.
+    // keeps what it stands on in turn. An unlisted intermediate (no name, no
+    // container) goes with the last image built on it, as the store prunes
+    // it then: it holds nothing once they go.
+    let listed: HashSet<usize> = verdicts.iter().map(|v| v.index).collect();
+    let intermediate = |at: usize| {
+        let image = &images[at];
+        !listed.contains(&at)
+            && image.names.is_empty()
+            && image.containers == 0
+            && !children[at].is_empty()
+    };
     loop {
-        let removing: HashSet<usize> = verdicts
+        let mut removing: HashSet<usize> = verdicts
             .iter()
             .filter(|v| v.remove)
             .map(|v| v.index)
             .collect();
+        loop {
+            let pruned: Vec<usize> = (0..images.len())
+                .filter(|at| !removing.contains(at) && intermediate(*at))
+                .filter(|at| children[*at].iter().all(|c| removing.contains(c)))
+                .collect();
+            if pruned.is_empty() {
+                break;
+            }
+            removing.extend(pruned);
+        }
         let mut held = HashSet::new();
         for at in (0..images.len()).filter(|at| !removing.contains(at)) {
             let mut stack = parents[at].clone();
@@ -390,9 +428,11 @@ pub fn classify(images: &[Image], k: &Knowledge) -> Vec<Verdict> {
     verdicts
 }
 
+#[allow(clippy::too_many_arguments)]
 fn judge(
     image: &Image,
     at: usize,
+    containers: u64,
     shape: Shape,
     owner: Owner,
     k: &Knowledge,
@@ -425,7 +465,7 @@ fn judge(
             &format!("also named {foreign}, which this node did not name"),
         );
     }
-    if image.containers > 0 {
+    if containers > 0 {
         return keep(class, "a container uses it");
     }
     if let Some(why) = kept.get(&at) {
@@ -634,36 +674,47 @@ pub mod podman {
     }
 
     /// List this node's images in Podman's store and what each is, and with
-    /// `apply`, remove those that go.
+    /// `apply`, remove those that go, pass after pass until one removes
+    /// nothing: what a removal frees is removed in the same sweep.
     pub async fn sweep(k: &Knowledge, apply: bool) -> Result<Vec<Swept>, String> {
-        let images = list().await?;
-        let mut k = k.clone();
-        for reference in k
-            .kept
-            .iter_mut()
-            .map(|kept| &mut kept.reference)
-            .chain(k.pinned_base.as_mut())
-        {
-            if resolve_in(&images, reference).is_none() {
-                if let Some(id) = inspect_id(reference).await {
-                    *reference = id;
+        let mut swept = Vec::new();
+        let mut failed = HashMap::new();
+        for _ in 0..MAX_PASSES {
+            let images = list().await?;
+            let mut k = k.clone();
+            for reference in k
+                .kept
+                .iter_mut()
+                .map(|kept| &mut kept.reference)
+                .chain(k.pinned_base.as_mut())
+            {
+                if resolve_in(&images, reference).is_none() {
+                    if let Some(id) = inspect_id(reference).await {
+                        *reference = id;
+                    }
                 }
             }
-        }
-        let verdicts = classify(&images, &k);
-        let mut order: Vec<&Verdict> = verdicts.iter().filter(|v| v.remove).collect();
-        order.sort_by_key(|v| std::cmp::Reverse(depth(&images, v.index)));
-        let mut outcome: HashMap<usize, Result<(), String>> = HashMap::new();
-        if apply {
-            for verdict in order {
-                outcome.insert(verdict.index, remove(&images[verdict.index]).await);
+            let verdicts = pass(&images, &k, &failed);
+            let mut order: Vec<&Verdict> = verdicts.iter().filter(|v| v.remove).collect();
+            order.sort_by_key(|v| std::cmp::Reverse(depth(&images, v.index)));
+            let mut outcome: HashMap<usize, Result<(), String>> = HashMap::new();
+            if apply {
+                for verdict in order {
+                    outcome.insert(verdict.index, remove(&images[verdict.index]).await);
+                }
             }
-        }
-        Ok(verdicts
-            .into_iter()
-            .map(|v| {
+            let settled = !outcome.values().any(Result::is_ok);
+            for v in verdicts {
                 let done = outcome.remove(&v.index);
-                Swept {
+                // A pass that removed something lists only what it did; the
+                // pass that removes nothing lists what stays.
+                if done.is_none() && !settled {
+                    continue;
+                }
+                if let Some(Err(error)) = &done {
+                    failed.insert(images[v.index].id.clone(), error.clone());
+                }
+                swept.push(Swept {
                     name: display_name(&images[v.index]),
                     class: v.class,
                     remove: v.remove,
@@ -671,10 +722,37 @@ pub mod podman {
                     reclaim: v.reclaim,
                     removed: matches!(done, Some(Ok(()))),
                     error: done.and_then(Result::err),
-                }
-            })
-            .collect())
+                });
+            }
+            if settled {
+                break;
+            }
+        }
+        Ok(swept)
     }
+}
+
+/// An applied sweep stops after this many passes even if each removes
+/// something; every pass removes at least one image, so a store needs as
+/// many only for a chain this deep.
+const MAX_PASSES: usize = 16;
+
+/// What one pass of an applied sweep makes of `images`: their verdicts, less
+/// the images an earlier pass failed to remove (already listed with why),
+/// which stay and keep what they are built on.
+fn pass(images: &[Image], k: &Knowledge, failed: &HashMap<String, String>) -> Vec<Verdict> {
+    let mut k = k.clone();
+    for id in failed.keys() {
+        k.kept.push(Kept {
+            reference: id.clone(),
+            why: "could not be removed".into(),
+            legacy: false,
+        });
+    }
+    classify(images, &k)
+        .into_iter()
+        .filter(|v| !failed.contains_key(&images[v.index].id))
+        .collect()
 }
 
 /// Apple's `container` image store. It lists one entry per name, so an image
@@ -950,6 +1028,7 @@ mod tests {
             now_ms: NOW,
             legacy: false,
             adopt_unlabelled: false,
+            departing: Vec::new(),
         }
     }
 
@@ -1164,6 +1243,100 @@ mod tests {
         ));
         let v = classify(&images, &k);
         assert!(!verdict(&v, &images, "r-old").remove);
+    }
+
+    /// A layered image built on a repository image stands on the build's
+    /// unnamed layers, not on the repository image itself. They go with it
+    /// (the store prunes them), so one list shows the whole chain a removal
+    /// frees rather than the next layer down only once the first has gone.
+    #[test]
+    fn a_chain_through_unnamed_layers_goes_in_one_list() {
+        let mut images = store();
+        images.push(image("src", None, &[&format!("{REPO}-src:k")], ours()));
+        images.push(image(
+            "dockerfile",
+            Some("src"),
+            &[&format!("{REPO}:k")],
+            ours(),
+        ));
+        images.push(image("step-1", Some("dockerfile"), &[], ours()));
+        images.push(image("step-2", Some("step-1"), &[], ours()));
+        images.push(image(
+            "layer",
+            Some("step-2"),
+            &[&format!("{REPO}-claude:k")],
+            ours(),
+        ));
+        let mut k = knowledge();
+        k.kept = current();
+        k.legacy = true;
+        let v = classify(&images, &k);
+        for id in ["layer", "dockerfile", "src"] {
+            assert!(verdict(&v, &images, id).remove, "{id}");
+        }
+        assert!(unlisted(&v, &images, "step-1"));
+        // An unnamed layer something that stays is built on still holds.
+        k.legacy = false;
+        let v = classify(&images, &k);
+        let dockerfile = verdict(&v, &images, "dockerfile");
+        assert!(!dockerfile.remove && dockerfile.reason.contains("built on it"));
+        // As does one a container uses.
+        k.legacy = true;
+        images
+            .iter_mut()
+            .find(|i| i.id == "step-1")
+            .unwrap()
+            .containers = 1;
+        assert!(!verdict(&classify(&images, &k), &images, "dockerfile").remove);
+    }
+
+    /// A container the sweep removes first (a leftover transfer's) no longer
+    /// counts, so the dry run lists the image it held as going.
+    #[test]
+    fn a_container_the_sweep_removes_first_holds_nothing() {
+        let mut images = store();
+        images.push(image(
+            "h",
+            None,
+            &["localhost/tracon-harness-claude:latest"],
+            BTreeMap::new(),
+        ));
+        images.last_mut().unwrap().containers = 1;
+        let mut k = knowledge();
+        k.kept = current();
+        k.legacy = true;
+        let h = verdict(&classify(&images, &k), &images, "h").clone();
+        assert!(!h.remove && h.reason.contains("container"), "{h:?}");
+        k.departing = vec!["h".into()];
+        assert!(verdict(&classify(&images, &k), &images, "h").remove);
+        // Only the containers that leave: another still holds it.
+        images.last_mut().unwrap().containers = 2;
+        assert!(!verdict(&classify(&images, &k), &images, "h").remove);
+    }
+
+    /// Each pass of an applied sweep lists anew; an image an earlier pass
+    /// could not remove is not offered again, and keeps what it stands on.
+    #[test]
+    fn a_pass_leaves_out_what_an_earlier_one_could_not_remove() {
+        let mut images = store();
+        images.push(image(
+            "b9",
+            None,
+            &[&format!("{BASE}:0.40.0")],
+            BTreeMap::new(),
+        ));
+        images.push(image("r-9", Some("b9"), &[&format!("{REPO}:9")], ours()));
+        let mut k = knowledge();
+        k.kept = current();
+        let first = pass(&images, &k, &HashMap::new());
+        assert!(verdict(&first, &images, "r-9").remove);
+        assert!(verdict(&first, &images, "b9").remove);
+        let failed = HashMap::from([("r-9".to_string(), "in use".to_string())]);
+        let next = pass(&images, &k, &failed);
+        assert!(unlisted(&next, &images, "r-9"));
+        let b9 = verdict(&next, &images, "b9");
+        assert!(!b9.remove && b9.reason.contains("built on it"), "{b9:?}");
+        assert!(verdict(&next, &images, "r-old").remove);
     }
 
     #[test]

@@ -31,6 +31,13 @@
 //! to the repository while it is the latest one prepared, and is otherwise
 //! superseded.
 //!
+//! A container a copy into or out of a volume made (`tracon-transfer-…`)
+//! belongs to that copy, which removes it when it ends; one a day old was
+//! left by a copy that never finished, and goes first, so the image and the
+//! volume it holds as in use go in the same sweep. A workspace's directory
+//! goes only with its volume: when the volume could not be removed, the
+//! directory stays beside it.
+//!
 //! Images on Podman and in Apple's `container` store are swept by
 //! `crate::image_gc`: only those carrying this node's owner labels, by class
 //! (superseded bases, repository images, snapshots, dangling builds, and with
@@ -89,6 +96,10 @@ pub struct Owners {
     pub version: String,
     /// Images this node's current builds, snapshots and open sessions name.
     pub kept_images: Vec<crate::image_gc::Kept>,
+    /// Repositories with builds recorded that no `[[repo]]` entry names and
+    /// that are no managed clone: nothing builds or prepares for them again,
+    /// so their last builds and snapshots are superseded rather than current.
+    pub retired_repositories: HashSet<String>,
 }
 
 impl Default for Owners {
@@ -105,15 +116,18 @@ impl Default for Owners {
             snapshots: HashSet::new(),
             version: String::new(),
             kept_images: Vec::new(),
+            retired_repositories: HashSet::new(),
         }
     }
 }
 
 impl Owners {
+    /// `repos` is the `[[repo]]` table as it stands now.
     pub fn read(
         store: &Store,
         node_id: &str,
         caches: bool,
+        repos: &[crate::config::Repo],
     ) -> Result<Self, crate::store::StoreError> {
         let mut owners = Owners {
             prefix: crate::config::resource_prefix().into(),
@@ -142,17 +156,23 @@ impl Owners {
         owners.running_checks = store.running_check_run_ids()?;
         owners.unsettled_publications = store.publications_unsettled()?;
         owners.version = env!("CARGO_PKG_VERSION").to_string();
-        // The latest ready snapshot of each repository; rows are newest first
-        // within a repository.
-        let mut repos = HashSet::new();
-        let mut rows: Vec<_> = store
-            .repo_images()?
+        let rows = store.repo_images()?;
+        owners.retired_repositories = rows
+            .iter()
+            .map(|row| row.repo_path.clone())
+            .filter(|repo| !repository_is_current(repos, Path::new(repo)))
+            .collect();
+        // The latest ready snapshot of each repository the node still
+        // builds for; rows are newest first within a repository.
+        let mut latest = HashSet::new();
+        let mut rows: Vec<_> = rows
             .into_iter()
             .filter(|row| row.kind == crate::sandbox_images::SNAPSHOT && row.status == "ready")
+            .filter(|row| !owners.retired_repositories.contains(&row.repo_path))
             .collect();
         rows.sort_by_key(|row| std::cmp::Reverse(row.started_ms));
         for row in rows {
-            if repos.insert(row.repo_path.clone()) {
+            if latest.insert(row.repo_path.clone()) {
                 owners.snapshots.insert(row.image);
             }
         }
@@ -161,10 +181,17 @@ impl Owners {
     }
 }
 
+/// Whether the node still builds for `repo`: a `[[repo]]` entry names it, or
+/// it is a managed clone.
+fn repository_is_current(repos: &[crate::config::Repo], repo: &Path) -> bool {
+    repos.iter().any(|entry| entry.matches(repo)) || crate::forge::managed_clone(repo).is_ok()
+}
+
 /// What a repository's work runs in now: the newest finished build of each
 /// kind (a stale one still stands while its successor fails) and what it
 /// was built on, the current snapshots, and the images open sessions
-/// started from.
+/// started from. A repository the node no longer builds for has no current
+/// build, save the newest trial an entry not yet approved would adopt.
 fn kept_images(
     store: &Store,
     owners: &Owners,
@@ -177,9 +204,16 @@ fn kept_images(
         .map(|row| row.repo_path)
         .collect();
     for repo in repos {
+        // A setup trial builds for a repository before its entry exists, and
+        // the entry the operator approves adopts that build, so a repository
+        // no entry names yet still keeps its newest trial.
+        let retired = owners.retired_repositories.contains(&repo);
         let mut kinds = HashSet::new();
         for row in store.ready_repo_images(&repo)? {
-            if row.kind == crate::sandbox_images::SNAPSHOT || !kinds.insert(row.kind.clone()) {
+            if row.kind == crate::sandbox_images::SNAPSHOT
+                || (retired && row.kind != crate::repo_image::TRIAL)
+                || !kinds.insert(row.kind.clone())
+            {
                 continue;
             }
             let legacy = row.kind.starts_with("session:");
@@ -231,7 +265,8 @@ fn workspace_key(id: &str) -> String {
 /// One piece of runtime storage and what the sweep makes of it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Item {
-    /// `volume`, `directory`, `file` (a publication's bundle), or `image`.
+    /// `container` (a transfer's), `volume`, `directory`, `file` (a
+    /// publication's bundle), or `image`.
     pub kind: &'static str,
     /// The volume name, or the directory relative to the node's state dir.
     pub name: String,
@@ -349,6 +384,52 @@ pub fn classify_volume(name: &str, created_ms: Option<i64>, owners: &Owners) -> 
         );
     }
     verdict(false, "not a volume this node recognizes")
+}
+
+/// Whether a transfer's container is over: one still copying (running, or
+/// made in the last day, as a copy holds a stopped container between its
+/// steps) stays.
+pub fn classify_transfer(
+    transfer: &crate::boundary::TransferInfo,
+    owners: &Owners,
+) -> (bool, String) {
+    if own_rest(&transfer.name, &owners.prefix).is_none() {
+        return verdict(false, "not named for this node; another node may own it");
+    }
+    if transfer.running {
+        return verdict(false, "running; a copy is under way");
+    }
+    if transfer
+        .created_ms
+        .is_none_or(|created| owners.now_ms - created < WORKSPACE_GRACE_MS)
+    {
+        return verdict(
+            false,
+            "made in the last day; its copy may still be under way",
+        );
+    }
+    verdict(
+        true,
+        "left by a copy that did not finish; it holds its image and volume as in use",
+    )
+}
+
+/// The volume a workspace's host directory is the shadow of, under `prefix`:
+/// the two go together or not at all.
+fn workspace_volume(item: &Item, prefix: &str) -> Option<String> {
+    let key = item
+        .name
+        .strip_prefix("workspaces/")
+        .or_else(|| item.name.strip_prefix("workspace-staging/"))?;
+    Some(format!("{prefix}-workspace-{key}"))
+}
+
+/// Keep a workspace's directory whose volume this sweep could not remove.
+fn hold_with_volume(item: &mut Item, failed_volumes: &HashSet<String>, prefix: &str) {
+    if let Some(volume) = workspace_volume(item, prefix).filter(|v| failed_volumes.contains(v)) {
+        item.remove = false;
+        item.reason = format!("its volume {volume} could not be removed, so it stays with it");
+    }
 }
 
 /// Whether a host directory under the state dir is still needed. `area` is
@@ -540,7 +621,43 @@ pub fn image_knowledge(
         now_ms: owners.now_ms,
         legacy: sweep.legacy,
         adopt_unlabelled: sweep.adopt_unlabelled,
+        departing: Vec::new(),
     }
+}
+
+/// The transfers' containers, and with `apply` those whose copy is over
+/// removed; with them, the images of those that go and are not removed yet,
+/// which an image sweep counts a container fewer. A runtime that cannot list
+/// them has none to offer.
+async fn sweep_transfers(
+    backend: &dyn Backend,
+    owners: &Owners,
+    apply: bool,
+) -> (Vec<Item>, Vec<String>) {
+    let transfers = match backend.list_transfers().await {
+        Ok(transfers) => transfers,
+        Err(error) => {
+            tracing::debug!(%error, "could not list transfer containers");
+            return (Vec::new(), Vec::new());
+        }
+    };
+    let mut items = Vec::new();
+    let mut departing = Vec::new();
+    for transfer in transfers {
+        let (remove, reason) = classify_transfer(&transfer, owners);
+        let mut item = item("container", transfer.name.clone(), remove, reason);
+        if remove && apply {
+            match backend.remove_transfer(&transfer.name).await {
+                Ok(()) => item.removed = true,
+                Err(error) => item.error = Some(error.to_string()),
+            }
+        }
+        if remove && !apply && !transfer.image.is_empty() {
+            departing.push(transfer.image);
+        }
+        items.push(item);
+    }
+    (items, departing)
 }
 
 /// The image store `backend` keeps, swept.
@@ -572,14 +689,16 @@ pub async fn note_reclaimable_images(
     if !matches!(backend.kind(), "podman" | "apple") {
         return;
     }
-    let owners = match Owners::read(store, node_id, false) {
+    let owners = match Owners::read(store, node_id, false, &cfg.repos()) {
         Ok(owners) => owners,
         Err(error) => {
             tracing::debug!(%error, "could not read what this node's images serve");
             return;
         }
     };
-    let knowledge = image_knowledge(cfg, &owners, node_id, &Sweep::default());
+    let mut knowledge = image_knowledge(cfg, &owners, node_id, &Sweep::default());
+    let (_, departing) = sweep_transfers(backend, &owners, false).await;
+    knowledge.departing = departing;
     match sweep_images(backend, cfg, &knowledge, false).await {
         Ok(swept) => log_reclaimable(&swept, false),
         Err(error) => tracing::debug!(%error, "could not list the image store"),
@@ -622,9 +741,11 @@ pub async fn sweep(
     sweep: Sweep,
 ) -> Result<Vec<Item>, String> {
     let Sweep { caches, apply, .. } = sweep;
-    let owners = Owners::read(store, node_id, caches).map_err(|e| e.to_string())?;
+    let owners = Owners::read(store, node_id, caches, &cfg.repos()).map_err(|e| e.to_string())?;
+    // Transfers first: one left behind holds its volume and its image.
+    let (mut items, departing) = sweep_transfers(backend, &owners, apply).await;
     let volumes = backend.list_volumes().await.map_err(|e| e.to_string())?;
-    let mut items = Vec::new();
+    let mut failed_volumes = HashSet::new();
     for volume in volumes {
         let (remove, reason) = classify_volume(&volume.name, volume.created_ms, &owners);
         let mut item = item("volume", volume.name, remove, reason);
@@ -633,13 +754,17 @@ pub async fn sweep(
             let _guard = lock.lock().await;
             match backend.remove_volume(&item.name).await {
                 Ok(()) => item.removed = true,
-                Err(error) => item.error = Some(error.to_string()),
+                Err(error) => {
+                    failed_volumes.insert(item.name.clone());
+                    item.error = Some(error.to_string());
+                }
             }
         }
         items.push(item);
     }
     if matches!(backend.kind(), "podman" | "apple") {
-        let knowledge = image_knowledge(cfg, &owners, node_id, &sweep);
+        let mut knowledge = image_knowledge(cfg, &owners, node_id, &sweep);
+        knowledge.departing = departing;
         let swept = sweep_images(backend, cfg, &knowledge, apply).await?;
         log_reclaimable(&swept, apply);
         for image in swept {
@@ -653,6 +778,7 @@ pub async fn sweep(
         }
     }
     for (mut item, path) in directory_items(&Config::state_dir(), &owners) {
+        hold_with_volume(&mut item, &failed_volumes, &owners.prefix);
         if apply && item.remove {
             let removed = match path.is_dir() {
                 true => std::fs::remove_dir_all(&path),
@@ -844,5 +970,128 @@ mod tests {
                 Some(true)
             );
         }
+    }
+
+    /// A transfer's container outlives its copy only when the node stopped
+    /// mid-copy; one a day old goes, one copying now stays.
+    #[test]
+    fn a_transfer_s_container_goes_once_its_copy_is_over() {
+        let o = owners();
+        let transfer =
+            |name: &str, running: bool, created_ms: Option<i64>| crate::boundary::TransferInfo {
+                name: name.into(),
+                running,
+                created_ms,
+                image: "harness".into(),
+            };
+        let (remove, reason) =
+            classify_transfer(&transfer("tracon-transfer-01a1", false, Some(0)), &o);
+        assert!(remove, "{reason}");
+        assert!(!classify_transfer(&transfer("tracon-transfer-01a1", true, Some(0)), &o).0);
+        let recent = Some(o.now_ms - 1000);
+        assert!(!classify_transfer(&transfer("tracon-transfer-01a1", false, recent), &o).0);
+        assert!(!classify_transfer(&transfer("tracon-transfer-01a1", false, None), &o).0);
+        assert!(!classify_transfer(&transfer("spike-transfer-01a1", false, Some(0)), &o).0);
+    }
+
+    /// A workspace's directory and its volume go together: when the volume
+    /// could not be removed, its directory stays, and others are untouched.
+    #[test]
+    fn a_workspace_directory_stays_with_a_volume_that_could_not_go() {
+        let failed: HashSet<String> = ["tracon-workspace-01a14200".to_string()].into();
+        let directory = |name: &str| item("directory", name.into(), true, "no open session".into());
+        for held in ["workspaces/01a14200", "workspace-staging/01a14200"] {
+            let mut it = directory(held);
+            hold_with_volume(&mut it, &failed, "tracon");
+            assert!(!it.remove, "{held}");
+            assert!(
+                it.reason.contains("tracon-workspace-01a14200"),
+                "{}",
+                it.reason
+            );
+        }
+        for free in ["workspaces/01a14201", "sessions/01a14200"] {
+            let mut it = directory(free);
+            hold_with_volume(&mut it, &failed, "tracon");
+            assert!(it.remove, "{free}");
+        }
+    }
+
+    /// A build of a repository no `[[repo]]` entry names any more (and that
+    /// is no managed clone) is superseded: it keeps neither its image, nor
+    /// what that was built on, nor its snapshot.
+    #[test]
+    fn a_build_of_a_repository_the_node_no_longer_names_is_superseded() {
+        let store = Store::open_in_memory().unwrap();
+        let built = |repo: &str, kind: &str, image: &str, parent: &str| {
+            let id = store
+                .start_repo_image(&crate::store::RepoImageStart {
+                    repo_path: repo,
+                    kind,
+                    recipe_hash: "r",
+                    source_ref: "",
+                    source_commit: "c",
+                    parent_image: parent,
+                })
+                .unwrap();
+            store.finish_repo_image(&id, Ok(image), "", &[]).unwrap();
+        };
+        built(
+            "/src/kept",
+            crate::repo_image::BASE,
+            "localhost/kept:1",
+            "localhost/kept-src:1",
+        );
+        built(
+            "/src/gone",
+            crate::repo_image::BASE,
+            "localhost/gone:1",
+            "localhost/gone-src:1",
+        );
+        built(
+            "/src/kept",
+            crate::sandbox_images::SNAPSHOT,
+            "localhost/kept-snap:1",
+            "",
+        );
+        built(
+            "/src/gone",
+            crate::sandbox_images::SNAPSHOT,
+            "localhost/gone-snap:1",
+            "",
+        );
+        built(
+            "/src/trying",
+            crate::repo_image::TRIAL,
+            "localhost/trying:1",
+            "localhost/trying-src:1",
+        );
+        let repos = vec![crate::config::Repo {
+            path: "/src/kept".into(),
+            ..Default::default()
+        }];
+        assert!(repository_is_current(&repos, Path::new("/src/kept")));
+        assert!(!repository_is_current(&repos, Path::new("/src/gone")));
+
+        let o = Owners::read(&store, "node-a", false, &repos).unwrap();
+        assert_eq!(
+            o.retired_repositories,
+            HashSet::from(["/src/gone".to_string(), "/src/trying".to_string()])
+        );
+        assert_eq!(
+            o.snapshots,
+            HashSet::from(["localhost/kept-snap:1".to_string()])
+        );
+        let kept: Vec<&str> = o.kept_images.iter().map(|k| k.reference.as_str()).collect();
+        assert_eq!(
+            kept,
+            [
+                "localhost/kept:1",
+                "localhost/kept-src:1",
+                "localhost/trying:1",
+                "localhost/trying-src:1",
+                "localhost/kept-snap:1"
+            ]
+        );
     }
 }
