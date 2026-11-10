@@ -3,14 +3,21 @@
 //! The prompt is the last thing between a phished confirmation and a write,
 //! so it is built to be read by someone who did not make the request: what
 //! could change what the node runs, trusts, reads, sends or reaches comes
-//! first, with its value in full, quoted, and never cut short: a list shows
-//! the elements it gains and loses, a single value what it was and what it
-//! becomes. A change too large to show that way is refused, to be split.
+//! first, with its value in full, quoted: a list shows the elements it
+//! gains and loses, a single value what it was and what it becomes. A change
+//! too large to show that way has its scripts' long steps (`build`,
+//! `prepare`, `checks`) cut short, visibly, each with its length, and each
+//! such list followed by how many elements and characters it holds and its
+//! digest; a build's steps are long, and a list replaced whole cannot be
+//! split. Nothing else is ever cut: a host, path or single value too large
+//! to show is refused, to be split.
 //! Routine keys follow, as many as fit, and how many more. An entry of an
 //! array of tables is named by its own `path`, `name` or `id` as it was
 //! before the edit, never by an index alone, and its changed fields are
 //! listed; an entry under a key the node does not read is named by its
 //! index only, since its fields are not shown.
+
+use sha2::{Digest, Sha256};
 
 use crate::config::edit::{Change, Seg};
 use crate::config_schema::{self, KEYS};
@@ -23,6 +30,31 @@ const HEAD: &str = "Change node.toml: ";
 const MAX_WILD: usize = 24;
 /// The longest any other key segment is shown.
 const MAX_SEGMENT: usize = 48;
+/// What a long element of a list is cut to, widest first, when the edit
+/// does not fit its prompt with every element whole.
+const CUTS: [usize; 4] = [160, 80, 40, 20];
+
+/// The only keys whose list elements may be cut short: scripts, long by
+/// nature and replaced whole. Hosts, paths, programs and names are always
+/// shown whole, so a long script in the same edit cannot push one out of
+/// sight; an edit too large to show them whole is refused, to be split.
+const CUTTABLE: &[&str] = &["repo.build", "repo.prepare", "repo.checks"];
+
+/// `fit` for a change at `key`: whole unless `key` is [`CUTTABLE`].
+fn fit_for(key: &[&str], fit: Fit) -> Fit {
+    match CUTTABLE.iter().any(|p| pattern_covers(p, key)) {
+        true => fit,
+        false => Fit::Whole,
+    }
+}
+
+/// How the elements of a list are shown: whole, or each string longer than
+/// so many characters cut short.
+#[derive(Clone, Copy)]
+enum Fit {
+    Whole,
+    Cut(usize),
+}
 
 /// Keys whose change could widen what the node runs, trusts, reads, sends
 /// or reaches, beyond what the schema flags itself (programs, host paths,
@@ -197,8 +229,9 @@ pub(crate) fn quote(text: &str) -> String {
     format!("\"{}\"", visible(text))
 }
 
-/// A value in full: a string quoted, a list element by element.
-fn render(value: &toml::Value) -> String {
+/// A value: a string quoted and whole, a list element by element, each as
+/// `fit` shows it.
+fn render(value: &toml::Value, fit: Fit) -> String {
     match value {
         // A URL sent in the clear says so.
         toml::Value::String(s)
@@ -210,13 +243,17 @@ fn render(value: &toml::Value) -> String {
         toml::Value::String(s) => quote(s),
         toml::Value::Array(items) => format!(
             "[{}]",
-            items.iter().map(render).collect::<Vec<_>>().join(", ")
+            items
+                .iter()
+                .map(|v| element(v, fit))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         toml::Value::Table(table) => format!(
             "{{{}}}",
             table
                 .iter()
-                .map(|(k, v)| format!("{} = {}", quote(k), render(v)))
+                .map(|(k, v)| format!("{} = {}", quote(k), render(v, Fit::Whole)))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -224,33 +261,102 @@ fn render(value: &toml::Value) -> String {
     }
 }
 
-/// A sensitive key's change, shown in full after its key: a list's added
-/// and removed elements, a value's old and new, or that it went. A secret's
-/// value, and a value under a key the node does not read, is not shown.
-fn show_change(at: &[&str], was: Option<&toml::Value>, now: Option<&toml::Value>) -> String {
+/// Whether `fit` cuts `value` short as an element of a list.
+fn too_long(value: &toml::Value, fit: Fit) -> bool {
+    match (value, fit) {
+        (toml::Value::String(s), Fit::Cut(max)) => visible(s).chars().count() > max,
+        _ => false,
+    }
+}
+
+/// An element of a list: whole, or a string cut short, visibly, with its
+/// length. Only a list's own strings are cut; anything nested is whole.
+fn element(value: &toml::Value, fit: Fit) -> String {
+    match (value, fit) {
+        (toml::Value::String(s), Fit::Cut(max)) if too_long(value, fit) => {
+            let clear = s
+                .get(..7)
+                .is_some_and(|p| p.eq_ignore_ascii_case("http://"));
+            format!(
+                "\"{}\" ({} chars){}",
+                cut(s, max),
+                s.chars().count(),
+                if clear { " (cleartext)" } else { "" }
+            )
+        }
+        _ => render(value, Fit::Whole),
+    }
+}
+
+/// What a list some of whose elements were cut short holds: how many
+/// elements and characters, and the start of the SHA-256 of the list as
+/// compact JSON, so the whole can be checked against what was sent.
+fn whole(list: &[toml::Value]) -> String {
+    let chars: usize = list
+        .iter()
+        .map(|v| match v {
+            toml::Value::String(s) => s.chars().count(),
+            other => other.to_string().chars().count(),
+        })
+        .sum();
+    let json = serde_json::to_string(list).unwrap_or_default();
+    let digest = hex::encode(Sha256::digest(json.as_bytes()));
+    format!(
+        " ({} items, {chars} chars, sha256 {})",
+        list.len(),
+        &digest[..12]
+    )
+}
+
+/// [`whole`], for `value` when it is a list `fit` cuts short, and nothing
+/// otherwise.
+fn whole_if_cut(value: &toml::Value, fit: Fit) -> String {
+    match value {
+        toml::Value::Array(list) if list.iter().any(|v| too_long(v, fit)) => whole(list),
+        _ => String::new(),
+    }
+}
+
+/// A sensitive key's change, shown after its key: a list's added and
+/// removed elements, a value's old and new, or that it went, each element as
+/// `fit` shows it. A secret's value, and a value under a key the node does
+/// not read, is not shown.
+fn show_change(
+    at: &[&str],
+    was: Option<&toml::Value>,
+    now: Option<&toml::Value>,
+    fit: Fit,
+) -> String {
     let concealed = config_schema::lookup(at).secret || !config_schema::known(at);
+    let fit = fit_for(at, fit);
     match (was, now) {
         (_, None) => " removed".into(),
         (_, Some(_)) if concealed => " = (a new value, not shown)".into(),
         (Some(toml::Value::Array(old)), Some(toml::Value::Array(new)))
             if !old.iter().chain(new).any(toml::Value::is_table) =>
         {
-            let mut parts: Vec<String> = beyond(new, old)
-                .into_iter()
-                .map(|v| format!("+ {}", render(v)))
+            let (gained, lost) = (beyond(new, old), beyond(old, new));
+            let mut parts: Vec<String> = gained
+                .iter()
+                .map(|v| format!("+ {}", element(v, fit)))
                 .collect();
-            parts.extend(
-                beyond(old, new)
-                    .into_iter()
-                    .map(|v| format!("- {}", render(v))),
-            );
+            parts.extend(lost.iter().map(|v| format!("- {}", element(v, fit))));
+            let tail = match gained.iter().chain(&lost).any(|v| too_long(v, fit)) {
+                true => whole(new),
+                false => String::new(),
+            };
             match parts.is_empty() {
                 true => " reordered".into(),
-                false => format!(": {}", parts.join(", ")),
+                false => format!(": {}{tail}", parts.join(", ")),
             }
         }
-        (Some(old), Some(new)) => format!(": {} -> {}", render(old), render(new)),
-        (None, Some(new)) => format!(" = {}", render(new)),
+        (Some(old), Some(new)) => format!(
+            ": {} -> {}{}",
+            render(old, fit),
+            render(new, fit),
+            whole_if_cut(new, fit)
+        ),
+        (None, Some(new)) => format!(" = {}{}", render(new, fit), whole_if_cut(new, fit)),
     }
 }
 
@@ -312,13 +418,17 @@ fn field(
     key: &str,
     was: Option<&toml::Value>,
     now: Option<&toml::Value>,
+    fit: Fit,
 ) -> (bool, String) {
     let mut full = array.to_vec();
     full.push(key);
     let sensitive = sensitive(&full);
     let shown = cut(key, MAX_SEGMENT);
     match sensitive {
-        true => (true, format!("{shown}{}", show_change(&full, was, now))),
+        true => (
+            true,
+            format!("{shown}{}", show_change(&full, was, now, fit)),
+        ),
         false => (false, shown),
     }
 }
@@ -326,7 +436,13 @@ fn field(
 /// An array of tables that gained, lost or reordered entries, entry by
 /// entry: each added or changed entry by its name with its fields, each
 /// removed one by its name.
-fn array_items(key: &[Seg], before: &[&toml::Table], after: &[&toml::Table], out: &mut Vec<Item>) {
+fn array_items(
+    key: &[Seg],
+    before: &[&toml::Table],
+    after: &[&toml::Table],
+    fit: Fit,
+    out: &mut Vec<Item>,
+) {
     let names: Vec<&str> = key
         .iter()
         .filter_map(|s| match s {
@@ -364,7 +480,7 @@ fn array_items(key: &[Seg], before: &[&toml::Table], after: &[&toml::Table], out
             {
                 continue;
             }
-            fields.push(field(&names, k, was.and_then(|w| w.get(k)), value));
+            fields.push(field(&names, k, was.and_then(|w| w.get(k)), value, fit));
         }
         // Sensitive fields first, as everywhere.
         fields.sort_by_key(|(s, _)| !*s);
@@ -409,7 +525,8 @@ fn array_items(key: &[Seg], before: &[&toml::Table], after: &[&toml::Table], out
 
 /// The prompt for `changes`, made against the file as it was (`before`) and
 /// as it would be (`after`). `Err` when the sensitive part alone does not
-/// fit a prompt: such an edit is to be split, never shown cut short.
+/// fit a prompt even with its lists' long elements cut short: such an edit
+/// is to be split.
 /// `effective` (the file before the edit as it loads, every default filled
 /// in) stands for a key the file did not write, so a list the edit writes
 /// for the first time shows what it adds to the default rather than the
@@ -434,6 +551,29 @@ pub fn summarize_within(
     changes: &[Change],
     budget: usize,
 ) -> Result<String, String> {
+    let mut needed = 0;
+    for fit in std::iter::once(Fit::Whole).chain(CUTS.map(Fit::Cut)) {
+        let items = items(before, after, effective, changes, fit);
+        match fitted(items, budget) {
+            Ok(line) => return Ok(line),
+            Err(n) => needed = n,
+        }
+    }
+    Err(format!(
+        "this edit's sensitive changes need {needed} characters even with long list elements cut short, \
+         more than one confirmation can show ({budget}); split it into smaller edits"
+    ))
+}
+
+/// What `changes` are, item by item, sensitive or not, lists shown as `fit`
+/// says.
+fn items(
+    before: &toml::Table,
+    after: &toml::Table,
+    effective: &toml::Table,
+    changes: &[Change],
+    fit: Fit,
+) -> Vec<Item> {
     let mut items = Vec::new();
     for change in changes {
         let segs = &change.key.0;
@@ -443,7 +583,7 @@ pub fn summarize_within(
             tables(change.after.as_ref()),
         ) {
             if !(was.is_empty() && now.is_empty()) {
-                array_items(segs, &was, &now, &mut items);
+                array_items(segs, &was, &now, fit, &mut items);
                 continue;
             }
         }
@@ -462,7 +602,7 @@ pub fn summarize_within(
                 };
                 format!(
                     "{shown}{}{note}",
-                    show_change(&names, was, change.after.as_ref())
+                    show_change(&names, was, change.after.as_ref(), fit)
                 )
             }
             false => shown,
@@ -498,6 +638,13 @@ pub fn summarize_within(
         }
     }
 
+    items
+}
+
+/// The line for `items` in `budget` characters: every sensitive item, then
+/// as many routine ones as fit and how many more. `Err` with the length
+/// the sensitive part needs when it does not fit.
+fn fitted(items: Vec<Item>, budget: usize) -> Result<String, usize> {
     let (loud, quiet): (Vec<Item>, Vec<Item>) = items.into_iter().partition(|i| i.sensitive);
     let mut line = HEAD.to_string();
     line.push_str(
@@ -513,10 +660,7 @@ pub fn summarize_within(
         false => "; ".len() + format!(" and {} more", quiet.len()).len(),
     };
     if line.chars().count() + reserve > budget {
-        return Err(format!(
-            "this edit changes more sensitive keys than one confirmation can show ({}); split it into smaller edits",
-            loud.len()
-        ));
+        return Err(line.chars().count() + reserve);
     }
     let mut shown = 0;
     for (n, item) in quiet.iter().enumerate() {
@@ -677,6 +821,80 @@ mod tests {
         assert!(line.contains(&fits), "{line}");
     }
 
+    /// The tracon recipe's three build steps, about 900 characters together.
+    const RECIPE: [&str; 3] = [
+        "apt-get update && apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev ca-certificates curl git jq unzip xz-utils uidmap fuse-overlayfs slirp4netns && rm -rf /var/lib/apt/lists/* && update-ca-certificates && git config --system --add safe.directory /work",
+        "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.91.0 --component clippy,rustfmt && . \"$HOME/.cargo/env\" && rustup target add x86_64-unknown-linux-gnu && cargo install --locked cargo-nextest just && cargo --version && rustc --version",
+        "curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash -s bun-v1.3.2 && ln -sf /usr/local/bin/bun /usr/local/bin/bunx && bun --version && mkdir -p /opt/tracon/spa && cd /opt/tracon/spa && printf '{}' > package.json && bun install || true && echo bun is ready for the interface build, its type check and its tests in every session",
+    ];
+
+    /// A build list too long to show whole is shown cut short, visibly:
+    /// each step's start and length, then the list's size and digest, so
+    /// one confirmation moves an entry to its build steps.
+    #[test]
+    fn a_build_list_too_long_to_show_whole_is_shown_cut_short_with_its_digest() {
+        assert!(RECIPE.iter().map(|s| s.len()).sum::<usize>() > 850);
+        let file =
+            "[runtime.podman]\nsandbox_protocol = true\nsandbox_images = true\n\n[[repo]]\npath = \"github.com/cosmicspork/tracon\"\ndockerfile = \"Dockerfile\"\n";
+        let line = prompt(
+            file,
+            &[
+                Op::remove(KeyPath::parse("repo[0].dockerfile").unwrap()),
+                set("repo[0].build", strings(&RECIPE)),
+            ],
+        )
+        .unwrap();
+        assert!(line.chars().count() <= MAX_SUMMARY, "{line}");
+        assert!(
+            line.contains("repo[0] (\"github.com/cosmicspork/tracon\").dockerfile removed"),
+            "{line}"
+        );
+        for step in RECIPE {
+            assert!(
+                line.contains(&format!("({} chars)", step.chars().count())),
+                "{line}"
+            );
+            assert!(line.contains(&step[..16]), "{line}");
+        }
+        let json = serde_json::to_string(&RECIPE).unwrap();
+        let digest = hex::encode(Sha256::digest(json.as_bytes()));
+        let chars: usize = RECIPE.iter().map(|s| s.chars().count()).sum();
+        assert!(
+            line.contains(&format!(
+                "(3 items, {chars} chars, sha256 {})",
+                &digest[..12]
+            )),
+            "{line}"
+        );
+
+        // What fits whole is still shown whole, with no digest.
+        let line = prompt(
+            file,
+            &[
+                Op::remove(KeyPath::parse("repo[0].dockerfile").unwrap()),
+                set("repo[0].build", strings(&["just setup"])),
+            ],
+        )
+        .unwrap();
+        assert!(line.contains("build = [\"just setup\"]"), "{line}");
+        assert!(!line.contains("sha256"), "{line}");
+
+        // A long script in the same edit never cuts a host short: hosts are
+        // shown whole, and an edit too large for that is refused.
+        let host = "objects.githubusercontent.com.cdn.attacker.example";
+        let line = prompt(
+            file,
+            &[
+                Op::remove(KeyPath::parse("repo[0].dockerfile").unwrap()),
+                set("repo[0].build", strings(&[RECIPE, RECIPE].concat())),
+                set("repo[0].egress", strings(&[host])),
+            ],
+        )
+        .unwrap();
+        assert!(line.contains(&format!("+ {}", quote(host))), "{line}");
+        assert!(line.contains("(6 items, "), "{line}");
+    }
+
     /// Moving an entry to another repository moves what it lends: named by
     /// what it was, with the old identity and the new.
     #[test]
@@ -762,6 +980,9 @@ mod tests {
             .collect();
         let err = prompt("", &ops).unwrap_err();
         assert!(err.contains("split"), "{err}");
+        // What is too long is the line, however few keys it names.
+        assert!(err.contains("characters"), "{err}");
+        assert!(err.contains(&format!("({MAX_SUMMARY})")), "{err}");
     }
 
     #[test]
