@@ -2087,7 +2087,7 @@ fn with_base_arg(dockerfile: &[u8], base: &str) -> Vec<u8> {
 
 /// Bumped when `steps_containerfile` changes what it writes, so every
 /// repository built from steps is built again.
-const STEPS_SCHEME: &str = "steps-1";
+const STEPS_SCHEME: &str = "steps-2";
 
 /// Why an entry's `build` steps have no recipe yet.
 const STEPS_UNPINNED: &str = "build steps stand on the stock sandbox base, which this node \
@@ -2134,9 +2134,11 @@ async fn steps_recipe(repo: &Path, entry: &Repo, base: &str) -> Result<Recipe, S
 /// The Containerfile `steps` are built from: each a `RUN` of its own as
 /// root, so a failure names the step, in exec form so a step's quotes and
 /// newlines reach the shell as written; then back to the base's own user,
-/// home and directory, as every sandbox runs.
+/// home and directory, as every sandbox runs. The steps run with root's own
+/// home, so a tool that writes under `$HOME` (`uv`'s cache, say) leaves
+/// nothing root owns in the harness's.
 pub(crate) fn steps_containerfile(base: &str, steps: &[String]) -> String {
-    let mut out = format!("FROM {base}\nUSER 0:0\n");
+    let mut out = format!("FROM {base}\nUSER 0:0\nENV HOME=/root\n");
     for step in steps {
         let argv = serde_json::json!(["/bin/sh", "-ec", step]);
         out.push_str(&format!("RUN {argv}\n"));
@@ -3997,7 +3999,7 @@ ENTRYPOINT []
     }
 
     #[test]
-    fn build_steps_run_as_root_one_each_and_end_as_the_bases_user() {
+    fn build_steps_run_as_root_in_roots_home_one_each_and_end_as_the_bases_user() {
         let file = steps_containerfile(
             "ghcr.io/cosmicspork/tracon-sandbox-base@sha256:ab",
             &["apt-get update".into(), "echo \"a b\" \\\nexit 3".into()],
@@ -4006,6 +4008,7 @@ ENTRYPOINT []
             file,
             r#"FROM ghcr.io/cosmicspork/tracon-sandbox-base@sha256:ab
 USER 0:0
+ENV HOME=/root
 RUN ["/bin/sh","-ec","apt-get update"]
 RUN ["/bin/sh","-ec","echo \"a b\" \\\nexit 3"]
 USER 65532:65532
