@@ -407,7 +407,8 @@ pub(crate) async fn default_commit(repo: &Path) -> Result<(String, String), Stri
 /// distinct for two repositories that share a directory name. A node with a
 /// `[boundary] resource_prefix` of its own names them `<prefix>-repo-…`, so
 /// a second node on one store never moves the first's tags; the default
-/// prefix keeps the name every image was built under.
+/// prefix keeps the name every image was built under. Each build is tagged
+/// under it with a tag of its own ([`build_tag`]).
 pub(crate) fn image_name(repo: &Path) -> String {
     let slug: String = repo
         .file_name()
@@ -429,6 +430,19 @@ pub(crate) fn image_name(repo: &Path) -> String {
 /// `localhost/<prefix>-repo-`.
 pub(crate) fn image_stem() -> String {
     format!("localhost/{}", crate::config::resource_name("repo-"))
+}
+
+/// The tag one build is made under: `<name>:<key>-<build>`, the first
+/// characters of its recipe (or layer key) and the store row that records
+/// it. No other build shares it, so nothing another process builds (a
+/// second node on the same image store, a test on the same checkout path)
+/// can move it between the build and the digest read back from it, or take
+/// the last name the recorded `name@sha256:…` resolves by off the image
+/// while something still runs from it: Podman resolves a digest reference
+/// only through a tag of the same name.
+pub(crate) fn build_tag(name: &str, key: &str, build: &str) -> String {
+    let build: String = build.chars().filter(char::is_ascii_alphanumeric).collect();
+    format!("{name}:{}-{build}", &key[..key.len().min(12)])
 }
 
 /// A build's labels: its recipe, and this node as its owner
@@ -1187,7 +1201,16 @@ async fn ensure_session_with(
         Ok(id) => id,
         Err(error) => return unlayered(error.to_string()),
     };
-    let built = build_session(builder, runner, repo, base, &harness_image, &key, harness).await;
+    let built = build_session(
+        builder,
+        runner,
+        repo,
+        base,
+        &harness_image,
+        (&key, &id),
+        harness,
+    )
+    .await;
     match built {
         Ok(built) => {
             let _ = store.finish_repo_image(&id, Ok(&built.image), &built.log_tail, &[]);
@@ -1219,11 +1242,12 @@ async fn build_session(
     repo: &Path,
     base: &str,
     harness_image: &str,
-    key: &str,
+    build: (&str, &str),
     harness: &SessionHarness<'_>,
 ) -> Result<BuiltImage, BuildFailure> {
     let begun = std::time::Instant::now();
-    let built = build_session_layer(builder, runner, repo, base, harness_image, key, harness).await;
+    let built =
+        build_session_layer(builder, runner, repo, base, harness_image, build, harness).await;
     count_build("session", repo, built.as_ref().err(), begun);
     built
 }
@@ -1250,13 +1274,14 @@ fn count_build(
     );
 }
 
+/// `build` is the layer's key and the row its build is recorded as.
 async fn build_session_layer(
     builder: &dyn ImageBuilder,
     runner: &dyn Runner,
     repo: &Path,
     base: &str,
     harness_image: &str,
-    key: &str,
+    (key, id): (&str, &str),
     harness: &SessionHarness<'_>,
 ) -> Result<BuiltImage, BuildFailure> {
     let staged = |error: String| BuildFailure {
@@ -1275,7 +1300,7 @@ async fn build_session_layer(
     std::fs::create_dir_all(&empty).map_err(|e| staged(e.to_string()))?;
     let built = builder
         .build(ImageBuild {
-            tag: &format!("{}-{}:{}", image_name(repo), harness.id, &key[..12]),
+            tag: &build_tag(&format!("{}-{}", image_name(repo), harness.id), key, id),
             containerfile: &containerfile,
             context: &empty,
             labels: &build_labels(key),
@@ -1696,7 +1721,7 @@ async fn ensure_with(
         Some(tried) => Ok(tried),
         None => {
             tracing::info!(repo = %repo.display(), recipe = %recipe.hash, "building repository image");
-            build(builder, cfg, store, repo, &recipe).await
+            build(builder, cfg, store, repo, &recipe, &id).await
         }
     };
     match built {
@@ -1811,7 +1836,8 @@ fn source_of(
     if !row.parent_image.is_empty() {
         return Some(row.parent_image.clone());
     }
-    (!kept_recipes.contains(row.recipe_hash.as_str())).then(|| source_tag(repo, &row.recipe_hash))
+    (!kept_recipes.contains(row.recipe_hash.as_str()))
+        .then(|| legacy_source_tag(repo, &row.recipe_hash))
 }
 
 /// The image a trial built from `recipe_hash`, if the runtime still holds it.
@@ -1904,7 +1930,7 @@ pub async fn build_for_trial(
         .start_repo_image(&started)
         .map_err(|error| failed(error.to_string()))?;
     tracing::info!(repo = %repo.display(), recipe = %recipe.hash, "building repository image for a trial");
-    match build(builder, cfg, store, repo, recipe).await {
+    match build(builder, cfg, store, repo, recipe, &id).await {
         Ok(built) => {
             let _ =
                 store.finish_repo_image(&id, Ok(&built.image.image), &built.image.log_tail, &[]);
@@ -1933,7 +1959,15 @@ fn stage_dir(builder: &dyn ImageBuilder) -> std::io::Result<tempfile::TempDir> {
     }
 }
 
-fn source_tag(repo: &Path, recipe_hash: &str) -> String {
+/// The image a build of `recipe_hash` recorded as `build` is built from,
+/// under the node's layer.
+fn source_tag(repo: &Path, recipe_hash: &str, build: &str) -> String {
+    build_tag(&format!("{}-src", image_name(repo)), recipe_hash, build)
+}
+
+/// The tag every build of `recipe_hash` shared before each build had its
+/// own, which a build from then that recorded no source image is found by.
+fn legacy_source_tag(repo: &Path, recipe_hash: &str) -> String {
     format!(
         "{}-src:{}",
         image_name(repo),
@@ -1950,18 +1984,21 @@ struct Built {
 
 /// Build the repository's own image from its default branch, then the node's
 /// layer over it. The context is materialized from Git objects into a
-/// directory of the node's; nothing the working tree holds is in it.
+/// directory of the node's; nothing the working tree holds is in it. `id`
+/// is the row the build is recorded as, which its tags carry
+/// ([`build_tag`]).
 async fn build(
     builder: &dyn ImageBuilder,
     cfg: &Config,
     store: &Store,
     repo: &Path,
     recipe: &Recipe,
+    id: &str,
 ) -> Result<Built, BuildFailure> {
     let begun = std::time::Instant::now();
     let built = match recipe.steps.is_empty() {
-        true => build_base(builder, cfg, store, repo, recipe).await,
-        false => build_steps(builder, repo, recipe).await,
+        true => build_base(builder, cfg, store, repo, recipe, id).await,
+        false => build_steps(builder, repo, recipe, id).await,
     };
     count_build(BASE, repo, built.as_ref().err(), begun);
     built
@@ -1973,6 +2010,7 @@ async fn build_base(
     store: &Store,
     repo: &Path,
     recipe: &Recipe,
+    id: &str,
 ) -> Result<Built, BuildFailure> {
     let staged = |error: String| BuildFailure {
         error,
@@ -2005,7 +2043,7 @@ async fn build_base(
     let labels = build_labels(&recipe.hash);
     let source = builder
         .build(ImageBuild {
-            tag: &source_tag(repo, &recipe.hash),
+            tag: &source_tag(repo, &recipe.hash, id),
             containerfile: &containerfile,
             context: &context.root,
             labels: &labels,
@@ -2020,7 +2058,7 @@ async fn build_base(
     std::fs::create_dir_all(&empty).map_err(|e| staged(e.to_string()))?;
     let built = match builder
         .build(ImageBuild {
-            tag: &format!("{}:{}", image_name(repo), &recipe.hash[..12]),
+            tag: &build_tag(&image_name(repo), &recipe.hash, id),
             containerfile: &layer,
             context: &empty,
             labels: &labels,
@@ -2158,6 +2196,7 @@ async fn build_steps(
     builder: &dyn ImageBuilder,
     repo: &Path,
     recipe: &Recipe,
+    id: &str,
 ) -> Result<Built, BuildFailure> {
     let staged = |error: String| BuildFailure {
         error,
@@ -2176,7 +2215,7 @@ async fn build_steps(
     let built = builder
         .build_steps(
             ImageBuild {
-                tag: &format!("{}:{}", image_name(repo), &recipe.hash[..12]),
+                tag: &build_tag(&image_name(repo), &recipe.hash, id),
                 containerfile: &containerfile,
                 context: &empty,
                 labels: &build_labels(&recipe.hash),
@@ -2283,6 +2322,22 @@ mod tests {
         warming: Option<Duration>,
         /// The hosts each build held to an egress grant was given.
         egress: StdMutex<Vec<Vec<String>>>,
+        /// Model an image store's tags: `name:tag` names the image last
+        /// built under it, and `name@sha256:…` resolves only while a tag of
+        /// that name still names the image, as Podman's does.
+        tagged: bool,
+        tags: StdMutex<HashMap<String, String>>,
+    }
+
+    impl FakeBuilder {
+        /// Whether the modelled store still resolves `image`.
+        fn resolves(&self, image: &str) -> bool {
+            let tags = self.tags.lock().unwrap();
+            match image.contains('@') {
+                true => tags.values().any(|pinned| pinned == image),
+                false => tags.contains_key(image),
+            }
+        }
     }
 
     #[async_trait]
@@ -2335,18 +2390,24 @@ mod tests {
                 true => 0,
                 false => self.builds.lock().unwrap().len(),
             };
-            let digest = hex::encode(Sha256::digest(format!("{}{text}{count}", build.tag)));
+            // A digest is the image's, not its tag's.
+            let digest = hex::encode(Sha256::digest(format!("{name}{text}{count}")));
             self.builds
                 .lock()
                 .unwrap()
                 .push((build.tag.to_string(), text, files));
+            let image = format!("{name}@sha256:{digest}");
+            self.tags
+                .lock()
+                .unwrap()
+                .insert(build.tag.to_string(), image.clone());
             Ok(BuiltImage {
-                image: format!("{name}@sha256:{digest}"),
+                image,
                 log_tail: "built".into(),
             })
         }
-        async fn exists(&self, _image: &str) -> bool {
-            !*self.pruned.lock().unwrap()
+        async fn exists(&self, image: &str) -> bool {
+            !*self.pruned.lock().unwrap() && (!self.tagged || self.resolves(image))
         }
         async fn identity(&self, image: &str) -> Option<String> {
             if *self.missing.lock().unwrap() {
@@ -2715,8 +2776,8 @@ mod tests {
         ));
     }
 
-    /// A forced rebuild of the same recipe moves the source tag onto the new
-    /// source image, so the old one is removed by the digest recorded with
+    /// A forced rebuild of the same recipe builds a new source image under a
+    /// tag of its own; the old one is removed by the digest recorded with
     /// it, and the new one stays.
     #[tokio::test]
     async fn a_superseded_source_image_is_removed_by_its_recorded_digest() {
@@ -2749,6 +2810,72 @@ mod tests {
                 .any(|image| image == &second_source || image.contains("-src:")),
             "{removed:?}"
         );
+    }
+
+    #[test]
+    fn each_build_has_a_tag_of_its_own() {
+        let name = image_name(Path::new("/src/app"));
+        let key = "0123456789abcdef".repeat(4);
+        let (a, b) = (uuid::Uuid::now_v7(), uuid::Uuid::now_v7());
+        let one = build_tag(&name, &key, &a.to_string());
+        let two = build_tag(&name, &key, &b.to_string());
+        assert_ne!(one, two);
+        assert_eq!(one, format!("{name}:0123456789ab-{}", a.simple()));
+        for built in [&one, &two] {
+            // Under the repository's one name, which a digest reference
+            // resolves through and the sweep classifies by.
+            assert_eq!(crate::image_gc::repository_of(built), name);
+            let tag = built.rsplit_once(':').unwrap().1;
+            assert!(
+                tag.len() <= 128 && tag.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+                "{tag}"
+            );
+        }
+    }
+
+    /// Another process on the same image store and checkout path (a second
+    /// node, a test) building the same repository tags its build with a tag
+    /// of its own, so the image this node recorded still resolves and is
+    /// still the one it built.
+    #[tokio::test]
+    async fn another_build_of_the_repository_leaves_a_recorded_image_resolving() {
+        let tmp = checkout();
+        let repo = tmp.path();
+        let builder = FakeBuilder {
+            tagged: true,
+            ..Default::default()
+        };
+        let ours = Store::open_in_memory().unwrap();
+        let Ensured::Rebuilt(first) = ensure(&builder, &ours, repo, false).await else {
+            panic!("the first ensure builds");
+        };
+        let row = base_row(&ours, repo);
+
+        let theirs = Store::open_in_memory().unwrap();
+        let Ensured::Rebuilt(second) = ensure(&builder, &theirs, repo, true).await else {
+            panic!("the other process builds its own");
+        };
+        assert_ne!(first, second);
+        assert!(builder.resolves(&first), "{first}");
+        assert!(builder.resolves(&row.parent_image), "{}", row.parent_image);
+        assert_eq!(
+            ensure(&builder, &ours, repo, false).await,
+            Ensured::Current(first.clone()),
+            "neither moved nor rebuilt"
+        );
+
+        let tags: Vec<String> = builder
+            .builds
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(tag, _, _)| tag.clone())
+            .collect();
+        assert_eq!(tags.len(), 4, "a source and a layer each: {tags:?}");
+        let distinct: std::collections::HashSet<_> = tags.iter().collect();
+        assert_eq!(distinct.len(), 4, "{tags:?}");
+        assert!(tags.contains(&build_tag(&image_name(repo), &row.recipe_hash, &row.id)));
+        assert!(tags.contains(&source_tag(repo, &row.recipe_hash, &row.id)));
     }
 
     /// A builder that keeps a previous generation removes a build only once a
@@ -4093,15 +4220,13 @@ WORKDIR /work
             .await
             .unwrap();
         let builder = FakeBuilder::default();
-        let built = build_steps(&builder, &repo, &recipe).await.unwrap();
+        let id = uuid::Uuid::now_v7().to_string();
+        let built = build_steps(&builder, &repo, &recipe, &id).await.unwrap();
         assert!(built.source.is_empty(), "no source image to remove with it");
         let builds = builder.builds.lock().unwrap();
         assert_eq!(builds.len(), 1, "one image, nothing layered over it");
         let (tag, containerfile, context) = &builds[0];
-        assert_eq!(
-            *tag,
-            format!("{}:{}", image_name(&repo), &recipe.hash[..12])
-        );
+        assert_eq!(*tag, build_tag(&image_name(&repo), &recipe.hash, &id));
         assert_eq!(
             *containerfile,
             steps_containerfile("localhost/base@sha256:aa", &recipe.steps)

@@ -1,7 +1,8 @@
 //! Repository image builds against real Podman: an unbuilt recipe asked for
-//! by several runs at once is built once, every run gets the one image, and a
-//! pinned image a rebuild of its tag replaced is refused at once instead of
-//! being pulled from `https://localhost/v2/`.
+//! by several runs at once is built once, every run gets the one image,
+//! another build of the repository leaves that image resolving under its own
+//! tag, and a pinned image that is gone is refused at once instead of being
+//! pulled from `https://localhost/v2/`.
 //!
 //! Runs only when asked for:
 //!
@@ -90,7 +91,7 @@ fn run(cfg: &Config, image: &str, name: &str) -> (bool, String, Duration) {
 }
 
 #[tokio::test]
-async fn runs_asked_for_together_build_once_and_a_replaced_image_is_never_pulled() {
+async fn runs_asked_for_together_build_once_and_a_removed_image_is_never_pulled() {
     if !requested() {
         return;
     }
@@ -161,36 +162,51 @@ async fn runs_asked_for_together_build_once_and_a_replaced_image_is_never_pulled
     assert_eq!(forced, Ensured::Current(image.clone()));
 
     // Both start, in the image they were given.
+    let mut built_at = String::new();
     for (n, _) in [&one, &two].iter().enumerate() {
         let (ok, said, _) = run(&cfg, &image, &format!("{prefix}run-{n}"));
         assert!(ok, "{said}");
+        built_at = said.trim().to_string();
     }
 
-    // Another builder moves the tag: the pinned reference no longer resolves.
+    // Another builder tags the same repository, under the tag every build
+    // of a recipe once shared and under one of its own: the pinned
+    // reference still resolves through its build's own tag, and runs.
     cleanup
         .ids
         .push(podman(&["image", "inspect", "--format", "{{.Id}}", &image]).unwrap());
-    let tag = format!(
-        "{}:{}",
-        image.split_once('@').unwrap().0,
-        &built[0].recipe_hash[..12]
-    );
+    let name = image.split_once('@').unwrap().0;
     let other = dir.path().join("Other.Containerfile");
     std::fs::write(
         &other,
         format!("FROM {base}\nUSER 0:0\nRUN echo other > /built\n"),
     )
     .unwrap();
-    assert!(podman(&[
-        "build",
-        "-q",
-        "-f",
-        &other.to_string_lossy(),
-        "-t",
-        &tag,
-        &dir.path().to_string_lossy(),
-    ])
-    .is_some());
+    for tag in [
+        format!("{name}:{}", &built[0].recipe_hash[..12]),
+        format!("{name}:{}-other", &built[0].recipe_hash[..12]),
+    ] {
+        assert!(podman(&[
+            "build",
+            "-q",
+            "-f",
+            &other.to_string_lossy(),
+            "-t",
+            &tag,
+            &dir.path().to_string_lossy(),
+        ])
+        .is_some());
+    }
+    assert!(podman(&["image", "exists", &image]).is_some());
+    let (ok, said, _) = run(&cfg, &image, &format!("{prefix}run-after"));
+    assert!(ok, "{said}");
+    assert!(said.contains(&built_at), "the image it was given: {said}");
+
+    // A cached rebuild leaves one image under two builds' tags; superseding
+    // it removes it by its digest all the same.
+    assert!(podman(&["tag", &image, &format!("{name}:cached-rebuild")]).is_some());
+    use tracon::boundary::ImageBuilder;
+    backend.remove(&image).await;
     assert!(podman(&["image", "exists", &image]).is_none());
 
     let (ok, said, took) = run(&cfg, &image, &format!("{prefix}run-gone"));
@@ -202,7 +218,7 @@ async fn runs_asked_for_together_build_once_and_a_replaced_image_is_never_pulled
     let provider = PodmanProvider::from_config(&cfg, RunSpec::from_config(&cfg, true));
     let refused = provider.entry_for(&image).await;
     let Err(error) = refused else {
-        panic!("a replaced image is refused");
+        panic!("a removed image is refused");
     };
     let error = error.to_string();
     assert!(error.contains("no longer in Podman's store"), "{error}");
