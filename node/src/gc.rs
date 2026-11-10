@@ -191,7 +191,7 @@ fn repository_is_current(repos: &[crate::config::Repo], repo: &Path) -> bool {
 /// kind (a stale one still stands while its successor fails) and what it
 /// was built on, the current snapshots, and the images open sessions
 /// started from. A repository the node no longer builds for has no current
-/// build.
+/// build, save the newest trial an entry not yet approved would adopt.
 fn kept_images(
     store: &Store,
     owners: &Owners,
@@ -203,13 +203,17 @@ fn kept_images(
         .into_iter()
         .map(|row| row.repo_path)
         .collect();
-    for repo in repos
-        .into_iter()
-        .filter(|repo| !owners.retired_repositories.contains(repo))
-    {
+    for repo in repos {
+        // A setup trial builds for a repository before its entry exists, and
+        // the entry the operator approves adopts that build, so a repository
+        // no entry names yet still keeps its newest trial.
+        let retired = owners.retired_repositories.contains(&repo);
         let mut kinds = HashSet::new();
         for row in store.ready_repo_images(&repo)? {
-            if row.kind == crate::sandbox_images::SNAPSHOT || !kinds.insert(row.kind.clone()) {
+            if row.kind == crate::sandbox_images::SNAPSHOT
+                || (retired && row.kind != crate::repo_image::TRIAL)
+                || !kinds.insert(row.kind.clone())
+            {
                 continue;
             }
             let legacy = row.kind.starts_with("session:");
@@ -1056,6 +1060,12 @@ mod tests {
             "localhost/gone-snap:1",
             "",
         );
+        built(
+            "/src/trying",
+            crate::repo_image::TRIAL,
+            "localhost/trying:1",
+            "localhost/trying-src:1",
+        );
         let repos = vec![crate::config::Repo {
             path: "/src/kept".into(),
             ..Default::default()
@@ -1066,7 +1076,7 @@ mod tests {
         let o = Owners::read(&store, "node-a", false, &repos).unwrap();
         assert_eq!(
             o.retired_repositories,
-            HashSet::from(["/src/gone".to_string()])
+            HashSet::from(["/src/gone".to_string(), "/src/trying".to_string()])
         );
         assert_eq!(
             o.snapshots,
@@ -1078,6 +1088,8 @@ mod tests {
             [
                 "localhost/kept:1",
                 "localhost/kept-src:1",
+                "localhost/trying:1",
+                "localhost/trying-src:1",
                 "localhost/kept-snap:1"
             ]
         );
