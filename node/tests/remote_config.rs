@@ -702,6 +702,67 @@ async fn a_repository_entry_is_named_in_the_prompt_with_what_it_lends() {
     );
 }
 
+/// An entry moves from its Dockerfile to build steps in one request: the
+/// file is checked once every operation has applied, so dropping the
+/// Dockerfile and setting the steps together load where neither does
+/// alone, and a realistic build list (three steps, about 900 characters)
+/// is shown cut short in the prompt rather than refused as too large.
+#[tokio::test]
+async fn an_entry_moves_from_a_dockerfile_to_build_steps_in_one_request() {
+    let _lock = state::config_lock().await;
+    let (n, cookie, mut key) = paired().await;
+    let original = "[runtime.podman]\nsandbox_protocol = true\nsandbox_images = true\n\n\
+                    [[repo]]\npath = \"github.com/cosmicspork/tracon\"\ndockerfile = \"Dockerfile\"\n\
+                    prepare = [\"cargo fetch --locked\"]\nprepare_credentials = [\"NOVA\"]\n";
+    write_file(original);
+    let steps = json!([
+        "apt-get update && apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev ca-certificates curl git jq unzip xz-utils uidmap fuse-overlayfs slirp4netns && rm -rf /var/lib/apt/lists/* && update-ca-certificates && git config --system --add safe.directory /work",
+        "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.91.0 --component clippy,rustfmt && . \"$HOME/.cargo/env\" && rustup target add x86_64-unknown-linux-gnu && cargo install --locked cargo-nextest just && cargo --version && rustc --version",
+        "curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash -s bun-v1.3.2 && ln -sf /usr/local/bin/bun /usr/local/bin/bunx && bun --version && mkdir -p /opt/tracon/spa && cd /opt/tracon/spa && printf '{}' > package.json && bun install || true && echo bun is ready for the interface build, its type check and its tests in every session",
+    ]);
+    let drop_dockerfile = json!({ "op": "remove", "key": "repo[0].dockerfile" });
+    let set_build = set("repo[0].build", steps.clone());
+    let h = hash(&n).await;
+
+    // Alone, either leaves a file that does not load.
+    for (op, why) in [
+        (&drop_dockerfile, "name a dockerfile or build steps"),
+        (&set_build, "no image or dockerfile beside them"),
+    ] {
+        let body = patch(&h, vec![op.clone()]);
+        let r = remote(&n, &cookie, "PATCH", "/api/config", Some(&body), None).await;
+        assert_eq!(r.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", r.body);
+        assert!(r.text.contains(why), "{}", r.body);
+    }
+
+    let body = patch(&h, vec![drop_dockerfile, set_build]);
+    let (refused, proof) =
+        confirm(&n, &cookie, &mut key, "PATCH", "/api/config", Some(&body)).await;
+    let summary = refused.body["step_up"]["summary"].as_str().unwrap();
+    assert!(summary.chars().count() <= 600, "{summary}");
+    assert!(summary.contains(".dockerfile removed"), "{summary}");
+    assert!(
+        summary.contains("(3 items, 916 chars, sha256 "),
+        "{summary}"
+    );
+    assert_eq!(file(), original, "refused means unwritten");
+
+    let r = remote(
+        &n,
+        &cookie,
+        "PATCH",
+        "/api/config",
+        Some(&body),
+        Some(&proof),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let saved = Config::try_load().unwrap();
+    assert_eq!(saved.repo[0].dockerfile, None);
+    assert_eq!(json!(saved.repo[0].build), steps);
+    assert_eq!(saved.repo[0].prepare_credentials, ["NOVA"]);
+}
+
 /// Whether a request changes anything is not told to a caller who has not
 /// confirmed it when the request names a key whose value is hidden: a
 /// guess at a hidden value gets the same answer, right or wrong.
