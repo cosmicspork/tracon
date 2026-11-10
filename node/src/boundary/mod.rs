@@ -517,6 +517,33 @@ pub trait Backend: Send + Sync {
             self.kind()
         )))
     }
+    /// The containers this node's copies into and out of runtime volumes
+    /// made (`tracon-transfer-…`) that are still here. A copy removes its
+    /// own when it ends, so one listed long after outlived a node that
+    /// stopped mid-copy, and holds its image and its volume as in use. A
+    /// backend that makes none has none to list.
+    async fn list_transfers(&self) -> Result<Vec<TransferInfo>, BoundaryError> {
+        Ok(Vec::new())
+    }
+    /// Remove one of [`Backend::list_transfers`]' containers. One running
+    /// is refused, never forced.
+    async fn remove_transfer(&self, name: &str) -> Result<(), BoundaryError> {
+        Err(BoundaryError::Other(format!(
+            "the {} backend cannot remove container {name}",
+            self.kind()
+        )))
+    }
+}
+
+/// A transfer's container as its backend reports it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TransferInfo {
+    pub name: String,
+    pub running: bool,
+    /// When the backend can say.
+    pub created_ms: Option<i64>,
+    /// The id of the image it was made from.
+    pub image: String,
 }
 
 /// A runtime volume as its backend reports it.

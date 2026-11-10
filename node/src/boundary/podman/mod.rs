@@ -242,6 +242,34 @@ fn parse_volume_list(out: &str) -> Vec<super::VolumeInfo> {
         .collect()
 }
 
+/// `podman ps -a --format json`, the transfers' containers only: a name
+/// that only starts like one (a filter is a pattern) is not one.
+fn parse_transfer_list(out: &str) -> Result<Vec<super::TransferInfo>, BoundaryError> {
+    let rows: Vec<serde_json::Value> = match out.trim() {
+        "" => Vec::new(),
+        out => serde_json::from_str(out)
+            .map_err(|e| BoundaryError::Other(format!("podman ps: {e}")))?,
+    };
+    let stem = crate::config::resource_name("transfer-");
+    Ok(rows
+        .iter()
+        .filter_map(|row| {
+            let name = row["Names"]
+                .as_array()?
+                .iter()
+                .filter_map(|n| n.as_str())
+                .find(|n| n.starts_with(&stem))?
+                .to_string();
+            Some(super::TransferInfo {
+                name,
+                running: row["State"].as_str() == Some("running"),
+                created_ms: row["Created"].as_i64().map(|secs| secs * 1000),
+                image: row["ImageID"].as_str().unwrap_or_default().to_string(),
+            })
+        })
+        .collect())
+}
+
 pub struct PodmanBackend {
     cfg: Config,
     selinux: bool,
@@ -696,6 +724,21 @@ impl Backend for PodmanBackend {
         match podman(&["volume", "rm", volume]).await {
             Ok(_) => Ok(()),
             Err(BoundaryError::Podman(stderr)) if stderr.contains("no such volume") => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn list_transfers(&self) -> Result<Vec<super::TransferInfo>, BoundaryError> {
+        let filter = format!("name=^{}", crate::config::resource_name("transfer-"));
+        let out = podman(&["ps", "-a", "--filter", &filter, "--format", "json"]).await?;
+        parse_transfer_list(&out)
+    }
+
+    /// Never `--force`: a copy still running is refused.
+    async fn remove_transfer(&self, name: &str) -> Result<(), BoundaryError> {
+        match podman(&["rm", name]).await {
+            Ok(_) => Ok(()),
+            Err(BoundaryError::Podman(stderr)) if stderr.contains("no such container") => Ok(()),
             Err(error) => Err(error),
         }
     }
@@ -1519,6 +1562,33 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn the_transfer_list_keeps_only_transfers_with_their_state_and_image() {
+        let out = r#"[
+          {"Names": ["tracon-transfer-01a1"], "State": "exited", "Created": 1789178113, "ImageID": "abc"},
+          {"Names": ["tracon-transfer-01a2"], "State": "running", "Created": 1789178114, "ImageID": "def"},
+          {"Names": ["tracon-transferish"], "State": "exited", "Created": 1789178115, "ImageID": "ghi"}
+        ]"#;
+        assert_eq!(
+            super::parse_transfer_list(out).unwrap(),
+            vec![
+                crate::boundary::TransferInfo {
+                    name: "tracon-transfer-01a1".into(),
+                    running: false,
+                    created_ms: Some(1_789_178_113_000),
+                    image: "abc".into(),
+                },
+                crate::boundary::TransferInfo {
+                    name: "tracon-transfer-01a2".into(),
+                    running: true,
+                    created_ms: Some(1_789_178_114_000),
+                    image: "def".into(),
+                },
+            ]
+        );
+        assert!(super::parse_transfer_list("").unwrap().is_empty());
     }
 
     /// Against a real Podman and the image named by

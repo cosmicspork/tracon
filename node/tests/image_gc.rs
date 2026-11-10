@@ -311,6 +311,7 @@ async fn a_sweep_removes_exactly_this_node_s_unused_images() {
             .as_millis() as i64,
         legacy,
         adopt_unlabelled: adopt,
+        departing: Vec::new(),
     };
 
     // The dry run.
