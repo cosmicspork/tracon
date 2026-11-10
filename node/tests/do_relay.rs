@@ -122,6 +122,7 @@ async fn a_digitalocean_sandbox_reaches_the_node_over_the_hubs_url() {
         },
     );
     bridge.spawn();
+    bridge.publish();
     let mut held = bridge.host();
     let relay_host = tokio::time::timeout(WAIT, held.wait_for(|h| h.is_some()))
         .await
@@ -169,6 +170,8 @@ async fn a_digitalocean_sandbox_reaches_the_node_over_the_hubs_url() {
     .unwrap();
     let provider = runtime.provider().clone();
     assert_eq!(provider.capabilities().route, Route::Unverified);
+    // This hub serves the relay's WebSocket, so nothing is held against it.
+    runtime.clone().check_hub(hub_url.clone()).await;
 
     let threads: Arc<Mutex<Vec<Sandbox>>> = Arc::default();
     fake.on_exec({
@@ -256,6 +259,25 @@ async fn a_digitalocean_sandbox_reaches_the_node_over_the_hubs_url() {
         .unwrap_err()
         .to_string();
     assert!(refused.contains("route is unverified"), "{refused}");
+
+    // A hub from before the relay's WebSocket: the provider says so, rather
+    // than leaving each sandbox's dial to fail unexplained.
+    runtime.health(&cfg).unwrap();
+    let old = axum::Router::new().route(
+        "/v0/info",
+        axum::routing::get(|| async {
+            axum::Json(serde_json::json!({"sandbox_relay": {"domain": "relay.test"}}))
+        }),
+    );
+    let old_hub = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let old_url = format!("http://{}", old_hub.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(old_hub, old).await.unwrap() });
+    runtime.clone().check_hub(old_url).await;
+    let why = runtime.health(&cfg).unwrap_err();
+    assert!(
+        why.contains(tracon::provider::digitalocean::HUB_WITH_CONNECT),
+        "{why}"
+    );
 
     let ended = std::mem::take(&mut *threads.lock().unwrap());
     for thread in ended {

@@ -1585,9 +1585,10 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node, or
 
 # [digitalocean]                    # DigitalOcean's Harness Runtime, for sessions [placement] sends
                                     # there. Off without a credential. Each sandbox is a microVM whose
-                                    # only route is this node (egress admits node_addr alone, or the
-                                    # hub's host alone; DNS is the runtime's, open, so client work
-                                    # never goes). Needs
+                                    # egress admits one destination: node_addr, so its only route is
+                                    # this node, or (relay with no node_addr) the hub's host, which is
+                                    # not this node alone (see relay). DNS is the runtime's, open, so
+                                    # client work never goes. Needs
                                     # [runtime.podman] sandbox_protocol, sandbox_files and
                                     # sandbox_tunnels: nothing is mounted there
 # credential = "do"                 # a broker credential holding DIGITALOCEAN_ACCESS_TOKEN
@@ -1612,8 +1613,11 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node, or
                                     # target is listen); its name for this node is the SNI. With no
                                     # node_addr, sandboxes open wss://<[mesh] hub_url host>/v0/relay/connect
                                     # through the runtime's proxy, and egress admits that host alone.
-                                    # A hub behind a shared front (a CDN) is then not the only thing
-                                    # that host reaches, so the route reads as unverified
+                                    # That host also reaches the hub's own public routes (/v0/info,
+                                    # /v0/enroll/{code}) and, behind a shared front (a CDN), any other
+                                    # site on it, so the route reads as unverified. Needs a hub that
+                                    # serves /v0/relay/connect (tracon-hub 0.49.0 or later); an older
+                                    # one is named in the provider's health and DigitalOcean is not used
 # server_name = ""                  # SNI to send otherwise; empty is tracon-node
 
 # [[service]]                       # something a session may start beside itself by name

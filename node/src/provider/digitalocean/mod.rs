@@ -26,9 +26,10 @@
 //!   session must be a bare one and its stored manifest's egress exactly the
 //!   way to the node. DNS is DigitalOcean's resolver, open to any name
 //!   (`dns: provider-open`), which is what keeps client work off it. Through
-//!   the hub's URL the route is `unverified`: the proxy admits the hub by
-//!   the name in `CONNECT` alone, so behind a shared front (a CDN) the
-//!   sandbox can reach whatever else that front serves.
+//!   the hub's URL the route is `unverified`: the sandbox reaches the hub's
+//!   other public routes too, and the proxy admits the hub by the name in
+//!   `CONNECT` alone, so behind a shared front (a CDN) it can reach whatever
+//!   else that front serves.
 //!
 //! Nothing on this provider is mounted from the node: a session's trees go
 //! over the files channel and its gateways through tunnels, as
@@ -155,6 +156,29 @@ impl Reach {
     }
 }
 
+/// The tracon-hub release that first serves `/v0/relay/connect`.
+pub const HUB_WITH_CONNECT: &str = "0.49.0";
+
+/// Whether a hub's `/v0/info` says it serves the relay's WebSocket. One
+/// from before it, or with no relay, would answer every sandbox with a 401
+/// or a 404 the operator never sees.
+pub fn hub_serves_connect(hub_url: &str, info: &serde_json::Value) -> Result<(), String> {
+    let relay = &info["sandbox_relay"];
+    if relay.is_null() {
+        return Err(format!(
+            "the hub at {hub_url} runs no sandbox relay: set TRACON_HUB_RELAY_DOMAIN there"
+        ));
+    }
+    if relay["connect"].as_str() != Some(proto::relay::CONNECT_PATH) {
+        return Err(format!(
+            "the hub at {hub_url} does not serve {}: it needs tracon-hub {HUB_WITH_CONNECT} or \
+             later, or set digitalocean.node_addr to its relay listener's address",
+            proto::relay::CONNECT_PATH
+        ));
+    }
+    Ok(())
+}
+
 /// The hub relay's WebSocket URL under `hub_url`, and the host a sandbox's
 /// egress must admit to reach it.
 pub fn relay_url(hub_url: &str) -> Result<(String, String), String> {
@@ -165,7 +189,17 @@ pub fn relay_url(hub_url: &str) -> Result<(String, String), String> {
         other => return Err(format!("{hub_url:?} is {other}://, not http(s)://")),
     };
     let host = match url.host() {
-        Some(url::Host::Domain(name)) => name.to_string(),
+        // A fully qualified name's trailing dot is no part of the name the
+        // runtime's proxy admits, the sandbox's SNI or the hub's Host.
+        Some(url::Host::Domain(name)) => {
+            let name = name.trim_end_matches('.').to_string();
+            if name.is_empty() {
+                return Err(format!("{hub_url:?} names no host"));
+            }
+            url.set_host(Some(&name))
+                .map_err(|e| format!("{hub_url:?}: {e}"))?;
+            name
+        }
         Some(url::Host::Ipv4(ip)) => ip.to_string(),
         Some(url::Host::Ipv6(ip)) => ip.to_string(),
         None => return Err(format!("{hub_url:?} names no host")),
@@ -1141,6 +1175,21 @@ mod tests {
     }
 
     #[test]
+    fn a_hub_without_the_relay_websocket_is_named_as_such() {
+        let hub = "https://hub.example.net";
+        let new =
+            serde_json::json!({"sandbox_relay": {"domain": "r", "connect": "/v0/relay/connect"}});
+        assert!(hub_serves_connect(hub, &new).is_ok());
+        let old = serde_json::json!({"sandbox_relay": {"domain": "r"}});
+        let why = hub_serves_connect(hub, &old).unwrap_err();
+        assert!(why.contains(HUB_WITH_CONNECT) && why.contains(hub), "{why}");
+        let none = serde_json::json!({"sandbox_relay": null});
+        assert!(hub_serves_connect(hub, &none)
+            .unwrap_err()
+            .contains("TRACON_HUB_RELAY_DOMAIN"));
+    }
+
+    #[test]
     fn the_relay_url_is_the_hubs_own() {
         for (hub, url, host) in [
             (
@@ -1162,6 +1211,11 @@ mod tests {
                 "http://[::1]:8080",
                 "ws://[::1]:8080/v0/relay/connect",
                 "::1",
+            ),
+            (
+                "https://Hub.Example.net.:8443",
+                "wss://hub.example.net:8443/v0/relay/connect",
+                "hub.example.net",
             ),
         ] {
             assert_eq!(relay_url(hub).unwrap(), (url.into(), host.into()), "{hub}");

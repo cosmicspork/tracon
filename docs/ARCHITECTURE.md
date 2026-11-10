@@ -1499,7 +1499,8 @@ token; the hub holds no key for it, so it relays ciphertext it cannot read or an
 The sandbox reaches the hub by one of two carriers, which differ only outside that
 TLS:
 
-- **The hub's own URL** (the default). The sandbox opens a WebSocket to
+- **The hub's own URL**, which a DigitalOcean node uses when `[digitalocean] relay`
+  is on and `node_addr` is empty. The sandbox opens a WebSocket to
   `wss://<hub>/v0/relay/connect`, unauthenticated as a sandbox holds no member key,
   and sends its TLS as binary messages; an empty message is a half-close. This works
   wherever the hub's HTTPS does, including behind a proxy that terminates TLS and
@@ -1508,17 +1509,21 @@ TLS:
   through the runtime's HTTP proxy (`HTTPS_PROXY`, `CONNECT`), and the egress
   allowlist names the hub's host (`allow_hosts`); that proxy refuses `CONNECT` to
   anything else and direct connections go nowhere.
-- **The relay listener** (`TRACON_HUB_RELAY_ADDR`): raw TLS to 443 on a public
+- **The relay listener** (`TRACON_HUB_RELAY_ADDR`), which a DigitalOcean node uses
+  when `node_addr` names its address: raw TLS to 443 on a public
   address, with a wildcard record for the domain pointing at it. It needs a stable
   address and its own TCP port (a load balancer), and cannot sit behind a proxy that
   terminates TLS, but it is the route for a provider whose egress admits only
   addresses or ranges.
 
-What the hub's-URL carrier cannot promise, stated plainly: DigitalOcean's proxy
-checks only the host name in `CONNECT`. A hub behind a shared front such as
-Cloudflare shares its addresses with every other site on that front, so a sandbox
-allowed to reach the hub can send TLS naming any of those sites through the same
-tunnel (domain fronting). That is a way out for data, not a way in: anything reaching
+What the hub's-URL carrier cannot promise, stated plainly. A sandbox allowed to
+reach the hub's host reaches everything at that origin, not just the relay: the
+hub's other public routes (`/v0/info`, `POST /v0/enroll/{code}`, rate-limited) and
+anything else served there. And DigitalOcean's proxy checks only the host name in
+`CONNECT`. A hub behind a shared front such as Cloudflare shares its addresses with
+every other site on that front, so the sandbox can send TLS naming any of those
+sites through the same tunnel (domain fronting). Both are ways out for data, not
+ways in: anything reaching
 the node still has to present the node's pinned certificate and the run's one-time
 token. DigitalOcean's resolver also answers any name, so names already carry data
 out regardless (`dns: provider-open`). For that reason a DigitalOcean sandbox reached
@@ -1532,7 +1537,10 @@ keeps TCP's flow control instead of sharing one window across sandboxes. Only a
 node member holding the listen stream is a target; a name nobody serves, a hello
 without SNI, a node at its stream limit (`TRACON_HUB_RELAY_MAX_STREAMS`, 16), or one
 that does not dial back in 15 seconds is closed without a byte written (on the
-WebSocket carrier, a close frame and nothing else).
+WebSocket carrier, a close frame and nothing else). Because the WebSocket route is
+public, one client (by `CF-Connecting-IP`, else `X-Forwarded-For`, else its address)
+may hold only 8 of the 256 connections in handshake, and a WebSocket has 3 seconds
+to send its ClientHello; a sandbox sends it as soon as the upgrade completes.
 
 ### Mesh frames
 

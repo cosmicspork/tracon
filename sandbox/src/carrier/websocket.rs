@@ -62,20 +62,23 @@ impl std::fmt::Debug for Proxy {
 impl RelayUrl {
     /// `url` (`wss://` or `ws://`) dialled directly.
     pub fn direct(url: &str) -> Result<Self, String> {
+        let shown = redacted(url);
         let uri: http::Uri = url
             .parse()
-            .map_err(|e| format!("{url:?} is not a URL: {e}"))?;
+            .map_err(|e| format!("{shown:?} is not a URL: {e}"))?;
         let tls = match uri.scheme_str() {
             Some("wss") => true,
             Some("ws") => false,
-            _ => return Err(format!("{url:?} is not a ws:// or wss:// URL")),
+            _ => return Err(format!("{shown:?} is not a ws:// or wss:// URL")),
         };
+        // A fully qualified name's trailing dot is no part of the name a
+        // proxy admits or a certificate is for.
         let host = uri
             .host()
+            .map(|h| h.trim_start_matches('[').trim_end_matches(']'))
+            .map(|h| h.trim_end_matches('.'))
             .filter(|h| !h.is_empty())
-            .ok_or_else(|| format!("{url:?} names no host"))?
-            .trim_start_matches('[')
-            .trim_end_matches(']')
+            .ok_or_else(|| format!("{shown:?} names no host"))?
             .to_ascii_lowercase();
         let port = uri.port_u16().unwrap_or(if tls { 443 } else { 80 });
         Ok(RelayUrl {
@@ -154,38 +157,56 @@ impl RelayUrl {
         let (socket, _) =
             tokio_tungstenite::client_async_with_config(self.url.as_str(), stream, Some(config))
                 .await
-                .map_err(|e| io::Error::new(io::ErrorKind::ConnectionRefused, e))?;
+                .map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::ConnectionRefused,
+                        format!("WebSocket to {}: {e}", redacted(&self.url)),
+                    )
+                })?;
         Ok(Box::new(WsIo::new(socket)))
     }
 }
 
 impl std::fmt::Display for RelayUrl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let url = redacted(&self.url);
         match &self.proxy {
-            None => write!(f, "websocket {}", self.url),
-            Some(proxy) => write!(f, "websocket {} via {proxy:?}", self.url),
+            None => write!(f, "websocket {url}"),
+            Some(proxy) => write!(f, "websocket {url} via {proxy:?}"),
         }
     }
 }
 
 impl Proxy {
-    /// `http://[user:password@]host[:port][/]`, or the same without a
-    /// scheme. A proxy reached over TLS is not supported.
+    /// `http://[user:password@]host[:port][/path]`, or the same without a
+    /// scheme; a path is ignored. A proxy reached over TLS is not supported.
     fn parse(text: &str) -> Result<Self, String> {
+        let shown = redacted(text);
         let rest = match text.split_once("://") {
             Some((scheme, rest)) if scheme.eq_ignore_ascii_case("http") => rest,
-            Some(_) => return Err(format!("proxy {text:?} is not an http:// proxy")),
+            Some(_) => return Err(format!("proxy {shown:?} is not an http:// proxy")),
             None => text,
         };
-        let rest = rest.trim_end_matches('/');
-        let (credentials, hostport) = match rest.rsplit_once('@') {
-            Some((user, hostport)) => (Some(user.to_string()), hostport),
+        let (userinfo, rest) = match rest.rsplit_once('@') {
+            Some((userinfo, rest)) => (Some(userinfo), rest),
             None => (None, rest),
         };
-        let (host, port) =
-            split_host_port(hostport).ok_or_else(|| format!("proxy {text:?} has no host"))?;
+        let hostport = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        let (host, port) = split_host_port(hostport)
+            .ok_or_else(|| format!("proxy {shown:?} has no host, or a port that is not one"))?;
+        let credentials = match userinfo {
+            None => None,
+            Some(userinfo) => {
+                let (user, password) = userinfo.split_once(':').unwrap_or((userinfo, ""));
+                let decode = |part: &str| {
+                    percent_decode(part)
+                        .ok_or_else(|| format!("proxy {shown:?} has a malformed user or password"))
+                };
+                Some(format!("{}:{}", decode(user)?, decode(password)?))
+            }
+        };
         Ok(Proxy {
-            host,
+            host: host.trim_end_matches('.').to_string(),
             port: port.unwrap_or(80),
             credentials,
         })
@@ -227,6 +248,46 @@ impl Proxy {
         }
         Ok(tcp)
     }
+}
+
+/// `text` with whatever precedes the last `@` of its authority, a user and
+/// password, replaced by `***`: for every error and log line that names a
+/// URL. Anything before the last `@` is taken as that, so a password with
+/// a raw `/` or `@` is hidden whole.
+fn redacted(text: &str) -> String {
+    let (scheme, rest) = match text.split_once("://") {
+        Some((scheme, rest)) => (Some(scheme), rest),
+        None => (None, text),
+    };
+    let rest = match rest.rfind('@') {
+        Some(at) => format!("***@{}", &rest[at + 1..]),
+        None => rest.to_string(),
+    };
+    match scheme {
+        Some(scheme) => format!("{scheme}://{rest}"),
+        None => rest,
+    }
+}
+
+/// `%XX` escapes decoded, as a URL's user and password are written.
+fn percent_decode(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' => {
+                let hex = text.get(i + 1..i + 3)?;
+                out.push(u8::from_str_radix(hex, 16).ok()?);
+                i += 3;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// `host[:port]`, `[v6]` or `[v6]:port`.
@@ -471,6 +532,68 @@ mod tests {
         }
         let tls_proxy = env(&[("HTTPS_PROXY", "https://p:3128")]);
         assert!(RelayUrl::from_env(url, tls_proxy).is_err());
+
+        // A fully qualified name's trailing dot is dropped.
+        let dotted = RelayUrl::direct("wss://Hub.Example.net./v0/relay/connect").unwrap();
+        assert_eq!(dotted.host, "hub.example.net");
+    }
+
+    #[test]
+    fn a_proxy_url_is_read_as_curl_reads_it() {
+        let p = Proxy::parse("http://us%40er:p%3Ass%2Fw@proxy.internal:3128/").unwrap();
+        assert_eq!((p.host.as_str(), p.port), ("proxy.internal", 3128));
+        assert_eq!(p.credentials.as_deref(), Some("us@er:p:ss/w"));
+        // A path, query or fragment is ignored rather than refused.
+        for text in [
+            "http://proxy.internal:3128/some/path",
+            "proxy.internal:3128/",
+            "http://proxy.internal:3128?x=1",
+        ] {
+            let p = Proxy::parse(text).unwrap();
+            assert_eq!(
+                (p.host.as_str(), p.port),
+                ("proxy.internal", 3128),
+                "{text}"
+            );
+            assert_eq!(p.credentials, None);
+        }
+        let user_only = Proxy::parse("http://alice@p:1").unwrap();
+        assert_eq!(user_only.credentials.as_deref(), Some("alice:"));
+        assert!(Proxy::parse("http://a:%zz@p:1").is_err());
+    }
+
+    #[test]
+    fn proxy_credentials_never_reach_an_error_or_a_log_line() {
+        for text in [
+            "https://alice:hunter2@p:3128",
+            "http://alice:hunter2@p:notaport",
+            "http://alice:hunter2@",
+            "http://alice:hun/ter2@p:1x",
+            "http://alice:%zzhunter2@p:1",
+        ] {
+            let error = Proxy::parse(text).err().unwrap();
+            assert!(
+                !error.contains("hunter2") && !error.contains("ter2"),
+                "{error}"
+            );
+            assert!(!error.contains("alice"), "{error}");
+        }
+        let url = "wss://hub.example/v0/relay/connect";
+        let relay = RelayUrl::from_env(url, env(&[("HTTPS_PROXY", "http://alice:hunter2@p:3128")]))
+            .unwrap();
+        let shown = format!(
+            "{relay} {relay:?} {}",
+            crate::carrier::Dial::WebSocket(relay.clone())
+        );
+        assert!(
+            !shown.contains("hunter2") && !shown.contains("alice"),
+            "{shown}"
+        );
+        assert_eq!(
+            redacted("http://alice:hunter2@p:3128/x"),
+            "http://***@p:3128/x"
+        );
+        assert_eq!(redacted("p:3128"), "p:3128");
     }
 
     /// A self-signed certificate for `localhost` and the client config that

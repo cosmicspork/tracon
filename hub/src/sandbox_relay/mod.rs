@@ -22,6 +22,7 @@ pub mod ws_bytes;
 
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -29,8 +30,8 @@ use std::time::Duration;
 use axum::{
     body::Bytes,
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
-    extract::{Path, State},
-    http::StatusCode,
+    extract::{ConnectInfo, Path, State},
+    http::{HeaderMap, StatusCode},
     response::sse::{Event, KeepAlive, Sse},
     response::{IntoResponse, Response},
     Extension, Json,
@@ -58,8 +59,14 @@ pub struct RelayConfig {
     /// Accepted connections, across every node, still sending their
     /// ClientHello or waiting for their node to dial back.
     pub max_handshakes: usize,
-    /// How long a connection has to send a complete ClientHello.
+    /// Of those, how many one client (one address) may hold, so a few
+    /// idle connections cannot take every slot from real sandboxes.
+    pub max_handshakes_per_client: usize,
+    /// How long a TCP connection has to send a complete ClientHello.
     pub hello_timeout: Duration,
+    /// How long a WebSocket has: a sandbox sends its ClientHello as soon as
+    /// the upgrade completes, so anything slower is not one.
+    pub ws_hello_timeout: Duration,
     /// How long a node has to dial back for a connection it was offered.
     pub dial_back_timeout: Duration,
 }
@@ -70,7 +77,9 @@ impl RelayConfig {
             domain: domain.trim_matches('.').to_ascii_lowercase(),
             max_streams_per_node: 16,
             max_handshakes: 256,
+            max_handshakes_per_client: 8,
             hello_timeout: Duration::from_secs(10),
+            ws_hello_timeout: Duration::from_secs(3),
             dial_back_timeout: Duration::from_secs(15),
         }
     }
@@ -107,7 +116,27 @@ pub struct SandboxRelay {
     /// Offer id → the connection waiting for the node to dial back.
     pending: Mutex<HashMap<String, Pending>>,
     handshakes: Arc<Semaphore>,
+    /// Client → its connections in handshake.
+    in_handshake: Mutex<HashMap<String, usize>>,
     generation: AtomicU64,
+}
+
+/// One client's place in handshake; dropping it gives the place back.
+struct ClientSlot {
+    relay: Arc<SandboxRelay>,
+    client: String,
+}
+
+impl Drop for ClientSlot {
+    fn drop(&mut self) {
+        let mut held = self.relay.in_handshake.lock().unwrap();
+        if let Some(n) = held.get_mut(&self.client) {
+            *n -= 1;
+            if *n == 0 {
+                held.remove(&self.client);
+            }
+        }
+    }
 }
 
 /// A node's registration, held by its listen stream; dropping it
@@ -134,6 +163,7 @@ impl SandboxRelay {
     pub fn new(cfg: RelayConfig, members: Arc<dyn MemberStore>) -> Arc<Self> {
         Arc::new(Self {
             handshakes: Arc::new(Semaphore::new(cfg.max_handshakes)),
+            in_handshake: Mutex::new(HashMap::new()),
             cfg,
             members,
             nodes: Mutex::new(HashMap::new()),
@@ -212,6 +242,30 @@ impl SandboxRelay {
         Some((node, label.to_string(), offers))
     }
 
+    /// A place in handshake for `client`, unless it holds its share.
+    fn client_slot(self: &Arc<Self>, client: &str) -> Option<ClientSlot> {
+        let mut held = self.in_handshake.lock().unwrap();
+        let n = held.entry(client.to_string()).or_insert(0);
+        if *n >= self.cfg.max_handshakes_per_client {
+            return None;
+        }
+        *n += 1;
+        Some(ClientSlot {
+            relay: self.clone(),
+            client: client.to_string(),
+        })
+    }
+
+    /// Connections `client` has in handshake now.
+    pub fn in_handshake(&self, client: &str) -> usize {
+        self.in_handshake
+            .lock()
+            .unwrap()
+            .get(client)
+            .copied()
+            .unwrap_or(0)
+    }
+
     fn budget(&self, label: &str) -> Arc<Semaphore> {
         self.budgets
             .lock()
@@ -228,7 +282,10 @@ impl SandboxRelay {
                 Ok((mut conn, peer)) => {
                     let relay = self.clone();
                     tokio::spawn(async move {
-                        if let Err(why) = relay.handle(&mut conn).await {
+                        // No per-client share here: behind a load balancer
+                        // every connection would come from one address.
+                        let within = relay.cfg.hello_timeout;
+                        if let Err(why) = relay.handle(&mut conn, None, within).await {
                             tracing::debug!(%peer, why, "sandbox relay connection closed unanswered");
                         }
                     });
@@ -241,19 +298,33 @@ impl SandboxRelay {
         }
     }
 
-    /// Route one sandbox connection, whichever carrier brought it, and
-    /// splice it to its node until it ends. An `Err` is a connection refused
-    /// before any byte of it was answered.
-    async fn handle<C>(self: Arc<Self>, conn: &mut C) -> Result<(), &'static str>
+    /// Route one sandbox connection, whichever carrier brought it, giving
+    /// it `hello_within` to send its ClientHello, and splice it to its node
+    /// until it ends. With a `client`, it counts against that client's
+    /// share of handshakes. An `Err` is a connection refused before any byte
+    /// of it was answered.
+    async fn handle<C>(
+        self: Arc<Self>,
+        conn: &mut C,
+        client: Option<&str>,
+        hello_within: Duration,
+    ) -> Result<(), &'static str>
     where
         C: AsyncRead + AsyncWrite + Unpin + Send,
     {
+        let slot = match client {
+            Some(client) => Some(
+                self.client_slot(client)
+                    .ok_or("this client has too many connections in handshake")?,
+            ),
+            None => None,
+        };
         let handshake = self
             .handshakes
             .clone()
             .try_acquire_owned()
             .map_err(|_| "too many connections in handshake")?;
-        let (head, host) = tokio::time::timeout(self.cfg.hello_timeout, read_hello(conn))
+        let (head, host) = tokio::time::timeout(hello_within, read_hello(conn))
             .await
             .map_err(|_| "no ClientHello in time")??;
         let (node, label, offers) = self.route(&host).ok_or("no node serves that name")?;
@@ -282,6 +353,7 @@ impl SandboxRelay {
             }
         };
         drop(handshake);
+        drop(slot);
         tracing::debug!(node = %label, "sandbox relay stream open");
         splice(conn, head, socket).await;
         drop(stream);
@@ -357,18 +429,47 @@ where
 
 // ------------------------------------------------------------------ routes
 
+/// Who a WebSocket's handshake place is counted against: the address
+/// Cloudflare names in `CF-Connecting-IP`, else the first one in
+/// `X-Forwarded-For` (another proxy's), else the peer's. Nothing proves a
+/// header came from a proxy, so a client that reaches the hub directly can
+/// set one, but all that buys is a bucket of its own, as a second address
+/// would.
+fn client_of(headers: &HeaderMap, peer: Option<SocketAddr>) -> String {
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .map(str::trim)
+            .filter(|v| !v.is_empty() && v.len() <= 64)
+            .map(str::to_string)
+    };
+    header("cf-connecting-ip")
+        .or_else(|| header("x-forwarded-for"))
+        .or_else(|| peer.map(|p| p.ip().to_string()))
+        .unwrap_or_else(|| "unknown".into())
+}
+
 /// `GET /v0/relay/connect`: a sandbox's WebSocket, unauthenticated as the
 /// relay listener is. It is routed and refused exactly as a TCP connection
 /// is; a refusal is a close and nothing else.
-pub async fn connect(State(s): State<AppState>, ws: WebSocketUpgrade) -> Response {
+pub async fn connect(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    ws: WebSocketUpgrade,
+) -> Response {
     let Some(relay) = s.relay.clone() else {
         return err(StatusCode::NOT_FOUND, "this hub has no sandbox relay").into_response();
     };
+    let client = client_of(&headers, peer.map(|Extension(ConnectInfo(p))| p));
     ws.max_message_size(MAX_CLIENT_MESSAGE)
         .max_frame_size(MAX_CLIENT_MESSAGE)
         .on_upgrade(move |socket| async move {
             let mut conn = ws_bytes::WsBytes::new(socket);
-            if let Err(why) = relay.handle(&mut conn).await {
+            let within = relay.cfg.ws_hello_timeout;
+            if let Err(why) = relay.handle(&mut conn, Some(&client), within).await {
                 tracing::debug!(why, "sandbox relay WebSocket closed unanswered");
             }
             conn.close().await;
@@ -503,7 +604,14 @@ mod tests {
         let app = crate::app_with_state(state);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap()
+        });
         addr
     }
 
@@ -555,8 +663,18 @@ mod tests {
     }
 
     async fn sandbox(hub: std::net::SocketAddr) -> Client {
+        sandbox_as(hub, None).await
+    }
+
+    /// A sandbox whose front names it as `client` in `CF-Connecting-IP`.
+    async fn sandbox_as(hub: std::net::SocketAddr, client: Option<&str>) -> Client {
         let url = format!("ws://{hub}{}", proto::relay::CONNECT_PATH);
-        tokio_tungstenite::connect_async(url).await.unwrap().0
+        let mut req = url.into_client_request().unwrap();
+        if let Some(client) = client {
+            req.headers_mut()
+                .insert("cf-connecting-ip", client.parse().unwrap());
+        }
+        tokio_tungstenite::connect_async(req).await.unwrap().0
     }
 
     /// Bytes until `want` have come, or what a close or end gave instead.
@@ -579,7 +697,15 @@ mod tests {
     /// What the relay answers a sandbox that sends `first`: every message
     /// up to the end, which must come.
     async fn answered(hub: std::net::SocketAddr, first: &[u8]) -> Vec<WsMessage> {
-        let mut ws = sandbox(hub).await;
+        answered_as(hub, None, first).await
+    }
+
+    async fn answered_as(
+        hub: std::net::SocketAddr,
+        client: Option<&str>,
+        first: &[u8],
+    ) -> Vec<WsMessage> {
+        let mut ws = sandbox_as(hub, client).await;
         if !first.is_empty() {
             ws.send(WsMessage::Binary(Bytes::copy_from_slice(first)))
                 .await
@@ -642,7 +768,7 @@ mod tests {
     async fn what_the_websocket_carrier_will_not_route_gets_only_a_close() {
         let (node, stranger) = (Identity::from_seed(&[6; 32]), Identity::from_seed(&[7; 32]));
         let mut cfg = RelayConfig::new("relay.example");
-        cfg.hello_timeout = Duration::from_millis(300);
+        cfg.ws_hello_timeout = Duration::from_millis(300);
         let members = Arc::new(MemoryMembers::new());
         let relay = SandboxRelay::new(cfg, members.clone());
         members
@@ -674,6 +800,76 @@ mod tests {
             let got = answered(hub, &first).await;
             assert!(only_a_close(&got), "{got:?}");
         }
+    }
+
+    #[test]
+    fn a_client_is_named_by_its_front_else_its_address() {
+        let peer: std::net::SocketAddr = "198.51.100.4:5555".parse().unwrap();
+        let mut h = HeaderMap::new();
+        assert_eq!(client_of(&h, Some(peer)), "198.51.100.4");
+        assert_eq!(client_of(&h, None), "unknown");
+        h.insert("x-forwarded-for", "203.0.113.9, 10.0.0.1".parse().unwrap());
+        assert_eq!(client_of(&h, Some(peer)), "203.0.113.9");
+        h.insert("cf-connecting-ip", " 192.0.2.7 ".parse().unwrap());
+        assert_eq!(client_of(&h, Some(peer)), "192.0.2.7");
+    }
+
+    #[tokio::test]
+    async fn one_client_at_its_share_of_handshakes_leaves_the_rest_to_others() {
+        let node = Identity::from_seed(&[9; 32]);
+        let mut cfg = RelayConfig::new("relay.example");
+        cfg.max_handshakes_per_client = 2;
+        cfg.ws_hello_timeout = Duration::from_secs(5);
+        let members = Arc::new(MemoryMembers::new());
+        members
+            .put(&Member {
+                node_id: node.node_id(),
+                x25519_pub: String::new(),
+                binding_sig: String::new(),
+                name: "n".into(),
+                channels: vec![proto::frame::MESH_CHANNEL.into()],
+                admitted_ms: 0,
+                admitted_by: "test".into(),
+                role: MemberRole::Node,
+            })
+            .unwrap();
+        let relay = SandboxRelay::new(cfg, members);
+        let hub = serve_hub(&relay).await;
+        let (host, offers, _listening) = relay.register(node_key(&node)).unwrap();
+        fake_node(hub, node, offers);
+
+        // One client opens its share and sends nothing.
+        let idle = [
+            sandbox_as(hub, Some("192.0.2.1")).await,
+            sandbox_as(hub, Some("192.0.2.1")).await,
+        ];
+        let start = tokio::time::Instant::now();
+        while relay.in_handshake("192.0.2.1") < 2 {
+            assert!(
+                start.elapsed() < WAIT,
+                "the idle connections were never counted"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // Its next is closed at once, long before any hello timeout.
+        let start = tokio::time::Instant::now();
+        let got = answered_as(hub, Some("192.0.2.1"), b"").await;
+        assert!(matches!(got.as_slice(), [WsMessage::Close(_)]), "{got:?}");
+        assert!(start.elapsed() < Duration::from_secs(2));
+        // Another client is routed meanwhile.
+        let mut other = sandbox_as(hub, Some("192.0.2.2")).await;
+        let hello = sni::tests::client_hello(&host);
+        other
+            .send(WsMessage::Binary(Bytes::copy_from_slice(&hello)))
+            .await
+            .unwrap();
+        assert_eq!(read_bytes(&mut other, hello.len()).await, hello);
+        assert_eq!(
+            relay.in_handshake("192.0.2.2"),
+            0,
+            "its place is given back"
+        );
+        drop(idle);
     }
 
     #[test]
