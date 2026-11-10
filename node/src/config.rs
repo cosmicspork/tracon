@@ -3241,7 +3241,7 @@ impl Config {
             .map_err(|error| format!("{}: {error}", path.display()))?;
         crate::provider::digitalocean::validate(
             &config.digitalocean,
-            config.mesh.sandbox_relay.enabled,
+            &config.mesh,
             config.runtime.podman.sandbox_images,
         )
         .map_err(|error| format!("{}: {error}", path.display()))?;

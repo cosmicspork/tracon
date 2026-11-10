@@ -241,10 +241,12 @@ See `hub/` and `docs/ARCHITECTURE.md` (Mesh frames). Summary:
 | `POST /v0/admit`, `DELETE /v0/admit/{id}`, `DELETE /v0/admit/{id}/channels/{channel}` | member; writing a sealing key needs the target's `binding_sig` | membership |
 | `GET /v0/relay/listen` | node member; `404` without a relay listener | SSE: `ready {host}`, then `open {id}` per relayed connection (`relay.rs`) |
 | `GET /v0/relay/streams/{id}` | the node the connection was offered to, once | WebSocket carrying its raw bytes; an empty binary message ends a direction |
+| `GET /v0/relay/connect` | none; `404` without a relay | a sandbox's WebSocket: binary messages (at most 64 KiB) carry its TLS to a node, routed by SNI as on the listener; an empty one ends a direction. Anything not routed gets a close and nothing else; one client may hold 8 connections in handshake, and each has 3 s to send its ClientHello. `GET /v0/info` lists it as `sandbox_relay.connect` |
 
 The relay listener itself (`TRACON_HUB_RELAY_ADDR`) is not HTTP: it reads a TLS
 ClientHello's SNI, `<first 32 hex of node id>.<relay domain>`, and forwards the
-connection's bytes unchanged. `GET /v0/info` reports `sandbox_relay: {domain}`.
+connection's bytes unchanged. `/v0/relay/connect` does the same with the bytes of
+a WebSocket's binary messages. `GET /v0/info` reports `sandbox_relay: {domain}`.
 
 ## Vectors
 

@@ -5,9 +5,12 @@
 //! - `TRACON_HUB_ADMIT` — comma-separated node ids admitted into `@mesh` at startup (bootstrap).
 //! - `TRACON_HUB_MAX_SKEW_SECS` (300), `TRACON_HUB_RETAIN_DAYS` (14),
 //!   `TRACON_HUB_MAX_CHANNEL_BYTES` (268435456), `TRACON_HUB_ENROLL_TTL_SECS` (600).
-//! - `TRACON_HUB_RELAY_ADDR` — the sandbox relay's TLS listener (off when unset; 443 behind
-//!   a public address in production). Needs `TRACON_HUB_RELAY_DOMAIN`, the suffix nodes are
-//!   reached under (`<label>.<domain>`), and takes `TRACON_HUB_RELAY_MAX_STREAMS` (16) per node.
+//! - `TRACON_HUB_RELAY_DOMAIN` — turns the sandbox relay on: the suffix nodes are reached
+//!   under (`<label>.<domain>`), served as a WebSocket on `/v0/relay/connect` at this hub's
+//!   own address. Takes `TRACON_HUB_RELAY_MAX_STREAMS` (16) per node.
+//! - `TRACON_HUB_RELAY_ADDR` — also a raw TLS listener for the relay (off when unset; 443
+//!   behind a public address and a wildcard record for the domain), for a provider whose
+//!   egress admits only addresses. Needs `TRACON_HUB_RELAY_DOMAIN`.
 //! - `RUST_LOG` — tracing filter (default `hub=info,tower_http=info`).
 
 use std::sync::Arc;
@@ -292,31 +295,47 @@ async fn serve() {
     }
 
     let mut state = state_for(frames, members.clone(), cfg, pokes, replica);
-    if let Ok(relay_addr) = std::env::var("TRACON_HUB_RELAY_ADDR") {
-        let domain = std::env::var("TRACON_HUB_RELAY_DOMAIN")
-            .expect("TRACON_HUB_RELAY_ADDR needs TRACON_HUB_RELAY_DOMAIN");
-        let mut relay_cfg = hub::sandbox_relay::RelayConfig::new(&domain);
-        relay_cfg.max_streams_per_node = env_u64(
-            "TRACON_HUB_RELAY_MAX_STREAMS",
-            relay_cfg.max_streams_per_node as u64,
-        ) as usize;
-        let relay = hub::sandbox_relay::SandboxRelay::new(relay_cfg, members);
-        let listener = tokio::net::TcpListener::bind(&relay_addr)
-            .await
-            .expect("bind sandbox relay address");
-        tracing::info!(addr = %relay_addr, domain = %relay.domain(), "sandbox relay listening");
-        tokio::spawn(relay.clone().serve(listener));
-        state.relay = Some(relay);
+    let relay_addr = std::env::var("TRACON_HUB_RELAY_ADDR").ok();
+    match std::env::var("TRACON_HUB_RELAY_DOMAIN").ok() {
+        Some(domain) => {
+            let mut relay_cfg = hub::sandbox_relay::RelayConfig::new(&domain);
+            relay_cfg.max_streams_per_node = env_u64(
+                "TRACON_HUB_RELAY_MAX_STREAMS",
+                relay_cfg.max_streams_per_node as u64,
+            ) as usize;
+            let relay = hub::sandbox_relay::SandboxRelay::new(relay_cfg, members);
+            tracing::info!(
+                path = proto::relay::CONNECT_PATH,
+                domain = %relay.domain(),
+                "sandbox relay on over WebSocket"
+            );
+            if let Some(relay_addr) = relay_addr {
+                let listener = tokio::net::TcpListener::bind(&relay_addr)
+                    .await
+                    .expect("bind sandbox relay address");
+                tracing::info!(addr = %relay_addr, "sandbox relay TLS listener on");
+                tokio::spawn(relay.clone().serve(listener));
+            }
+            state.relay = Some(relay);
+        }
+        None if relay_addr.is_some() => {
+            panic!("TRACON_HUB_RELAY_ADDR needs TRACON_HUB_RELAY_DOMAIN")
+        }
+        None => {}
     }
     let router = app_with_state(state);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .expect("bind listen address");
     tracing::info!(addr = %addr, contract_version = proto::CONTRACT_VERSION, "tracon hub listening");
-    axum::serve(listener, router)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await
-        .expect("server error");
+    // The peer's address keys the relay's per-client handshake limit.
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await
+    .expect("server error");
 }

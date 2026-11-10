@@ -63,7 +63,10 @@ impl Node {
         match self.listener.dial().unwrap() {
             tracon_sandbox::carrier::Dial::Tcp(addr) => command.env("TRACON_SANDBOX_ADDR", addr),
             tracon_sandbox::carrier::Dial::Unix(path) => command.env("TRACON_SANDBOX_SOCKET", path),
-            tracon_sandbox::carrier::Dial::Listen(_) => unreachable!("a listener dials"),
+            tracon_sandbox::carrier::Dial::Listen(_)
+            | tracon_sandbox::carrier::Dial::WebSocket(_) => {
+                unreachable!("a listener is dialled by tcp or unix socket")
+            }
         };
         command
     }

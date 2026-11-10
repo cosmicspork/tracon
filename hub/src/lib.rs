@@ -64,7 +64,7 @@ pub struct AppState {
     pub limiter: Arc<RateLimit>,
     /// The replica half, when the hub has an identity and a data directory.
     pub replica: Option<Arc<replica::Replica>>,
-    /// The sandbox relay, when the hub has a relay listener.
+    /// The sandbox relay, when the hub has a relay domain.
     pub relay: Option<Arc<sandbox_relay::SandboxRelay>>,
 }
 
@@ -194,6 +194,9 @@ pub fn app_with_state(state: AppState) -> Router {
         .route("/health", get(routes::health))
         .route("/v0/info", get(routes::info))
         .route("/v0/enroll/{code}", post(routes::fill_enroll))
+        // A sandbox has no member key. What it relays is TLS pinned to its
+        // node and a one-time token inside it, which only the node checks.
+        .route(proto::relay::CONNECT_PATH, get(sandbox_relay::connect))
         .merge(authed)
         .layer(DefaultBodyLimit::max(auth::MAX_BODY))
         .layer(CorsLayer::permissive())

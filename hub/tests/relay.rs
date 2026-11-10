@@ -104,6 +104,29 @@ async fn public_endpoints() {
     assert_eq!(v["contract_version"], proto::CONTRACT_VERSION);
 }
 
+/// A sandbox holds no member key, so the relay's WebSocket is the one relay
+/// route outside the signature check; its neighbours stay inside it.
+#[tokio::test]
+async fn only_the_sandbox_relay_websocket_is_unsigned() {
+    let h = hub_with(&[]);
+    let get = |path: &str| Request::get(path).body(Body::empty()).unwrap();
+    let (st, _) = call(&h.app, get(proto::relay::CONNECT_PATH)).await;
+    assert_ne!(st, StatusCode::UNAUTHORIZED);
+    for path in [
+        proto::relay::LISTEN_PATH.to_string(),
+        proto::relay::stream_path("ab"),
+        format!("{}/x", proto::relay::CONNECT_PATH),
+    ] {
+        let (st, _) = call(&h.app, get(&path)).await;
+        assert!(
+            st == StatusCode::UNAUTHORIZED || st == StatusCode::NOT_FOUND,
+            "{path}: {st}"
+        );
+    }
+    let (st, _) = call(&h.app, get(proto::relay::LISTEN_PATH)).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+}
+
 #[tokio::test]
 async fn auth_rejections() {
     let (a, _, stranger) = ids();

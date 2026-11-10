@@ -28,7 +28,7 @@ use tracon::http::api::AppState;
 use tracon::provider::digitalocean::listener::DoListener;
 use tracon::provider::digitalocean::runtime::{self, DoRuntime};
 use tracon::provider::digitalocean::templates::{Source, TemplateState};
-use tracon::provider::digitalocean::{ClientSource, Owner, Settings};
+use tracon::provider::digitalocean::{ClientSource, HubRelay, Owner, Settings};
 use tracon::provider::requirements::{DoMode, RepoPlacement};
 use tracon::runner::local::LocalBackend;
 use tracon::runner::{Mount, Runner};
@@ -193,7 +193,7 @@ async fn node(fake: &FakeDo, client_repo: &str) -> Node {
         owner,
         "tracon-gw".into(),
         listener,
-        Arc::new(|| None),
+        HubRelay::none(),
     )
     .unwrap();
     assert!(matches!(

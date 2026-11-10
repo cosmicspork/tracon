@@ -40,29 +40,77 @@ exec /opt/tracon/bin/tracon-sandbox
 pub const SERVICE_DIR: &str = "/etc/services.d/tracon-sandbox";
 
 /// The exec that delivers a run's bootstrap. Positional arguments: the
-/// node's address, the certificate pin, the server name, the token and the
-/// gateway's name. The token is written before the bootstrap that names it,
-/// so the service never starts without one.
+/// variable the dial goes in (`ADDR` or `RELAY_URL`), the dial, the
+/// certificate pin, the server name, the token, the gateway's name and the
+/// run script. The token is written before the bootstrap that names it, so
+/// the service never starts without one.
+///
+/// The runtime's proxy settings are in this exec's environment but need not
+/// be in the service's, so a WebSocket dial gets a copy under the
+/// supervisor's own names, which it removes from its environment like the
+/// rest: nothing it starts sees anything new. A value with a character that
+/// could leave its quotes is left out.
 const DELIVER: &str = r#"set -eu
 umask 077
 mkdir -p /run/tracon
-grep -qs "^127.0.0.1 $5\$" /etc/hosts || printf '127.0.0.1 %s\n' "$5" >> /etc/hosts
-printf '%s' "$4" > /run/tracon/token.new
+grep -qs "^127.0.0.1 $6\$" /etc/hosts || printf '127.0.0.1 %s\n' "$6" >> /etc/hosts
+printf '%s' "$5" > /run/tracon/token.new
 mv -f /run/tracon/token.new /run/tracon/token
-printf "TRACON_SANDBOX_ADDR='%s'\nTRACON_SANDBOX_PIN='%s'\nTRACON_SANDBOX_SERVER_NAME='%s'\n" "$1" "$2" "$3" > /run/tracon/bootstrap.new
+case "$1" in
+  ADDR|RELAY_URL) ;;
+  *) echo "unknown dial $1" >&2; exit 64 ;;
+esac
+printf "TRACON_SANDBOX_%s='%s'\nTRACON_SANDBOX_PIN='%s'\nTRACON_SANDBOX_SERVER_NAME='%s'\n" "$1" "$2" "$3" "$4" > /run/tracon/bootstrap.new
+if [ "$1" = RELAY_URL ]; then
+  proxy="${HTTPS_PROXY:-${https_proxy:-}}"
+  no_proxy_list="${NO_PROXY:-${no_proxy:-}}"
+  case "$proxy" in
+    *[!A-Za-z0-9.:/@_%-]*) ;;
+    ?*) printf "TRACON_SANDBOX_PROXY='%s'\n" "$proxy" >> /run/tracon/bootstrap.new ;;
+  esac
+  case "$no_proxy_list" in
+    *[!A-Za-z0-9.,:*_\[\]-]*) ;;
+    ?*) printf "TRACON_SANDBOX_NO_PROXY='%s'\n" "$no_proxy_list" >> /run/tracon/bootstrap.new ;;
+  esac
+fi
 mv -f /run/tracon/bootstrap.new /run/tracon/bootstrap
 if [ ! -x /etc/services.d/tracon-sandbox/run ]; then
-  printf '%s' "$6" > /run/tracon/run
+  printf '%s' "$7" > /run/tracon/run
   chmod 0700 /run/tracon/run
   setsid -f /run/tracon/run </dev/null >>/run/tracon/log 2>&1
 fi
 "#;
 
+/// How the sandbox dials the node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dial<'a> {
+    /// `ip:port`, raw TLS: the only address the sandbox's egress allows.
+    Addr(&'a str),
+    /// The hub relay's WebSocket URL, through the runtime's proxy: the
+    /// hub's host is the only name the sandbox's egress allows.
+    RelayUrl(&'a str),
+}
+
+impl<'a> Dial<'a> {
+    /// The bootstrap variable it goes in, after `TRACON_SANDBOX_`.
+    fn variable(&self) -> &'static str {
+        match self {
+            Dial::Addr(_) => "ADDR",
+            Dial::RelayUrl(_) => "RELAY_URL",
+        }
+    }
+
+    pub fn value(&self) -> &'a str {
+        match self {
+            Dial::Addr(v) | Dial::RelayUrl(v) => v,
+        }
+    }
+}
+
 /// What one run's sandbox is told.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Delivery<'a> {
-    /// `ip:port`: the only address the sandbox's egress allows.
-    pub addr: &'a str,
+    pub dial: Dial<'a>,
     pub pin: &'a str,
     /// What the sandbox puts in SNI: the hub relay's name for this node, or
     /// the node's own.
@@ -76,7 +124,7 @@ pub struct Delivery<'a> {
 impl std::fmt::Debug for Delivery<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Delivery")
-            .field("addr", &self.addr)
+            .field("dial", &self.dial)
             .field("pin", &self.pin)
             .field("server_name", &self.server_name)
             .field("token", &"<redacted>")
@@ -102,7 +150,15 @@ fn plain(what: &str, value: &str, extra: &[char]) -> Result<(), String> {
 
 impl Delivery<'_> {
     pub fn validate(&self) -> Result<(), String> {
-        plain("the node address", self.addr, &['.', ':', '[', ']'])?;
+        match self.dial {
+            Dial::Addr(addr) => plain("the node address", addr, &['.', ':', '[', ']'])?,
+            Dial::RelayUrl(url) => {
+                plain("the relay URL", url, &['.', ':', '/', '-', '_', '[', ']'])?;
+                if !(url.starts_with("wss://") || url.starts_with("ws://")) {
+                    return Err(format!("the relay URL {url:?} is not ws:// or wss://"));
+                }
+            }
+        }
         plain("the certificate pin", self.pin, &[':'])?;
         plain("the server name", self.server_name, &['.', '-'])?;
         plain("the token", self.token, &['-', '_'])?;
@@ -118,7 +174,8 @@ impl Delivery<'_> {
             "-c".into(),
             DELIVER.into(),
             "tracon-bootstrap".into(),
-            self.addr.into(),
+            self.dial.variable().into(),
+            self.dial.value().into(),
             self.pin.into(),
             self.server_name.into(),
             self.token.into(),
@@ -131,11 +188,16 @@ impl Delivery<'_> {
     /// template's service, and for tests.
     pub fn parse(argv: &[String]) -> Option<Delivery<'_>> {
         match argv {
-            [sh, c, script, _, addr, pin, server_name, token, gateway_host, _run]
+            [sh, c, script, _, variable, dial, pin, server_name, token, gateway_host, _run]
                 if sh == "/bin/sh" && c == "-c" && script == DELIVER =>
             {
+                let dial = match variable.as_str() {
+                    "ADDR" => Dial::Addr(dial),
+                    "RELAY_URL" => Dial::RelayUrl(dial),
+                    _ => return None,
+                };
                 Some(Delivery {
-                    addr,
+                    dial,
                     pin,
                     server_name,
                     token,
@@ -153,7 +215,7 @@ mod tests {
 
     fn delivery() -> Delivery<'static> {
         Delivery {
-            addr: "203.0.113.7:443",
+            dial: Dial::Addr("203.0.113.7:443"),
             pin: "sha256:00aa",
             server_name: "0123abcd.relay.example.net",
             token: "AbC-_9",
@@ -163,10 +225,17 @@ mod tests {
 
     #[test]
     fn the_argv_reads_back_and_never_logs_the_token() {
-        let d = delivery();
-        let argv = d.argv().unwrap();
-        assert_eq!(Delivery::parse(&argv), Some(d.clone()));
-        assert!(!format!("{d:?}").contains("AbC-_9"));
+        for d in [
+            delivery(),
+            Delivery {
+                dial: Dial::RelayUrl("wss://hub.example.net/v0/relay/connect"),
+                ..delivery()
+            },
+        ] {
+            let argv = d.argv().unwrap();
+            assert_eq!(Delivery::parse(&argv), Some(d.clone()));
+            assert!(!format!("{d:?}").contains("AbC-_9"));
+        }
     }
 
     #[test]
@@ -177,7 +246,19 @@ mod tests {
                 ..delivery()
             },
             Delivery {
-                addr: "1.2.3.4:443\nX=1",
+                dial: Dial::Addr("1.2.3.4:443\nX=1"),
+                ..delivery()
+            },
+            Delivery {
+                dial: Dial::RelayUrl("wss://hub/'$(id)'"),
+                ..delivery()
+            },
+            Delivery {
+                dial: Dial::RelayUrl("wss://hub/x?a=b&c=d"),
+                ..delivery()
+            },
+            Delivery {
+                dial: Dial::RelayUrl("https://hub/v0/relay/connect"),
                 ..delivery()
             },
             Delivery {
@@ -197,6 +278,79 @@ mod tests {
     fn the_template_image_installs_this_service() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../containers/do-sandbox/run");
         assert_eq!(std::fs::read_to_string(path).unwrap(), RUN_SCRIPT);
+    }
+
+    /// Run the delivery against a scratch directory standing in for
+    /// `/run/tracon` and `/etc/hosts`, with `env`; the bootstrap it wrote.
+    fn delivered(d: &Delivery<'_>, env: &[(&str, &str)]) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        let hosts = dir.path().join("hosts");
+        let mut argv = d.argv().unwrap();
+        argv[2] = DELIVER
+            .replace("/run/tracon", &run.to_string_lossy())
+            .replace("/etc/hosts", &hosts.to_string_lossy())
+            // Present and executable: the template's service is installed.
+            .replace("/etc/services.d/tracon-sandbox/run", "/bin/sh");
+        let out = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .envs(env.iter().copied())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(std::fs::read_to_string(run.join("token")).unwrap(), d.token);
+        assert_eq!(
+            std::fs::read_to_string(&hosts).unwrap(),
+            format!("127.0.0.1 {}\n", d.gateway_host)
+        );
+        std::fs::read_to_string(run.join("bootstrap")).unwrap()
+    }
+
+    #[test]
+    fn the_bootstrap_names_the_dial_and_a_websocket_gets_the_proxy() {
+        let on_do = [
+            ("HTTPS_PROXY", "http://169.254.169.254:3128"),
+            (
+                "NO_PROXY",
+                "169.254.169.254,localhost,127.0.0.1,.vpc-endpoint.internal.digitalocean.com",
+            ),
+        ];
+        assert_eq!(
+            delivered(&delivery(), &on_do),
+            "TRACON_SANDBOX_ADDR='203.0.113.7:443'\nTRACON_SANDBOX_PIN='sha256:00aa'\n\
+             TRACON_SANDBOX_SERVER_NAME='0123abcd.relay.example.net'\n"
+        );
+        let ws = Delivery {
+            dial: Dial::RelayUrl("wss://hub.example.net/v0/relay/connect"),
+            ..delivery()
+        };
+        assert_eq!(
+            delivered(&ws, &on_do),
+            "TRACON_SANDBOX_RELAY_URL='wss://hub.example.net/v0/relay/connect'\n\
+             TRACON_SANDBOX_PIN='sha256:00aa'\n\
+             TRACON_SANDBOX_SERVER_NAME='0123abcd.relay.example.net'\n\
+             TRACON_SANDBOX_PROXY='http://169.254.169.254:3128'\n\
+             TRACON_SANDBOX_NO_PROXY='169.254.169.254,localhost,127.0.0.1,.vpc-endpoint.internal.digitalocean.com'\n"
+        );
+        // Nothing to copy; and a value that could leave its quotes is not.
+        let bare = delivered(&ws, &[]);
+        assert!(!bare.contains("PROXY"), "{bare}");
+        let hostile = delivered(
+            &ws,
+            &[("https_proxy", "http://p:1'\nX='1"), ("no_proxy", "a b")],
+        );
+        assert!(!hostile.contains("PROXY"), "{hostile}");
+        let lower = delivered(&ws, &[("https_proxy", "http://p:3128")]);
+        assert!(
+            lower.contains("TRACON_SANDBOX_PROXY='http://p:3128'\n"),
+            "{lower}"
+        );
     }
 
     #[test]

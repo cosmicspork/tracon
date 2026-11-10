@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use super::listener::DoListener;
 use super::templates::{Source, TemplateState, Templates};
-use super::{upkeep, ClientSource, DoProvider, Options, Owner, ServerName, Settings};
+use super::{upkeep, ClientSource, DoProvider, HubRelay, Options, Owner, Settings};
 use crate::config::Config;
 use crate::provider::requirements::DoMode;
 use crate::provider::{Candidate, ProviderKind, Requirements, SandboxProvider as _};
@@ -34,7 +34,13 @@ const CAPACITY_WITHIN: Duration = Duration::from_secs(15);
 
 pub struct DoRuntime {
     provider: Arc<DoProvider>,
+    /// Why the hub cannot carry sandboxes over its own URL, once its
+    /// `/v0/info` has said so.
+    hub_refused: std::sync::Mutex<Option<String>>,
 }
+
+/// How often an unanswered look at the hub's `/v0/info` is tried again.
+const HUB_INFO_RETRY: Duration = Duration::from_secs(60);
 
 static RUNTIME: OnceLock<Arc<DoRuntime>> = OnceLock::new();
 
@@ -95,7 +101,10 @@ impl DoRuntime {
             .await
             .map_err(|e| format!("digitalocean.listen {}: {e}", settings.listen))?;
         let client = client_source(settings.clone(), broker, node_id.to_string());
-        let server_name: ServerName = Arc::new(crate::mesh::sandbox_relay::current_host);
+        let relay = HubRelay {
+            host: Arc::new(crate::mesh::sandbox_relay::current_host),
+            hub_url: cfg.mesh.hub_url.clone(),
+        };
         let source = match settings.image.is_empty() {
             false => Source::Given(settings.image.clone()),
             true => Source::Built {
@@ -112,10 +121,15 @@ impl DoRuntime {
             Owner::new(crate::config::resource_prefix(), node_id),
             cfg.boundary.gateway_container.clone(),
             listener,
-            server_name,
+            relay,
         )?;
         let _ = RUNTIME.set(runtime.clone());
         tokio::spawn(runtime.clone().upkeep());
+        if let (super::Reach::HubUrl { .. }, Some(hub_url)) =
+            (&runtime.provider.options().reach, cfg.mesh.hub_url.clone())
+        {
+            tokio::spawn(runtime.clone().check_hub(hub_url));
+        }
         tracing::info!(
             listen = %runtime.provider.listener().local_addr(),
             "DigitalOcean sandbox provider started"
@@ -131,8 +145,9 @@ impl DoRuntime {
         owner: Owner,
         gateway_host: String,
         listener: Arc<DoListener>,
-        server_name: ServerName,
+        relay: HubRelay,
     ) -> Result<Arc<Self>, String> {
+        let reach = settings.reach(relay.hub_url.as_deref())?;
         let templates = Arc::new(Templates::new(
             source,
             &settings.base_template,
@@ -144,16 +159,46 @@ impl DoRuntime {
                 settings,
                 owner,
                 gateway_host,
+                reach,
                 ready_within: READY_WITHIN,
                 poll: Duration::from_secs(1),
             },
             listener,
             templates,
-            server_name,
+            relay.host,
         );
         Ok(Arc::new(DoRuntime {
             provider: Arc::new(provider),
+            hub_refused: std::sync::Mutex::new(None),
         }))
+    }
+
+    /// Ask the hub, until it answers, whether it serves the relay's
+    /// WebSocket; one that does not keeps this provider unhealthy, saying
+    /// why, rather than leaving each sandbox to fail its dial unexplained.
+    pub async fn check_hub(self: Arc<Self>, hub_url: String) {
+        let http = match reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+        {
+            Ok(http) => http,
+            Err(error) => return tracing::warn!(%error, "no client to ask the hub with"),
+        };
+        let info = format!("{}/v0/info", hub_url.trim_end_matches('/'));
+        loop {
+            let answer = match http.get(&info).send().await {
+                Ok(res) if res.status().is_success() => res.json::<serde_json::Value>().await.ok(),
+                _ => None,
+            };
+            if let Some(info) = answer {
+                if let Err(why) = super::hub_serves_connect(&hub_url, &info) {
+                    tracing::error!(%why, "DigitalOcean sandboxes cannot reach this node through the hub");
+                    *self.hub_refused.lock().unwrap() = Some(why);
+                }
+                return;
+            }
+            tokio::time::sleep(HUB_INFO_RETRY).await;
+        }
     }
 
     pub fn provider(&self) -> &Arc<DoProvider> {
@@ -338,6 +383,9 @@ impl DoRuntime {
             .default_image()
             .ok_or("this node has not pinned its base image yet")?;
         self.provider.templates().ready(&image)?;
+        if let Some(why) = self.hub_refused.lock().unwrap().clone() {
+            return Err(why);
+        }
         let settings = &self.provider.options().settings;
         if settings.relay
             && settings.server_name.is_empty()

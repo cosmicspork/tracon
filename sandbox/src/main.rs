@@ -7,7 +7,10 @@
 //! |---|---|
 //! | `TRACON_SANDBOX_ADDR` | the node as `host:port` (TCP), or |
 //! | `TRACON_SANDBOX_SOCKET` | the node's unix socket, or |
-//! | `TRACON_SANDBOX_LISTEN` | a unix socket to listen on for the node to connect to |
+//! | `TRACON_SANDBOX_LISTEN` | a unix socket to listen on for the node to connect to, or |
+//! | `TRACON_SANDBOX_RELAY_URL` | the hub relay's WebSocket (`wss://<hub>/v0/relay/connect`) |
+//! | `HTTPS_PROXY`, `NO_PROXY` | with `TRACON_SANDBOX_RELAY_URL`: the HTTP proxy it is dialled through (`HTTP_PROXY` for `ws://`; lower case too), and the hosts it is not |
+//! | `TRACON_SANDBOX_PROXY`, `TRACON_SANDBOX_NO_PROXY` | the same, ahead of those: a bootstrap's copy for a supervisor started without the provider's environment |
 //! | `TRACON_SANDBOX_PIN` | SHA-256 of the node's certificate (`sha256:<hex>`) |
 //! | `TRACON_SANDBOX_TOKEN` | this run's one-time token, or |
 //! | `TRACON_SANDBOX_TOKEN_FILE` | a file holding it |
@@ -24,7 +27,7 @@
 use std::process::ExitCode;
 use std::time::Duration;
 
-use tracon_sandbox::carrier::Dial;
+use tracon_sandbox::carrier::{Dial, RelayUrl};
 use tracon_sandbox::inside::{self, Config, Ending};
 use tracon_sandbox::tls::CertPin;
 
@@ -52,13 +55,17 @@ fn config_from_env() -> Result<Config, String> {
         var("TRACON_SANDBOX_ADDR"),
         var("TRACON_SANDBOX_SOCKET"),
         var("TRACON_SANDBOX_LISTEN"),
+        var("TRACON_SANDBOX_RELAY_URL"),
     ) {
-        (Some(addr), None, None) => Dial::Tcp(addr),
-        (None, Some(path), None) => Dial::Unix(path.into()),
-        (None, None, Some(path)) => Dial::Listen(path.into()),
+        (Some(addr), None, None, None) => Dial::Tcp(addr),
+        (None, Some(path), None, None) => Dial::Unix(path.into()),
+        (None, None, Some(path), None) => Dial::Listen(path.into()),
+        (None, None, None, Some(url)) => Dial::WebSocket(
+            RelayUrl::from_env(&url, var).map_err(|e| format!("TRACON_SANDBOX_RELAY_URL: {e}"))?,
+        ),
         _ => {
             return Err(
-                "set exactly one of TRACON_SANDBOX_ADDR, TRACON_SANDBOX_SOCKET and TRACON_SANDBOX_LISTEN"
+                "set exactly one of TRACON_SANDBOX_ADDR, TRACON_SANDBOX_SOCKET, TRACON_SANDBOX_LISTEN and TRACON_SANDBOX_RELAY_URL"
                     .into(),
             )
         }

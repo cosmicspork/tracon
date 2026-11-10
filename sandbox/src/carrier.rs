@@ -1,6 +1,7 @@
 //! What carries the TLS connection: a TCP connection, a unix socket the
-//! node mounts into the sandbox, or a unix socket the sandbox listens on for
-//! the node to connect in.
+//! node mounts into the sandbox, a unix socket the sandbox listens on for
+//! the node to connect in, or a WebSocket to the hub's relay
+//! ([`websocket`]).
 //!
 //! The last is for a provider that relays a socket from the sandbox out to
 //! the host and nothing the other way (Apple's `container --publish-socket`).
@@ -21,6 +22,9 @@ use std::path::{Path, PathBuf};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 
+pub mod websocket;
+pub use websocket::RelayUrl;
+
 /// Any byte stream a TLS connection can run over.
 pub trait Io: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Io for T {}
@@ -36,6 +40,8 @@ pub enum Dial {
     /// Listen on this unix socket and take the first connection; after a
     /// dropped connection, listen there again.
     Listen(PathBuf),
+    /// A WebSocket to the hub's relay URL, dialled afresh each time.
+    WebSocket(RelayUrl),
 }
 
 impl Dial {
@@ -50,6 +56,7 @@ impl Dial {
                 Ok(Box::new(stream))
             }
             Dial::Unix(path) => Ok(Box::new(UnixStream::connect(path).await?)),
+            Dial::WebSocket(url) => url.connect().await,
         }
     }
 }
@@ -60,6 +67,7 @@ impl std::fmt::Display for Dial {
             Dial::Tcp(addr) => write!(f, "tcp {addr}"),
             Dial::Unix(path) => write!(f, "unix {}", path.display()),
             Dial::Listen(path) => write!(f, "listening on unix {}", path.display()),
+            Dial::WebSocket(url) => write!(f, "{url}"),
         }
     }
 }

@@ -1,9 +1,14 @@
 //! The hub's sandbox relay: how a node behind NAT is reached by a sandbox that
-//! can only dial a public address. The sandbox opens TLS to the hub's relay
-//! listener naming the node in SNI; the hub reads nothing past that name and
-//! hands the raw bytes to the node over a connection the node dialled out.
+//! can only dial a public address. The sandbox opens TLS naming the node in
+//! SNI, either straight to the hub's relay listener or inside a WebSocket to
+//! [`CONNECT_PATH`] on the hub's own URL; the hub reads nothing past that name
+//! and hands the raw bytes to the node over a connection the node dialled out.
 //! TLS is end to end, pinned to the node's certificate; the hub never holds a
 //! key for it.
+//!
+//! On [`CONNECT_PATH`] the sandbox's bytes travel as binary messages of at
+//! most [`MAX_MESSAGE`] bytes each, with the same end-of-stream convention as
+//! the dial-back below.
 //!
 //! The node holds [`LISTEN_PATH`] open (signed, SSE) while it opts in. Each
 //! connection the hub accepts for it arrives there as an [`OPEN_EVENT`] whose
@@ -15,6 +20,14 @@
 
 /// Held open by a node that serves the relay.
 pub const LISTEN_PATH: &str = "/v0/relay/listen";
+
+/// The WebSocket a sandbox opens, unauthenticated, to reach a node through
+/// the hub's own HTTPS URL: for a hub behind a proxy that terminates TLS and
+/// passes only HTTP, where the relay listener cannot be published.
+pub const CONNECT_PATH: &str = "/v0/relay/connect";
+
+/// The largest binary message a sandbox sends on [`CONNECT_PATH`].
+pub const MAX_MESSAGE: usize = 64 * 1024;
 
 /// The SSE event announcing one relayed connection to dial back for.
 pub const OPEN_EVENT: &str = "open";

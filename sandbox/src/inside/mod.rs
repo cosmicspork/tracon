@@ -119,7 +119,14 @@ async fn dial(target: &Dial, within: Duration) -> Result<BoxedIo, RunError> {
     let deadline = Instant::now() + within;
     let mut delay = Duration::from_millis(50);
     loop {
-        match target.connect().await {
+        // A WebSocket dial is several exchanges, any of which a proxy can
+        // leave unanswered; none may outlast the window.
+        let left = deadline.saturating_duration_since(Instant::now());
+        let attempt = match tokio::time::timeout(left, target.connect()).await {
+            Ok(attempt) => attempt,
+            Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "no answer in time")),
+        };
+        match attempt {
             Ok(io) => return Ok(io),
             Err(error) if Instant::now() + delay >= deadline => {
                 return Err(RunError::Dial(target.to_string(), error));

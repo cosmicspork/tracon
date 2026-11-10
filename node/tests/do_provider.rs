@@ -26,11 +26,11 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tracon::config::{Config, HarnessListen};
 use tracon::provider::capabilities::Route;
-use tracon::provider::digitalocean::bootstrap::Delivery;
+use tracon::provider::digitalocean::bootstrap::{Delivery, Dial as BootstrapDial};
 use tracon::provider::digitalocean::listener::DoListener;
 use tracon::provider::digitalocean::runtime::DoRuntime;
 use tracon::provider::digitalocean::templates::{Source, TemplateState};
-use tracon::provider::digitalocean::{ClientSource, Owner, Settings};
+use tracon::provider::digitalocean::{ClientSource, HubRelay, Owner, Settings};
 use tracon::provider::{Handle, Requirements, SandboxProvider as _, Status};
 use tracon::runner::sandbox_files::FilesStore;
 use tracon::runner::{Mount, RunnerCommand};
@@ -141,7 +141,7 @@ async fn a_session_runs_on_digitalocean_minus_digitalocean() {
         Owner::new("tracon", "abcd1234"),
         "tracon-gw".into(),
         listener.clone(),
-        Arc::new(|| None),
+        HubRelay::none(),
     )
     .unwrap();
     let provider = runtime.provider().clone();
@@ -166,10 +166,10 @@ async fn a_session_runs_on_digitalocean_minus_digitalocean() {
                     .unwrap()
                     .to_string();
                 api.configs.get_mut(&config).unwrap()["manifest"]["egress"]["allow_ips"] =
-                    serde_json::json!([d.addr.split(':').next().unwrap(), "198.51.100.9"]);
+                    serde_json::json!([d.dial.value().split(':').next().unwrap(), "198.51.100.9"]);
             }
             let mut config = inside::Config::new(
-                Dial::Tcp(d.addr.to_string()),
+                Dial::Tcp(d.dial.value().to_string()),
                 CertPin::parse(d.pin).unwrap(),
                 d.token,
             );
@@ -274,7 +274,7 @@ async fn a_session_runs_on_digitalocean_minus_digitalocean() {
         })
     );
     let delivered = Delivery::parse(&exec.1).unwrap();
-    assert_eq!(delivered.addr, node.to_string());
+    assert_eq!(delivered.dial, BootstrapDial::Addr(&node.to_string()));
     assert_eq!(delivered.pin, server.pin().to_string());
     assert_eq!(delivered.server_name, "tracon-node");
     assert_eq!(delivered.gateway_host, "tracon-gw");
