@@ -182,8 +182,7 @@ async fn a_node_that_runs_no_services_in_its_sandboxes_fetches_nothing() {
     support::state::isolate();
     let (url, asked) = serve(tempfile::tempdir().unwrap().path().to_path_buf()).await;
     let mut cfg = node(&url);
-    cfg.runtime.kind = RuntimeKind::default();
-    cfg.runtime.podman = tracon::config::PodmanRuntime::legacy();
+    cfg.runtime.kind = RuntimeKind::Kubernetes;
     assert!(!service_bundle::wanted(&cfg));
     assert!(!service_bundle::converge(&cfg).await.unwrap());
     assert_eq!(service_bundle::missing(&cfg, false), None);

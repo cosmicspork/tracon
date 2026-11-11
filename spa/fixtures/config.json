@@ -311,74 +311,10 @@
       "editable": true,
       "editable_at_node": true,
       "editable_by_peer": true,
-      "exec_path": false,
-      "fs_path": false,
-      "key": "harness.native_binary",
-      "path": null,
-      "secret": false,
-      "shape": {
-        "kind": "string",
-        "optional": false
-      }
-    },
-    {
-      "admin": true,
-      "apply": "restart",
-      "editable": true,
-      "editable_at_node": true,
-      "editable_by_peer": true,
       "exec_path": true,
       "fs_path": false,
       "key": "boundary.podman",
       "path": "executable",
-      "secret": false,
-      "shape": {
-        "kind": "string",
-        "optional": false
-      }
-    },
-    {
-      "admin": true,
-      "apply": "restart",
-      "editable": true,
-      "editable_at_node": true,
-      "editable_by_peer": true,
-      "exec_path": false,
-      "fs_path": false,
-      "key": "boundary.network",
-      "path": null,
-      "secret": false,
-      "shape": {
-        "kind": "string",
-        "optional": false
-      }
-    },
-    {
-      "admin": true,
-      "apply": "restart",
-      "editable": true,
-      "editable_at_node": true,
-      "editable_by_peer": true,
-      "exec_path": false,
-      "fs_path": false,
-      "key": "boundary.subnet",
-      "path": null,
-      "secret": false,
-      "shape": {
-        "kind": "string",
-        "optional": false
-      }
-    },
-    {
-      "admin": true,
-      "apply": "restart",
-      "editable": true,
-      "editable_at_node": true,
-      "editable_by_peer": true,
-      "exec_path": false,
-      "fs_path": false,
-      "key": "boundary.gateway_ip",
-      "path": null,
       "secret": false,
       "shape": {
         "kind": "string",
@@ -404,40 +340,6 @@
     {
       "admin": true,
       "apply": "restart",
-      "editable": false,
-      "editable_at_node": true,
-      "editable_by_peer": false,
-      "exec_path": false,
-      "fs_path": false,
-      "key": "boundary.gateway_image",
-      "path": null,
-      "secret": false,
-      "shape": {
-        "kind": "string",
-        "optional": false
-      },
-      "why_not": "is an image the node runs with its own sockets and credentials, which the path guard does not check, so it is changed at the node, not from elsewhere"
-    },
-    {
-      "admin": true,
-      "apply": "restart",
-      "editable": false,
-      "editable_at_node": true,
-      "editable_by_peer": false,
-      "exec_path": false,
-      "fs_path": false,
-      "key": "boundary.harness_image",
-      "path": null,
-      "secret": false,
-      "shape": {
-        "kind": "string",
-        "optional": false
-      },
-      "why_not": "is an image the node runs with its own sockets and credentials, which the path guard does not check, so it is changed at the node, not from elsewhere"
-    },
-    {
-      "admin": true,
-      "apply": "restart",
       "editable": true,
       "editable_at_node": true,
       "editable_by_peer": true,
@@ -449,22 +351,6 @@
       "shape": {
         "kind": "bool",
         "optional": true
-      }
-    },
-    {
-      "admin": true,
-      "apply": "restart",
-      "editable": true,
-      "editable_at_node": true,
-      "editable_by_peer": true,
-      "exec_path": false,
-      "fs_path": false,
-      "key": "boundary.start_machine",
-      "path": null,
-      "secret": false,
-      "shape": {
-        "kind": "bool",
-        "optional": false
       }
     },
     {
@@ -612,7 +498,7 @@
         "kind": "any",
         "optional": false
       },
-      "why_not": "is the harness socket's path, whose directory the node creates and mounts writable into the gateway container, so it is changed at the node, not from elsewhere"
+      "why_not": "is the harness socket's path, whose directory the node creates and every sandbox's tunnel leads to, so it is changed at the node, not from elsewhere"
     },
     {
       "admin": true,
@@ -1274,87 +1160,7 @@
       "editable_by_peer": true,
       "exec_path": false,
       "fs_path": false,
-      "key": "runtime.podman.sandbox_protocol",
-      "path": null,
-      "secret": false,
-      "shape": {
-        "kind": "bool",
-        "optional": false
-      }
-    },
-    {
-      "admin": true,
-      "apply": "restart",
-      "editable": true,
-      "editable_at_node": true,
-      "editable_by_peer": true,
-      "exec_path": false,
-      "fs_path": false,
       "key": "runtime.podman.sandbox_init",
-      "path": null,
-      "secret": false,
-      "shape": {
-        "kind": "bool",
-        "optional": false
-      }
-    },
-    {
-      "admin": true,
-      "apply": "restart",
-      "editable": true,
-      "editable_at_node": true,
-      "editable_by_peer": true,
-      "exec_path": false,
-      "fs_path": false,
-      "key": "runtime.podman.sandbox_files",
-      "path": null,
-      "secret": false,
-      "shape": {
-        "kind": "bool",
-        "optional": false
-      }
-    },
-    {
-      "admin": true,
-      "apply": "restart",
-      "editable": true,
-      "editable_at_node": true,
-      "editable_by_peer": true,
-      "exec_path": false,
-      "fs_path": false,
-      "key": "runtime.podman.sandbox_tunnels",
-      "path": null,
-      "secret": false,
-      "shape": {
-        "kind": "bool",
-        "optional": false
-      }
-    },
-    {
-      "admin": true,
-      "apply": "restart",
-      "editable": true,
-      "editable_at_node": true,
-      "editable_by_peer": true,
-      "exec_path": false,
-      "fs_path": false,
-      "key": "runtime.podman.sandbox_images",
-      "path": null,
-      "secret": false,
-      "shape": {
-        "kind": "bool",
-        "optional": false
-      }
-    },
-    {
-      "admin": true,
-      "apply": "restart",
-      "editable": true,
-      "editable_at_node": true,
-      "editable_by_peer": true,
-      "exec_path": false,
-      "fs_path": false,
-      "key": "runtime.podman.sandbox_services",
       "path": null,
       "secret": false,
       "shape": {

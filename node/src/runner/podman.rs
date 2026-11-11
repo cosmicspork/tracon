@@ -1,6 +1,9 @@
-//! The Podman runner and the single place a harness `podman run` line is built.
-//! The boundary checks render the same spec against a probe container, so what
-//! is verified is what sessions actually run.
+//! What a Podman sandbox container is made from, and the single place its
+//! `podman run` line is built (`RunSpec::sandbox_args`); the boundary checks
+//! render the same spec against a probe container, so what is verified is
+//! what sessions actually run. `PodmanRunner` is what a sandbox's runner
+//! hands on: an image's identity, and image-only services as containers
+//! beside the sandbox (sidecars).
 
 use std::process::Stdio;
 
@@ -9,7 +12,6 @@ use tokio::process::Command;
 
 use super::{Mount, Runner, RunnerCommand, RunnerError, Spawned};
 use crate::config::Config;
-use crate::telemetry::{run_kind, telemetry};
 
 /// Everything that puts a harness process inside the boundary.
 #[derive(Debug, Clone)]
@@ -17,14 +19,14 @@ pub struct RunSpec {
     /// The podman binary, resolved once from config/PATH/known locations.
     pub podman_bin: String,
     pub image: String,
-    pub network: String,
+    /// The name a harness reaches the gateways by: its own loopback, where
+    /// the tunnels listen.
     pub gateway_host: String,
-    pub gateway_ip: String,
     pub proxy_port: u16,
     pub selinux_label_disable: bool,
     pub extra_mounts: Vec<Mount>,
     pub workdir: String,
-    /// The harness runs as root in its container; its state is under `/root`.
+    /// The harness's home in the sandbox; its state is under it.
     pub home: String,
     /// What this harness calls its state directory. The mount target and the
     /// harness's own idea of where its state lives have to agree, and the name
@@ -33,11 +35,6 @@ pub struct RunSpec {
     pub state_dir: &'static str,
     /// Seconds a stopped container gets between SIGTERM and SIGKILL.
     pub stop_timeout_secs: u16,
-    /// A sandbox (`sandbox_args`) gets no network at all, and the gateway's
-    /// name is its own loopback, where the node's tunnels listen
-    /// (`[runtime.podman] sandbox_tunnels`). A plain harness container is
-    /// unaffected.
-    pub node_only: bool,
 }
 
 impl RunSpec {
@@ -51,124 +48,17 @@ impl RunSpec {
         let layout = crate::adapter::layout(harness_id);
         Self {
             podman_bin: crate::boundary::podman::resolve_podman_env(cfg),
-            image: cfg.podman_harness_image(harness_id),
-            network: cfg.boundary.network.clone(),
+            image: crate::sandbox_images::base_image(cfg),
             gateway_host: cfg.boundary.gateway_container.clone(),
-            gateway_ip: cfg.boundary.gateway_ip.clone(),
             proxy_port: cfg.gateway.proxy_port,
             selinux_label_disable: cfg.boundary.selinux_label_disable.unwrap_or(selinux),
             extra_mounts: Vec::new(),
             workdir: "/work".into(),
-            home: match crate::sandbox_images::enabled(cfg) {
-                true => crate::sandbox_images::HOME.into(),
-                false => crate::session::materialize::PODMAN_HARNESS_HOME.into(),
-            },
+            home: crate::sandbox_images::HOME.into(),
             state_env: layout.env,
             state_dir: layout.dir,
             stop_timeout_secs: cfg.boundary.stop_timeout_secs,
-            node_only: crate::boundary::podman::uses_sandbox_tunnels(cfg),
         }
-    }
-
-    /// The argv for `podman run`, minus the trailing command. `detached_probe`
-    /// creates the container without starting it, for inspection.
-    pub fn podman_args(&self, name: &str, cmd: &RunnerCommand, create_only: bool) -> Vec<String> {
-        let proxy = format!("http://{}:{}", self.gateway_host, self.proxy_port);
-        let mut a: Vec<String> = vec![
-            if create_only { "create" } else { "run" }.into(),
-            "--rm".into(),
-            "-i".into(),
-            "--name".into(),
-            name.into(),
-            "--network".into(),
-            self.network.clone(),
-            "--add-host".into(),
-            format!("{}:{}", self.gateway_host, self.gateway_ip),
-            // The gate: no capabilities, no way to gain any.
-            "--cap-drop=ALL".into(),
-            "--security-opt=no-new-privileges".into(),
-            // A real init as PID 1 of the container's own PID namespace, with
-            // the harness as its child. A harness that installs no signal
-            // handlers and spawns children it never reaps leaves them to the
-            // namespace, and the init is what keeps a double-forked one from
-            // being reparented to something outside it in the meantime.
-            "--init".into(),
-            // A stop is a SIGTERM to that init and a bounded wait, not an
-            // immediate SIGKILL: a harness that can flush gets the chance,
-            // and one that cannot is still gone when the wait runs out.
-            "--stop-signal".into(),
-            "SIGTERM".into(),
-            "--stop-timeout".into(),
-            self.stop_timeout_secs.to_string(),
-        ];
-        if create_only {
-            // `--rm` with `create` would delete the container before it can be
-            // inspected.
-            a.retain(|x| x != "--rm");
-        }
-        if crate::boundary::podman::local_only(cmd.image.as_deref().unwrap_or(&self.image)) {
-            a.push("--pull=never".into());
-        }
-        if self.selinux_label_disable {
-            a.push("--security-opt".into());
-            a.push("label=disable".into());
-        }
-        // The state dir is explicit even though the image sets it: the mount
-        // target and the harness's idea of its state directory must agree. A
-        // harness that names no such variable gets none invented for it.
-        let state = format!("{}/{}", self.home, self.state_dir);
-        let direct = super::no_proxy(&self.gateway_host);
-        for (k, v) in [
-            ("HTTPS_PROXY", proxy.as_str()),
-            ("HTTP_PROXY", proxy.as_str()),
-            // Both spellings: curl reads only the lowercase one.
-            ("NO_PROXY", direct.as_str()),
-            ("no_proxy", direct.as_str()),
-            (self.state_env, state.as_str()),
-        ] {
-            // A value the command sets itself is not also set here: two `-e`
-            // entries for one name is a rule about ordering rather than a
-            // choice.
-            if k.is_empty() || cmd.sets(k) {
-                continue;
-            }
-            a.push("-e".into());
-            a.push(format!("{k}={v}"));
-        }
-        for (k, v) in cmd.plain_env() {
-            a.push("-e".into());
-            a.push(format!("{k}={v}"));
-        }
-        a.extend(secret_env_args(cmd));
-        for m in self.extra_mounts.iter().chain(cmd.mounts.iter()) {
-            let mut mount = format!("type=volume,src={},dst={}", m.volume, m.target);
-            if !m.sub_path.is_empty() {
-                mount.push_str(",volume-subpath=");
-                mount.push_str(&m.sub_path);
-            }
-            if m.read_only {
-                mount.push_str(",ro");
-            }
-            a.push("--mount".into());
-            a.push(mount);
-        }
-        // Podman 6.1 rejects an explicit `-w` whose path is only in the image
-        // layer ("workdir does not exist on container"), so the flag is passed
-        // only when a mount actually provides that directory. Otherwise the
-        // image's own WORKDIR applies, which is the same path.
-        let workdir = cmd.workdir.clone().unwrap_or_else(|| self.workdir.clone());
-        let mounted = self
-            .extra_mounts
-            .iter()
-            .chain(cmd.mounts.iter())
-            .any(|m| m.target == workdir);
-        if mounted {
-            a.push("-w".into());
-            a.push(workdir);
-        }
-        a.push(cmd.image.clone().unwrap_or_else(|| self.image.clone()));
-        a.extend(cmd.argv.iter().cloned());
-        a
     }
 }
 
@@ -229,10 +119,10 @@ pub const SOCKET_INSIDE: &str = "/run/tracon/node.sock";
 pub const SANDBOX_LABEL: &str = "tracon.provider=podman";
 
 impl RunSpec {
-    /// The argv for a sandbox container: the same gate, network and
-    /// boundary environment as `podman_args`, with `tracon-sandbox` from the
-    /// mounted bundle in place of the harness, which it starts later over
-    /// the protocol. Detached and removed when it exits, as a lost
+    /// The argv for a sandbox container: no capabilities and no network,
+    /// the boundary's environment, and `tracon-sandbox` from the mounted
+    /// bundle as what it runs; the harness it starts later over the
+    /// protocol. Detached and removed when it exits, as a lost
     /// connection ends it; its log is written to `launch.log_file`, which the
     /// provider removes with the sandbox. `create_only` creates it without
     /// starting it, for the boundary checks' probe.
@@ -257,19 +147,15 @@ impl RunSpec {
         // Node-only: no interface but loopback, so the protocol's socket is
         // the one way out, and the gateway's name is loopback, where the
         // tunnels stand in for it on the ports it used.
-        let (network, gateway_ip) = match self.node_only {
-            true => ("none", "127.0.0.1"),
-            false => (self.network.as_str(), self.gateway_ip.as_str()),
-        };
         a.extend([
             "--name".into(),
             name.into(),
             "--label".into(),
             SANDBOX_LABEL.into(),
             "--network".into(),
-            network.into(),
+            "none".into(),
             "--add-host".into(),
-            format!("{}:{gateway_ip}", self.gateway_host),
+            format!("{}:127.0.0.1", self.gateway_host),
             "--cap-drop=ALL".into(),
             "--security-opt=no-new-privileges".into(),
         ]);
@@ -388,27 +274,6 @@ impl RunSpec {
     }
 }
 
-/// `--env NAME` for each of the command's secret variables, with no value:
-/// podman reads the value from its own environment, which the runner sets on
-/// the `podman` process alone (`secret_env_for`). An argv is world-readable in
-/// `/proc/<pid>/cmdline` for as long as `podman run` lives, which for a
-/// session is the session; a process environment is readable only by the
-/// same user. An env-file would put the values on disk instead, where a node
-/// that dies before removing it leaves them.
-fn secret_env_args(cmd: &RunnerCommand) -> Vec<String> {
-    cmd.secret_env
-        .names()
-        .flat_map(|name| ["--env".to_string(), name.to_string()])
-        .collect()
-}
-
-/// The `podman` process's own environment for a command: its secret values,
-/// checked first so a name can never be read as `NAME=value` on the argv.
-fn secret_env_for(cmd: &RunnerCommand) -> Result<Vec<(String, String)>, RunnerError> {
-    cmd.secret_env.validate()?;
-    Ok(cmd.secret_env.iter().cloned().collect())
-}
-
 impl RunSpec {
     /// `podman run` for a service beside a session: detached, in the
     /// session container's network namespace (so no network or host entry of
@@ -451,7 +316,7 @@ impl RunSpec {
     }
 
     /// `podman run` for one readiness probe: a throwaway container of the
-    /// harness image (which carries curl and bash) in the same namespace,
+    /// stock base (which carries curl and bash) in the same namespace,
     /// asking the service's port on loopback, never through the proxy.
     pub fn probe_args(&self, sidecar: &super::Sidecar) -> Vec<String> {
         let probe = match &sidecar.ready {
@@ -506,83 +371,21 @@ impl PodmanRunner {
         command.env("PATH", crate::config::path_guard::child_path());
         Ok(command)
     }
-
-    async fn ensure_volumes(&self, cmd: &RunnerCommand) -> Result<(), RunnerError> {
-        let mut seen = std::collections::BTreeSet::new();
-        for mount in self.spec.extra_mounts.iter().chain(cmd.mounts.iter()) {
-            if !seen.insert(&mount.volume) {
-                continue;
-            }
-            let out = self
-                .podman()?
-                .args(["volume", "create", "--ignore", &mount.volume])
-                .output()
-                .await?;
-            if !out.status.success() {
-                return Err(RunnerError::Other(format!(
-                    "create runtime volume {}: {}",
-                    mount.volume,
-                    String::from_utf8_lossy(&out.stderr).trim()
-                )));
-            }
-        }
-        Ok(())
-    }
 }
+
+/// What a Podman node runs a command in: always a sandbox, made by the
+/// provider (`boundary::podman::protocol_runner`).
+const NOT_A_SANDBOX: &str =
+    "a Podman node runs every command in a sandbox over the sandbox protocol";
 
 #[async_trait]
 impl Runner for PodmanRunner {
-    async fn spawn(&self, cmd: RunnerCommand) -> Result<Spawned, RunnerError> {
-        self.ensure_volumes(&cmd).await?;
-        let name = if cmd.name.is_empty() {
-            crate::config::resource_name("h")
-        } else {
-            cmd.name.clone()
-        };
-        let secrets = secret_env_for(&cmd)?;
-        let args = self.spec.podman_args(&name, &cmd, false);
-        tracing::debug!(container = %name, "podman run");
-        // While podman is started, not while the container runs.
-        let _images = crate::boundary::reconcile::images_in_use().await;
-        let child = self
-            .podman()?
-            .args(&args)
-            .envs(secrets)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()?;
-        // Counted until the harness is gone.
-        let running = telemetry().run_started(run_kind(cmd.labels.kind, "session"));
-        let mut spawned = Spawned::from_child(child)?;
-        let done = spawned.done;
-        spawned.done = Box::pin(async move {
-            let _running = running;
-            done.await
-        });
-        Ok(spawned)
+    async fn spawn(&self, _cmd: RunnerCommand) -> Result<Spawned, RunnerError> {
+        Err(RunnerError::Other(NOT_A_SANDBOX.into()))
     }
 
-    async fn run_capture(&self, cmd: RunnerCommand) -> Result<std::process::Output, RunnerError> {
-        let _running = telemetry().run_started(run_kind(cmd.labels.kind, "command"));
-        self.ensure_volumes(&cmd).await?;
-        let name = self.capture_name(&cmd.name);
-        let secrets = secret_env_for(&cmd)?;
-        let args = self.spec.podman_args(&name, &cmd, false);
-        // While podman is started, not while the container runs: a capture
-        // can be a repository's whole check run.
-        let images = crate::boundary::reconcile::images_in_use().await;
-        let child = self
-            .podman()?
-            .args(&args)
-            .envs(secrets)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        drop(images);
-        child.wait_with_output().await.map_err(Into::into)
+    async fn run_capture(&self, _cmd: RunnerCommand) -> Result<std::process::Output, RunnerError> {
+        Err(RunnerError::Other(NOT_A_SANDBOX.into()))
     }
 
     /// Stop, then remove. `podman rm --force` on its own is a SIGKILL: the
@@ -609,8 +412,7 @@ impl Runner for PodmanRunner {
     async fn start_sidecar(&self, sidecar: &super::Sidecar) -> Result<(), RunnerError> {
         if sidecar.image.is_empty() {
             return Err(RunnerError::Other(format!(
-                "service {} has a bundle and no image, so it runs only inside a sandbox \
-                 ([runtime.podman] sandbox_services)",
+                "service {} has a bundle and no image, so it runs only inside a sandbox",
                 sidecar.name
             )));
         }
@@ -641,21 +443,6 @@ impl Runner for PodmanRunner {
             .output()
             .await?;
         Ok(out.status.success())
-    }
-
-    /// Two node processes can share a container runtime, so a capture's
-    /// container carries this process's id. `kill` has to be given the same
-    /// name back.
-    fn capture_name(&self, name: &str) -> String {
-        format!(
-            "{}-{}",
-            if name.is_empty() {
-                crate::config::resource_name("x")
-            } else {
-                name.to_string()
-            },
-            std::process::id()
-        )
     }
 
     /// Ask podman itself for the digest of the image this command will run in
@@ -714,12 +501,8 @@ fn image_repository(image: &str) -> &str {
 mod tests {
     use super::*;
 
-    /// The `podman run` line is the deprecated path's: a node with the
-    /// sandbox switches off.
     fn spec() -> RunSpec {
-        let mut cfg = Config::default();
-        cfg.runtime.podman = crate::config::PodmanRuntime::legacy();
-        RunSpec::from_config(&cfg, false)
+        RunSpec::from_config(&Config::default(), false)
     }
 
     #[test]
@@ -747,22 +530,6 @@ mod tests {
             "registry:5000/a/b"
         );
         assert_eq!(image_repository("registry:5000/a/b"), "registry:5000/a/b");
-    }
-
-    /// What only this host's store can hold is run without pulling, so one
-    /// that is gone fails as missing instead of asking `localhost` for it.
-    #[test]
-    fn a_local_image_is_never_pulled_for_a_run() {
-        let run = |image: &str| {
-            let cmd = RunnerCommand {
-                image: Some(image.into()),
-                ..Default::default()
-            };
-            spec().podman_args("tracon-c-1", &cmd, false)
-        };
-        let never = "--pull=never".to_string();
-        assert!(run("localhost/tracon-repo-app-1a2b@sha256:aa").contains(&never));
-        assert!(!run("ghcr.io/acme/app@sha256:aa").contains(&never));
     }
 
     #[test]
@@ -815,147 +582,81 @@ mod tests {
             .start_sidecar(&sidecar)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("sandbox_services"), "{error}");
-    }
-
-    #[test]
-    fn run_line_carries_the_gate() {
-        let args = spec().podman_args(
-            "tracon-h-1",
-            &RunnerCommand {
-                argv: vec!["claude".into(), "-p".into()],
-                ..Default::default()
-            },
-            false,
-        );
-        let joined = args.join(" ");
-        assert!(joined.contains("--cap-drop=ALL"));
-        assert!(joined.contains("--security-opt=no-new-privileges"));
-        // A PID namespace with a real init at its head, and a stop that is a
-        // signal before it is a kill.
-        assert!(joined.contains("--init"));
-        assert!(joined.contains("--stop-signal SIGTERM"));
-        assert!(joined.contains("--stop-timeout 10"));
-        assert!(joined.contains("--network tracon-int"));
-        assert!(joined.contains("HTTPS_PROXY=http://tracon-gw:8888"));
-        // A run's own loopback never goes to the proxy, in either spelling.
-        for name in ["NO_PROXY", "no_proxy"] {
-            assert!(
-                joined.contains(&format!("{name}=tracon-gw,localhost,127.0.0.1,::1")),
-                "{joined}"
-            );
-        }
-        // The state directory is named in the variable the harness reads, so
-        // the mount and the harness agree on where it is.
         assert!(
-            joined.contains("CLAUDE_CONFIG_DIR=/root/.claude"),
-            "{joined}"
+            error.to_string().contains("only inside a sandbox"),
+            "{error}"
         );
-        assert!(joined.ends_with("localhost/tracon-harness-claude claude -p"));
-        // No SELinux flag unless the host needs it.
-        assert!(!joined.contains("label=disable"));
-        // Nothing is mounted at /work here, so the image's WORKDIR is used.
-        assert!(!joined.contains(" -w "));
     }
 
-    /// A lent value, or a grant's proxy URL, is never on the `podman run`
-    /// argv, which any local user can read in `/proc/<pid>/cmdline` for as
-    /// long as the container lives. The name goes there; the value goes to
-    /// the podman process's own environment.
+    /// Nothing runs as a plain container on a Podman node: a sandbox's
+    /// runner is the provider's, and this one only ever answers for images
+    /// and sidecars.
+    #[tokio::test]
+    async fn a_command_is_never_run_outside_a_sandbox() {
+        let runner = PodmanRunner::new(spec());
+        let error = runner
+            .run_capture(RunnerCommand::default())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("in a sandbox"), "{error}");
+        assert!(runner.spawn(RunnerCommand::default()).await.is_err());
+    }
+
+    /// What only this host's store can hold is run without pulling, so one
+    /// that is gone fails as missing instead of asking `localhost` for it.
     #[test]
-    fn secret_values_are_never_on_the_argv() {
-        let token = "npm_lent0123456789";
-        let proxy = "http://prepare:grant-password@tracon-gw:8890";
-        let cmd = RunnerCommand {
-            argv: vec!["sh".into(), "-c".into(), "npm ci".into()],
-            env: vec![
-                ("npm_config_cache".into(), "/cache/npm".into()),
-                // Set both ways: the secret one is the one that goes.
-                ("NPM_TOKEN".into(), "a-plain-duplicate".into()),
-            ],
-            secret_env: crate::runner::SecretEnv::new(vec![
-                ("NPM_TOKEN".into(), token.into()),
-                ("HTTPS_PROXY".into(), proxy.into()),
-            ]),
-            ..Default::default()
+    fn a_local_image_is_never_pulled_for_a_sandbox() {
+        let launch = SandboxLaunch {
+            bundle: "/b".into(),
+            socket_dir: "/s".into(),
+            pin: "sha256:00".into(),
+            entry: SandboxEntry::Pid1,
+            cpu_millis: None,
+            memory_bytes: None,
+            connect_timeout_ms: 1000,
+            log_file: None,
+            user: None,
+            userns: None,
+            env: Vec::new(),
+            service_bundles: Vec::new(),
         };
-        let args = spec().podman_args("tracon-w-1", &cmd, false);
-        let line = args.join(" ");
-        for value in [token, proxy, "grant-password", "a-plain-duplicate"] {
-            assert!(!line.contains(value), "{value} is on the argv: {line}");
-        }
-        assert!(args.windows(2).any(|w| w == ["--env", "NPM_TOKEN"]));
-        assert!(args.windows(2).any(|w| w == ["--env", "HTTPS_PROXY"]));
-        // The harness proxy is not set beside the grant that replaces it.
+        let run = |image: &str| spec().sandbox_args("tracon-c-1", image, &[], &launch, false);
+        let never = "--pull=never".to_string();
+        assert!(run("localhost/tracon-repo-app-1a2b@sha256:aa").contains(&never));
+        assert!(!run("ghcr.io/acme/app@sha256:aa").contains(&never));
+        // No network, and the gateway's name is loopback.
+        let line = run("img").join(" ");
         assert!(
-            !line.contains("HTTPS_PROXY=http://tracon-gw:8888"),
+            line.contains("--network none --add-host tracon-gw:127.0.0.1"),
             "{line}"
         );
-        assert!(line.contains("HTTP_PROXY=http://tracon-gw:8888"), "{line}");
-        assert!(line.contains("-e npm_config_cache=/cache/npm"));
-        // The image and the command still come last.
-        assert!(line.ends_with("localhost/tracon-harness-claude sh -c npm ci"));
-
-        let env = secret_env_for(&cmd).unwrap();
-        assert!(env.contains(&("NPM_TOKEN".to_string(), token.to_string())));
-        assert!(env.contains(&("HTTPS_PROXY".to_string(), proxy.to_string())));
     }
 
-    /// `--env A=b` would be a name and a value on the argv; such a name is
-    /// refused before podman runs.
+    /// A sidecar shares the sandbox's network namespace, which on an SELinux
+    /// host needs its label off; a sandbox itself never does.
     #[test]
-    fn a_secret_name_that_could_carry_a_value_is_refused() {
-        for name in ["A=b", "", "1ST", "with space", "dash-ed"] {
-            let cmd = RunnerCommand {
-                secret_env: crate::runner::SecretEnv::new(vec![(name.into(), "v".into())]),
-                ..Default::default()
-            };
-            assert!(secret_env_for(&cmd).is_err(), "{name:?}");
-        }
-        let cmd = RunnerCommand {
-            secret_env: crate::runner::SecretEnv::new(vec![("_Ok_1".into(), "v".into())]),
-            ..Default::default()
+    fn selinux_hosts_give_a_sidecar_label_disable() {
+        let sidecar = crate::runner::Sidecar {
+            name: "tracon-h-s1-svc-db".into(),
+            session_container: "tracon-h-s1".into(),
+            image: "pg@sha256:abc".into(),
+            command: Vec::new(),
+            port: 5432,
+            ready: None,
+            in_sandbox: None,
         };
-        assert!(secret_env_for(&cmd).is_ok());
-    }
-
-    #[test]
-    fn probe_container_is_created_not_removed() {
-        let args = spec().podman_args("probe", &RunnerCommand::default(), true);
-        assert_eq!(args[0], "create");
-        assert!(
-            !args.iter().any(|a| a == "--rm"),
-            "probe must survive inspect"
-        );
-    }
-
-    #[test]
-    fn selinux_hosts_get_label_disable() {
         let mut s = spec();
+        assert!(!s
+            .sidecar_args(&sidecar)
+            .contains(&"label=disable".to_string()));
         s.selinux_label_disable = true;
-        let args = s.podman_args("probe", &RunnerCommand::default(), false);
-        assert!(args
+        assert!(s
+            .sidecar_args(&sidecar)
             .windows(2)
             .any(|w| w == ["--security-opt", "label=disable"]));
-    }
-
-    #[test]
-    fn mounts_render_with_read_only_flag() {
-        let mut s = spec();
-        s.extra_mounts
-            .push(Mount::volume("tracon-state", "/root/.omp", false));
-        let args = s.podman_args(
-            "probe",
-            &RunnerCommand {
-                mounts: vec![Mount::volume("tracon-work", "/work", true)],
-                ..Default::default()
-            },
-            false,
-        );
-        let joined = args.join(" ");
-        assert!(joined.contains("--mount type=volume,src=tracon-state,dst=/root/.omp"));
-        assert!(joined.contains("--mount type=volume,src=tracon-work,dst=/work,ro"));
-        // A mount provides /work, so the explicit workdir is safe to pass.
-        assert!(joined.contains("-w /work"));
+        assert!(s
+            .probe_args(&sidecar)
+            .windows(2)
+            .any(|w| w == ["--security-opt", "label=disable"]));
     }
 }

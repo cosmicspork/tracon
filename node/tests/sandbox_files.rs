@@ -397,9 +397,7 @@ async fn a_sessions_trees_go_in_come_back_and_resume() {
     harness
         .run(&format!("echo two > {w}/a.txt; echo new > {w}/b.txt"))
         .await;
-    let mut cfg = tracon::config::Config::default();
-    cfg.runtime.podman.sandbox_protocol = true;
-    cfg.runtime.podman.sandbox_files = true;
+    let cfg = tracon::config::Config::default();
     let backend = tracon::boundary::podman::PodmanBackend::detect(&cfg).await;
     let workspace = tracon::workspace::Workspace {
         id: "p3loop".into(),

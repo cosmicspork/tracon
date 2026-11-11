@@ -1,7 +1,6 @@
-//! `[runtime.podman] sandbox_images`: sandboxes without harness images.
-//!
-//! With the setting on (it needs `sandbox_protocol`), nothing is built or
-//! layered for a harness:
+//! Sandboxes without harness images, as every Podman and Apple node runs
+//! them (and a pod over the sandbox protocol). Nothing is built or layered
+//! for a harness:
 //!
 //! - **Images.** A session, check or preparation runs the stock base image
 //!   (`[sandbox] base_image`, pulled for the host's architecture alone and
@@ -115,17 +114,15 @@ pub const BUNDLE_BIN: &str = "/opt/tracon/bin";
 /// The build argument a repository's Dockerfile names the base by.
 pub const BASE_ARG: &str = "TRACON_SANDBOX_BASE";
 
-/// Whether this node runs its sandboxes without harness images.
+/// Whether this node's own Podman converges and runs the stock base and the
+/// bundle: a Podman node's, whose every sandbox runs on them.
 pub fn enabled(cfg: &Config) -> bool {
     cfg.runtime.kind == crate::config::RuntimeKind::Podman
-        && cfg.runtime.podman.sandbox_images
-        && crate::boundary::podman::uses_sandbox_protocol(cfg)
 }
 
 /// Whether this node's sandboxes run harnesses from the bundle on the stock
-/// base or a repository's image, with no harness images: Podman's with the
-/// setting, an Apple node's always, and a pod-hosted node's over the sandbox
-/// protocol. A repository with a `prepare` starts from its prepared snapshot
+/// base or a repository's image, with no harness images: a Podman or Apple
+/// node's always, and a pod-hosted node's over the sandbox protocol. A repository with a `prepare` starts from its prepared snapshot
 /// on any of them (on Kubernetes, once `[runtime.kubernetes.builder]` can
 /// build one).
 pub fn bundled(cfg: &Config) -> bool {
@@ -183,8 +180,8 @@ pub(crate) fn pin(configured: &str, pinned: &str) {
     *PINNED.write().unwrap() = Some((configured.to_string(), pinned.to_string()));
 }
 
-/// What the boundary's converge adds with the setting on: the bundle for
-/// this release, and the base image pulled and pinned. `Ok(true)` when it
+/// What a Podman boundary's converge brings in: the bundle for this
+/// release, and the base image pulled and pinned. `Ok(true)` when it
 /// fetched or pulled anything.
 pub async fn converge(cfg: &Config) -> Result<bool, String> {
     if !enabled(cfg) {
@@ -1529,22 +1526,17 @@ mod tests {
     }
 
     #[test]
-    fn on_by_default_and_only_over_the_protocol() {
-        assert_eq!(enabled(&Config::default()), cfg!(target_os = "linux"));
+    fn every_podman_node_runs_the_sandbox_images() {
         let mut cfg = Config::default();
-        cfg.runtime.podman = crate::config::PodmanRuntime::legacy();
-        assert!(!enabled(&cfg));
-        assert_eq!(definitions(&cfg), "");
-        cfg.runtime.podman.sandbox_images = true;
-        assert!(!enabled(&cfg), "the setting stands on sandbox_protocol");
-        assert!(crate::config::validate_sandbox(&cfg)
-            .unwrap_err()
-            .contains("sandbox_protocol"));
-        cfg.runtime.podman.sandbox_protocol = true;
+        assert!(enabled(&cfg) && bundled(&cfg));
+        assert!(definitions(&cfg).starts_with("sandbox-images"));
         crate::config::validate_sandbox(&cfg).unwrap();
-        assert_eq!(enabled(&cfg), cfg!(target_os = "linux"));
         cfg.sandbox.release_url = Some("ftp://example".into());
         assert!(crate::config::validate_sandbox(&cfg).is_err());
+        let mut kube = Config::default();
+        kube.runtime.kind = crate::config::RuntimeKind::Kubernetes;
+        assert!(!enabled(&kube) && !bundled(&kube));
+        assert_eq!(definitions(&kube), "");
     }
 
     #[test]

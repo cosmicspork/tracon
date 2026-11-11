@@ -21,7 +21,37 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::boundary::podman::setup::anchor;
+/// Anchor one literal hostname as an exact-match allowlist entry.
+/// Unlike [`anchor`] (for the operator-authored, regex-capable
+/// `[gateway] allow_hosts`), every regex metacharacter in the host itself is
+/// escaped: a host built from a parsed URL — a provider upstream's when `POST /api/providers` widens the allowlist for it — never
+/// an operator writing a pattern, so a literal dot must never accidentally
+/// match any character.
+pub(crate) fn anchor_literal_host(host: &str) -> String {
+    let mut escaped = String::with_capacity(host.len() + 2);
+    escaped.push('^');
+    for ch in host.chars() {
+        if ".^$*+?()[]{}|\\".contains(ch) {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped.push('$');
+    escaped
+}
+
+/// Anchor an allowlist entry at both ends so it matches a whole host, not a
+/// substring. Already-anchored entries are left as they are.
+pub fn anchor(host: &str) -> String {
+    let mut s = host.to_string();
+    if !s.starts_with('^') {
+        s.insert(0, '^');
+    }
+    if !s.ends_with('$') {
+        s.push('$');
+    }
+    s
+}
 
 /// Hosts a harness may CONNECT to. Entries are anchored regexes, exactly as
 /// the gateway allowlist file holds them.

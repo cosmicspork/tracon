@@ -1,5 +1,5 @@
-//! Catalogue services inside a session's sandbox, with
-//! `[runtime.podman] sandbox_services`: the sandbox's own supervisor starts
+//! Catalogue services inside a session's sandbox, on Podman and Apple: the
+//! sandbox's own supervisor starts
 //! the service from its mounted bundle, watches its readiness, restarts it by
 //! its policy and stops it with the sandbox. Nothing is started beside the
 //! session, so the service has exactly the sandbox's network: reached on its

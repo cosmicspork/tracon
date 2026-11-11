@@ -835,7 +835,7 @@ mod tests {
     fn a_build_list_too_long_to_show_whole_is_shown_cut_short_with_its_digest() {
         assert!(RECIPE.iter().map(|s| s.len()).sum::<usize>() > 850);
         let file =
-            "[runtime.podman]\nsandbox_protocol = true\nsandbox_images = true\n\n[[repo]]\npath = \"github.com/cosmicspork/tracon\"\ndockerfile = \"Dockerfile\"\n";
+            "[[repo]]\npath = \"github.com/cosmicspork/tracon\"\ndockerfile = \"Dockerfile\"\n";
         let line = prompt(
             file,
             &[

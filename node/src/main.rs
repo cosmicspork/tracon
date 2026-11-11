@@ -20,11 +20,12 @@ enum Command {
         #[arg(long, env = "TRACON_LISTEN", default_value = "127.0.0.1:7420")]
         listen: SocketAddr,
     },
-    /// Create the harness network, gateway, and images this node owns.
+    /// Fetch the harness bundle and pull the sandbox base this node runs, and
+    /// remove the gateway an older release made.
     Setup {
-        /// Rebuild the gateway and harness images even if they are already
-        /// current.
-        #[arg(long)]
+        /// Accepted and ignored: an older release rebuilt its gateway and
+        /// harness images with it, and the node builds none now.
+        #[arg(long, hide = true)]
         rebuild: bool,
     },
     /// Verify the harness boundary and exit non-zero naming the first failed check.
@@ -1217,7 +1218,8 @@ fn node_config() -> Result<config::Config> {
 
 /// The configuration `setup` and `check-boundary` act on, loaded strictly:
 /// on the defaults a file that does not parse would fall back to, setup could
-/// retire a gateway or harness images the file keeps. A missing file is the
+/// act on names the file does not give (it removes the gateway an older
+/// release made, by the names the file gives it). A missing file is the
 /// defaults.
 fn boundary_config() -> Result<config::Config> {
     config::Config::try_load().map_err(|error| {

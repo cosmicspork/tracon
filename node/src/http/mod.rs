@@ -875,8 +875,7 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     // Sandboxes with no network reach the allowlist proxy through a tunnel,
     // so the node serves it where the gateway container's tinyproxy would.
     let tunnelled = match cfg.runtime.kind {
-        crate::config::RuntimeKind::Podman => crate::boundary::podman::uses_sandbox_tunnels(&cfg),
-        crate::config::RuntimeKind::Apple => true,
+        crate::config::RuntimeKind::Podman | crate::config::RuntimeKind::Apple => true,
         crate::config::RuntimeKind::Kubernetes => false,
     };
     if tunnelled {

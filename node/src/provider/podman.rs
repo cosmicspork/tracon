@@ -17,12 +17,9 @@
 //! connection, for that run alone: a supervisor whose connection dropped
 //! dials it again with its resume secret.
 //!
-//! **Network.** By default unchanged from a harness container: the
-//! boundary's internal network, the gateway its only peer, the same proxy
-//! environment. With `sandbox_tunnels` (`RunSpec::node_only`) the sandbox
-//! has no network at all (`--network none`): the socket is its only route,
-//! and the gateway's name is its loopback, where the runner's tunnels to the
-//! node listen.
+//! **Network.** None at all (`--network none`): the socket is a sandbox's
+//! only route, and the gateway's name is its loopback, where the runner's
+//! tunnels to the node listen.
 //!
 //! **Bundle.** Mounted read-only at `/opt/tracon` and relabelled shared, never
 //! with `label=disable`.
@@ -171,7 +168,7 @@ pub struct PodmanOptions {
     /// What [`SandboxProvider::snapshot`] names its images (`<repo>:<id>`).
     pub snapshot_repo: String,
     /// Catalogue service bundles mounted read-only into every sandbox, with
-    /// where (`[runtime.podman] sandbox_services`).
+    /// where.
     pub service_bundles: Vec<(PathBuf, String)>,
 }
 
@@ -199,7 +196,6 @@ impl PodmanProvider {
     /// The provider a node configured for it runs with, around `spec`.
     pub fn from_config(cfg: &crate::config::Config, mut spec: RunSpec) -> Self {
         spec.selinux_label_disable = false;
-        let images = crate::sandbox_images::enabled(cfg);
         Self::new(PodmanOptions {
             spec,
             bundle: crate::bundle::effective(cfg).unwrap_or_default(),
@@ -207,17 +203,14 @@ impl PodmanProvider {
             init: cfg.runtime.podman.sandbox_init,
             limit: None,
             connect_timeout: crate::runner::protocol::CONNECT_WITHIN,
-            user: images.then(|| crate::sandbox_images::USER.to_string()),
-            userns: images.then(|| crate::sandbox_images::USERNS.to_string()),
+            user: Some(crate::sandbox_images::USER.to_string()),
+            userns: Some(crate::sandbox_images::USERNS.to_string()),
             // HOME as Apple sets it: the image's own `ENV HOME` (a snapshot
             // keeps whatever its source said) is not what the node placed
             // the harness's state under.
-            env: match images {
-                true => std::iter::once(("HOME".into(), crate::sandbox_images::HOME.into()))
-                    .chain(crate::sandbox_images::sandbox_env())
-                    .collect(),
-                false => Vec::new(),
-            },
+            env: std::iter::once(("HOME".into(), crate::sandbox_images::HOME.into()))
+                .chain(crate::sandbox_images::sandbox_env())
+                .collect(),
             snapshot_repo: crate::sandbox_images::snapshot_repo(),
             service_bundles: service_bundles(cfg),
         })
@@ -434,23 +427,6 @@ impl PodmanProvider {
         }
     }
 
-    async fn network_inspect(&self) -> Result<serde_json::Value, ProviderError> {
-        let text = self
-            .cli(&[
-                "network",
-                "inspect",
-                &self.options.spec.network,
-                "--format",
-                "json",
-            ])
-            .await?;
-        let all: Vec<serde_json::Value> = serde_json::from_str(&text)
-            .map_err(|e| ProviderError::Failed(format!("podman network inspect: {e}")))?;
-        all.into_iter().next().ok_or_else(|| {
-            ProviderError::Failed(format!("no network {}", self.options.spec.network))
-        })
-    }
-
     /// The last lines a sandbox's supervisor wrote, for an error about it.
     fn logs(&self, handle: &Handle) -> String {
         let Ok(text) = std::fs::read_to_string(self.log_file(&handle.0)) else {
@@ -624,12 +600,8 @@ pub(crate) fn commit_changes(
     changes
 }
 
-/// Each catalogue service's bundle and where it is mounted, when this node
-/// runs services in its sandboxes.
+/// Each catalogue service's bundle and where every sandbox mounts it.
 pub fn service_bundles(cfg: &crate::config::Config) -> Vec<(PathBuf, String)> {
-    if !crate::boundary::podman::uses_sandbox_services(cfg) {
-        return Vec::new();
-    }
     crate::service_bundle::mounts(cfg)
 }
 
@@ -749,20 +721,6 @@ fn node_only_route(c: &serde_json::Value) -> Route {
     match mode == "none" && attached.iter().all(|n| n == "none") {
         true => Route::NodeOnly,
         false => Route::Unverified,
-    }
-}
-
-/// Whether the sandbox's one network is the boundary's internal one, and
-/// what answers names on it.
-fn route_and_dns(attached: &[String], expected: &str, network: &serde_json::Value) -> (Route, Dns) {
-    let internal = network["internal"].as_bool().unwrap_or(false);
-    let dns = match network["dns_enabled"].as_bool().unwrap_or(true) {
-        false => Dns::None,
-        true => Dns::ProviderOpen,
-    };
-    match attached == [expected.to_string()] && internal {
-        true => (Route::NodeOnly, dns),
-        false => (Route::Unverified, dns),
     }
 }
 
@@ -1009,26 +967,14 @@ impl SandboxProvider for PodmanProvider {
             "unix:{}",
             self.socket_dir(&handle.0).join(SOCKET_NAME).display()
         );
-        if self.options.spec.node_only {
-            let mut destinations = vec![socket];
-            if node_only_route(&c) == Route::Unverified {
-                destinations.extend(networks(&c).into_iter().map(|n| format!("network:{n}")));
-            }
-            return Ok(Network {
-                destinations,
-                dns: Dns::None,
-            });
+        let mut destinations = vec![socket];
+        if node_only_route(&c) == Route::Unverified {
+            destinations.extend(networks(&c).into_iter().map(|n| format!("network:{n}")));
         }
-        let attached = networks(&c);
-        let network = self.network_inspect().await?;
-        let (_, dns) = route_and_dns(&attached, &self.options.spec.network, &network);
-        let mut destinations: Vec<String> =
-            attached.iter().map(|n| format!("network:{n}")).collect();
-        destinations.push(format!(
-            "unix:{}",
-            self.socket_dir(&handle.0).join(SOCKET_NAME).display()
-        ));
-        Ok(Network { destinations, dns })
+        Ok(Network {
+            destinations,
+            dns: Dns::None,
+        })
     }
 
     async fn verify_isolation(&self, handle: &Handle) -> Result<Capabilities, ProviderError> {
@@ -1046,23 +992,15 @@ impl SandboxProvider for PodmanProvider {
             &self.options.bundle,
             tracon_sandbox::carrier::selinux_enabled(),
         );
-        if self.options.spec.node_only {
-            found.extend(
-                other_binds(&c)
-                    .into_iter()
-                    .map(|d| format!("a host path is bind-mounted at {d}")),
-            );
-        }
+        found.extend(
+            other_binds(&c)
+                .into_iter()
+                .map(|d| format!("a host path is bind-mounted at {d}")),
+        );
         if !found.is_empty() {
             return Err(ProviderError::Failed(found.join("; ")));
         }
-        let (route, dns) = match self.options.spec.node_only {
-            true => (node_only_route(&c), Dns::None),
-            false => {
-                let network = self.network_inspect().await?;
-                route_and_dns(&networks(&c), &self.options.spec.network, &network)
-            }
-        };
+        let (route, dns) = (node_only_route(&c), Dns::None);
         let image_identity = self.identity_of(&c).await?.kind();
         Ok(Capabilities {
             route,
@@ -1072,8 +1010,8 @@ impl SandboxProvider for PodmanProvider {
         })
     }
 
-    /// What today's boundary checks establish: an internal network whose
-    /// only peer is the gateway, with no DNS.
+    /// What today's boundary checks establish: no network but the node's
+    /// socket, and no DNS.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             tier: Tier::Container,
@@ -1124,7 +1062,6 @@ mod tests {
         calls: Arc<Mutex<Vec<Call>>>,
         entrypoint: Arc<Mutex<Option<String>>>,
         inspect: Arc<Mutex<Option<String>>>,
-        internal: bool,
         fail_run: bool,
         /// The image is not in the store until pulled.
         pulled: Option<Arc<Mutex<bool>>>,
@@ -1168,10 +1105,6 @@ mod tests {
                         args[4]
                     ))),
                 },
-                ["network", "inspect"] => Ok(serde_json::json!([{
-                    "name": "tracon-int", "internal": self.internal, "dns_enabled": false
-                }])
-                .to_string()),
                 ["stop", ..] | ["rm", ..] => Ok(String::new()),
                 ["ps", ..] => Ok("aa\nbb\n".into()),
                 other => panic!("unexpected podman {other:?}"),
@@ -1193,10 +1126,7 @@ mod tests {
         let bundle = dir.path().join("bundle");
         std::fs::create_dir_all(bundle.join("bin")).unwrap();
         std::fs::write(bundle.join("bin/tracon-sandbox"), b"").unwrap();
-        // The protocol over the internal network and mounted volumes: what
-        // a node with tunnels and files off runs.
-        let mut cfg = crate::config::Config::default();
-        cfg.runtime.podman = crate::config::PodmanRuntime::legacy();
+        let cfg = crate::config::Config::default();
         let mut spec = RunSpec::from_config(&cfg, true);
         spec.extra_mounts = vec![Mount::volume(
             "tracon-harness-state",
@@ -1296,7 +1226,7 @@ mod tests {
         let line = args.join(" ");
         for expected in [
             "run --detach --rm --name tracon-h-1 --label tracon.provider=podman",
-            "--network tracon-int --add-host tracon-gw:",
+            "--network none --add-host tracon-gw:127.0.0.1",
             "--cap-drop=ALL --security-opt=no-new-privileges --stop-signal SIGTERM",
             "-e HTTPS_PROXY=http://tracon-gw:8888",
             "-e TRACON_SANDBOX_SOCKET=/run/tracon/node.sock",
@@ -1475,24 +1405,22 @@ mod tests {
             "ProcessLabel": "system_u:system_r:container_t:s0:c1,c2",
             "EffectiveCaps": [],
             "Config": {"Labels": {"tracon.provider": "podman"}, "Annotations": {}},
-            "HostConfig": {"Privileged": false, "CapAdd": [], "SecurityOpt": ["no-new-privileges"]},
+            "HostConfig": {"Privileged": false, "CapAdd": [], "SecurityOpt": ["no-new-privileges"],
+                "NetworkMode": "none"},
             "Mounts": [
                 {"Type": "bind", "Source": s.provider.options.bundle, "Destination": "/opt/tracon", "RW": false},
                 {"Type": "bind", "Source": s.provider.socket_dir("tracon-h-1"), "Destination": "/run/tracon", "RW": false},
                 {"Type": "volume", "Source": "/var/lib/vol", "Destination": "/work", "RW": true},
                 {"Type": "bind", "Source": "/srv/browser", "Destination": "/opt/tracon-services/browser", "RW": false},
             ],
-            "NetworkSettings": {"Networks": {"tracon-int": {"IPAddress": "10.89.0.5"}}},
+            "NetworkSettings": {"Networks": {"none": {"IPAddress": ""}}},
             "State": {"Status": "running", "ExitCode": 0},
         }])
     }
 
     #[tokio::test]
     async fn verify_reads_back_the_boundary() {
-        let s = setup(Fake {
-            internal: true,
-            ..Fake::default()
-        });
+        let s = setup(Fake::default());
         *s.fake.inspect.lock().unwrap() = Some(inspected(&s).to_string());
         let handle = Handle("tracon-h-1".into());
         assert_eq!(
@@ -1508,23 +1436,22 @@ mod tests {
         );
         let network = s.provider.network(&handle).await.unwrap();
         assert_eq!(network.dns, Dns::None);
-        assert_eq!(network.destinations[0], "network:tracon-int");
+        assert!(network.destinations[0].starts_with("unix:"), "{network:?}");
 
         // A network with a way out is no longer node-only.
-        let s2 = setup(Fake::default());
-        *s2.fake.inspect.lock().unwrap() = Some(inspected(&s2).to_string());
+        let mut doc = inspected(&s);
+        doc[0]["HostConfig"]["NetworkMode"] = serde_json::json!("bridge");
+        doc[0]["NetworkSettings"]["Networks"] = serde_json::json!({"podman": {}});
+        *s.fake.inspect.lock().unwrap() = Some(doc.to_string());
         assert_eq!(
-            s2.provider.verify_isolation(&handle).await.unwrap().route,
+            s.provider.verify_isolation(&handle).await.unwrap().route,
             Route::Unverified
         );
     }
 
     #[tokio::test]
     async fn verify_refuses_a_broken_boundary() {
-        let s = setup(Fake {
-            internal: true,
-            ..Fake::default()
-        });
+        let s = setup(Fake::default());
         let handle = Handle("tracon-h-1".into());
         let cases: [(&str, serde_json::Value, &str); 7] = [
             (
@@ -1570,8 +1497,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_node_only_sandbox_has_no_network_and_the_gateway_is_its_loopback() {
-        let mut s = setup(Fake::default());
-        s.provider.options.spec.node_only = true;
+        let s = setup(Fake::default());
         create(&s, "tracon-h-7", &[]).await.unwrap();
         let line = run_call(&s).0.join(" ");
         assert!(

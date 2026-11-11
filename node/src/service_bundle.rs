@@ -5,7 +5,7 @@
 //! its node's release attaches (`tracon-browser-<chrome>-<arch>.tar.gz`, from
 //! `scripts/browser-bundle.sh`), rather than a directory the operator
 //! unpacked. Only `browser` is published. Where the node runs services in its
-//! sandboxes (Podman with `[runtime.podman] sandbox_services`, and Apple),
+//! sandboxes (Podman and Apple),
 //! the boundary's converge fetches it into
 //! `<state>/bundles/browser/<chrome>/<arch>`, at start and whenever the
 //! definitions move, and removes other Chrome versions.
@@ -84,8 +84,10 @@ pub fn mounts(cfg: &Config) -> Vec<(PathBuf, String)> {
 
 /// Whether this node runs `[[service]]` bundles in its sandboxes.
 fn runs_in_sandboxes(cfg: &Config) -> bool {
-    crate::boundary::podman::uses_sandbox_services(cfg)
-        || cfg.runtime.kind == crate::config::RuntimeKind::Apple
+    matches!(
+        cfg.runtime.kind,
+        crate::config::RuntimeKind::Podman | crate::config::RuntimeKind::Apple
+    )
 }
 
 /// Whether the node bakes `[[service]]` bundles into the DigitalOcean
@@ -527,13 +529,10 @@ pub(crate) mod tests {
             service: vec![service("browser", Some("release"))],
             ..Config::default()
         };
-        assert_eq!(wanted(&cfg), cfg!(target_os = "linux"));
-        cfg.runtime.podman = crate::config::PodmanRuntime::legacy();
+        assert!(wanted(&cfg));
+        cfg.runtime.kind = crate::config::RuntimeKind::Kubernetes;
         assert!(!wanted(&cfg));
         assert_eq!(missing(&cfg, false), None);
-        cfg.runtime.podman.sandbox_protocol = true;
-        cfg.runtime.podman.sandbox_services = true;
-        assert_eq!(wanted(&cfg), cfg!(target_os = "linux"));
         cfg.runtime.kind = crate::config::RuntimeKind::Apple;
         assert!(wanted(&cfg));
         cfg.service = vec![service("browser", Some("/srv/browser"))];
@@ -549,8 +548,9 @@ pub(crate) mod tests {
             service: vec![service("browser", Some("release"))],
             ..Config::default()
         };
-        // The node's own sandboxes run no services.
-        cfg.runtime.podman = crate::config::PodmanRuntime::legacy();
+        // The node's own sandboxes run no services: a pod-hosted node off
+        // the protocol (in a test, where only the wanting is asked).
+        cfg.runtime.kind = crate::config::RuntimeKind::Kubernetes;
         assert!(!wanted(&cfg));
         cfg.digitalocean.credential = "do".into();
         cfg.digitalocean.registry = "registry.digitalocean.com/acme".into();

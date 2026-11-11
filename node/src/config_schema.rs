@@ -165,17 +165,10 @@ pub const KEYS: &[KeySpec] = &[
     restart("harness.tools"),
     restart("harness.version"),
     restart("harness.experimental"),
-    restart("harness.native_binary"),
     // [boundary]
     restart("boundary.podman").exec(),
-    restart("boundary.network"),
-    restart("boundary.subnet"),
-    restart("boundary.gateway_ip"),
     restart("boundary.gateway_container"),
-    restart("boundary.gateway_image").host_only(),
-    restart("boundary.harness_image").host_only(),
     restart("boundary.selinux_label_disable"),
-    restart("boundary.start_machine"),
     restart("boundary.stop_timeout_secs"),
     restart("boundary.auto_reconcile"),
     restart("boundary.resource_prefix").host_only(),
@@ -233,12 +226,7 @@ pub const KEYS: &[KeySpec] = &[
     restart("runtime.kind"),
     live("runtime.approved_images"),
     // [runtime.podman]
-    restart("runtime.podman.sandbox_protocol"),
     restart("runtime.podman.sandbox_init"),
-    restart("runtime.podman.sandbox_files"),
-    restart("runtime.podman.sandbox_tunnels"),
-    restart("runtime.podman.sandbox_images"),
-    restart("runtime.podman.sandbox_services"),
     // [runtime.apple]
     restart("runtime.apple.container").exec(),
     restart("runtime.apple.limit"),
@@ -528,7 +516,7 @@ pub fn host_only_reason(key: &str) -> &'static str {
             "is where the node sends its DigitalOcean token, so it is changed at the node, not from elsewhere"
         }
         "gateway.harness_listen" => {
-            "is the harness socket's path, whose directory the node creates and mounts writable into the gateway container, so it is changed at the node, not from elsewhere"
+            "is the harness socket's path, whose directory the node creates and every sandbox's tunnel leads to, so it is changed at the node, not from elsewhere"
         }
         _ => {
             "is an image the node runs with its own sockets and credentials, which the path guard does not check, so it is changed at the node, not from elsewhere"
@@ -1024,7 +1012,7 @@ mod tests {
     }
 
     #[test]
-    fn the_state_mount_sockets_and_gateway_images_are_left_to_the_host() {
+    fn the_state_mount_sockets_and_images_are_left_to_the_host() {
         let mut host_only: Vec<&str> = KEYS
             .iter()
             .filter(|spec| spec.host_only)
@@ -1034,8 +1022,6 @@ mod tests {
         assert_eq!(
             host_only,
             [
-                "boundary.gateway_image",
-                "boundary.harness_image",
                 "boundary.resource_prefix",
                 "digitalocean.api_url",
                 "digitalocean.registry",

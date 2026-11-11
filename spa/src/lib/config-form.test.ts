@@ -364,9 +364,9 @@ test('a save reports a conflict, a refusal by field, a cancelled step-up, or the
 
   // A key only the host changes: the node's reason lands on the key.
   const hostOnly = await saveOps(async () => {
-    throw new ApiError(422, 'refused', undefined, [{ field: 'boundary.gateway_image', message: 'boundary.gateway_image is an image the node runs with its own sockets' }], 'refused')
-  }, 'h1', [{ op: 'set', key: 'boundary.gateway_image', value: 'x' }], ['boundary.gateway_image'])
-  expect(hostOnly.kind === 'refused' && Object.keys(hostOnly.fields)).toEqual(['boundary.gateway_image'])
+    throw new ApiError(422, 'refused', undefined, [{ field: 'sandbox.base_image', message: 'sandbox.base_image is an image the node runs with its own sockets' }], 'refused')
+  }, 'h1', [{ op: 'set', key: 'sandbox.base_image', value: 'x' }], ['sandbox.base_image'])
+  expect(hostOnly.kind === 'refused' && Object.keys(hostOnly.fields)).toEqual(['sandbox.base_image'])
 
   const cancelled = await saveOps(async () => {
     throw new Error('Not confirmed: the action was not taken.')

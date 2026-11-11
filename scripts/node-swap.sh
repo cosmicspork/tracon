@@ -242,8 +242,8 @@ release() {
 
   argv=$(release_argv)
   bin=${argv%% *}
-  # The dev build's setup may have rebuilt the gateway from its own
-  # definitions; the release refuses to run harnesses until they match again.
+  # The dev build's setup fetched the bundle and base for its own version;
+  # the release refuses to run harnesses until it has its own again.
   "$bin" setup
   start_node
   "$bin" check-boundary --deep

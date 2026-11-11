@@ -151,9 +151,6 @@ async fn node(fake: &FakeDo, client_repo: &str) -> Node {
             models: Vec::new(),
         },
     );
-    cfg.runtime.podman.sandbox_protocol = true;
-    cfg.runtime.podman.sandbox_files = true;
-    cfg.runtime.podman.sandbox_tunnels = true;
     cfg.placement.digitalocean = DoMode::Overflow;
     cfg.placement.local_limit = Some(1);
     cfg.placement.repo.push(RepoPlacement {

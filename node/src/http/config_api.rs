@@ -1317,8 +1317,8 @@ mod tests {
         // state mount may change.
         for key in [
             "gateway.harness_listen",
-            "boundary.gateway_image",
-            "boundary.harness_image",
+            "sandbox.base_image",
+            "sandbox.bundle",
             "runtime.kubernetes.harness_image",
         ] {
             assert_eq!(
@@ -1459,7 +1459,7 @@ mod tests {
         }
         let models = op_set("review.max_files", toml::Value::Integer(3));
         assert!(check_named(&[models], Editor::Peer).is_empty());
-        let image = op_set("boundary.harness_image", toml::Value::String("x".into()));
+        let image = op_set("sandbox.base_image", toml::Value::String("x".into()));
         assert_eq!(check_named(&[image], Editor::Peer).len(), 1);
     }
 

@@ -25,7 +25,7 @@
 //! `publishers/`, and its bundle beside it, belong to that publication until
 //! it is settled.
 //!
-//! With `[runtime.podman] sandbox_images`: a harness bundle under
+//! Where sandboxes run from the bundle: a harness bundle under
 //! `bundles/` belongs to the node's version, and one of any other version is
 //! never mounted again; a repository's prepared snapshot (an image) belongs
 //! to the repository while it is the latest one prepared, and is otherwise
@@ -577,12 +577,12 @@ pub struct Sweep {
     pub adopt_unlabelled: bool,
 }
 
-/// The legacy images' repositories: every harness image this node's
-/// `[boundary] harness_image` names, as `Config::podman_harness_image` derives
-/// them, and the gateway's once tunnels have retired it.
+/// The legacy images' repositories: every harness image an older node named
+/// from `[boundary] harness_image` (as its `node.toml` still says, else the
+/// default), and its gateway's.
 fn legacy_repositories(cfg: &Config) -> Vec<String> {
     use crate::image_gc::repository_of;
-    let configured = repository_of(&cfg.boundary.harness_image).to_string();
+    let configured = repository_of(&cfg.retired.harness_image).to_string();
     let stem = configured
         .strip_suffix(&format!("-{}", cfg.harness.id))
         .filter(|stem| !stem.is_empty())
@@ -592,9 +592,7 @@ fn legacy_repositories(cfg: &Config) -> Vec<String> {
     for id in ["claude", "native", "opencode"] {
         out.push(format!("{stem}-{id}"));
     }
-    if crate::boundary::podman::uses_sandbox_tunnels(cfg) {
-        out.push(repository_of(&cfg.boundary.gateway_image).to_string());
-    }
+    out.push(repository_of(&cfg.retired.gateway_image).to_string());
     out.sort();
     out.dedup();
     out

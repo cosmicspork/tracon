@@ -2964,8 +2964,8 @@ impl Manager {
         // Upstreams that opt sessions in are attached by the grant, so the
         // agent reaches them as the credential's owner without holding it.
         let mut environment = crate::environment::session_environment(&self.cfg, &self.store, id);
-        // Its workspace is prepared where the session runs: with
-        // `sandbox_images`, the repository's prepared snapshot.
+        // Its workspace is prepared where the session runs: on the stock
+        // base, the repository's prepared snapshot.
         if crate::sandbox_images::bundled(&self.cfg) {
             if let Some(image) = &image.image {
                 environment.image = image.clone();
@@ -3270,7 +3270,7 @@ impl Manager {
         // takes what its resume needs out of the runtime's volumes.
         if let Some(reopened) = reopened
             .as_ref()
-            .filter(|_| crate::boundary::podman::uses_sandbox_files(&self.cfg))
+            .filter(|_| self.cfg.runtime.kind == crate::config::RuntimeKind::Podman)
         {
             materialize::carry_from_runtime_volumes(
                 self.backend.as_ref(),
@@ -3286,9 +3286,11 @@ impl Manager {
         let container = crate::config::resource_name(&format!("h-{slug}"));
         let mut mounts = scratch.mounts;
         if placed.is_elsewhere()
-            || crate::boundary::podman::uses_sandbox_files(&self.cfg)
             || crate::boundary::kubernetes::uses_sandbox_protocol(&self.cfg)
-            || self.cfg.runtime.kind == crate::config::RuntimeKind::Apple
+            || matches!(
+                self.cfg.runtime.kind,
+                crate::config::RuntimeKind::Podman | crate::config::RuntimeKind::Apple
+            )
         {
             materialize::own_state(&mut mounts, &scratch.volume);
         }

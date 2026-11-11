@@ -8,9 +8,9 @@
 //! session runs on from those reports and what the session's channel and
 //! repository require (`[placement]`, [`requirements`]).
 //!
-//! The boundary backends (`crate::boundary`) still run sessions; with
-//! `[runtime.podman] sandbox_protocol` on, Podman's runs them through
-//! [`podman::PodmanProvider`] and `crate::runner::protocol`. Podman's and
+//! The boundary backends (`crate::boundary`) still run sessions; Podman's
+//! runs them through [`podman::PodmanProvider`] and
+//! `crate::runner::protocol`. Podman's and
 //! Kubernetes's checks also read as capabilities
 //! ([`capabilities::from_checks`]), shown in the checks interface and acted
 //! on by nothing yet.

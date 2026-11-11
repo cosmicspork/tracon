@@ -3,12 +3,11 @@
 //! They run only when asked for, with `TRACON_PODMAN_TESTS=1`. A machine with
 //! Podman is often one running a node, and a test left to find Podman for
 //! itself shares that node's Podman machine while its sessions are working. Asked
-//! for, a test borrows nothing of the node's: it names its image, and runs on
-//! a network of its own that it removes again. `just check-podman` builds the
+//! for, a test borrows nothing of the node's: it names its image, and every
+//! name it gives a runtime resource is its own. `just check-podman` builds the
 //! image and runs them.
 
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// What asks for these tests.
 pub const OPT_IN: &str = "TRACON_PODMAN_TESTS";
@@ -44,31 +43,4 @@ pub fn named_image(var: &str) -> String {
         "{var} names {image}, which is not in the local store"
     );
     image
-}
-
-/// An internal, route-less network of the test's own, shaped like the one the
-/// node creates for its sessions, and removed when dropped.
-pub struct Network(pub String);
-
-impl Network {
-    pub fn create() -> Network {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let name = format!(
-            "tracon-test-int-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        );
-        // No subnet: Podman picks a free one, never the node's.
-        assert!(
-            podman(&["network", "create", "--internal", "--disable-dns", &name]).is_some(),
-            "could not create the test network {name}"
-        );
-        Network(name)
-    }
-}
-
-impl Drop for Network {
-    fn drop(&mut self) {
-        let _ = podman(&["network", "rm", "-f", &self.0]);
-    }
 }

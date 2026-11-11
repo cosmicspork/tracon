@@ -146,19 +146,37 @@ fn image_retired_by(doc: &mut toml::Table, path: &[&str]) -> Option<&'static str
         .and_then(retired_image)
 }
 
+/// Replace a retired harness's image at `path` with `current`, or with
+/// `None` take the key out: `[boundary] harness_image` is itself retired, and
+/// a value written back would be logged as ignored at every load.
 fn replace_retired_image(
     doc: &mut toml::Table,
     path: &[&str],
-    current: &str,
+    current: Option<&str>,
     changed: &mut Vec<String>,
 ) {
-    let Some(image) = table(doc, path).and_then(|t| t.get_mut("harness_image")) else {
+    let Some(table) = table(doc, path) else {
         return;
     };
-    if image.as_str().is_some_and(is_retired_image) {
-        *image = toml::Value::String(current.to_string());
-        changed.push(format!("{}.harness_image", path.join(".")));
+    let retired = table
+        .get("harness_image")
+        .and_then(toml::Value::as_str)
+        .is_some_and(is_retired_image);
+    if !retired {
+        return;
     }
+    match current {
+        Some(current) => {
+            table.insert(
+                "harness_image".into(),
+                toml::Value::String(current.to_string()),
+            );
+        }
+        None => {
+            table.remove("harness_image");
+        }
+    }
+    changed.push(format!("{}.harness_image", path.join(".")));
 }
 
 /// Migrate the text of a `node.toml` whose `[harness] id`, or whose harness
@@ -198,16 +216,11 @@ pub fn migrate_config(text: &str) -> Option<ConfigMigration> {
     }
 
     let defaults = Config::default();
-    replace_retired_image(
-        &mut doc,
-        &["boundary"],
-        &defaults.boundary.harness_image,
-        &mut changed,
-    );
+    replace_retired_image(&mut doc, &["boundary"], None, &mut changed);
     replace_retired_image(
         &mut doc,
         &["runtime", "kubernetes"],
-        &defaults.runtime.kubernetes.harness_image,
+        Some(&defaults.runtime.kubernetes.harness_image),
         &mut changed,
     );
     let text = toml::to_string_pretty(&doc).ok()?;
@@ -251,7 +264,7 @@ pub fn persist_config_migration(
 pub fn apply_config_migration(path: &Path, migration: &ConfigMigration) {
     let changed = migration.changed.join(", ");
     let from = migration.from;
-    let next = "run `tracon setup` to build the harness images, and \
+    let next = "run `tracon setup` to bring the boundary in step, and \
                 `tracon session archive-legacy` to put the retired harness's sessions away read-only";
     match persist_config_migration(path, migration) {
         Ok(backup) => tracing::warn!(
@@ -298,6 +311,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `[boundary] harness_image` as a migrated file holds it, if it does: a
+    /// key the node no longer reads but for removing the images it named, so
+    /// a retired harness's own is taken out rather than replaced.
+    fn boundary_harness_image(text: &str) -> Option<String> {
+        let doc: toml::Table = toml::from_str(text).unwrap();
+        doc.get("boundary")?
+            .get("harness_image")?
+            .as_str()
+            .map(str::to_string)
+    }
+
     /// What a node.toml written in full by a pre-cutover version looks like,
     /// trimmed to the keys the migration reads plus a few it must leave alone,
     /// and one host the operator added.
@@ -332,7 +356,7 @@ state_claim = "tracon-state"
 
         assert_eq!(cfg.harness.id, "claude");
         assert_eq!(cfg.harness.version, "");
-        assert_eq!(cfg.boundary.harness_image, defaults.boundary.harness_image);
+        assert_eq!(boundary_harness_image(&migration.text), None);
         assert_eq!(
             cfg.runtime.kubernetes.harness_image,
             defaults.runtime.kubernetes.harness_image
@@ -391,10 +415,7 @@ harness_image = "registry.example/team/harness:3"
         assert_eq!(cfg.harness.id, "claude");
         assert_eq!(cfg.harness.version, "");
         assert_eq!(cfg.harness.experimental, ["native"]);
-        assert_eq!(
-            cfg.boundary.harness_image,
-            Config::default().boundary.harness_image
-        );
+        assert_eq!(boundary_harness_image(&migration.text), None);
         assert_eq!(
             cfg.runtime.kubernetes.harness_image,
             "registry.example/team/harness:3"
@@ -443,8 +464,8 @@ harness_image = "registry.example/team/harness:3"
         let cfg: Config = toml::from_str(&migration.text).unwrap();
         assert_eq!(cfg.harness.id, "claude");
         assert_eq!(
-            cfg.boundary.harness_image,
-            "registry.example/team/harness:3"
+            boundary_harness_image(&migration.text).as_deref(),
+            Some("registry.example/team/harness:3")
         );
         // Keys the file never had keep following the defaults.
         assert_eq!(
@@ -526,10 +547,8 @@ state_claim = "tracon-state"
             )
         );
         assert_eq!(cfg.runtime.kubernetes.state_claim, "tracon-state");
-        assert_eq!(
-            cfg.boundary.harness_image,
-            "localhost/tracon-harness-claude"
-        );
+        // The retired image's key is gone, so nothing names another.
+        assert_eq!(cfg.retired.harness_image, "localhost/tracon-harness-claude");
         assert_eq!(
             cfg.gateway.allow_hosts,
             [

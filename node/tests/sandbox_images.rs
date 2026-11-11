@@ -67,13 +67,8 @@ impl Rig {
             .tempdir_in("/tmp")
             .unwrap();
         let mut cfg = Config::default();
-        // Each switch this suite runs is set below; the rest stay off.
-        cfg.runtime.podman = tracon::config::PodmanRuntime::legacy();
-        cfg.boundary.network = network.clone();
         cfg.boundary.gateway_container = format!("{prefix}gw");
         cfg.gateway.harness_listen = HarnessListen::Unix(short.path().join("harness.sock"));
-        cfg.runtime.podman.sandbox_protocol = true;
-        cfg.runtime.podman.sandbox_images = true;
         cfg.sandbox.base_image = Some(base.clone());
         tracon::config::validate_sandbox(&cfg).unwrap();
         Some(Rig {
@@ -262,8 +257,12 @@ async fn the_node_fetches_its_bundle_and_runs_harnesses_from_it_in_the_base_imag
 
     // No harness image: the harness an adapter names is the bundle's, in the
     // base image, as its own user.
-    assert_eq!(rig.cfg.podman_harness_image("claude"), pinned);
-    assert_eq!(rig.cfg.podman_harness_image("native"), pinned);
+    for harness in ["claude", "native"] {
+        assert_eq!(
+            tracon::runner::podman::RunSpec::for_harness(&rig.cfg, harness, false).image,
+            pinned
+        );
+    }
     let work = rig.volume("work");
     let runner = rig.runner(&pinned, vec![Mount::volume(work.clone(), "/work", false)]);
     let mut cmd = rig.command(
@@ -674,7 +673,6 @@ async fn a_session_on_the_stock_base_has_its_home_and_its_gitconfig() {
     let Some(mut rig) = Rig::new("home") else {
         return;
     };
-    rig.cfg.runtime.podman.sandbox_files = true;
     rig.cfg.sandbox.bundle = Some(PathBuf::from(
         std::env::var("TRACON_SANDBOX_BUNDLE").expect("TRACON_SANDBOX_BUNDLE"),
     ));

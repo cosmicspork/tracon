@@ -349,12 +349,8 @@ pub async fn recipe(repo: &Path, entry: &Repo, run_as: &RunAs) -> Result<Recipe,
         hash.update(part.as_bytes());
         hash.update([0]);
     }
-    // Podman's recipe hashes what it always did, so the images it already
-    // built keep their keys; any other profile adds itself.
-    if let Some(profile) = run_as.key() {
-        hash.update(profile.as_bytes());
-        hash.update([0]);
-    }
+    hash.update(run_as.key().as_bytes());
+    hash.update([0]);
     // A recipe may stand on the stock base (`FROM ${TRACON_SANDBOX_BASE}`),
     // so a new base is a new recipe.
     if let Some(base) = crate::sandbox_images::active_base() {
@@ -452,63 +448,52 @@ fn build_labels(recipe_hash: &str) -> Vec<(String, String)> {
 }
 
 /// Who a run in a repository's image is, which decides what the node's layer
-/// over it does. Part of every key built from it, so an image made for one
-/// runtime is never taken for the other's.
+/// over it does: this uid and group, never root, with this home. Part of
+/// every key built from it, so an image made for one runtime is never taken
+/// for another's.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RunAs {
-    /// Podman: root with every capability dropped, at home in `/root`.
-    Root,
-    /// A Kubernetes pod: this uid and group, never root (the pod says
-    /// `runAsNonRoot`), with this home.
-    Pod { uid: i64, home: String },
+pub struct RunAs {
+    pub uid: i64,
+    pub home: String,
 }
 
 impl RunAs {
-    /// The profile `[runtime] kind` runs repository images with.
+    /// The profile `[runtime] kind` runs repository images with: a pod's
+    /// configured uid and home on Kubernetes (the pod says `runAsNonRoot`),
+    /// and elsewhere the stock base's own user, which every sandbox there
+    /// runs as.
     pub fn of(cfg: &Config) -> Self {
         match cfg.runtime.kind {
-            crate::config::RuntimeKind::Podman => RunAs::Root,
-            crate::config::RuntimeKind::Kubernetes => RunAs::Pod {
+            crate::config::RuntimeKind::Kubernetes => RunAs {
                 uid: cfg.runtime.kubernetes.uid,
                 home: cfg.runtime.kubernetes.harness_home.clone(),
             },
-            // The stock base's own user, which every sandbox there runs as.
-            crate::config::RuntimeKind::Apple => RunAs::Pod {
+            crate::config::RuntimeKind::Podman | crate::config::RuntimeKind::Apple => RunAs {
                 uid: 65532,
                 home: crate::sandbox_images::HOME.into(),
             },
         }
     }
 
-    /// What a key adds for this profile. Nothing for Podman, whose keys
-    /// (and so the images already built under them) stay as they were.
-    fn key(&self) -> Option<String> {
-        match self {
-            RunAs::Root => None,
-            RunAs::Pod { uid, home } => Some(format!("pod:{uid}:{home}")),
-        }
+    /// What a key adds for this profile.
+    fn key(&self) -> String {
+        format!("pod:{}:{}", self.uid, self.home)
     }
 
     fn home(&self) -> &str {
-        match self {
-            RunAs::Root => "/root",
-            RunAs::Pod { home, .. } => home,
-        }
+        &self.home
     }
 }
 
 /// The node's layer over a repository's own image, so every run in it meets
 /// the same thing whatever the Dockerfile ended on.
 ///
-/// A dev environment usually ends as an unprivileged user in that user's
-/// home. Under Podman runs are root with every capability dropped, in
-/// `/work`, which root owns: without `USER 0:0` nothing could write the
-/// workspace. An `ENTRYPOINT` (a devcontainer's process supervisor) would
-/// swallow the command a run names. And a login shell on some bases resets
-/// `PATH` for root, losing what the Dockerfile's `ENV PATH` added; the
-/// profile line puts it back.
+/// An `ENTRYPOINT` (a devcontainer's process supervisor) would swallow the
+/// command a run names, and a login shell on some bases resets `PATH`,
+/// losing what the Dockerfile's `ENV PATH` added; the profile line puts it
+/// back.
 ///
-/// A pod is never root: it runs as the configured uid, which owns `/work`,
+/// A run is never root: it runs as the profile's uid, which owns `/work`,
 /// `/cache` and the harness's home here, and the image says so with its last
 /// `USER`. The uid is given a name where the image has none for it, because
 /// Git, SSH and some package managers refuse to run as a uid with no passwd
@@ -516,33 +501,23 @@ impl RunAs {
 /// by that uid, which nothing here can arrange after the fact (see
 /// ARCHITECTURE, "the recipe is configuration").
 fn normalised(source: &str, run_as: &RunAs) -> String {
-    match run_as {
-        RunAs::Root => format!(
-            "FROM {source}\n\
-             USER 0:0\n\
-             ENV HOME=/root\n\
-             RUN mkdir -p /work /cache && if [ -d /etc/profile.d ]; then \
-             printf 'export PATH=\"%s\"\\n' \"$PATH\" > /etc/profile.d/zz-tracon-path.sh; fi\n\
-             WORKDIR /work\n\
-             ENTRYPOINT []\n"
-        ),
-        RunAs::Pod { uid, home } => format!(
-            "FROM {source}\n\
-             USER 0:0\n\
-             RUN mkdir -p /work /cache {home} && chown {uid}:{uid} /work /cache \
-             && chown -R {uid}:{uid} {home} \
-             && if ! grep -q '^[^:]*:[^:]*:{uid}:' /etc/passwd 2>/dev/null; then \
-             echo 'harness:x:{uid}:{uid}::{home}:/bin/sh' >> /etc/passwd; fi \
-             && if ! grep -q '^[^:]*:[^:]*:{uid}:' /etc/group 2>/dev/null; then \
-             echo 'harness:x:{uid}:' >> /etc/group; fi \
-             && if [ -d /etc/profile.d ]; then \
-             printf 'export PATH=\"%s\"\\n' \"$PATH\" > /etc/profile.d/zz-tracon-path.sh; fi\n\
-             ENV HOME={home}\n\
-             WORKDIR /work\n\
-             USER {uid}:{uid}\n\
-             ENTRYPOINT []\n"
-        ),
-    }
+    let RunAs { uid, home } = run_as;
+    format!(
+        "FROM {source}\n\
+         USER 0:0\n\
+         RUN mkdir -p /work /cache {home} && chown {uid}:{uid} /work /cache \
+         && chown -R {uid}:{uid} {home} \
+         && if ! grep -q '^[^:]*:[^:]*:{uid}:' /etc/passwd 2>/dev/null; then \
+         echo 'harness:x:{uid}:{uid}::{home}:/bin/sh' >> /etc/passwd; fi \
+         && if ! grep -q '^[^:]*:[^:]*:{uid}:' /etc/group 2>/dev/null; then \
+         echo 'harness:x:{uid}:' >> /etc/group; fi \
+         && if [ -d /etc/profile.d ]; then \
+         printf 'export PATH=\"%s\"\\n' \"$PATH\" > /etc/profile.d/zz-tracon-path.sh; fi\n\
+         ENV HOME={home}\n\
+         WORKDIR /work\n\
+         USER {uid}:{uid}\n\
+         ENTRYPOINT []\n"
+    )
 }
 
 /// How a harness goes onto a repository's image: what is copied out of the
@@ -615,7 +590,7 @@ fn claude_layer(run_as: &RunAs) -> HarnessLayer {
     );
     let probe = format!(
         "{} && {binary} --version && git --version",
-        resolve_to_themselves(&[binary], run_as)
+        resolve_to_themselves(&[binary])
     );
     HarnessLayer {
         lines: format!(
@@ -623,10 +598,7 @@ fn claude_layer(run_as: &RunAs) -> HarnessLayer {
              COPY --from=harness {binary} {binary}\n\
              ENV CLAUDE_CONFIG_DIR={home}/.claude DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1\n"
         ),
-        probe: match run_as {
-            RunAs::Root => probe,
-            RunAs::Pod { .. } => format!("{probe} && {POD_INIT} --version"),
-        },
+        probe: format!("{probe} && {POD_INIT} --version"),
     }
 }
 
@@ -648,14 +620,11 @@ fn native_layer(run_as: &RunAs) -> HarnessLayer {
     );
     let probe = format!(
         "{} && {binary} --version && git --version",
-        resolve_to_themselves(&[binary], run_as)
+        resolve_to_themselves(&[binary])
     );
     HarnessLayer {
         lines: format!("{guard}COPY --from=harness {binary} {binary}\n"),
-        probe: match run_as {
-            RunAs::Root => probe,
-            RunAs::Pod { .. } => format!("{probe} && {POD_INIT} --version"),
-        },
+        probe: format!("{probe} && {POD_INIT} --version"),
     }
 }
 
@@ -718,10 +687,8 @@ fn layer_guard(
          && if [ -n \"$found\" ]; then echo \"{LAYER_REFUSAL}sets ${{found% }}, which would reach \
          the harness and change how it is configured or what it loads\" >&2; exit 1; fi\n"
     );
-    match run_as {
-        RunAs::Root => guard,
-        RunAs::Pod { uid, .. } => format!("USER 0:0\n{guard}USER {uid}:{uid}\n"),
-    }
+    let uid = run_as.uid;
+    format!("USER 0:0\n{guard}USER {uid}:{uid}\n")
 }
 
 /// The directories every layer copies into, or under (the binary's, and a
@@ -736,11 +703,9 @@ const LINKLESS_DIRS: [&str; 5] = [
 
 /// A probe's first step: each of `paths`, and a pod's init, is the file the
 /// layer put there and not a link to somewhere else.
-fn resolve_to_themselves(paths: &[&str], run_as: &RunAs) -> String {
+fn resolve_to_themselves(paths: &[&str]) -> String {
     let mut all = paths.to_vec();
-    if let RunAs::Pod { .. } = run_as {
-        all.push(POD_INIT);
-    }
+    all.push(POD_INIT);
     format!(
         "for p in {}; do if [ \"$(readlink -f \"$p\")\" != \"$p\" ]; then echo \"$p is not the \
          file the layer put there\"; exit 1; fi; done",
@@ -774,17 +739,14 @@ const POD_INIT: &str = crate::runner::kube::SESSION_INIT;
 /// Bumped when the session layer itself changes.
 const SESSION_LAYER: &str = "1";
 
-/// The harness over a repository's image. The node's own layer is applied
-/// again because the image may be one the operator pinned by hand, which
-/// never had it. A pod also gets an init: a pod's first process is PID 1,
-/// which no signal it does not handle reaches and which has to reap what
-/// the harness's tools leave behind, and Podman's `--init` has no pod
-/// equivalent.
+/// The harness over a repository's image, for a pod-hosted node that runs
+/// harness images (Kubernetes without the sandbox protocol). The node's own
+/// layer is applied again because the image may be one the operator pinned
+/// by hand, which never had it. A pod also gets an init: a pod's first
+/// process is PID 1, which no signal it does not handle reaches and which
+/// has to reap what the harness's tools leave behind.
 fn layered(base: &str, harness_image: &str, layer: &HarnessLayer, run_as: &RunAs) -> String {
-    let init = match run_as {
-        RunAs::Root => String::new(),
-        RunAs::Pod { .. } => format!("COPY --from=harness /usr/bin/tini-static {POD_INIT}\n"),
-    };
+    let init = format!("COPY --from=harness /usr/bin/tini-static {POD_INIT}\n");
     format!(
         "FROM {harness_image} AS harness\n{}{}{init}",
         normalised(base, run_as),
@@ -792,8 +754,8 @@ fn layered(base: &str, harness_image: &str, layer: &HarnessLayer, run_as: &RunAs
     )
 }
 
-/// Whether this node runs every repository on its stock base: Podman with
-/// `sandbox_images`, Apple, and Kubernetes with `sandbox_protocol`. A
+/// Whether this node runs every repository on its stock base: Podman,
+/// Apple, and Kubernetes with `sandbox_protocol`. A
 /// sandbox there runs as the base's own user, in the `/work`, `/cache` and
 /// home the base made that user's; an image of the repository's own has none
 /// of them, and no layer over an arbitrary image can be trusted to add them.
@@ -1062,7 +1024,7 @@ async fn repository_base(
     })
 }
 
-/// A session's image with `[runtime.podman] sandbox_images` on: nothing is
+/// A session's image where sandboxes run on the stock base: nothing is
 /// layered, since the harness comes from the bundle. The repository's
 /// prepared snapshot where its entry prepares anything (made now, once, if
 /// there is none for what the default branch needs), else its own image,
@@ -1146,26 +1108,18 @@ async fn ensure_session_with(
         if let Some(why) = builder.unavailable().await {
             return unlayered(why);
         }
-        return unlayered(match harness.run_as {
-            RunAs::Root => format!(
-                "the harness image {} is missing; `tracon setup` builds it",
-                harness.image
-            ),
-            RunAs::Pod { .. } => format!(
-                "the harness image {} could not be found in its registry",
-                harness.image
-            ),
-        });
+        return unlayered(format!(
+            "the harness image {} could not be found in its registry",
+            harness.image
+        ));
     };
     let mut hash = Sha256::new();
     for part in [SESSION_LAYER, base, &harness_image, &harness.layer.lines] {
         hash.update(part.as_bytes());
         hash.update([0]);
     }
-    if let Some(profile) = harness.run_as.key() {
-        hash.update(profile.as_bytes());
-        hash.update([0]);
-    }
+    hash.update(harness.run_as.key().as_bytes());
+    hash.update([0]);
     let key = hex::encode(hash.finalize());
     let kind = format!("session:{}", harness.id);
     let repo_path = repo.to_string_lossy();
@@ -2475,7 +2429,7 @@ mod tests {
         ensure_with(
             builder,
             &LocalRunner,
-            &Config::podman_legacy(),
+            &Config::pod_hosted(),
             store,
             repo,
             &entry(repo),
@@ -2616,7 +2570,7 @@ mod tests {
                 prepare: vec!["npm ci".into()],
                 ..entry(repo)
             }],
-            ..Config::podman_legacy()
+            ..Config::pod_hosted()
         };
         let warms = || *pulling.builder.warms.lock().unwrap();
 
@@ -2670,7 +2624,7 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let builder = FakeBuilder::default();
         let path = repo.to_string_lossy();
-        let hash = recipe(repo, &entry(repo), &RunAs::Root).await.unwrap().hash;
+        let hash = recipe(repo, &entry(repo), &pod()).await.unwrap().hash;
 
         *builder.down.lock().unwrap() = Some("buildkitd did not answer, so no".into());
         let ensured = ensure(&builder, &store, repo, false).await;
@@ -2921,9 +2875,9 @@ mod tests {
         let repo_path = repo.to_string_lossy();
         let store = Store::open_in_memory().unwrap();
         let builder = FakeBuilder::default();
-        let cfg = Config::podman_legacy();
+        let cfg = Config::pod_hosted();
 
-        let first = recipe(repo, &entry(repo), &RunAs::Root).await.unwrap();
+        let first = recipe(repo, &entry(repo), &pod()).await.unwrap();
         assert_eq!(
             already_built(&builder, &store, repo, &first.hash).await,
             None
@@ -2968,7 +2922,7 @@ mod tests {
                      && git update-ref refs/remotes/origin/main HEAD"
                 ),
             );
-            let next = recipe(repo, &entry(repo), &RunAs::Root).await.unwrap();
+            let next = recipe(repo, &entry(repo), &pod()).await.unwrap();
             assert_ne!(next.hash, first.hash);
             images.push(
                 build_for_trial(&builder, &cfg, &store, repo, &next)
@@ -3039,7 +2993,7 @@ mod tests {
         let unavailable = ensure_with(
             &builder,
             &LocalRunner,
-            &Config::podman_legacy(),
+            &Config::pod_hosted(),
             &store,
             repo,
             &missing,
@@ -3130,7 +3084,7 @@ mod tests {
         "localhost/tracon-repo-app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     fn claude(image: &str) -> SessionHarness<'static> {
-        claude_as(image, RunAs::Root)
+        claude_as(image, pod())
     }
 
     /// What `session_started` says a session runs in, on each kind of node.
@@ -3142,7 +3096,7 @@ mod tests {
             note: None,
         };
         let layered = image("localhost/tracon-session-claude-1", BASE_IMAGE);
-        let podman = Config::podman_legacy();
+        let podman = Config::pod_hosted();
         assert_eq!(SessionImage::default().source(&podman), "harness image");
         assert_eq!(SessionImage::default().reported(&podman), None);
         assert_eq!(layered.source(&podman), "repository image");
@@ -3150,7 +3104,7 @@ mod tests {
         let mut sandboxed: Config =
             toml::from_str("[runtime.podman]\nsandbox_protocol = true\nsandbox_images = true\n")
                 .unwrap();
-        let mut apple = Config::podman_legacy();
+        let mut apple = Config::pod_hosted();
         apple.runtime.kind = crate::config::RuntimeKind::Apple;
         sandboxed.sandbox.base_image = Some("ghcr.io/x/tracon-sandbox-base:1".into());
         let mut bundled = vec![apple];
@@ -3191,9 +3145,7 @@ mod tests {
     }
 
     fn kubernetes() -> Config {
-        let mut cfg = Config::podman_legacy();
-        cfg.runtime.kind = crate::config::RuntimeKind::Kubernetes;
-        cfg
+        Config::pod_hosted()
     }
 
     /// The harness goes onto the repository's image as a layer, proven to run
@@ -3212,7 +3164,7 @@ mod tests {
         let image = first.image.clone().expect("the session image is built");
         assert_eq!(first.toolchain_image.as_deref(), Some(BASE_IMAGE));
         assert_eq!(first.note, None);
-        assert_eq!(first.source(&Config::podman_legacy()), "repository image");
+        assert_eq!(first.source(&Config::pod_hosted()), "repository image");
         // Proven in the image that was built, not in the harness's own.
         assert_eq!(
             runner.ran_in.lock().unwrap().as_slice(),
@@ -3277,7 +3229,7 @@ mod tests {
             let got =
                 ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
             assert_eq!(got.image, None, "{says}");
-            assert_eq!(got.source(&Config::podman_legacy()), "harness image");
+            assert_eq!(got.source(&Config::pod_hosted()), "harness image");
             assert!(got.note.unwrap().contains("does not run"), "{says}");
             let row = store
                 .latest_repo_image("/src/musl-app", "session:claude")
@@ -3312,7 +3264,7 @@ mod tests {
                 image: Some(BASE_IMAGE.into()),
                 ..Default::default()
             }],
-            ..Config::podman_legacy()
+            ..Config::pod_hosted()
         });
         let ask = |repo: &'static str, harness: &'static str| {
             let (backend, cfg, store) = (backend.clone(), cfg.clone(), store.clone());
@@ -3420,7 +3372,7 @@ mod tests {
                 image: Some(BASE_IMAGE.into()),
                 ..Default::default()
             }],
-            ..Config::podman_legacy()
+            ..Config::pod_hosted()
         });
         let got = session_image(
             &backend,
@@ -3448,13 +3400,12 @@ mod tests {
     #[test]
     fn the_claude_layer_carries_what_the_harness_image_sets() {
         let image = include_str!("../../containers/harness-claude/Containerfile");
-        let layer = harness_layer("claude", &RunAs::Root).unwrap().lines;
+        let layer = harness_layer("claude", &pod()).unwrap().lines;
         assert!(image.contains("/usr/local/bin/claude"));
-        for variable in [
-            "CLAUDE_CONFIG_DIR=/root/.claude",
-            "DISABLE_AUTOUPDATER=1",
-            "DISABLE_TELEMETRY=1",
-        ] {
+        // The image's own home is root's; the layer's is the profile's.
+        assert!(image.contains("CLAUDE_CONFIG_DIR=/root/.claude"));
+        assert!(layer.contains("CLAUDE_CONFIG_DIR=/home/harness/.claude"));
+        for variable in ["DISABLE_AUTOUPDATER=1", "DISABLE_TELEMETRY=1"] {
             assert!(
                 image.contains(variable),
                 "{variable} left the harness image"
@@ -3470,7 +3421,7 @@ mod tests {
             exported, 3,
             "the harness image sets something the layer does not"
         );
-        assert!(harness_layer("pi", &RunAs::Root).is_none());
+        assert!(harness_layer("pi", &pod()).is_none());
     }
 
     /// The native harness needs one static binary and sets no environment;
@@ -3483,20 +3434,18 @@ mod tests {
             !image.lines().any(|line| line.starts_with("ENV ")),
             "the harness image sets something the layer does not"
         );
-        for run_as in [RunAs::Root, pod()] {
-            let layer = harness_layer("native", &run_as).unwrap();
-            assert!(layer.lines.contains(
-                "COPY --from=harness /usr/local/bin/tracon-agent /usr/local/bin/tracon-agent\n"
-            ));
-            assert!(layer.lines.contains("TRACON_AGENT_[A-Za-z0-9_]*"));
-            assert!(!layer.lines.contains("LD_LIBRARY_PATH"));
-            assert!(layer
-                .lines
-                .contains("rm -rf /usr/local/bin/tracon-agent /usr/libexec/tracon"));
-            assert!(layer
-                .probe
-                .contains("/usr/local/bin/tracon-agent --version && git --version"));
-        }
+        let layer = harness_layer("native", &pod()).unwrap();
+        assert!(layer.lines.contains(
+            "COPY --from=harness /usr/local/bin/tracon-agent /usr/local/bin/tracon-agent\n"
+        ));
+        assert!(layer.lines.contains("TRACON_AGENT_[A-Za-z0-9_]*"));
+        assert!(!layer.lines.contains("LD_LIBRARY_PATH"));
+        assert!(layer
+            .lines
+            .contains("rm -rf /usr/local/bin/tracon-agent /usr/libexec/tracon"));
+        assert!(layer
+            .probe
+            .contains("/usr/local/bin/tracon-agent --version && git --version"));
     }
 
     /// Claude Code's guard, for a harness whose home is `home`.
@@ -3505,8 +3454,6 @@ mod tests {
 "#
         .replace("HOME", home)
     }
-
-    const CLAUDE_PROBE: &str = r#"for p in /usr/local/bin/claude; do if [ "$(readlink -f "$p")" != "$p" ]; then echo "$p is not the file the layer put there"; exit 1; fi; done && /usr/local/bin/claude --version && git --version"#;
 
     /// An image a harness layer refuses says why in the session's note, not
     /// only that the build failed, from either builder's log; the reason is
@@ -3547,8 +3494,8 @@ mod tests {
             id: "native",
             version: crate::adapter::native::NativeAdapter::PINNED_VERSION,
             image: "localhost/tracon-harness-native".into(),
-            layer: harness_layer("native", &RunAs::Root).unwrap(),
-            run_as: RunAs::Root,
+            layer: harness_layer("native", &pod()).unwrap(),
+            run_as: pod(),
         };
         for _ in 0..2 {
             let got =
@@ -3588,19 +3535,16 @@ mod tests {
 
     /// The sandbox providers run every repository on the stock base: an
     /// `image`, or a Dockerfile that does not begin on the base, is refused
-    /// with what to do instead. Without them nothing changes.
+    /// with what to do instead. Off them (a pod-hosted node off the sandbox
+    /// protocol) nothing changes.
     #[test]
     fn the_sandbox_providers_refuse_a_repository_off_the_stock_base() {
-        let legacy = Config::podman_legacy();
-        let mut podman = Config::podman_legacy();
-        podman.runtime.podman.sandbox_protocol = true;
-        podman.runtime.podman.sandbox_images = true;
-        let mut apple = Config::podman_legacy();
+        let legacy = Config::pod_hosted();
+        let podman = Config::default();
+        let mut apple = Config::default();
         apple.runtime.kind = crate::config::RuntimeKind::Apple;
         let mut kube = kubernetes();
         kube.runtime.kubernetes.sandbox_protocol = true;
-        let mut protocol_only = Config::podman_legacy();
-        protocol_only.runtime.podman.sandbox_protocol = true;
 
         let image = Repo {
             path: "github.com/o/mesa".into(),
@@ -3618,14 +3562,9 @@ mod tests {
             "# comment\nfrom $TRACON_SANDBOX_BASE as tools\nFROM rust AS other\n",
         ];
 
-        // A fresh node, which runs the sandbox switches by default.
-        let fresh = Config::default();
         for (cfg, refuses) in [
             (&legacy, false),
-            (&fresh, cfg!(target_os = "linux")),
-            (&protocol_only, false),
-            (&kubernetes(), false),
-            (&podman, cfg!(target_os = "linux")),
+            (&podman, true),
             (&apple, true),
             (&kube, true),
         ] {
@@ -3673,7 +3612,7 @@ mod tests {
     #[tokio::test]
     async fn a_refused_repository_builds_and_starts_nothing() {
         let tmp = checkout();
-        let mut cfg = Config::podman_legacy();
+        let mut cfg = Config::pod_hosted();
         cfg.runtime.kind = crate::config::RuntimeKind::Apple;
         cfg.repo = vec![entry(tmp.path())];
         let cfg = Arc::new(cfg);
@@ -3696,77 +3635,6 @@ mod tests {
         let checks = environment(backend.as_ref(), &cfg, &store, Some(tmp.path())).await;
         assert_eq!(checks.err(), Some(refused));
         assert!(pulling.builder.builds.lock().unwrap().is_empty());
-    }
-
-    /// What Podman builds, pinned. The repository's own image (its normalised
-    /// layer and its recipe's key) is what it was before runtimes had
-    /// profiles, so no base image a Podman node built is rebuilt or orphaned.
-    /// The Claude Code session layer changed once, deliberately, when it began
-    /// refusing images that would configure the harness (its guard below):
-    /// every Claude session layer rebuilds once over the base it already has.
-    #[tokio::test]
-    async fn podmans_layers_and_keys_are_pinned() {
-        let source = "localhost/tracon-repo-app-src@sha256:abc";
-        let normalised_text = r#"FROM localhost/tracon-repo-app-src@sha256:abc
-USER 0:0
-ENV HOME=/root
-RUN mkdir -p /work /cache && if [ -d /etc/profile.d ]; then printf 'export PATH="%s"\n' "$PATH" > /etc/profile.d/zz-tracon-path.sh; fi
-WORKDIR /work
-ENTRYPOINT []
-"#;
-        assert_eq!(normalised(source, &RunAs::Root), normalised_text);
-        let layer = harness_layer("claude", &RunAs::Root).unwrap();
-        let lines = format!(
-            "{}COPY --from=harness /usr/local/bin/claude /usr/local/bin/claude\n\
-             ENV CLAUDE_CONFIG_DIR=/root/.claude DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1\n",
-            claude_guard("/root")
-        );
-        let lines = lines.as_str();
-        assert_eq!(layer.lines, lines);
-        assert_eq!(layer.probe, CLAUDE_PROBE);
-        assert_eq!(
-            layered(source, "localhost/h@sha256:def", &layer, &RunAs::Root),
-            format!("FROM localhost/h@sha256:def AS harness\n{normalised_text}{lines}")
-        );
-
-        // The recipe hashes the parts it always did, and nothing else.
-        let tmp = checkout();
-        let repo = tmp.path();
-        let recipe = recipe(repo, &entry(repo), &RunAs::Root).await.unwrap();
-        let dir = repo.to_string_lossy();
-        let blob = crate::review::resolve(&dir, "HEAD:.devcontainer/Dockerfile")
-            .await
-            .unwrap();
-        let mut hash = Sha256::new();
-        for part in [
-            "1",
-            ".devcontainer/Dockerfile",
-            &blob,
-            ".devcontainer",
-            &recipe.context_tree,
-        ] {
-            hash.update(part.as_bytes());
-            hash.update([0]);
-        }
-        assert_eq!(recipe.hash, hex::encode(hash.finalize()));
-
-        // And so does the session layer's key.
-        let store = Store::open_in_memory().unwrap();
-        let builder = FakeBuilder::default();
-        let runner = ProbeRunner::saying("2.1.295 (Claude Code)", 0);
-        let harness = claude("localhost/tracon-harness-claude");
-        ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
-        let identity = builder.identity("localhost/tracon-harness-claude").await;
-        let mut hash = Sha256::new();
-        for part in ["1", BASE_IMAGE, &identity.unwrap(), lines] {
-            hash.update(part.as_bytes());
-            hash.update([0]);
-        }
-        let row = store
-            .ready_repo_image(&repo.to_string_lossy(), "session:claude")
-            .unwrap()
-            .unwrap();
-        assert_eq!(row.recipe_hash, hex::encode(hash.finalize()));
     }
 
     /// A pod is never root: its layer gives the harness uid the workspace,
@@ -3832,23 +3700,24 @@ ENTRYPOINT []
         assert!(other.contains("'harness:x:1000:1000::/home/agent:/bin/sh'"));
         assert!(other.contains("ENV HOME=/home/agent\n") && other.contains("USER 1000:1000\n"));
 
+        // Podman and Apple run the stock base's own user, which is the
+        // default pod's.
+        assert_eq!(RunAs::of(&Config::default()), pod());
+
         let tmp = checkout();
         let repo = tmp.path();
-        let podman = recipe(repo, &entry(repo), &RunAs::Root).await.unwrap();
         let kube = recipe(repo, &entry(repo), &pod()).await.unwrap();
         let elsewhere = recipe(repo, &entry(repo), &RunAs::of(&cfg)).await.unwrap();
-        assert_ne!(podman.hash, kube.hash);
         assert_ne!(kube.hash, elsewhere.hash);
         assert_eq!(
-            (podman.context_tree, podman.source_commit),
-            (kube.context_tree, kube.source_commit)
+            (kube.context_tree, kube.source_commit),
+            (elsewhere.context_tree, elsewhere.source_commit)
         );
     }
 
     /// On Kubernetes the repository's image is built with the pod's layer,
     /// and a session's harness is layered over it from the harness image in
-    /// its registry, probed, and kept apart from what Podman would build from
-    /// the same base.
+    /// its registry and probed.
     #[tokio::test]
     async fn a_kubernetes_session_is_layered_with_the_pods_profile() {
         let tmp = checkout();
@@ -3931,25 +3800,14 @@ ENTRYPOINT []
             assert!(text.contains("/usr/bin/tini-static /usr/libexec/tracon/tini"));
         }
 
-        // Asked again on Kubernetes, nothing is built; asked on Podman, the
-        // same base is a different layer, never the pod's.
+        // Asked again, nothing is built.
         let again = ask(Config {
-            repo: entries.clone(),
+            repo: entries,
             ..kubernetes()
         })
         .await;
         assert_eq!(again.image.as_deref(), Some(image.as_str()));
         assert_eq!(pulling.builder.builds.lock().unwrap().len(), 1);
-        let on_podman = ask(Config {
-            repo: entries,
-            ..Config::podman_legacy()
-        })
-        .await;
-        assert_ne!(on_podman.image, Some(image));
-        let builds = pulling.builder.builds.lock().unwrap();
-        assert_eq!(builds.len(), 2);
-        assert!(builds[1].1.contains("USER 0:0\nENV HOME=/root\n"));
-        assert!(!builds[1].1.contains("tini"));
     }
 
     /// A harness image the builder cannot find leaves the session in the
@@ -3973,7 +3831,6 @@ ENTRYPOINT []
                     .unwrap()
             }
         };
-        assert!(ask(RunAs::Root).await.contains("`tracon setup` builds it"));
         let pod_note = ask(pod()).await;
         assert!(
             pod_note.contains("could not be found in its registry"),
@@ -4025,7 +3882,7 @@ ENTRYPOINT []
         // its own to build.
         let backend = crate::runner::local::LocalBackend;
         assert_eq!(
-            ensure_base(&backend, &Config::podman_legacy(), &store, repo, true).await,
+            ensure_base(&backend, &Config::pod_hosted(), &store, repo, true).await,
             Ensured::Unconfigured
         );
         let retried =
@@ -4056,7 +3913,7 @@ ENTRYPOINT []
         };
         let cfg = Arc::new(Config {
             repo: vec![held_entry.clone()],
-            ..Config::podman_legacy()
+            ..Config::pod_hosted()
         });
         let hold = CredentialHoldRow {
             path: repo.to_string_lossy().into(),
@@ -4197,7 +4054,7 @@ WORKDIR /work
     #[tokio::test]
     async fn build_steps_are_what_the_stock_base_refusal_points_at() {
         let dir = tempfile::tempdir().unwrap();
-        let mut apple = Config::podman_legacy();
+        let mut apple = Config::pod_hosted();
         apple.runtime.kind = crate::config::RuntimeKind::Apple;
         let mut kube = kubernetes();
         kube.runtime.kubernetes.sandbox_protocol = true;

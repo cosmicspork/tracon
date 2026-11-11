@@ -1,188 +1,27 @@
-//! `tracon setup`: create the network, allowlist, and gateway the node owns.
-//! Idempotent — running it again reconciles rather than failing. The node
-//! runs the same steps itself (`converge`, through `boundary::reconcile`),
-//! touching only what is out of step.
+//! `tracon setup`: bring in what every sandbox starts from — the harness
+//! bundle for this release and the pinned stock base, and the browser bundle
+//! where a service asks for it — and remove the gateway an older node made.
+//! Idempotent: running it again reconciles rather than failing. The node runs
+//! the same steps itself (`converge`, through `boundary::reconcile`).
 
-use rust_embed::Embed;
-
-use crate::config::{Config, HarnessListen};
+use crate::config::Config;
 
 use super::podman;
 use crate::boundary::BoundaryError;
 
-/// The gateway and harness definitions, carried inside the binary so a host
-/// that only fetched the release can build the images it needs.
-///
-/// The exclusion is load-bearing. The native harness's `local/` is where a
-/// locally built `tracon-agent` is staged for its image; without it a 7 MB
-/// binary would be compiled into every node built from that tree, silently.
-#[derive(Embed)]
-#[folder = "../containers"]
-#[exclude = "harness-native/local/*"]
-struct Containers;
-
-/// The native harness's definitions directory, and where in it a local
-/// `tracon-agent` is staged (`[harness] native_binary`).
-const NATIVE_DIR: &str = "harness-native";
-const NATIVE_LOCAL: &str = "local/tracon-agent";
-
-/// What an image's label must say for it to be current. For every image, its
-/// definitions; the native harness's also installs a `tracon-agent` that is
-/// not among them — the release asset of this node's version, or the
-/// operator's own build — so that is part of what it was built from.
-pub fn expected_digest(cfg: &Config, dir: &str) -> String {
-    let definitions = definitions_digest(dir);
-    if dir != NATIVE_DIR {
-        return definitions;
-    }
-    use sha2::{Digest, Sha256};
-    let mut hash = Sha256::new();
-    hash.update(definitions.as_bytes());
-    hash.update([0]);
-    hash.update(crate::adapter::native::NativeAdapter::PINNED_VERSION.as_bytes());
-    if !cfg.harness.native_binary.is_empty() {
-        hash.update([0]);
-        match std::fs::read(&cfg.harness.native_binary) {
-            Ok(bytes) => hash.update(Sha256::digest(&bytes)),
-            // Unreadable reads as stale, and the build says why.
-            Err(_) => hash.update(b"unreadable"),
-        }
-    }
-    hex::encode(hash.finalize())
-}
-
-/// Stage what the native harness image installs: the operator's own
-/// `tracon-agent` when one is configured, otherwise nothing, and the image
-/// fetches the release asset.
-fn stage_native(cfg: &Config, ctx: &std::path::Path) -> Result<(), BoundaryError> {
-    let local = ctx.join(NATIVE_LOCAL);
-    if let Some(dir) = local.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let _ = std::fs::remove_file(&local);
-    if !cfg.harness.native_binary.is_empty() {
-        std::fs::copy(&cfg.harness.native_binary, &local).map_err(|e| {
-            std::io::Error::new(
-                e.kind(),
-                format!("[harness] native_binary {}: {e}", cfg.harness.native_binary),
-            )
-        })?;
-    }
-    Ok(())
-}
-
-/// The label a built image carries: a digest of the definitions it was built
-/// from, so a node on a newer binary can tell its images are stale.
-pub const DEFINITIONS_LABEL: &str = "io.tracon.definitions";
-
-/// The directory the harness image is built from. Each harness has its own
-/// definitions; another harness's under this one's tag would run the wrong CLI.
-///
-/// Only the harnesses with an adapter have definitions. An id outside them
-/// never reaches here — `adapter_for` refuses it at startup, a retired one
-/// by name — so Claude Code's is the safe answer rather than a panic in the
-/// setup path.
-pub fn harness_dir(cfg: &Config) -> &'static str {
-    harness_dir_for(&cfg.harness.id)
-}
-
-/// Each image the node runs, with the directory it is built from: the
-/// gateway, and one harness image per supported harness. Both harnesses are
-/// built because a session names its own harness and the node runs whichever
-/// it names; the configured `[harness] id` is only the default.
-///
-/// With `sandbox_tunnels` there is no gateway container, so no gateway image.
-pub fn images(cfg: &Config) -> Vec<(String, &'static str)> {
-    let mut out = Vec::new();
-    if !super::uses_sandbox_tunnels(cfg) {
-        out.push((cfg.boundary.gateway_image.clone(), "gateway"));
-    }
-    // Harnesses come from the bundle, and sandboxes run the stock base.
-    if crate::sandbox_images::enabled(cfg) {
-        return out;
-    }
-    for id in crate::adapter::enabled(cfg) {
-        out.push((cfg.podman_harness_image(id), harness_dir_for(id)));
-    }
-    out
-}
-
-/// Each harness image and whether it is built from this build's
-/// definitions, judged the way `check_runtime` judges it: an image without
-/// the label cannot be judged, which is not the same as stale.
+/// Each harness's image here, which is the stock base every harness runs in
+/// from the bundle, and whether it is present.
 pub async fn harness_images(cfg: &Config) -> Vec<crate::boundary::HarnessImage> {
-    let mut out = Vec::new();
-    if crate::sandbox_images::enabled(cfg) {
-        // Every harness runs in the base image, from the bundle.
-        let image = crate::sandbox_images::base_image(cfg);
-        let present = podman(&["image", "exists", &image]).await.is_ok();
-        for id in crate::adapter::enabled(cfg) {
-            out.push(crate::boundary::HarnessImage {
-                harness_id: id.to_string(),
-                image: image.clone(),
-                state: if present { "current" } else { "missing" },
-            });
-        }
-        return out;
-    }
-    for id in crate::adapter::enabled(cfg) {
-        let image = cfg.podman_harness_image(id);
-        let state = if podman(&["image", "exists", &image]).await.is_err() {
-            "missing"
-        } else {
-            match image_digest(&image).await {
-                Some(built) if built == expected_digest(cfg, harness_dir_for(id)) => "current",
-                Some(_) => "stale",
-                None => "unknown",
-            }
-        };
-        out.push(crate::boundary::HarnessImage {
+    let image = crate::sandbox_images::base_image(cfg);
+    let present = podman(&["image", "exists", &image]).await.is_ok();
+    crate::adapter::enabled(cfg)
+        .into_iter()
+        .map(|id| crate::boundary::HarnessImage {
             harness_id: id.to_string(),
-            image,
-            state,
-        });
-    }
-    out
-}
-
-/// The definitions directory for a harness id.
-pub fn harness_dir_for(harness_id: &str) -> &'static str {
-    match harness_id {
-        "claude" => "harness-claude",
-        "native" => "harness-native",
-        _ => "harness-claude",
-    }
-}
-
-/// A digest of one image's embedded definitions: every file under `dir`, in
-/// path order.
-pub fn definitions_digest(dir: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let prefix = format!("{dir}/");
-    let mut paths: Vec<_> = Containers::iter()
-        .filter(|p| p.starts_with(&prefix))
-        .collect();
-    paths.sort();
-    let mut hash = Sha256::new();
-    for path in paths {
-        if let Some(file) = Containers::get(&path) {
-            hash.update(path.as_bytes());
-            hash.update([0]);
-            hash.update(file.data.as_ref());
-            hash.update([0]);
-        }
-    }
-    hex::encode(hash.finalize())
-}
-
-/// The definitions digest an image was built with, if it carries one. Images
-/// built before the label existed, or by hand, carry none.
-pub async fn image_digest(image: &str) -> Option<String> {
-    let format = format!("{{{{ index .Labels \"{DEFINITIONS_LABEL}\" }}}}");
-    podman(&["image", "inspect", "--format", &format, image])
-        .await
-        .ok()
-        .and_then(|out| label_value(&out))
+            image: image.clone(),
+            state: if present { "current" } else { "missing" },
+        })
+        .collect()
 }
 
 fn label_value(out: &str) -> Option<String> {
@@ -190,209 +29,46 @@ fn label_value(out: &str) -> Option<String> {
     (!v.is_empty() && v != "<no value>").then(|| v.to_string())
 }
 
-/// `tracon setup`: everything converged, the gateway restarted whatever it
-/// was running (so a gateway an operator suspects is put back as new), and
-/// with `rebuild` every image built again.
-pub async fn setup(cfg: &Config, rebuild: bool) -> Result<(), BoundaryError> {
-    steps(cfg, rebuild, true).await.map(|_| ())
+/// `tracon setup`: everything converged. `rebuild` asks for nothing more:
+/// there are no images of the node's own to build.
+pub async fn setup(cfg: &Config, _rebuild: bool) -> Result<(), BoundaryError> {
+    converge(cfg).await.map(|_| ())
 }
 
-/// The node's own setup: only what is out of step changes. A gateway already
-/// running this build's image with these arguments and this allowlist keeps
-/// running, with the sessions that are using it. `Ok(true)` when anything
-/// changed.
+/// The node's own setup: only what is out of step changes. `Ok(true)` when
+/// anything changed.
 pub async fn converge(cfg: &Config) -> Result<bool, BoundaryError> {
-    steps(cfg, false, false).await
-}
-
-async fn steps(cfg: &Config, rebuild: bool, restart_gateway: bool) -> Result<bool, BoundaryError> {
-    super::ensure_machine(cfg).await?;
-    let built = ensure_images(cfg, rebuild).await?;
     let fetched = crate::sandbox_images::converge(cfg)
         .await
         .map_err(BoundaryError::Other)?;
     std::fs::create_dir_all(Config::harness_state_dir())?;
-    let gateway = match gateway_plan(cfg) {
-        GatewayPlan::Retire(gateway) => retire_gateway(&SystemHost, &gateway).await?,
-        GatewayPlan::Keep => {
-            let created = ensure_network(cfg).await?;
-            let rewritten = write_allowlist(cfg)?;
-            let restarted = ensure_gateway(cfg, restart_gateway).await?;
-            created || rewritten || restarted
-        }
-    };
-    // Last: a browser that cannot be fetched leaves sessions their gateway.
+    let retired = retire_gateway(&SystemHost, &retired_gateway(cfg)).await?;
+    // Last: a browser that cannot be fetched leaves sessions the rest.
     let browser = crate::service_bundle::converge(cfg)
         .await
         .map_err(BoundaryError::Other)?;
-    Ok(built || fetched || gateway || browser)
+    Ok(fetched || retired || browser)
 }
 
-/// A digest of everything [`converge`] builds images from, cheap enough to
-/// compare every few minutes: each image's name and expected label.
+/// A digest of everything [`converge`] fetches, cheap enough to compare every
+/// few minutes.
 pub fn definitions(cfg: &Config) -> String {
     use sha2::{Digest, Sha256};
-    let mut hash = Sha256::new();
-    for (image, dir) in images(cfg) {
-        hash.update(image.as_bytes());
-        hash.update([0]);
-        hash.update(expected_digest(cfg, dir).as_bytes());
-        hash.update([0]);
-    }
-    hash.update(crate::sandbox_images::definitions(cfg).as_bytes());
-    hex::encode(hash.finalize())
+    hex::encode(Sha256::digest(
+        crate::sandbox_images::definitions(cfg).as_bytes(),
+    ))
 }
 
-/// Write the embedded container definitions out and build any image that is
-/// missing or was built from definitions other than this binary's. The
-/// harness image fetches the pinned harness release at build time, the one
-/// network fetch a fresh node makes. `Ok(true)` when it built one.
-async fn ensure_images(cfg: &Config, rebuild: bool) -> Result<bool, BoundaryError> {
-    let root = Config::containers_dir();
-    for path in Containers::iter() {
-        let Some(file) = Containers::get(&path) else {
-            continue;
-        };
-        let dest = root.join(path.as_ref());
-        if let Some(dir) = dest.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(&dest, file.data.as_ref())?;
-    }
-    let mut built = false;
-    for (image, dir) in images(cfg) {
-        let image = image.as_str();
-        let digest = expected_digest(cfg, dir);
-        let current = podman(&["image", "exists", image]).await.is_ok()
-            && image_digest(image).await.as_deref() == Some(digest.as_str());
-        if current && !rebuild {
-            tracing::info!(image, "image current");
-            continue;
-        }
-        let ctx = root.join(dir);
-        let label = format!("{DEFINITIONS_LABEL}={digest}");
-        let mut args = vec!["build".to_string(), "--label".into(), label];
-        if dir == NATIVE_DIR {
-            stage_native(cfg, &ctx)?;
-            args.push("--build-arg".into());
-            args.push(format!(
-                "TRACON_AGENT_VERSION={}",
-                crate::adapter::native::NativeAdapter::PINNED_VERSION
-            ));
-        }
-        args.extend([
-            "-t".into(),
-            image.into(),
-            ctx.to_string_lossy().into_owned(),
-        ]);
-        tracing::info!(image, context = %ctx.display(), "building image");
-        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-        podman(&argv).await?;
-        built = true;
-    }
-    Ok(built)
-}
-
-/// `Ok(true)` when it had to create the network.
-async fn ensure_network(cfg: &Config) -> Result<bool, BoundaryError> {
-    if podman(&["network", "exists", &cfg.boundary.network])
-        .await
-        .is_ok()
-    {
-        tracing::info!(network = %cfg.boundary.network, "network exists");
-        return Ok(false);
-    }
-    // `--internal` removes the route out; `--disable-dns` stops the network's
-    // resolver answering for every external name.
-    podman(&[
-        "network",
-        "create",
-        "--internal",
-        "--disable-dns",
-        "--subnet",
-        &cfg.boundary.subnet,
-        &cfg.boundary.network,
-    ])
-    .await?;
-    tracing::info!(network = %cfg.boundary.network, "network created");
-    Ok(true)
-}
-
-/// `Ok(true)` when what it wrote differs from what was there.
-fn write_allowlist(cfg: &Config) -> Result<bool, BoundaryError> {
-    let path = Config::allow_file();
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    // tinyproxy matches these as unanchored regexes, so `api.openai.com` would
-    // also match `api.openai.com.evil.com`. Anchor every entry that is not
-    // already anchored, so a hand-added host is an exact match rather than a
-    // substring one. An operator who wants a pattern can still write `.*`.
-    let body = cfg
-        .gateway
-        .allow_hosts
-        .iter()
-        .map(|h| anchor(h))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let body = format!("{body}\n");
-    if std::fs::read_to_string(&path).ok().as_deref() == Some(body.as_str()) {
-        return Ok(false);
-    }
-    std::fs::write(&path, body)?;
-    tracing::info!(path = %path.display(), hosts = cfg.gateway.allow_hosts.len(), "allowlist written");
-    Ok(true)
-}
-
-/// Anchor one literal hostname as an exact-match tinyproxy filter entry.
-/// Unlike [`anchor`] (for the operator-authored, regex-capable
-/// `[gateway] allow_hosts`), every regex metacharacter in the host itself is
-/// escaped: a host built from a parsed URL — a provider upstream's when `POST /api/providers` widens the allowlist for it — never
-/// an operator writing a pattern, so a literal dot must never accidentally
-/// match any character.
-pub(crate) fn anchor_literal_host(host: &str) -> String {
-    let mut escaped = String::with_capacity(host.len() + 2);
-    escaped.push('^');
-    for ch in host.chars() {
-        if ".^$*+?()[]{}|\\".contains(ch) {
-            escaped.push('\\');
-        }
-        escaped.push(ch);
-    }
-    escaped.push('$');
-    escaped
-}
-
-/// Anchor a tinyproxy allowlist entry at both ends so it matches a whole host,
-/// not a substring. Already-anchored entries are left as they are.
-pub fn anchor(host: &str) -> String {
-    let mut s = host.to_string();
-    if !s.starts_with('^') {
-        s.insert(0, '^');
-    }
-    if !s.ends_with('$') {
-        s.push('$');
-    }
-    s
-}
-
-/// The gateway's own user service, on a Linux host whose systemd user manager
-/// is running. Its own unit, so its own cgroup: restarting or stopping the
-/// node's service, which ends everything in the node's cgroup, leaves the
-/// boundary's gateway running, and systemd starts a gateway that stopped
-/// rather than the operator rerunning setup.
+/// The user service an older node ran its gateway under, on a Linux host.
+/// Kept by name so an upgraded node removes it, and `tracon service
+/// uninstall` with it.
 pub const GATEWAY_UNIT: &str = "tracon-gateway.service";
-
-/// The subnet the gateway's proxy admits when it is told no other.
-const DEFAULT_SUBNET: &str = "10.89.0.0/24";
 
 /// The default gateway container, whose unit is [`GATEWAY_UNIT`].
 const DEFAULT_GATEWAY: &str = "tracon-gw";
 
-/// The unit for this node's gateway. A second node on the machine (a scratch
-/// node with its own `gateway_container`) gets its own unit: it now writes and
-/// restarts its unit as it starts, and doing that to the first node's would
-/// take that node's gateway over.
+/// The unit an older node ran this node's gateway under: a second node on
+/// the machine (a scratch node with its own `gateway_container`) had its own.
 pub fn gateway_unit(cfg: &Config) -> String {
     let name = cfg.boundary.gateway_container.as_str();
     if name == DEFAULT_GATEWAY || name.is_empty() {
@@ -408,239 +84,12 @@ pub fn gateway_unit(cfg: &Config) -> String {
     format!("tracon-gateway-{safe}.service")
 }
 
-/// The label a gateway container carries: a digest of the arguments it was
-/// started with and the allowlist it read, so a converge can tell a gateway
-/// that is already what this node describes from one to replace.
+/// The label a gateway container carried, which is how retiring one tells a
+/// gateway the node made from a container of the same name it did not.
 const GATEWAY_LABEL: &str = "io.tracon.gateway";
 
-/// The `podman run` arguments that make the gateway, without the verb and
-/// without how it is supervised, carrying [`GATEWAY_LABEL`] over themselves
-/// and `allow`, the allowlist it is started with: tinyproxy reads it once, so
-/// a changed allowlist needs a new gateway as much as changed arguments do.
-fn gateway_args(cfg: &Config, selinux: bool, allow: &[u8]) -> Result<Vec<String>, BoundaryError> {
-    let mut args = gateway_run_args(cfg, selinux)?;
-    let spec = {
-        use sha2::{Digest, Sha256};
-        let mut hash = Sha256::new();
-        for arg in &args {
-            hash.update(arg.as_bytes());
-            hash.update([0]);
-        }
-        hash.update(allow);
-        hex::encode(hash.finalize())
-    };
-    // Before the image, the last argument.
-    let at = args.len() - 1;
-    args.splice(
-        at..at,
-        ["--label".to_string(), format!("{GATEWAY_LABEL}={spec}")],
-    );
-    Ok(args)
-}
-
-/// The spec label `gateway_args` put in `args`.
-fn gateway_spec(args: &[String]) -> Option<&str> {
-    let prefix = format!("{GATEWAY_LABEL}=");
-    args.iter().find_map(|a| a.strip_prefix(prefix.as_str()))
-}
-
-/// The allowlist as the gateway will read it.
-fn allowlist_bytes() -> Vec<u8> {
-    std::fs::read(Config::allow_file()).unwrap_or_default()
-}
-
-/// Whether the running gateway is the one `args` describe: running, from the
-/// image the tag names now, and labelled with this spec. One an older node
-/// made carries no label and is replaced once.
-async fn gateway_current(cfg: &Config, args: &[String]) -> bool {
-    let Some(spec) = gateway_spec(args) else {
-        return false;
-    };
-    let format = format!(
-        "{{{{.State.Running}}}} {{{{.Image}}}} {{{{index .Config.Labels \"{GATEWAY_LABEL}\"}}}}"
-    );
-    let Ok(running) = podman(&[
-        "container",
-        "inspect",
-        "--format",
-        &format,
-        &cfg.boundary.gateway_container,
-    ])
-    .await
-    else {
-        return false;
-    };
-    let Ok(image) = podman(&[
-        "image",
-        "inspect",
-        "--format",
-        "{{.Id}}",
-        &cfg.boundary.gateway_image,
-    ])
-    .await
-    else {
-        return false;
-    };
-    running_matches(&running, image.trim(), spec)
-}
-
-/// `true <image id> <spec>`, as `gateway_current` asks for it.
-fn running_matches(inspect: &str, image: &str, spec: &str) -> bool {
-    let mut fields = inspect.split_whitespace();
-    fields.next() == Some("true")
-        && fields.next() == Some(image)
-        && !image.is_empty()
-        && fields.next() == Some(spec)
-}
-
-fn gateway_run_args(cfg: &Config, selinux: bool) -> Result<Vec<String>, BoundaryError> {
-    let allow = Config::allow_file();
-    let net_int = format!("{}:ip={}", cfg.boundary.network, cfg.boundary.gateway_ip);
-    // Two forwards. On a Podman machine the node is outside the VM and gvproxy
-    // reaches the host's loopback, so TCP via `host.containers.internal` works.
-    // On a Linux host that name is a pasta interface address, not loopback, so
-    // the node listens on a Unix socket and the gateway mounts its directory.
-    //
-    // Under SELinux a plain bind mount is unreadable from the container (the
-    // gateway died on "allow.txt missing" on an SELinux host); `:z` relabels the node's
-    // own files, which is fine for state tracon owns.
-    let label = if selinux { ",z" } else { "" };
-    let mount = format!("{}:/etc/tinyproxy/allow.txt:ro{label}", allow.display());
-    // The per-client egress proxy is the node's, reached through a second
-    // forward. It sits beside the harness listener — the same socket
-    // directory, or the same host — so it needs no mount of its own.
-    let egress = match cfg.egress_listen() {
-        HarnessListen::Tcp(addr) => format!("TCP:host.containers.internal:{}", addr.port()),
-        HarnessListen::Unix(path) => format!(
-            "UNIX-CONNECT:/run/tracon/{}",
-            path.file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "egress.sock".into())
-        ),
-    };
-    let (upstream, socket_mount) = match &cfg.gateway.harness_listen {
-        HarnessListen::Tcp(addr) => (
-            format!("TCP:host.containers.internal:{}", addr.port()),
-            None,
-        ),
-        HarnessListen::Unix(path) => {
-            let dir = path
-                .parent()
-                .ok_or_else(|| BoundaryError::Podman("harness socket path has no parent".into()))?;
-            std::fs::create_dir_all(dir)?;
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "harness.sock".into());
-            let label = if selinux { ":z" } else { "" };
-            (
-                format!("UNIX-CONNECT:/run/tracon/{name}"),
-                Some(format!("{}:/run/tracon{label}", dir.display())),
-            )
-        }
-    };
-    let mut args: Vec<String> = vec![
-        "--name".into(),
-        cfg.boundary.gateway_container.clone(),
-        // The default network gives the gateway its own egress; the internal
-        // one is how the harness reaches it.
-        "--network".into(),
-        "podman".into(),
-        "--network".into(),
-        net_int,
-        "-v".into(),
-        mount,
-    ];
-    if let Some(m) = socket_mount {
-        args.push("-v".into());
-        args.push(m);
-        // SELinux forbids a confined container process from connecting to a
-        // socket whose listener is unconfined (`connectto`), whatever the file
-        // is labelled. The gateway is the trusted, node-owned piece — it exists
-        // so the harness never touches the socket — so it runs unconfined; the
-        // harness keeps its label.
-        if selinux {
-            args.push("--security-opt".into());
-            args.push("label=disable".into());
-        }
-    }
-    for env in [
-        format!("TRACON_UPSTREAM={upstream}"),
-        format!("TRACON_LISTEN_IP={}", cfg.boundary.gateway_ip),
-        format!("TRACON_EGRESS_UPSTREAM={egress}"),
-        format!("TRACON_EGRESS_PORT={}", cfg.gateway.qa_proxy_port),
-    ] {
-        args.push("-e".into());
-        args.push(env);
-    }
-    // Only when it is not the subnet the gateway admits by default: a new
-    // argument would replace every running gateway once for nothing.
-    if cfg.boundary.subnet != DEFAULT_SUBNET {
-        args.push("-e".into());
-        args.push(format!("TRACON_ALLOW_SUBNET={}", cfg.boundary.subnet));
-    }
-    args.push(cfg.boundary.gateway_image.clone());
-    Ok(args)
-}
-
-/// Make the gateway, under its own user service where there is a user manager
-/// to run one, and as a plain container where there is not (a Podman
-/// machine, whose containers live in its VM and outside the node's cgroup
-/// anyway). Either way the result replaces whatever gateway was there.
-///
-/// Without `restart`, a gateway that is already what this node describes is
-/// left running. `Ok(true)` when it started one.
-async fn ensure_gateway(cfg: &Config, restart: bool) -> Result<bool, BoundaryError> {
-    let args = gateway_args(cfg, super::selinux_enabled().await, &allowlist_bytes())?;
-    if !restart && gateway_current(cfg, &args).await {
-        tracing::info!(container = %cfg.boundary.gateway_container, "gateway current");
-        return Ok(false);
-    }
-    if let Some(unit) = gateway_unit_path(cfg).filter(|_| !cfg!(target_os = "macos")) {
-        if user_manager_running().await {
-            let name = gateway_unit(cfg);
-            // Checked here: systemd, not the node, runs what the unit names.
-            let podman_bin = super::guarded_podman(&super::resolve_podman_env(cfg))?;
-            let text = gateway_unit_text(&podman_bin, &args, &service_path());
-            write_unit(&unit, &text)?;
-            systemctl(&["daemon-reload"]).await?;
-            systemctl(&["enable", &name]).await?;
-            // A restart, not a start: this is also how a changed gateway
-            // definition is applied.
-            systemctl(&["restart", &name]).await?;
-            tracing::info!(unit = %name, container = %cfg.boundary.gateway_container, "gateway started under its own user service");
-            return Ok(true);
-        }
-    }
-    let _ = podman(&["rm", "-f", "-i", &cfg.boundary.gateway_container]).await;
-    let mut run: Vec<&str> = vec!["run", "-d"];
-    run.extend(args.iter().map(String::as_str));
-    podman(&run).await?;
-    tracing::info!(container = %cfg.boundary.gateway_container, "gateway started");
-    Ok(true)
-}
-
-/// What a converge does about the gateway.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GatewayPlan {
-    /// Make it, or keep the one that is current.
-    Keep,
-    /// Sandboxes on no network reach the node through tunnels, and the node
-    /// serves the allowlist itself: no internal network or gateway to keep.
-    /// A boot without tunnels left this node's running under its own unit,
-    /// which nothing else would stop.
-    Retire(RetiredGateway),
-}
-
-pub fn gateway_plan(cfg: &Config) -> GatewayPlan {
-    match super::uses_sandbox_tunnels(cfg) {
-        true => GatewayPlan::Retire(retired_gateway(cfg)),
-        false => GatewayPlan::Keep,
-    }
-}
-
-/// The gateway objects a node with `sandbox_tunnels` removes: its own unit,
-/// container and internal network, as its configuration names them. `None`
+/// The gateway objects an older node made, which this one removes: its unit,
+/// container and internal network, as its configuration named them. `None`
 /// where the name is the default node's and this node has a prefix of its
 /// own: a scratch node left on the default names must not take down the
 /// gateway of the node beside it.
@@ -651,7 +100,7 @@ pub struct RetiredGateway {
     pub network: Option<String>,
 }
 
-fn retired_gateway(cfg: &Config) -> RetiredGateway {
+pub fn retired_gateway(cfg: &Config) -> RetiredGateway {
     let own_prefix = cfg.boundary.resource_prefix != crate::config::DEFAULT_RESOURCE_PREFIX;
     let ours = |name: String, default: &str| {
         (!name.is_empty() && !(own_prefix && name == default)).then_some(name)
@@ -659,12 +108,12 @@ fn retired_gateway(cfg: &Config) -> RetiredGateway {
     RetiredGateway {
         unit: ours(gateway_unit(cfg), GATEWAY_UNIT),
         container: ours(cfg.boundary.gateway_container.clone(), DEFAULT_GATEWAY),
-        network: ours(cfg.boundary.network.clone(), DEFAULT_NETWORK),
+        network: ours(
+            cfg.retired.network.clone(),
+            crate::config::DEFAULT_GATEWAY_NETWORK,
+        ),
     }
 }
-
-/// The default internal network.
-const DEFAULT_NETWORK: &str = "tracon-int";
 
 /// What retiring a gateway runs on: podman, the user manager, and where a
 /// unit's file is.
@@ -686,14 +135,14 @@ impl GatewayHost for SystemHost {
         systemctl(args).await
     }
     fn unit_file(&self, unit: &str) -> Option<std::path::PathBuf> {
-        unit_path(unit).filter(|_| !cfg!(target_os = "macos"))
+        unit_path(unit)
     }
 }
 
 /// Stop, disable and remove the gateway's unit, then remove its container and
-/// network, whichever of them are still there. Turning tunnels off again makes
-/// all three anew. `Ok(true)` when it removed anything, which is logged once:
-/// the next converge finds nothing left to remove.
+/// network, whichever of them are still there. `Ok(true)` when it removed
+/// anything, which is logged once: the next converge finds nothing left to
+/// remove.
 pub(crate) async fn retire_gateway(
     host: &dyn GatewayHost,
     gateway: &RetiredGateway,
@@ -742,72 +191,10 @@ pub(crate) async fn retire_gateway(
     if !removed.is_empty() {
         tracing::info!(
             removed = %removed.join(", "),
-            "sandboxes reach the node through tunnels; removed the gateway they no longer use"
+            "sandboxes reach the node through tunnels; removed the gateway an older node made"
         );
     }
     Ok(!removed.is_empty())
-}
-
-/// What `recover_gateway` did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Recovery {
-    /// The gateway was running; nothing was touched.
-    Running,
-    /// It was stopped and was started again: under its own user service, put
-    /// there now if setup had not already, or as the container it was.
-    Started,
-    /// There is no gateway to start. Setup makes one; recovery never does,
-    /// because it has no image or network it can be sure of.
-    Missing,
-}
-
-/// Bring back a gateway that stopped, without rerunning setup: at startup,
-/// after a node-service restart took an older gateway down with it, or from a
-/// re-check in the interface. A running gateway is never touched, so this is
-/// safe while sessions are using it. The boundary checks that follow still
-/// decide whether the node runs harnesses; this only gives them a gateway to
-/// find.
-pub async fn recover_gateway(cfg: &Config) -> Result<Recovery, BoundaryError> {
-    let name = &cfg.boundary.gateway_container;
-    let state = podman(&["inspect", name, "--format", "{{.State.Running}}"]).await;
-    if matches!(&state, Ok(running) if running.trim() == "true") {
-        return Ok(Recovery::Running);
-    }
-    let image_present = podman(&["image", "exists", &cfg.boundary.gateway_image])
-        .await
-        .is_ok();
-    let network_present = podman(&["network", "exists", &cfg.boundary.network])
-        .await
-        .is_ok();
-    if let Some(unit) = gateway_unit_path(cfg).filter(|_| !cfg!(target_os = "macos")) {
-        if image_present && network_present && user_manager_running().await {
-            // Written again whatever is there: an older setup left none (its
-            // gateway was a container in the node's own cgroup, which is how
-            // it came to be stopped), and a newer binary may describe it
-            // differently. Both converge on the same unit.
-            let args = gateway_args(cfg, super::selinux_enabled().await, &allowlist_bytes())?;
-            let name = gateway_unit(cfg);
-            // Checked here: systemd, not the node, runs what the unit names.
-            let podman_bin = super::guarded_podman(&super::resolve_podman_env(cfg))?;
-            let text = gateway_unit_text(&podman_bin, &args, &service_path());
-            write_unit(&unit, &text)?;
-            systemctl(&["daemon-reload"]).await?;
-            systemctl(&["enable", &name]).await?;
-            systemctl(&["start", &name]).await?;
-            return Ok(Recovery::Started);
-        }
-    }
-    if state.is_ok() {
-        // A container exists and is stopped: start it as it was made.
-        podman(&["start", name]).await?;
-        return Ok(Recovery::Started);
-    }
-    Ok(Recovery::Missing)
-}
-
-/// Where the gateway's unit goes: beside the node's own.
-fn gateway_unit_path(cfg: &Config) -> Option<std::path::PathBuf> {
-    unit_path(&gateway_unit(cfg))
 }
 
 fn unit_path(unit: &str) -> Option<std::path::PathBuf> {
@@ -816,19 +203,6 @@ fn unit_path(unit: &str) -> Option<std::path::PathBuf> {
             .join(".config/systemd/user")
             .join(unit)
     })
-}
-
-/// Whether there is a systemd user manager to hand the gateway to. A host
-/// without one (a container, a session with no user bus) keeps the plain
-/// container.
-async fn user_manager_running() -> bool {
-    tokio::process::Command::new("systemctl")
-        .args(["--user", "show-environment"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await
-        .is_ok_and(|s| s.success())
 }
 
 async fn systemctl(args: &[&str]) -> Result<(), BoundaryError> {
@@ -846,101 +220,6 @@ async fn systemctl(args: &[&str]) -> Result<(), BoundaryError> {
             String::from_utf8_lossy(&out.stderr).trim()
         )))
     }
-}
-
-fn write_unit(path: &std::path::Path, text: &str) -> Result<(), BoundaryError> {
-    if std::fs::read_to_string(path).ok().as_deref() == Some(text) {
-        return Ok(());
-    }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(path, text)?;
-    Ok(())
-}
-
-/// The PATH the unit runs podman with: the node's own, which found podman and
-/// its helpers (conmon, netavark, pasta) already.
-/// The unit's PATH: the node's, less every entry the path guard refuses, as
-/// every program the guard checks is given. Podman finds conmon and its
-/// network helpers on it.
-fn service_path() -> String {
-    let path = crate::config::path_guard::child_path();
-    match path.is_empty() {
-        true => "/usr/local/bin:/usr/bin:/bin".into(),
-        false => path.to_string_lossy().into_owned(),
-    }
-}
-
-/// The gateway's unit, as Podman's own Quadlet generator would write it for a
-/// container: `--cgroups=split` keeps conmon and the container in this unit's
-/// cgroup rather than the caller's, `--sdnotify=conmon` makes it ready once the
-/// container runs, and the cidfile is how stop finds it. `--replace` takes
-/// over a gateway an older setup left as a bare container.
-pub fn gateway_unit_text(podman_bin: &str, args: &[String], path: &str) -> String {
-    let podman_bin = systemd_quote(podman_bin);
-    let run = args
-        .iter()
-        .map(|a| systemd_quote(a))
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!(
-        "# Written by the node as it sets up its boundary, and by `tracon setup`.\n\
-         # The gateway runs as its own user service so that restarting or stopping the\n\
-         # node's service, which ends everything in that service's cgroup, leaves the\n\
-         # boundary's gateway running, and so a gateway that stops is started again.\n\
-         [Unit]\n\
-         Description=tracon gateway\n\
-         Documentation=https://github.com/cosmicspork/tracon\n\
-         After=network-online.target\n\
-         Wants=network-online.target\n\
-         \n\
-         [Service]\n\
-         Type=notify\n\
-         NotifyAccess=all\n\
-         Delegate=yes\n\
-         KillMode=mixed\n\
-         Environment={path}\n\
-         ExecStart={podman_bin} run --cidfile=%t/%N.cid --replace --rm --cgroups=split --sdnotify=conmon -d {run}\n\
-         ExecStop={podman_bin} rm -v -f -i --cidfile=%t/%N.cid\n\
-         ExecStopPost=-{podman_bin} rm -v -f -i --cidfile=%t/%N.cid\n\
-         Restart=always\n\
-         RestartSec=5\n\
-         TimeoutStopSec=30\n\
-         \n\
-         [Install]\n\
-         WantedBy=default.target\n",
-        path = env_quote(&format!("PATH={path}")),
-    )
-}
-
-/// An `Environment=` assignment, quoted: systemd expands specifiers there but
-/// not variables, so only `%` is doubled.
-fn env_quote(assignment: &str) -> String {
-    let escaped = assignment
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('%', "%%");
-    format!("\"{escaped}\"")
-}
-
-/// One word of a unit's command line, quoted so systemd reads it back as
-/// exactly that word: double quotes, with backslash and quote escaped, and
-/// `%` and `$` doubled so neither specifier nor variable expansion touches it.
-fn systemd_quote(word: &str) -> String {
-    let mut out = String::with_capacity(word.len() + 2);
-    out.push('"');
-    for c in word.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '%' => out.push_str("%%"),
-            '$' => out.push_str("$$"),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
 }
 
 #[cfg(test)]
@@ -1031,57 +310,41 @@ mod tests {
         }
     }
 
-    fn tunnels(prefix: &str, gateway: &str, network: &str) -> Config {
-        let mut cfg: Config =
-            toml::from_str("[runtime.podman]\nsandbox_protocol = true\nsandbox_tunnels = true\n")
-                .unwrap();
-        cfg.boundary.resource_prefix = prefix.into();
-        cfg.boundary.gateway_container = gateway.into();
-        cfg.boundary.network = network.into();
-        cfg
+    fn named(prefix: &str, gateway: &str, network: &str) -> Config {
+        let text = format!(
+            "[boundary]\nresource_prefix = \"{prefix}\"\ngateway_container = \"{gateway}\"\n\
+             network = \"{network}\"\n"
+        );
+        Config::from_toml(&text, std::path::Path::new("node.toml")).unwrap()
     }
 
     #[test]
-    fn a_converge_with_tunnels_retires_the_gateway_and_one_without_keeps_it() {
-        let mut off = Config::default();
-        off.runtime.podman = crate::config::PodmanRuntime::legacy();
-        assert_eq!(gateway_plan(&off), GatewayPlan::Keep);
-        // On by default, where tunnels run at all.
+    fn a_converge_retires_the_gateway_by_the_names_the_node_gave_it() {
         assert_eq!(
-            gateway_plan(&Config::default()) == GatewayPlan::Keep,
-            !cfg!(target_os = "linux")
-        );
-        let on = tunnels("tracon", "tracon-gw", "tracon-int");
-        if !cfg!(target_os = "linux") {
-            // Tunnels need the sandbox protocol, which needs a Linux host.
-            assert_eq!(gateway_plan(&on), GatewayPlan::Keep);
-            return;
-        }
-        assert_eq!(
-            gateway_plan(&on),
-            GatewayPlan::Retire(RetiredGateway {
+            retired_gateway(&Config::default()),
+            RetiredGateway {
                 unit: Some(GATEWAY_UNIT.into()),
                 container: Some("tracon-gw".into()),
                 network: Some("tracon-int".into()),
-            })
+            }
         );
         // A second node retires its own, by the names it gave them.
         assert_eq!(
-            gateway_plan(&tunnels("spike-a4", "spike-a4-gw", "spike-a4-int")),
-            GatewayPlan::Retire(RetiredGateway {
+            retired_gateway(&named("spike-a4", "spike-a4-gw", "spike-a4-int")),
+            RetiredGateway {
                 unit: Some("tracon-gateway-spike-a4-gw.service".into()),
                 container: Some("spike-a4-gw".into()),
                 network: Some("spike-a4-int".into()),
-            })
+            }
         );
         // One that kept the default names never takes the default node's.
         assert_eq!(
-            gateway_plan(&tunnels("spike-a4", "tracon-gw", "tracon-int")),
-            GatewayPlan::Retire(RetiredGateway {
+            retired_gateway(&named("spike-a4", "tracon-gw", "tracon-int")),
+            RetiredGateway {
                 unit: None,
                 container: None,
                 network: None,
-            })
+            }
         );
     }
 
@@ -1142,30 +405,6 @@ mod tests {
     }
 
     #[test]
-    fn the_gateway_unit_runs_it_in_its_own_cgroup_and_restarts_it() {
-        let args: Vec<String> = ["--name", "tracon-gw", "-e", "A=b c", "img:1"]
-            .map(String::from)
-            .to_vec();
-        let text = gateway_unit_text("/usr/bin/podman", &args, "/usr/bin:/bin");
-        assert!(text.contains("--cgroups=split"), "{text}");
-        assert!(text.contains("Restart=always"), "{text}");
-        assert!(text.contains("Type=notify"), "{text}");
-        assert!(text.contains("WantedBy=default.target"), "{text}");
-        assert!(
-            text.contains("Environment=\"PATH=/usr/bin:/bin\""),
-            "{text}"
-        );
-        assert!(
-            text.contains(
-                "ExecStart=\"/usr/bin/podman\" run --cidfile=%t/%N.cid --replace --rm \
-                 --cgroups=split --sdnotify=conmon -d \"--name\" \"tracon-gw\" \"-e\" \"A=b c\" \"img:1\""
-            ),
-            "{text}"
-        );
-        assert!(text.contains("ExecStop=\"/usr/bin/podman\" rm"), "{text}");
-    }
-
-    #[test]
     fn a_second_gateway_gets_a_unit_of_its_own() {
         let mut cfg = Config::default();
         assert_eq!(gateway_unit(&cfg), GATEWAY_UNIT);
@@ -1175,112 +414,9 @@ mod tests {
         assert_eq!(gateway_unit(&cfg), "tracon-gateway-odd_name_x.service");
     }
 
-    /// The label is what lets a converge leave a running gateway alone, so it
-    /// has to move with anything the gateway was started from.
-    #[test]
-    fn the_gateway_label_follows_its_arguments_and_allowlist() {
-        let mut cfg = Config::default();
-        // A socket listener would have its directory made.
-        cfg.gateway.harness_listen = HarnessListen::Tcp("127.0.0.1:7421".parse().unwrap());
-        let args = gateway_args(&cfg, false, b"^a$\n").unwrap();
-        assert_eq!(args.last().unwrap(), &cfg.boundary.gateway_image);
-        let spec = gateway_spec(&args).unwrap().to_string();
-        assert_eq!(spec.len(), 64);
-        let same = gateway_args(&cfg, false, b"^a$\n").unwrap();
-        assert_eq!(gateway_spec(&same), Some(spec.as_str()));
-        let widened = gateway_args(&cfg, false, b"^a$\n^b$\n").unwrap();
-        assert_ne!(gateway_spec(&widened), Some(spec.as_str()));
-        let labelled = gateway_args(&cfg, true, b"^a$\n").unwrap();
-        assert_ne!(gateway_spec(&labelled), Some(spec.as_str()));
-    }
-
-    /// The proxy admits the internal network's own subnet; the default one's
-    /// gateway is started exactly as before there was a choice.
-    #[test]
-    fn the_gateway_admits_the_configured_subnet() {
-        let mut cfg = Config::default();
-        cfg.gateway.harness_listen = HarnessListen::Tcp("127.0.0.1:7421".parse().unwrap());
-        let args = gateway_run_args(&cfg, false).unwrap();
-        assert!(!args.iter().any(|a| a.starts_with("TRACON_ALLOW_SUBNET=")));
-        cfg.boundary.subnet = "10.89.17.0/24".into();
-        let args = gateway_run_args(&cfg, false).unwrap();
-        assert!(args.contains(&"TRACON_ALLOW_SUBNET=10.89.17.0/24".to_string()));
-    }
-
-    #[test]
-    fn only_a_running_gateway_from_the_current_image_with_its_spec_is_current() {
-        assert!(running_matches(
-            "true sha256abc spec1\n",
-            "sha256abc",
-            "spec1"
-        ));
-        assert!(!running_matches(
-            "false sha256abc spec1",
-            "sha256abc",
-            "spec1"
-        ));
-        assert!(!running_matches(
-            "true sha256old spec1",
-            "sha256abc",
-            "spec1"
-        ));
-        assert!(!running_matches(
-            "true sha256abc <no value>",
-            "sha256abc",
-            "spec1"
-        ));
-        assert!(!running_matches("true sha256abc", "sha256abc", "spec1"));
-        assert!(!running_matches("true  spec1", "", "spec1"));
-    }
-
-    #[test]
-    fn a_unit_word_reads_back_as_exactly_that_word() {
-        assert_eq!(systemd_quote("plain"), "\"plain\"");
-        assert_eq!(systemd_quote("a b"), "\"a b\"");
-        assert_eq!(systemd_quote("50%"), "\"50%%\"");
-        assert_eq!(systemd_quote("$HOME"), "\"$$HOME\"");
-        assert_eq!(systemd_quote("say \"hi\""), "\"say \\\"hi\\\"\"");
-        assert_eq!(systemd_quote("a\\b"), "\"a\\\\b\"");
-        assert_eq!(env_quote("PATH=/a%b:$c"), "\"PATH=/a%%b:$c\"");
-    }
-
-    #[test]
-    fn each_image_has_its_own_definitions_digest() {
-        let gateway = definitions_digest("gateway");
-        assert_eq!(gateway, definitions_digest("gateway"));
-        assert_eq!(gateway.len(), 64);
-        assert_ne!(gateway, definitions_digest("harness-claude"));
-        assert_ne!(
-            definitions_digest("harness-native"),
-            definitions_digest("harness-claude")
-        );
-        assert_ne!(gateway, definitions_digest("nonexistent"));
-    }
-
-    /// Each harness is built from its own definitions, and there are exactly
-    /// two of them. The retired harnesses' directories are gone; a
-    /// `harness_dir` that still answered with one would name an empty
-    /// directory and build an image with nothing in it.
-    #[test]
-    fn each_harness_is_built_from_its_own_definitions() {
-        let mut cfg = Config::default();
-        assert_eq!(harness_dir(&cfg), "harness-claude");
-        cfg.harness.id = "native".into();
-        assert_eq!(harness_dir(&cfg), "harness-native");
-        for gone in ["harness", "harness-opencode"] {
-            assert_eq!(definitions_digest(gone), definitions_digest("gone"));
-        }
-    }
-
-    #[test]
-    fn an_unlabelled_image_has_no_digest() {
-        assert_eq!(label_value("<no value>\n"), None);
-        assert_eq!(label_value(""), None);
-        assert_eq!(label_value("abc123\n"), Some("abc123".into()));
-    }
-
     #[test]
     fn allowlist_entries_are_anchored_exactly_once() {
+        use crate::gateway::proxy::anchor;
         // A plain host becomes an exact match, so a suffix cannot slip past.
         assert_eq!(anchor("api.openai.com"), "^api.openai.com$");
         // An already-anchored regex is left alone.

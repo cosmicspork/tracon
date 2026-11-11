@@ -199,7 +199,7 @@ pub fn own_state(mounts: &mut [Mount], scratch_volume: &str) {
 }
 
 /// A session reopened after its node moved to keeping harness state per
-/// session (`own_state`, with `[runtime.podman] sandbox_files` on by default)
+/// session (`own_state`, which every Podman sandbox has)
 /// had its state in the runtime's volumes: its scratch volume (the native
 /// harness's journal, under `harness/run`) and, for Claude Code, its
 /// transcript in the volume every session shared. Without them its resume

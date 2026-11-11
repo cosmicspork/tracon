@@ -1,6 +1,6 @@
 //! The Podman answers to the four startup checks (five with `--deep`). Each
-//! is run against the same `RunSpec` a session uses, via a probe container
-//! that is created but never started.
+//! is run against a sandbox as the provider makes one for a session, via a
+//! probe container that is created but never started.
 
 use super::{podman, podman_json};
 use crate::boundary::checks::{egress_script, egress_verdict, CheckId, CheckResult, Denial};
@@ -51,9 +51,6 @@ pub async fn check_all(cfg: &Config, selinux: bool, deep: bool) -> BoundaryRepor
 }
 
 async fn check_runtime(cfg: &Config) -> CheckResult {
-    if let Err(e) = super::ensure_machine(cfg).await {
-        return CheckResult::fail(CheckId::Runtime, e.to_string());
-    }
     let info = match podman_json(&["info", "--format", "json"]).await {
         Ok(v) => v,
         Err(e) => return CheckResult::fail(CheckId::Runtime, format!("podman info: {e}")),
@@ -71,99 +68,49 @@ async fn check_runtime(cfg: &Config) -> CheckResult {
             format!("podman {version} is rootful; the harness must not share a root domain with the node"),
         );
     }
-    // While the node is building them itself, the remedy is to wait; the
+    // While the node is fetching them itself, the remedy is to wait; the
     // desktop app reads "run `tracon setup`" as its cue to run one.
     let building = crate::boundary::reconcile::running();
-    for (image, dir) in super::setup::images(cfg) {
-        let image = image.as_str();
-        if podman(&["image", "exists", image]).await.is_err() {
-            return CheckResult::fail(
-                CheckId::Runtime,
-                match building {
-                    true => format!("image {image} is missing; the node is building it"),
-                    false => format!("image {image} is missing; run `tracon setup`"),
-                },
-            );
-        }
-        // An image without the label predates it or was built by hand, and
-        // cannot be judged; the next setup rebuilds and labels it.
-        if let Some(built) = super::setup::image_digest(image).await {
-            if built != super::setup::expected_digest(cfg, dir) {
-                return CheckResult::fail(
-                    CheckId::Runtime,
-                    match building {
-                        true => format!("image {image} is out of date; the node is rebuilding it"),
-                        false => format!(
-                            "image {image} was built from other definitions than this binary's; run `tracon setup`"
-                        ),
-                    },
-                );
-            }
-        }
-    }
-    if super::uses_sandbox_protocol(cfg) {
-        let bundle = crate::bundle::effective(cfg).unwrap_or_default();
-        if !bundle.join("bin/tracon-sandbox").is_file() {
-            return CheckResult::fail(
-                CheckId::Runtime,
-                match crate::bundle::managed(cfg) {
-                    true if building => format!(
-                        "the harness bundle {} is not here yet; the node is fetching it",
-                        bundle.display()
-                    ),
-                    true => format!(
-                        "the harness bundle {} is not here; the node fetches it from {} when it sets up its boundary (`tracon setup`)",
-                        bundle.display(),
-                        cfg.sandbox.release_url()
-                    ),
-                    false => format!(
-                        "[runtime.podman] sandbox_protocol is on, and [sandbox] bundle {:?} has no bin/tracon-sandbox",
-                        bundle.display().to_string()
-                    ),
-                },
-            );
-        }
-        if let Some(missing) = crate::service_bundle::missing(cfg, building) {
-            return CheckResult::fail(CheckId::Runtime, missing);
-        }
-        if crate::sandbox_images::enabled(cfg) {
-            let base = crate::sandbox_images::base_image(cfg);
-            if podman(&["image", "exists", &base]).await.is_err() {
-                return CheckResult::fail(
-                    CheckId::Runtime,
-                    match building {
-                        true => format!("image {base} is missing; the node is pulling it"),
-                        false => format!("image {base} is missing; run `tracon setup`"),
-                    },
-                );
-            }
-            return CheckResult::ok(
-                CheckId::Runtime,
-                format!(
-                    "podman {version}, rootless, images present; sandboxes run {base} with the harnesses from {}",
+    let bundle = crate::bundle::effective(cfg).unwrap_or_default();
+    if !bundle.join("bin/tracon-sandbox").is_file() {
+        return CheckResult::fail(
+            CheckId::Runtime,
+            match crate::bundle::managed(cfg) {
+                true if building => format!(
+                    "the harness bundle {} is not here yet; the node is fetching it",
                     bundle.display()
                 ),
-            );
-        }
-        let services = match super::uses_sandbox_services(cfg) {
-            true => ", services in the sandbox",
-            false => "",
-        };
-        return CheckResult::ok(
+                true => format!(
+                    "the harness bundle {} is not here; the node fetches it from {} when it sets up its boundary (`tracon setup`)",
+                    bundle.display(),
+                    cfg.sandbox.release_url()
+                ),
+                false => format!(
+                    "[sandbox] bundle {:?} has no bin/tracon-sandbox",
+                    bundle.display().to_string()
+                ),
+            },
+        );
+    }
+    if let Some(missing) = crate::service_bundle::missing(cfg, building) {
+        return CheckResult::fail(CheckId::Runtime, missing);
+    }
+    let base = crate::sandbox_images::base_image(cfg);
+    if podman(&["image", "exists", &base]).await.is_err() {
+        return CheckResult::fail(
             CheckId::Runtime,
-            format!(
-                "podman {version}, rootless, images present; commands run over the sandbox protocol from {}{}{services}",
-                bundle.display(),
-                match super::uses_sandbox_tunnels(cfg) {
-                    true => ", reaching the node through tunnels with no gateway container",
-                    false => "",
-                }
-            ),
+            match building {
+                true => format!("image {base} is missing; the node is pulling it"),
+                false => format!("image {base} is missing; run `tracon setup`"),
+            },
         );
     }
     CheckResult::ok(
         CheckId::Runtime,
-        format!("podman {version}, rootless, images present"),
+        format!(
+            "podman {version}, rootless, images present; sandboxes run {base} with the harnesses from {}",
+            bundle.display()
+        ),
     )
 }
 
@@ -171,16 +118,13 @@ async fn check_runtime(cfg: &Config) -> CheckResult {
 /// `no_runtime_socket`, `network_isolated`), against one created as
 /// sessions run under `cfg`, named `probe`, and removed afterwards.
 pub async fn probe_checks(cfg: &Config, spec: &RunSpec, probe: &str) -> Vec<CheckResult> {
-    let created = match super::uses_sandbox_protocol(cfg) {
-        true => create_sandbox_probe(cfg, spec, probe).await,
-        false => create_probe(spec, probe).await,
-    };
+    let created = create_sandbox_probe(cfg, spec, probe).await;
     let mut checks = Vec::new();
     match created {
         Ok(inspect) => {
             checks.push(check_unprivileged(&inspect));
             checks.push(check_no_runtime_socket(&inspect));
-            checks.push(check_network(cfg, &inspect).await);
+            checks.push(check_node_only(cfg, &inspect));
             let _ = podman(&["rm", "-f", "-i", probe]).await;
         }
         Err(e) => {
@@ -199,23 +143,7 @@ pub async fn probe_checks(cfg: &Config, spec: &RunSpec, probe: &str) -> Vec<Chec
     checks
 }
 
-/// Create (do not start) a container from the real session spec, and return its
-/// inspect JSON.
-async fn create_probe(spec: &RunSpec, probe: &str) -> Result<serde_json::Value, BoundaryError> {
-    let _ = podman(&["rm", "-f", "-i", probe]).await;
-    let cmd = RunnerCommand {
-        argv: vec!["true".into()],
-        ..Default::default()
-    };
-    let args = spec.podman_args(probe, &cmd, true);
-    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-    podman(&argv).await?;
-    let v = podman_json(&["inspect", probe, "--format", "json"]).await?;
-    Ok(v.get(0).cloned().unwrap_or(serde_json::Value::Null))
-}
-
-/// The probe for a node running its commands over the sandbox protocol: a
-/// sandbox container as the provider makes one, with the bundle and the
+/// The probe: a sandbox container as the provider makes one, with the bundle and the
 /// socket directory mounted, created and not started.
 async fn create_sandbox_probe(
     cfg: &Config,
@@ -344,103 +272,6 @@ fn check_no_runtime_socket(c: &serde_json::Value) -> CheckResult {
     }
 }
 
-async fn check_network(cfg: &Config, c: &serde_json::Value) -> CheckResult {
-    if super::uses_sandbox_tunnels(cfg) {
-        return check_node_only(cfg, c);
-    }
-    let net = match podman_json(&[
-        "network",
-        "inspect",
-        &cfg.boundary.network,
-        "--format",
-        "json",
-    ])
-    .await
-    {
-        Ok(v) => v.get(0).cloned().unwrap_or(serde_json::Value::Null),
-        Err(e) => {
-            return CheckResult::fail(
-                CheckId::NetworkIsolated,
-                format!("network {} not found: {e}", cfg.boundary.network),
-            )
-        }
-    };
-    if !net["internal"].as_bool().unwrap_or(false) {
-        return CheckResult::fail(
-            CheckId::NetworkIsolated,
-            format!(
-                "{} is not internal: the harness has a route out",
-                cfg.boundary.network
-            ),
-        );
-    }
-    if net["dns_enabled"].as_bool().unwrap_or(true) {
-        return CheckResult::fail(
-            CheckId::NetworkIsolated,
-            format!("{} has DNS enabled; disable it", cfg.boundary.network),
-        );
-    }
-    // The harness container must be on that network and nothing else.
-    let nets: Vec<String> = c["NetworkSettings"]["Networks"]
-        .as_object()
-        .map(|o| o.keys().cloned().collect())
-        .unwrap_or_default();
-    if nets != vec![cfg.boundary.network.clone()] {
-        return CheckResult::fail(
-            CheckId::NetworkIsolated,
-            format!(
-                "harness is attached to {nets:?}, expected only {:?}",
-                cfg.boundary.network
-            ),
-        );
-    }
-    // And the gateway has to be up, or the harness reaches nothing at all.
-    let gw = match podman_json(&[
-        "inspect",
-        &cfg.boundary.gateway_container,
-        "--format",
-        "json",
-    ])
-    .await
-    {
-        Ok(v) => v.get(0).cloned().unwrap_or(serde_json::Value::Null),
-        Err(e) => {
-            return CheckResult::fail(
-                CheckId::NetworkIsolated,
-                format!(
-                    "gateway {} is not running: {e}",
-                    cfg.boundary.gateway_container
-                ),
-            )
-        }
-    };
-    if gw["State"]["Running"].as_bool() != Some(true) {
-        return CheckResult::fail(
-            CheckId::NetworkIsolated,
-            format!("gateway {} is not running", cfg.boundary.gateway_container),
-        );
-    }
-    let gw_ip = gw["NetworkSettings"]["Networks"][&cfg.boundary.network]["IPAddress"]
-        .as_str()
-        .unwrap_or("");
-    if gw_ip != cfg.boundary.gateway_ip {
-        return CheckResult::fail(
-            CheckId::NetworkIsolated,
-            format!(
-                "gateway is at {gw_ip:?} on {}, expected {}",
-                cfg.boundary.network, cfg.boundary.gateway_ip
-            ),
-        );
-    }
-    CheckResult::ok(
-        CheckId::NetworkIsolated,
-        format!(
-            "{} is internal with no DNS; gateway at {}",
-            cfg.boundary.network, cfg.boundary.gateway_ip
-        ),
-    )
-}
-
 /// `network_isolated` for a sandbox whose only route is the node, read back
 /// from `podman inspect`: no network but Podman's `none`, no host path
 /// mounted but the bundle and the socket directory, no resolver, and the
@@ -456,9 +287,7 @@ fn check_node_only(cfg: &Config, c: &serde_json::Value) -> CheckResult {
     if mode != "none" || nets.iter().any(|n| n != "none") {
         return CheckResult::fail(
             CheckId::NetworkIsolated,
-            format!(
-                "the sandbox has network {mode:?} ({nets:?}); with sandbox_tunnels it must have none"
-            ),
+            format!("the sandbox has network {mode:?} ({nets:?}); it must have none"),
         );
     }
     let binds = crate::provider::podman::other_binds(c);
@@ -520,13 +349,14 @@ fn check_node_only(cfg: &Config, c: &serde_json::Value) -> CheckResult {
 const ANONYMOUS_GRANT: &str = "GRANT_ANONYMOUS_OK";
 
 /// What only a sandbox with no network must also show from inside: no name
-/// resolves, and the internal network's gateway address, where a harness
-/// container would have found tinyproxy, is not there.
+/// resolves, and the old internal network's gateway address (as an older
+/// `node.toml` named it, else the default), where a harness container once
+/// found the allowlist proxy, is not there.
 fn node_only_script(cfg: &Config) -> String {
     format!(
         "getent hosts example.com >/dev/null 2>&1 && echo DIRECT_DNS_OK; \
          curl -s -o /dev/null -m 5 --noproxy '*' http://{}:{}/ && echo DIRECT_GATEWAY_OK; ",
-        cfg.boundary.gateway_ip, cfg.gateway.proxy_port
+        cfg.retired.gateway_ip, cfg.gateway.proxy_port
     )
 }
 
@@ -562,13 +392,12 @@ fn node_only_verdict(out: &str) -> CheckResult {
 /// the container it runs in.
 pub async fn check_egress(cfg: &Config, selinux: bool, probe: &str) -> CheckResult {
     let spec = RunSpec::from_config(cfg, selinux);
-    let node_only = super::uses_sandbox_tunnels(cfg);
     // The per-client proxy must serve nobody who presents no grant. A node
     // that is not running answers nothing at all, which proves the same. Asked
     // first: the script's last command is what decides its exit status.
     let script = format!(
         "{}curl -s -o /dev/null -m 10 -x http://{}:{} https://example.com/ && echo {ANONYMOUS_GRANT}; {}",
-        if node_only { node_only_script(cfg) } else { String::new() },
+        node_only_script(cfg),
         cfg.boundary.gateway_container,
         cfg.gateway.qa_proxy_port,
         egress_script(&cfg.boundary.gateway_container, cfg.gateway.forward_port),
@@ -580,46 +409,31 @@ pub async fn check_egress(cfg: &Config, selinux: bool, probe: &str) -> CheckResu
     // Clear a leftover of the same name from a crashed prior `--deep` run, or
     // this run fails with a name conflict instead of re-probing.
     let _ = podman(&["rm", "-f", "-i", probe]).await;
-    if super::uses_sandbox_protocol(cfg) {
-        // Run as everything else runs: in a sandbox, over the protocol, and
-        // with sandbox_tunnels through the tunnels a session gets.
-        let runner = super::protocol_runner(cfg, spec);
-        let cmd = RunnerCommand {
-            name: probe.into(),
-            ..cmd
-        };
-        return match runner.run_capture(cmd).await {
-            Ok(out) if out.status.success() => {
-                let out = String::from_utf8_lossy(&out.stdout);
-                match (out.contains(ANONYMOUS_GRANT), node_only) {
-                    (true, _) => CheckResult::fail(
-                        CheckId::Egress,
-                        "the per-client egress proxy served a request that presented no grant",
-                    ),
-                    (false, true) => node_only_verdict(&out),
-                    (false, false) => egress_verdict(&out, Denial::Rejects),
-                }
-            }
-            Ok(out) => CheckResult::fail(
-                CheckId::Egress,
-                format!(
-                    "probe failed: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
+    // Run as everything else runs: in a sandbox, over the protocol, through
+    // the tunnels a session gets.
+    let runner = super::protocol_runner(cfg, spec);
+    let cmd = RunnerCommand {
+        name: probe.into(),
+        ..cmd
+    };
+    match runner.run_capture(cmd).await {
+        Ok(out) if out.status.success() => {
+            let out = String::from_utf8_lossy(&out.stdout);
+            match out.contains(ANONYMOUS_GRANT) {
+                true => CheckResult::fail(
+                    CheckId::Egress,
+                    "the per-client egress proxy served a request that presented no grant",
                 ),
-            ),
-            Err(e) => CheckResult::fail(CheckId::Egress, format!("probe failed: {e}")),
-        };
-    }
-    let args = spec.podman_args(probe, &cmd, false);
-    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-    match podman(&argv).await {
-        // The internal network has no route out at all, so a denied
-        // destination fails at `connect(2)`. The probe is what proves it.
-        Ok(out) if out.contains(ANONYMOUS_GRANT) => CheckResult::fail(
+                false => node_only_verdict(&out),
+            }
+        }
+        Ok(out) => CheckResult::fail(
             CheckId::Egress,
-            "the per-client egress proxy served a request that presented no grant",
+            format!(
+                "probe failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
         ),
-        Ok(out) => egress_verdict(&out, Denial::Rejects),
         Err(e) => CheckResult::fail(CheckId::Egress, format!("probe failed: {e}")),
     }
 }
@@ -738,6 +552,7 @@ mod tests {
         assert!(!node_only_verdict("DIRECT_NAME_SECONDS=0\nDIRECT_ADDR_SECONDS=0").ok);
         let script = node_only_script(&Config::default());
         assert!(script.contains("getent hosts"), "{script}");
+        assert!(script.contains("http://10.89.0.2:8888/"), "{script}");
     }
 
     #[test]

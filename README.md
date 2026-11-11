@@ -128,22 +128,22 @@ inherits a minimal PATH — set `podman` under `[boundary]` in `node.toml` to it
 full path. The interface says so too, in the refusal it shows. A Mac runs Apple
 Containerization and nothing else: with no `[runtime] kind` it runs `apple`, and a
 `node.toml` that says `kind = "podman"` there is refused at load, naming the way over. The node keeps the boundary in step by itself: when it
-starts (after an upgrade, or a new pinned Claude Code), and when what an image is
-built from changes under it, it rebuilds any image whose definitions changed,
-recreates a missing network, rewrites the allowlist and replaces the gateway only if
-it differs from what this build describes, then checks the boundary again. The
-interface says nothing unless a check still fails, and the check refuses sessions
-until the images are current; a session that starts while the node is setting up
-waits for it. `tracon setup` does the same by hand, and is the only way with
+starts (after an upgrade), and when what it fetches changes under it, it fetches the
+harness bundle for its own release and pulls and pins the stock base, then checks the
+boundary again. The interface says nothing unless a check still fails, and the check
+refuses sessions until both are there; a session that starts while the node is setting
+up waits for it. `tracon setup` does the same by hand, and is the only way with
 `auto_reconcile = false` under `[boundary]`.
 
-On Linux each sandbox has no network of its own: its one route is a socket to the node,
-which serves the gateway, the allowlist proxy and the egress proxy itself over it, so
-there is no gateway container. A node that turns that off (`[runtime.podman]
-sandbox_tunnels = false`, deprecated) runs the gateway as its own user service,
-`tracon-gateway.service`, beside the node's: restarting the node leaves it running,
-systemd starts it again if it stops, and a node that finds it stopped starts it before
-checking the boundary.
+Each sandbox has no network of its own: its one route is a socket to the node, which
+serves the gateway, the allowlist proxy and the egress proxy itself over it, so there is
+no gateway container. A node upgraded from a release that ran one (a
+`tracon-gateway.service` user unit, its container and the `tracon-int` network) removes
+all three as it sets up its boundary, and `tracon gc --legacy` removes the gateway and
+harness images it built. A `node.toml` that still turns one of the `[runtime.podman]`
+`sandbox_*` switches off is refused at load, naming the lines to delete; the
+`[boundary]` keys only the gateway and harness images read are ignored, with a line in
+the log.
 
 Open `http://127.0.0.1:7420`. **Settings** groups configuration into Connections,
 Channels, Devices & notifications, Mesh, Permissions & policies, and Maintenance.
@@ -217,7 +217,7 @@ channel bindings, mesh invitations and members, repository recipe offers, any ch
 to `node.toml`, passkeys themselves) is confirmed with a passkey, one prompt per save, and the cookie alone
 cannot make them. A configuration save's prompt lists the keys it changes. Every
 `node.toml` key can be changed this way except a few changed at the node only: the
-state mount, the gateway's socket path, and the gateway and harness images. A
+state mount, the gateway's socket path, and the images and bundle the node runs. A
 secret's value can be set but is never shown back. Importing a skill from a host directory, policy signing and the service
 lifecycle stay at the node. A
 freshly paired browser may add the node's first passkey without one for 15 minutes;
@@ -394,9 +394,8 @@ node-wide volumes, any name it does not recognize, and another node's volumes (n
 that node's `[boundary] resource_prefix`) never.
 
 On Podman and Apple it lists images too, class by class with about what each frees and a total.
-Every image a node builds or commits (a build-steps image, a prepared snapshot, and on the
-deprecated paths a repository's Dockerfile image, the `-src` image under it and a layered
-`-claude`/`-native` image) carries two
+Every image a node builds or commits (a build-steps image, a prepared snapshot, a
+repository's Dockerfile image and the `-src` image under it) carries two
 labels naming its owner, `io.tracon.node.prefix` (the `resource_prefix`) and
 `io.tracon.node.id`, and only images carrying this node's pair are ever removed:
 
@@ -406,7 +405,7 @@ labels naming its owner, `io.tracon.node.prefix` (the `resource_prefix`) and
 | `repository` | a repository image no current build, snapshot or open session uses. A repository no `[[repo]]` entry names, and that is no managed clone, has no current build |
 | `snapshot` | a prepared snapshot that is no repository's current one |
 | `dangling` | a `<none>` image of this node's whose tag a later build took |
-| `legacy` | with `sandbox_images` (the default on Linux), the harness images (and the gateway's under `sandbox_tunnels`) and the layered and `-src` repository images; only with `--legacy` |
+| `legacy` | what older releases built and nothing runs now: the harness images and the gateway's (named from `[boundary] harness_image` and `gateway_image` where an older `node.toml` still sets them), and the layered `-claude`/`-native` session images; only with `--legacy` |
 | `unowned` | never: an image named as this node's with no owner label (made before the labels). `--adopt-unlabelled` takes it as the node's, and it is then judged as above |
 
 Nothing a container uses (running or stopped, any node's) is removed, nothing an image
@@ -470,12 +469,12 @@ submits, and waits: the node snapshots the workspace volume itself, runs the
 project's checks against that snapshot in a throwaway container, and refuses a failure
 or an oversized diff before you ever see it. Which checks, and what they run in, is that
 repository's `[[repo]]` entry in `node.toml`: its own commands and a digest-pinned
-toolchain image, or the node-wide `[supervision] checks` and the harness image where you
+toolchain image, or the node-wide `[supervision] checks` and the stock base where you
 named none — and a check whose command is not in the image is reported as *not runnable*,
 naming the missing tool and the image it looked in, rather than as a failing check the
 agent is told to fix.
 
-Where sandboxes don't run on the stock base, the image can be the repository's own dev
+On a pod-hosted node off the sandbox protocol, the image can be the repository's own dev
 environment. Name its Dockerfile (`dockerfile = ".devcontainer/Dockerfile"`) instead of
 an image and the node builds it
 from the repository's **default branch** — read out of Git, never from a working tree or
@@ -483,8 +482,9 @@ a candidate, which could otherwise choose the image its own checks run in — pi
 built, and rebuilds when the Dockerfile or its build context changes there. Only the
 Dockerfile is honoured: a devcontainer's hooks, features, compose files and services are
 not, and `prepare` is where their work belongs. Over it the node adds one layer so every
-run meets the same thing whatever the Dockerfile ended on: root, `HOME=/root`, `/work`,
-no entrypoint (on Kubernetes, uid 65532 instead of root: see "Images on Kubernetes"). The first check (or `tracon repo build`) pays for the build; a build that
+run meets the same thing whatever the Dockerfile ended on: the pod's uid (65532 unless
+`[runtime.kubernetes] uid` says otherwise) owning `/work`, `/cache` and its home, and no
+entrypoint (see "Images on Kubernetes"). The first check (or `tracon repo build`) pays for the build; a build that
 fails leaves the last image that worked in place and is not retried until you ask. A
 build runs on this machine's Podman with the network, outside the boundary — the same
 trust `devcontainer up` asks for, which is why it is per repository and yours to name.
@@ -497,8 +497,8 @@ instead (next section): an `image`, or a Dockerfile whose first `FROM` is not
 
 #### Repository recipes on the stock base
 
-Where sandboxes run on the stock base (`[runtime.podman] sandbox_images`, an Apple
-node, or `[runtime.kubernetes] sandbox_protocol` with a builder), a repository's recipe
+Where sandboxes run on the stock base (a Podman or Apple node, or
+`[runtime.kubernetes] sandbox_protocol` with a builder), a repository's recipe
 lives in `node.toml` and nothing goes in the repository. A devcontainer stays the
 developers' environment and is no longer the node's recipe. An entry looks like this:
 
@@ -610,11 +610,10 @@ drafted `dockerfile` into steps yourself, as above: unless it begins
 `FROM ${TRACON_SANDBOX_BASE}`, it is refused there.
 
 A session runs in that image too, with Claude Code or `tracon-agent`. Where sandboxes run
-on the stock base (a Podman node on Linux by default, an Apple node, Kubernetes with
-`sandbox_protocol`), the harness comes from the bundle mounted at `/opt/tracon`, and the
-session runs in the repository's build-steps image, or its prepared snapshot, with no layer
-of the node's. The rest of this section is the path Kubernetes without the protocol and a
-Podman node with the sandbox switches off (deprecated) or off Linux still take: the node copies the
+on the stock base (a Podman or Apple node, Kubernetes with `sandbox_protocol`), the
+harness comes from the bundle mounted at `/opt/tracon`, and the session runs in the
+repository's build-steps image, or its prepared snapshot, with no layer of the node's.
+The rest of this section is the path Kubernetes without the protocol still takes: the node copies the
 harness onto the repository's image as one more layer, proves it runs there, and launches
 the session in the result, so the agent has the compiler, the test runner and the formatter its checks
 will be run with instead of the bare harness image. The session's start line says which
@@ -626,8 +625,8 @@ the session. Sessions keep a build cache at `/cache`, one per repository and cha
 outlives each session: what a session fetched and, through `CARGO_TARGET_DIR=/cache/target`,
 what it compiled are there for the next one. It starts as a copy of the repository's base
 cache, and no check reads it. Two sessions on one repository share it, so a second
-`cargo build` waits for the first's lock. The layer is root, like every run here, so a tool the Dockerfile installed under
-another user's home has to be readable and executable by others.
+`cargo build` waits for the first's lock. The layer runs as the pod's uid, so a tool the
+Dockerfile installed under another user's home has to be readable and executable by others.
 
 Either harness reads its configuration from the node and nowhere else, so its layer
 deletes what the harness would otherwise read from the image, and refuses an image that
@@ -844,12 +843,10 @@ anyway. A session in the harness's own image has no cache to prepare against and
 the commands were not run, and why: on a Kubernetes node without a builder, that is every
 session.
 
-A session that starts from its repository's prepared snapshot (`sandbox_images`, or an
-Apple node) skips `prepare` when its workspace is at the very commit the snapshot was
-prepared from: its tree is sent over the snapshot's `/work`, which already holds what
-`prepare` installed, and its log says *workspace prepared from the snapshot*. This needs
-a workspace sent over the image rather than mounted in its place: Apple, or Podman with
-`sandbox_files`. At any other commit, or for a resumed workspace, `prepare` runs again,
+A session that starts from its repository's prepared snapshot (a Podman or Apple node)
+skips `prepare` when its workspace is at the very commit the snapshot was prepared from:
+its tree is sent over the snapshot's `/work`, which already holds what `prepare`
+installed, and its log says *workspace prepared from the snapshot*. At any other commit, or for a resumed workspace, `prepare` runs again,
 every step in one sandbox from the snapshot on its warm `/work` and `/cache`, and the
 workspace comes back once at the end. The snapshot is keyed on lockfiles, not commits, so
 it stays current as the default branch moves, and sessions on a later commit prepare
@@ -1299,7 +1296,7 @@ and revoked the moment the hub loses that key.
 | | |
 |---|---|
 | `tracon serve [--listen]` | run the node |
-| `tracon setup [--rebuild]`, `check-boundary [--deep]` | the boundary: the base image and harness bundle (or, on the deprecated paths, the network, the gateway and the harness images) |
+| `tracon setup`, `check-boundary [--deep]` | the boundary: the base image and harness bundle, and an older release's gateway removed |
 | `tracon service install\|uninstall\|status\|restart` | the platform supervisor (the desktop app runs these for you) |
 | `tracon auth issue [--url]\|revoke\|sessions` | off-machine access; `--url` prints the login QR |
 | `tracon external show\|detach\|stop\|clear <channel>` | a harness you run yourself, using this node's tools |
@@ -1394,8 +1391,8 @@ id = "claude"                       # "claude" or "native": the harness for a mo
                                     # refuses to start; a retired one (omp, opencode) is migrated to
                                     # "claude" as the file loads, with the original kept beside it
                                     # (docs/RECOVERY.md).
-version = "2.1.295"                 # pinned; empty means the version this node's harness image
-                                    # installs. Checked twice — `--version` in the runner, and the
+version = "2.1.295"                 # pinned; empty means the version this node's release
+                                    # carries. Checked twice — `--version` in the runner, and the
                                     # handshake's own report — and a session whose harness reports
                                     # another version, or a protocol revision this node was not
                                     # written against, fails with that reason rather than running.
@@ -1403,31 +1400,24 @@ tools = []                          # the only tools a session may use; empty is
                                     # (a list without the harness's shell leaves nothing to commit,
                                     #  so nothing to review)
 
-[boundary]                          # the rootless-Podman boundary a laptop establishes
+[boundary]                          # the rootless-Podman boundary a Linux host establishes
 podman = ""                         # empty: found on PATH, then the usual install locations
-                                    # network, subnet, gateway_* and harness_image serve only the
-                                    # deprecated paths ([runtime.podman] sandbox_tunnels or
-                                    # sandbox_images off)
-network = "tracon-int"
-subnet = "10.89.0.0/24"
-gateway_ip = "10.89.0.2"
-gateway_container = "tracon-gw"
-gateway_image = "localhost/tracon-gateway"
-harness_image = "localhost/tracon-harness-claude"  # the image for [harness] id; the other
-                                    # harness runs from the same name ending in its own id
-                                    # (localhost/tracon-harness-<id> when this one does not
-                                    # end in [harness] id), which setup builds too. Unused on
-                                    # the sandbox images, where every harness runs from the
-                                    # bundle on the base
-auto_reconcile = true               # set up the boundary at start and when its definitions
-                                    # change; false leaves it to `tracon setup`
+gateway_container = "tracon-gw"     # the name a sandbox reaches the gateways by, on its own
+                                    # loopback. network, subnet, gateway_ip, gateway_image,
+                                    # harness_image and start_machine configured what older
+                                    # releases ran; they are ignored, with a line in the log, but
+                                    # for naming what an upgraded node removes
+auto_reconcile = true               # set up the boundary at start and when what it fetches
+                                    # changes; false leaves it to `tracon setup`
 resource_prefix = "tracon"          # every runtime volume and container this node names starts
                                     # with it and a `-`: the shared harness state, the boundary
                                     # probes, each session's and check's own. Only for a second
                                     # node on the same container host (see "A scratch node"); set
                                     # it before that node first runs, since a change strands the
                                     # volumes the old one named. It may not begin with "tracon-"
-# selinux_label_disable = true      # only if the boundary check says the labels fight you
+# selinux_label_disable = true      # an image-only [[service]]'s container, beside the session's
+                                    # sandbox, runs with label=disable; unset, wherever SELinux
+                                    # is enforcing
 
 [gateway]
 allow_hosts = ['^api\.anthropic\.com$', '^api\.openai\.com$', '^chatgpt\.com$',
@@ -1462,43 +1452,30 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
 # cpus = 4                          # each sandbox VM's CPUs and memory ("4G"); unset or empty
 # memory = ""                       # for container's defaults
 # build_timeout_secs = 1800         # how long one container build of a repository image may take
-# [runtime.podman]                  # every sandbox_* switch but sandbox_init is on by default on a
-                                    # Linux host. One set to false keeps the path it replaced, which
-                                    # is deprecated (the node logs it at start) and goes in a later
-                                    # release; with sandbox_protocol = false the others default off
-# sandbox_protocol = true           # run each harness, check and preparation under tracon-sandbox
-                                    # from the harness bundle, with control and stdio over the
-                                    # sandbox protocol instead of podman's pipes. Linux hosts only;
-                                    # off on any other
-# sandbox_init = false              # start tracon-sandbox under podman's --init, not as PID 1
-# sandbox_files = true              # with sandbox_protocol: workspaces and harness state on the
+# [runtime.podman]                  # every harness, check and preparation runs under tracon-sandbox
+                                    # from the harness bundle, over the sandbox protocol, with
+                                    # --network none: its only route the protocol's socket, and the
+                                    # MCP and model gateway, the allowlist proxy (served by the
+                                    # node) and the per-client egress proxy tunnels to the node on
+                                    # the gateway's ports. Workspaces and harness state are on the
                                     # sandbox's own disk, sent in at start and read back over the
                                     # protocol (exports live; the session's own state at each turn
-                                    # end, every 60 s in a turn, at exit). A lost sandbox loses only
-                                    # what changed since its last sync
-# sandbox_tunnels = true            # with sandbox_protocol: each sandbox runs --network none, its
-                                    # only route the protocol's socket; the MCP and model gateway,
-                                    # the allowlist proxy (served by the node) and the per-client
-                                    # egress proxy are tunnels to the node on the gateway's ports.
-                                    # No gateway container or internal network is made, and the
-                                    # node's own from before (its unit, container and network)
-                                    # is removed
-# sandbox_images = true             # with sandbox_protocol: no harness images. Sandboxes run the
-                                    # stock base ([sandbox] base_image), or a repository's image
-                                    # built FROM ${TRACON_SANDBOX_BASE} (an `image` or another
-                                    # Dockerfile is refused), harnesses run from the bundle the node
-                                    # fetches for its own release, and a repository's prepare runs
-                                    # once and is snapshotted (podman commit) for its sessions and
-                                    # checks. Sandboxes run as the base's user 65532, mapped to the
-                                    # node's own (--userns=keep-id), with HOME=/home/harness
-# sandbox_services = true           # with sandbox_protocol: run each [[service]] that has a bundle
-                                    # inside the session's sandbox under tracon-sandbox, not as a
-                                    # container beside it; one with only an image stays a container
+                                    # end, every 60 s in a turn, at exit). Sandboxes run the stock
+                                    # base ([sandbox] base_image), or a repository's image built
+                                    # FROM ${TRACON_SANDBOX_BASE} (an `image` or another Dockerfile
+                                    # is refused), as the base's user 65532, mapped to the node's own
+                                    # (--userns=keep-id), with HOME=/home/harness; a repository's
+                                    # prepare runs once and is snapshotted (podman commit). Each
+                                    # [[service]] with a bundle runs inside the session's sandbox;
+                                    # one with only an image is a container beside it. The
+                                    # sandbox_protocol, sandbox_files, sandbox_tunnels,
+                                    # sandbox_images and sandbox_services switches that chose this
+                                    # are gone: one set to false is refused at load
+# sandbox_init = false              # start tracon-sandbox under podman's --init, not as PID 1
 # [sandbox]
 # bundle = "/path/to/<version>/amd64" # the harness bundle (scripts/harness-bundle.sh --sandbox)
                                     # holding bin/tracon-sandbox, mounted read-only at /opt/tracon;
-                                    # set at the node only. With sandbox_images and no bundle, the
-                                    # node fetches its release's bundle into <state>/bundles,
+                                    # set at the node only. With no bundle, the node fetches its release's bundle into <state>/bundles,
                                     # checked against its .sha256 and manifest
 # base_image = "ghcr.io/cosmicspork/tracon-sandbox-base:<version>" # pulled for this host's
                                     # architecture only and pinned by that platform's manifest
@@ -1569,9 +1546,9 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
                                     # a check's evidence is keyed on the image identity the runtime
                                     # confirmed, and a tag is not an identity. A locally built image has
                                     # a digest too (`podman image inspect` reports `RepoDigests`); the
-                                    # node refuses to start on a tag. Without one, the harness image,
-                                    # which carries no project toolchain. Refused with sandbox_images,
-                                    # on Apple and with [runtime.kubernetes] sandbox_protocol, which
+                                    # node refuses to start on a tag. Without one, the stock base (or a
+                                    # pod's harness image), which carries no project toolchain. Refused
+                                    # on Podman, Apple and with [runtime.kubernetes] sandbox_protocol, which
                                     # run every repository on the stock base: use `build` steps and
                                     # `prepare` there (Settings → Repositories names each refusal)
 # dockerfile = ".devcontainer/Dockerfile"  # in place of `image`: the node builds this from the
@@ -1585,8 +1562,8 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
                                     # `RUN` each, on the pinned stock base ([sandbox] base_image),
                                     # into one image that ends as the base's user 65532 in /work.
                                     # They reach only `egress`, over HTTPS. Rebuilt when the base,
-                                    # a step or the egress changes. Needs [runtime.podman]
-                                    # sandbox_images, Apple, or Kubernetes sandbox_protocol (see
+                                    # a step or the egress changes. Needs Podman, Apple, or
+                                    # Kubernetes sandbox_protocol (see
                                     # "Repository recipes on the stock base")
 # checks = ["just check"]           # in place of [supervision] checks
 # timeout_secs = 1800               # in place of [supervision] timeout_secs; covers preparation too
@@ -1656,15 +1633,14 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
                                     # proxy through the tunnel, not the runtime's. A [[service]] with a
                                     # bundle runs inside, from the template's copy; one with only an
                                     # image is refused there. Settings' capability view shows how it is
-                                    # reached and why it cannot take a session. Needs
-                                    # [runtime.podman] sandbox_protocol, sandbox_files and
-                                    # sandbox_tunnels: nothing is mounted there
+                                    # reached and why it cannot take a session. Needs a Podman
+                                    # node (or Apple): nothing is mounted there
 # credential = "do"                 # a broker credential holding DIGITALOCEAN_ACCESS_TOKEN
 # registry = "registry.digitalocean.com/acme"  # where the node pushes the template sources it
                                     # builds: its pinned base and each repository's prepared snapshot,
                                     # with the bundle it verified, each [[service]] bundle it holds
                                     # (the release's browser is fetched for it) and the tracon-sandbox
-                                    # service (containers/do-sandbox). Needs sandbox_images. Each is
+                                    # service (containers/do-sandbox). Needs a Podman node. Each is
                                     # registered as a template once per image digest and what goes
                                     # into it (about seven minutes), as part of preparing it, never per
                                     # session, so a release or a new browser bundle makes a new one and
@@ -1703,14 +1679,13 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
 # name = "browser"
 # image = "ghcr.io/cosmicspork/tracon-browser@sha256:…"  # digest-pinned, as a repository image is;
                                     # each publish's digest is in its `browser` workflow run summary.
-                                    # Headless Chrome bound to loopback: the session's namespace is
-                                    # on the shared internal network, and loopback is the session's
-                                    # alone. Upstream chromedp/headless-shell puts socat on 0.0.0.0
+                                    # Headless Chrome bound to loopback, which is the session
+                                    # sandbox's alone. Upstream chromedp/headless-shell puts socat on 0.0.0.0
 # command = []                      # the image's arguments, when another image needs them
 # port = 9222                       # where the session reaches it
 # ready = "/json/version"           # an HTTP path answering 2xx once ready; left out, a TCP connect
 # timeout_secs = 60                 # how long it may take to answer before it is reported failed
-# bundle = "release"                # with [runtime.podman] sandbox_services (and on Apple): what is
+# bundle = "release"                # on Podman and Apple: what is
                                     # mounted read-only at /opt/tracon-services/<name> in every
                                     # sandbox, whose supervisor runs it on the sandbox's loopback
                                     # instead of a container from `image`, which may then be left out.
@@ -1731,8 +1706,6 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
 # env = {}                          # with bundle: environment added to the sandbox's own
 # restart = "on-failure"            # with bundle: "never", "on-failure" or "always"; `timeout_secs`
                                     # then bounds each start, and a restart is not a failure
-# native_binary = "/path/to/tracon-agent"  # a Linux build for tracon-agent's image (`just
-                                    # native-agent`) in place of this version's release asset
 
 # [[mcp_server]]                    # an MCP server outside the node (streamable HTTP). Sessions see
                                     # its tools on the node's own MCP endpoint as `<name>__<tool>`,
@@ -2067,8 +2040,8 @@ directory holding `node.toml`. `TRACON_LISTEN` or `serve --listen` moves the API
 
 ### When a sandbox's connection drops
 
-A run over the sandbox protocol (Podman with `sandbox_protocol`, Kubernetes with
-`sandbox_protocol`, Apple, DigitalOcean) outlives a dropped connection:
+A run over the sandbox protocol (Podman, Kubernetes with `sandbox_protocol`, Apple,
+DigitalOcean) outlives a dropped connection:
 
 - **The node's identity is kept.** The serving node keeps the certificate its sandboxes
   pin in `<state>/sandbox-identity/` (`cert.der` and `key.der`, 0600), made on the
@@ -2119,7 +2092,7 @@ leaves its session closed as `node_restart`, to be continued as before. A node t
 not come back is never waited for: each sandbox ends itself once its redials run out
 (twice `resume_within_secs`), and the next start removes what is left. A node started
 with `resume_within_secs = 0` leaves nothing running when it stops. Services that run beside a
-sandbox as containers of their own (not under `sandbox_services`) are stopped as before.
+sandbox as containers of their own (an image-only `[[service]]`) are stopped as before.
 
 ### The hub
 
@@ -2208,12 +2181,11 @@ loads.
 #### Sandboxes on Kubernetes
 
 With `[runtime.kubernetes] sandbox_protocol = true`, every harness pod is a sandbox
-over the sandbox protocol, as on Podman with `sandbox_protocol`, `sandbox_files` and
-`sandbox_tunnels` together. Apply `deploy/kubernetes/sandbox-protocol` (an overlay of
+over the sandbox protocol, as on Podman. Apply `deploy/kubernetes/sandbox-protocol` (an overlay of
 the base) for it:
 
 - **Bundle.** The node's own: `[sandbox] bundle`, else its release's, which it fetches
-  and checks into `<state>/bundles` as a Podman node with `sandbox_images` does (at the
+  and checks into `<state>/bundles` as a Podman node does (at the
   boundary check, so at start). It serves it as one tar on the sandbox port. Each pod's
   init container, in the pod's own image (it needs `sh`, `curl` or `wget`, `sha256sum`
   and `tar`), fetches it, checks it against the digest the node wrote into the pod
@@ -2223,7 +2195,7 @@ the base) for it:
 - **Files.** Nothing of the state claim is mounted, so the claim is the node's alone.
   Every directory a run names is an emptyDir of the pod's own, filled over the
   protocol and, for a session's workspace and own harness state, taken back at each
-  turn end, every 60 s in a turn and at exit, as with Podman's `sandbox_files`. A
+  turn end, every 60 s in a turn and at exit, as on Podman. A
   session's harness state is its own; the state every session once shared is never
   sent. Caches are sent in and come back only from a preparation.
 - **Placement.** Pods sit beside this node's own pod (`tracon.dev/role=node` and
@@ -2361,7 +2333,7 @@ triggers no rebuild.
 **Over the sandbox protocol** (`sandbox_protocol = true`) there are no harness images
 and no layer: every sandbox runs the stock base (`[sandbox] base_image`), or a
 repository's image built on it from its `build` steps, with the harness from the
-bundle, as on Podman with `sandbox_images`. The node pins the base when it converges
+bundle, as on Podman. The node pins the base when it converges
 (at start, and whenever the release, `base_image` or `bundle` changes) by the manifest
 its registry holds for the node's own architecture, which is every sandbox's, since
 affinity keeps them on the node pod's machine; nothing is pulled by the node, and a
@@ -2489,13 +2461,8 @@ To try a build without touching the node you run, start a second one beside it w
 own state, configuration, port and runtime names. Everything a node creates in Podman is
 named from `node.toml`, so a scratch node with its own values shares none of the real
 one's harness state, images, probes or sockets, and neither node's `tracon gc` lists the
-other's volumes. On Linux its sandboxes have no network and no gateway of their own, so a
-prefix of its own is all the boundary needs. A node with the sandbox switches off
-(deprecated) also names its own `network`, `subnet`, `gateway_ip`,
-`gateway_container`, `gateway_image` and `harness_image` under `[boundary]` (say
-`scratch-int`, `10.89.7.0/24`, `10.89.7.2`, `scratch-gw`, `localhost/scratch-gateway`
-and `localhost/scratch-harness-claude`), since the gateway, its user service and the
-harness images are named from them.
+other's volumes. Its sandboxes have no network and no gateway of their own, so a prefix
+of its own is all the boundary needs.
 
 ```sh
 # Not under the temp directory: sessions' worktrees go there, and it may not hold the config.
@@ -2527,10 +2494,6 @@ podman volume ls -q --filter name='^scratch-' | xargs -r podman volume rm
 podman images --format '{{.Repository}}:{{.Tag}}' | grep '^localhost/scratch-' | xargs -r podman image rm
 rm -rf "$TRACON_STATE_DIR" "$TRACON_CONFIG_DIR"
 ```
-
-A node on the deprecated path also leaves its network (`podman network rm scratch-int`)
-and, on Linux, its gateway's user service (`systemctl --user disable --now
-tracon-gateway-scratch-gw.service`).
 
 ## Escape hatch
 

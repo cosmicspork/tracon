@@ -1,7 +1,8 @@
-//! How the node gets a harness process. `PodmanRunner` puts it inside the
-//! Podman boundary, the Kubernetes runner inside a harness pod, and
-//! `ProtocolRunner` inside a sandbox provider's sandbox over the sandbox
-//! protocol (Podman's, with `[runtime.podman] sandbox_protocol`);
+//! How the node gets a harness process. `ProtocolRunner` puts it inside a
+//! sandbox provider's sandbox over the sandbox protocol (Podman's, Apple's,
+//! DigitalOcean's, and a pod's with `[runtime.kubernetes] sandbox_protocol`),
+//! and the Kubernetes runner inside a harness pod otherwise. `PodmanRunner`
+//! answers for a Podman sandbox's image identity and image-only services;
 //! `LocalRunner` (tests only) runs the argv on the host so the adapter can be
 //! exercised without containers.
 

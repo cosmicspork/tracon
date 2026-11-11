@@ -488,9 +488,10 @@ async fn a_dockerfile_is_never_tried_in_the_harness_image_instead() {
 #[tokio::test]
 async fn a_dockerfile_the_entry_already_names_is_built_without_a_card() {
     let backend = Arc::new(Building::default());
-    // A Dockerfile off the stock base: the deprecated path's.
+    // A Dockerfile off the stock base, which only a pod-hosted node off the
+    // sandbox protocol still builds.
     let mut cfg = Config::default();
-    cfg.runtime.podman = tracon::config::PodmanRuntime::legacy();
+    cfg.runtime.kind = tracon::config::RuntimeKind::Kubernetes;
     let h = harness_on(cfg, backend.clone()).await;
     let dir = repository_for(&h, "s-held");
     dev_dockerfile(dir.path());

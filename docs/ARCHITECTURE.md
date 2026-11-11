@@ -190,9 +190,9 @@ to last-good is never replaced, so the restore cannot loop. Undoing one is in
 Every key is editable from wherever the operator is (`http::config_api`), except a few
 the schema marks `host_only`. The state mount is changed in the file on the host and
 never by an edit, since it decides where agents can write. The gateway's harness socket
-path (`gateway.harness_listen`, whose directory the node creates and mounts writable
-into the gateway container) and the images the node runs with its own sockets and
-credentials (`boundary.gateway_image`, `boundary.harness_image`,
+path (`gateway.harness_listen`, whose directory the node creates) and the images and
+bundles the node runs with its own sockets and credentials (`sandbox.base_image`,
+`sandbox.bundle`, `sandbox.release_url`, a service's `bundle`,
 `runtime.kubernetes.harness_image`) are outside the path guard's rules, so they are
 changed at the node, by hand or by an edit made there, and refused from elsewhere.
 
@@ -455,10 +455,8 @@ which rely on the node's own `PATH`, which no key sets (the review capture's, th
 session checkpoint's and the skill reader's `git` go through the guard);
 configuration files a trusted program reads from the home the node gives it, which on
 Kubernetes is on the state volume (the publish path's `git` is told to ignore them);
-Podman storage moved elsewhere by `storage.conf`; the gateway's systemd unit, which
-names the podman checked when setup or recovery wrote it, with the guard's `PATH`, and
-which systemd runs later without asking the node; and image keys (`boundary.harness_image`, `[[repo]] image`,
-`[[service]] image`), which choose what runs inside the boundary, not on the host, and
+Podman storage moved elsewhere by `storage.conf`; and image keys (`sandbox.base_image`,
+`runtime.kubernetes.harness_image`, `[[repo]] image`, `[[service]] image`), which choose what runs inside the boundary, not on the host, and
 are held by digest pinning instead. The guard is a backstop behind the passkey every
 admin save needs, the audit row and the push.
 
@@ -664,15 +662,16 @@ node that cannot enforce must not quietly run credential-adjacent work with a la
 on it. Refusal is the honest state, verified at startup, and a refusing node still
 serves its interface and relays so the refusal is visible from anywhere.
 
-The boundary is capability-driven, not tied to an OS or product. Two
-implementations exist — rootless Podman (internal network with no DNS, a gateway
-container carrying an allowlist CONNECT proxy and the node forward, the harness
-container capability-dropped with the node holding its exec pipe) and Kubernetes
-(one harness pod per session, a NetworkPolicy making the node the harness's only
-route, the node serving the allowlist proxy itself). Both answer the same checks
+The boundary is capability-driven, not tied to an OS or product. Three
+implementations exist — rootless Podman on a Linux host and Apple Containerization on a
+Mac (each sandbox capability-dropped with no network at all, its one route the sandbox
+protocol's socket to the node, over which the node serves the MCP and model gateway, the
+allowlist CONNECT proxy and the egress proxy as tunnels on the sandbox's loopback) and
+Kubernetes (one harness pod per session, a NetworkPolicy making the node the harness's
+only route, the node serving the allowlist proxy itself). All answer the same checks
 behind the same seam. The harness reaches exactly two things: allowlisted provider
-hosts through the proxy, and the node through the forward. On Podman a second forward
-carries the node's per-client egress proxy, which opens nothing to a caller that
+hosts through the proxy, and the node through the forward. On Podman and Apple a third
+tunnel carries the node's per-client egress proxy, which opens nothing to a caller that
 presents no grant; on Kubernetes a harness pod reaches the same proxy at the node's pod,
 on `[gateway] egress_port`, which both policies must open before the node issues a
 grant. The proxy never dials this machine or its link for a grant. In a cluster it sits
@@ -695,10 +694,10 @@ Three things collapse the boundary and must be verified per environment:
 **Denied egress rejects; it does not drop.** A blackholed destination and a working
 but slow one are the same thing to a caller, and a harness or a tool it runs may
 fetch with no timeout of its own, so one dropped packet is a call that never
-returns. Podman's internal network has no route out at
+returns. A Podman or Apple sandbox has no route out at
 all, so a denied connection fails at `connect(2)` and a denied name fails at
-resolution, both in milliseconds; the gateway refuses an unlisted host with a status
-rather than silence. `--deep` measures this rather than assuming it, and fails a
+resolution, both in milliseconds; the allowlist proxy refuses an unlisted host with a
+status rather than silence. `--deep` measures this rather than assuming it, and fails a
 boundary whose denials take longer than a few seconds. Kubernetes is the caveat: a
 NetworkPolicy drops by nature and there is no portable way to make it reject, so
 there the bound has to come from a cluster that can express one, and until it does
@@ -783,10 +782,9 @@ reachable, an unlisted host refused.
 Contact-derived rules that stay rules: a bind mount over a symlink does not mask it,
 so the harness state directory is built empty and only named files are mounted in —
 nothing of the operator's leaks into a session, the same commitment as "nothing in
-project repos" applied in the other direction. Where a gateway container still
-runs (Podman with the sandbox switches off), the node forward is a Unix socket and
-the gateway runs `label=disable` so the harness never touches the socket while
-keeping its own confinement.
+project repos" applied in the other direction. A sandbox never runs with
+`label=disable`: the bundle is relabelled shared and read-only, and the socket directory
+it dials is the node's, mounted read-only.
 
 ### Credential classes
 
@@ -1017,29 +1015,28 @@ the id the review will have, `review_status` carries the wait and then reports t
 review or the same refusal the call would have given, and a retry of the same candidate
 against the same check definitions attaches to the run instead of starting another. A
 restart interrupts whatever was still `running` and closes the sessions that asked for
-it, like every other live session. Where sandboxes run on the stock base (a Podman node
-on Linux by default, an Apple node, and Kubernetes with `[runtime.kubernetes]
-sandbox_protocol`), an entry gives root `build` steps instead: the node layers them on
-the pinned `tracon-sandbox-base` as the repository's one image, every harness runs in it
-from the mounted bundle with no layer of the node's, and an `image` or a Dockerfile not
-`FROM ${TRACON_SANDBOX_BASE}` is refused (`repo_image::stock_base_only`). What follows is
-the path that remains for Kubernetes without the protocol and for a Podman node that turns
-the sandbox switches off (deprecated) or runs off Linux. An entry may name the repository's
+it, like every other live session. Where sandboxes run on the stock base (a Podman or
+Apple node, and Kubernetes with `[runtime.kubernetes] sandbox_protocol`), an entry gives
+root `build` steps instead: the node layers them on the pinned `tracon-sandbox-base` as
+the repository's one image, every harness runs in it from the mounted bundle with no
+layer of the node's, and an `image` or a Dockerfile not `FROM ${TRACON_SANDBOX_BASE}` is
+refused (`repo_image::stock_base_only`). A Dockerfile that is on the base is built as
+below, under the same layer. What follows is otherwise the path that remains for
+Kubernetes without the protocol. An entry may name the repository's
 Dockerfile instead of an image: the node then builds it (`crate::repo_image`) from the **default branch**, read
 through Git's object store and never from a working tree, adds one layer of its own,
 and records the digest it built in its own state — the recipe is configuration, the
 digest is not, because a locally built image has a different one on every node. That
 is also why a recipe can be offered to another node (see Mesh frames) and its digest
 never is. The
-layer depends on who a run is (`repo_image::RunAs`). Under Podman it is root with no
-capabilities in `/work`, `HOME=/root`, no entrypoint. A pod is never root: there the
-layer makes `/work`, `/cache` and `harness_home` owned by `[runtime.kubernetes] uid`
-(65532), sets `HOME` to that home, ends on `USER 65532:65532` and clears the
-entrypoint, and the pod says `runAsNonRoot` with the same uid. That makes a contract the
-node cannot enforce: what the repository's Dockerfile installs must be readable and
-executable by any uid. The profile is part of the recipe's hash and of the session
-layer's key (only where it is not Podman's, so Podman's existing digests keep their
-keys), so an image built for one runtime is never used by the other. A check run builds first when the recipe has moved; an
+layer depends on who a run is (`repo_image::RunAs`), which is never root: it makes
+`/work`, `/cache` and the home owned by the run's uid (the stock base's 65532 on Podman
+and Apple, `[runtime.kubernetes] uid` in a pod), sets `HOME` to that home, ends on that
+`USER` and clears the entrypoint, and a pod says `runAsNonRoot` with the same uid. That
+makes a contract the node cannot enforce: what the repository's Dockerfile installs must
+be readable and executable by any uid. The profile is part of the recipe's hash and of
+the session layer's key, so an image built for one runtime's profile is never used by
+another's. A check run builds first when the recipe has moved; an
 approval only reads, so it cannot start a build, and a merged Dockerfile change is a
 different execution image and therefore different evidence. Image builds are the one
 place repository-authored commands run with the network and outside the boundary,

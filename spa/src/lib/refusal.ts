@@ -5,10 +5,10 @@
 const REMEDIES: Record<string, string> = {
   runtime:
     'start the container runtime, or set `podman` under [boundary] in node.toml, then restart the node',
-  harness_unprivileged: 'run `tracon setup` to rebuild the harness image, then restart the node',
-  no_runtime_socket: 'run `tracon setup` to rebuild the harness image, then restart the node',
-  network_isolated: 'run `tracon setup` to recreate the network and gateway, then restart the node',
-  egress: 'run `tracon setup` to rebuild the gateway, then restart the node',
+  harness_unprivileged: 'run `tracon setup` to bring the base image and bundle back, then restart the node',
+  no_runtime_socket: 'run `tracon setup` to bring the base image and bundle back, then restart the node',
+  network_isolated: 'run `tracon setup` to bring the boundary in step, then restart the node',
+  egress: 'run `tracon setup` to bring the boundary in step, then restart the node',
 }
 
 /** The remedy for a failed boundary check, or a way to find out. */

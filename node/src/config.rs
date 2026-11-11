@@ -81,6 +81,10 @@ pub struct Config {
     /// How this node reaches DigitalOcean's Harness Runtime, for sessions
     /// `[placement] digitalocean` sends there.
     pub digitalocean: crate::provider::digitalocean::Settings,
+    /// What an older node's gateway and harness images were named, which an
+    /// upgraded node removes. Not part of the file's current shape.
+    #[serde(skip)]
+    pub retired: RetiredNames,
 }
 
 /// `[sandbox]`: what a sandbox provider mounts into each sandbox.
@@ -94,13 +98,13 @@ pub struct Sandbox {
     /// SELinux host.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bundle: Option<PathBuf>,
-    /// The stock image a sandbox runs when its repository names none, with
-    /// `[runtime.podman] sandbox_images` on. Pinned by digest once pulled.
+    /// The stock image a sandbox runs when its repository names none: on
+    /// Podman, Apple, and Kubernetes with `sandbox_protocol`. Pinned by
+    /// digest once pulled.
     /// Unset, the release's own `tracon-sandbox-base` at this node's version.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_image: Option<String>,
-    /// Where the node fetches its harness bundle from, with
-    /// `[runtime.podman] sandbox_images` on and no `bundle` set:
+    /// Where the node fetches its harness bundle from, with no `bundle` set:
     /// `<release_url>/v<version>/tracon-bundle-<version>-<arch>.tar.gz` and
     /// its `.sha256`; and a `[[service]]` with `bundle = "release"`, its
     /// `tracon-browser-<chrome>-<arch>.tar.gz` beside them. Unset, this
@@ -146,16 +150,9 @@ impl Sandbox {
     }
 }
 
-/// `[runtime.podman] sandbox_images` stands on the sandbox protocol, and the
-/// bundle it fetches is the release's: refuse a setting that cannot work
-/// rather than run sessions in images that are not there.
+/// Refuse a sandbox setting that cannot work rather than run sessions in
+/// sandboxes that are not there.
 pub fn validate_sandbox(config: &Config) -> Result<(), String> {
-    let podman = &config.runtime.podman;
-    if podman.sandbox_images && !podman.sandbox_protocol {
-        return Err(
-            "runtime.podman.sandbox_images needs runtime.podman.sandbox_protocol = true".into(),
-        );
-    }
     let memory = &config.runtime.apple.memory;
     let digits = memory.trim_end_matches(['K', 'M', 'G', 'T']);
     if !memory.is_empty()
@@ -305,7 +302,7 @@ pub struct Service {
     /// `<version>/<arch>` of `scripts/browser-bundle.sh`'s output, say), or
     /// `release` on `browser`: the browser bundle of the node's own release,
     /// which the node fetches and checks (`crate::service_bundle`).
-    /// With `[runtime.podman] sandbox_services` (and on Apple), it is mounted
+    /// On Podman and Apple (and Kubernetes over the protocol), it is mounted
     /// read-only at `/opt/tracon-services/<name>` in every sandbox, and the
     /// service runs there under the sandbox's supervisor instead of in
     /// `image`.
@@ -1249,124 +1246,45 @@ pub struct Runtime {
 
 /// `[runtime.podman]`: how the Podman boundary runs what it runs.
 ///
-/// Every `sandbox_*` switch but `sandbox_init` is on by default on a Linux
-/// host, which is the only one the sandbox protocol runs on. Turning one off
-/// keeps the path it replaced (the gateway container, harness images,
-/// mounted volumes, sidecars), which is deprecated: the node says so at load
-/// (`deprecated_podman_settings`), and the old paths go in a later release.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Every harness, check and preparation runs under `tracon-sandbox` from the
+/// harness bundle, over the sandbox protocol, on the stock base or a
+/// repository's image built on it: with no network of its own, its trees on
+/// its own disk and its routes to the node as tunnels. The `sandbox_*`
+/// switches that once chose this over the gateway container, harness images
+/// and mounted volumes are gone (`retired_podman_switches`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PodmanRuntime {
-    /// Run every harness, check and preparation under `tracon-sandbox` from
-    /// the harness bundle, with its control and stdio over the sandbox
-    /// protocol rather than `podman run`'s own pipes. Linux hosts only. Off,
-    /// every other switch here is off too unless set on.
-    pub sandbox_protocol: bool,
     /// Start `tracon-sandbox` under Podman's `--init` rather than as the
     /// container's PID 1.
     pub sandbox_init: bool,
-    /// Keep a sandbox's workspace and harness state on its own disk rather
-    /// than on mounted volumes: the node sends them in when it starts, reads
-    /// the workspace back over the protocol whenever it is exported, and
-    /// takes the session's own state back at each turn end, every
-    /// `runner::sandbox_files::SYNC_EVERY` during a turn, and at exit. Needs
-    /// `sandbox_protocol`.
-    pub sandbox_files: bool,
-    /// With `sandbox_protocol`: each sandbox runs with `--network none`, and
-    /// its only route is the protocol's socket. The MCP and model gateway,
-    /// the allowlist proxy and the per-client egress proxy are tunnels over
-    /// that connection to the node, which serves the allowlist proxy itself;
-    /// no gateway container or internal network is made for them.
-    pub sandbox_tunnels: bool,
-    /// With `sandbox_protocol`: no harness images. Sandboxes run the stock
-    /// base image (`[sandbox] base_image`) or a repository's image built on
-    /// it (any other is refused, `repo_image::stock_base_only`), the
-    /// harnesses come from the harness bundle the node fetches for its own
-    /// version (unless `[sandbox] bundle` names one), and a repository's
-    /// preparation is run once and snapshotted for its sessions and checks
-    /// to start from.
-    pub sandbox_images: bool,
-    /// Run each `[[service]]` that has a `bundle` inside the session's
-    /// sandbox, under its supervisor, rather than as a container beside it.
-    /// Needs `sandbox_protocol`. A service with only an image stays a
-    /// container.
-    pub sandbox_services: bool,
-}
-
-impl Default for PodmanRuntime {
-    fn default() -> Self {
-        let on = cfg!(target_os = "linux");
-        Self {
-            sandbox_protocol: on,
-            sandbox_init: false,
-            sandbox_files: on,
-            sandbox_tunnels: on,
-            sandbox_images: on,
-            sandbox_services: on,
-        }
-    }
 }
 
 #[cfg(test)]
 impl Config {
-    /// A Podman node with every sandbox switch off: the deprecated paths,
-    /// which the tests written against them still cover.
-    pub fn podman_legacy() -> Self {
+    /// A pod-hosted node off the sandbox protocol: the one runtime that
+    /// still runs repositories' own images with a harness layered on, which
+    /// the tests written against that path cover.
+    pub fn pod_hosted() -> Self {
         let mut config = Self::default();
-        config.runtime.podman = PodmanRuntime::legacy();
+        config.runtime.kind = RuntimeKind::Kubernetes;
         config
     }
 }
 
-/// The `[runtime.podman]` switches that stand on `sandbox_protocol`.
-const PROTOCOL_SWITCHES: [&str; 4] = [
+/// The `[runtime.podman]` switches that chose the sandbox protocol and its
+/// parts over the paths it replaced, which are gone.
+const RETIRED_PODMAN_SWITCHES: [&str; 5] = [
+    "sandbox_protocol",
     "sandbox_files",
     "sandbox_tunnels",
     "sandbox_images",
     "sandbox_services",
 ];
 
-impl PodmanRuntime {
-    /// Every switch off: the deprecated paths, as Podman runs them off a
-    /// Linux host or where a node turns the protocol off.
-    pub fn legacy() -> Self {
-        Self {
-            sandbox_protocol: false,
-            sandbox_init: false,
-            sandbox_files: false,
-            sandbox_tunnels: false,
-            sandbox_images: false,
-            sandbox_services: false,
-        }
-    }
-
-    /// The switches as `text` writes them, settled: with `sandbox_protocol`
-    /// off, each switch that stands on it and that `text` leaves out is off
-    /// too, rather than on by default and refused or ignored for want of the
-    /// protocol. One the file turns on beside it is left to be refused.
-    fn settle(&mut self, text: &str) {
-        if self.sandbox_protocol {
-            return;
-        }
-        let written = podman_settings(text);
-        for key in PROTOCOL_SWITCHES {
-            if written.iter().any(|(name, _)| *name == key) {
-                continue;
-            }
-            match key {
-                "sandbox_files" => self.sandbox_files = false,
-                "sandbox_tunnels" => self.sandbox_tunnels = false,
-                "sandbox_images" => self.sandbox_images = false,
-                _ => self.sandbox_services = false,
-            }
-        }
-    }
-}
-
-/// The `sandbox_*` switches `[runtime.podman]` in `text` sets, by name, with
-/// the value each is set to; `sandbox_init` is a choice of how, not a path,
-/// and is left out.
-fn podman_settings(text: &str) -> Vec<(&'static str, bool)> {
+/// The retired `[runtime.podman]` switches `text` sets, by name, with the
+/// value each is set to.
+fn retired_podman_switches(text: &str) -> Vec<(&'static str, bool)> {
     let Ok(value) = toml::from_str::<toml::Value>(text) else {
         return Vec::new();
     };
@@ -1376,24 +1294,135 @@ fn podman_settings(text: &str) -> Vec<(&'static str, bool)> {
     else {
         return Vec::new();
     };
-    std::iter::once("sandbox_protocol")
-        .chain(PROTOCOL_SWITCHES)
+    RETIRED_PODMAN_SWITCHES
+        .into_iter()
         .filter_map(|key| Some((key, podman.get(key)?.as_bool()?)))
         .collect()
 }
 
-/// The `[runtime.podman]` switches `text` turns off on a Podman node, each of
-/// which keeps a deprecated path: worth one line each in the log, since the
-/// node still runs them.
-fn deprecated_podman_settings(text: &str, kind: RuntimeKind) -> Vec<&'static str> {
-    if kind != RuntimeKind::Podman || !cfg!(target_os = "linux") {
-        return Vec::new();
+/// The retired switches `text` sets on a Podman node, which ask for what
+/// always happens there now: worth a line in the log. Another kind's node
+/// does not read `[runtime.podman]` at all.
+fn ignored_podman_switches(text: &str, kind: RuntimeKind) -> Vec<&'static str> {
+    match kind {
+        RuntimeKind::Podman => retired_podman_switches(text)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect(),
+        RuntimeKind::Kubernetes | RuntimeKind::Apple => Vec::new(),
     }
-    podman_settings(text)
+}
+
+/// Refuse a Podman node whose `text` turns a retired switch off: the path it
+/// kept is gone, and running the default instead would change what the
+/// operator asked for without saying so. One set `true` asks for what
+/// always happens, and is only worth a line in the log.
+fn refuse_retired_podman_switches(text: &str, kind: RuntimeKind) -> Result<(), String> {
+    if kind != RuntimeKind::Podman {
+        return Ok(());
+    }
+    let off: Vec<&str> = retired_podman_switches(text)
         .into_iter()
         .filter(|(_, on)| !on)
         .map(|(key, _)| key)
+        .collect();
+    if off.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "[runtime.podman] {} = false is no longer supported: Podman runs every sandbox over \
+         the sandbox protocol, on the stock base with the harnesses from the bundle, with no \
+         network but tunnels to the node, and the gateway container, harness images and \
+         mounted volumes those switches kept are gone. Delete the line{} and run `tracon setup` \
+         (it removes the old gateway); a [[repo]] entry with `image =`, or a Dockerfile not on \
+         `FROM ${{TRACON_SANDBOX_BASE}}`, moves to `build` steps (README, \"Starting work\"); \
+         `tracon gc --legacy` removes the old harness images",
+        off.join(" = false, "),
+        if off.len() > 1 { "s" } else { "" },
+    ))
+}
+
+/// The `[boundary]` and `[harness]` keys only the gateway container and the
+/// harness images read, which went with them. Ignored, and worth one line in
+/// the log rather than silence.
+const RETIRED_BOUNDARY_KEYS: [(&str, &str); 7] = [
+    ("boundary", "network"),
+    ("boundary", "subnet"),
+    ("boundary", "gateway_ip"),
+    ("boundary", "gateway_image"),
+    ("boundary", "harness_image"),
+    ("boundary", "start_machine"),
+    ("harness", "native_binary"),
+];
+
+/// The retired keys `text` still sets, as `table.key`.
+fn retired_boundary_keys(text: &str) -> Vec<String> {
+    let Ok(value) = toml::from_str::<toml::Value>(text) else {
+        return Vec::new();
+    };
+    RETIRED_BOUNDARY_KEYS
+        .into_iter()
+        .filter(|(table, key)| value.get(*table).and_then(|t| t.get(*key)).is_some())
+        .map(|(table, key)| format!("{table}.{key}"))
         .collect()
+}
+
+/// What an older node's gateway and harness images were named, as its
+/// `node.toml` still says, so an upgraded node can find and remove them
+/// (`boundary::podman::setup::retire_gateway`, `tracon gc --legacy`). Not
+/// part of the file's current shape: read from the retired keys, else the
+/// names every node used by default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetiredNames {
+    /// `[boundary] network`: the internal network the gateway served.
+    pub network: String,
+    /// `[boundary] gateway_ip`: where the gateway answered on it, which a
+    /// sandbox must not reach.
+    pub gateway_ip: String,
+    /// `[boundary] gateway_image`.
+    pub gateway_image: String,
+    /// `[boundary] harness_image`: the configured harness's image, which the
+    /// other harnesses' were named after.
+    pub harness_image: String,
+}
+
+/// The names an older node's gateway and harness images took by default.
+pub const DEFAULT_GATEWAY_NETWORK: &str = "tracon-int";
+pub const DEFAULT_GATEWAY_IP: &str = "10.89.0.2";
+pub const DEFAULT_GATEWAY_IMAGE: &str = "localhost/tracon-gateway";
+pub const DEFAULT_HARNESS_IMAGE: &str = "localhost/tracon-harness-claude";
+
+impl Default for RetiredNames {
+    fn default() -> Self {
+        Self {
+            network: DEFAULT_GATEWAY_NETWORK.into(),
+            gateway_ip: DEFAULT_GATEWAY_IP.into(),
+            gateway_image: DEFAULT_GATEWAY_IMAGE.into(),
+            harness_image: DEFAULT_HARNESS_IMAGE.into(),
+        }
+    }
+}
+
+impl RetiredNames {
+    fn from_text(text: &str) -> Self {
+        let value = toml::from_str::<toml::Value>(text).ok();
+        let named = |key: &str| {
+            value
+                .as_ref()?
+                .get("boundary")?
+                .get(key)?
+                .as_str()
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+        };
+        let defaults = Self::default();
+        Self {
+            network: named("network").unwrap_or(defaults.network),
+            gateway_ip: named("gateway_ip").unwrap_or(defaults.gateway_ip),
+            gateway_image: named("gateway_image").unwrap_or(defaults.gateway_image),
+            harness_image: named("harness_image").unwrap_or(defaults.harness_image),
+        }
+    }
 }
 
 /// `[runtime.apple]`: a Mac node whose sandboxes are Apple Containerization
@@ -1497,8 +1526,7 @@ pub struct Repo {
     /// `/usr/local`. Each step is one `RUN` of `sh -ec`; the image ends as the
     /// base's own user (65532) in `/work`, and `prepare` runs in it after.
     /// The steps reach only `egress`. Only where sandboxes run on the stock
-    /// base: `[runtime.podman] sandbox_images`, Apple, or Kubernetes with
-    /// `sandbox_protocol`.
+    /// base: Podman, Apple, or Kubernetes with `sandbox_protocol`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub build: Vec<String>,
     /// This repository's required checks, in place of `[supervision] checks`.
@@ -1779,8 +1807,7 @@ fn validate_build_steps(entry: &Repo) -> Result<(), String> {
 /// entry's `build` steps are layered on.
 pub fn builds_on_base(config: &Config) -> bool {
     match config.runtime.kind {
-        RuntimeKind::Podman => config.runtime.podman.sandbox_images,
-        RuntimeKind::Apple => true,
+        RuntimeKind::Podman | RuntimeKind::Apple => true,
         RuntimeKind::Kubernetes => config.runtime.kubernetes.sandbox_protocol,
     }
 }
@@ -1791,14 +1818,10 @@ pub fn validate_repo_builds(config: &Config) -> Result<(), String> {
     if builds_on_base(config) {
         return Ok(());
     }
-    let setting = match config.runtime.kind {
-        RuntimeKind::Kubernetes => "runtime.kubernetes.sandbox_protocol",
-        _ => "runtime.podman.sandbox_images",
-    };
     match config.repo.iter().find(|entry| !entry.build.is_empty()) {
         Some(entry) => Err(format!(
             "repo {}: build steps stand on the stock sandbox base, which this node runs only \
-             with {setting} = true",
+             with runtime.kubernetes.sandbox_protocol = true",
             entry.path.display()
         )),
         None => Ok(()),
@@ -1867,7 +1890,7 @@ pub struct Kubernetes {
     /// the node pod by affinity. Needs the `tracon-sandbox` NetworkPolicy
     /// (`deploy/kubernetes/sandbox-protocol`). The bundle is the node's own
     /// (`[sandbox] bundle`, else its release's, fetched and checked as
-    /// `sandbox_images` does on Podman), which the node hands each pod's init
+    /// a Podman node does), which the node hands each pod's init
     /// container on the same port.
     pub sandbox_protocol: bool,
     /// The port the node listens on, on its pod address, for its sandboxes'
@@ -2443,51 +2466,42 @@ pub struct Harness {
     pub tools: Vec<String>,
     /// Exact version this node runs. Checked twice: the harness's own
     /// `--version` in the runner, and what it reports at session start. Empty
-    /// means the version this node's harness image installs — never "whatever
-    /// the image happens to contain", since the same string is what the image
-    /// build fetches and what both checks compare against.
+    /// means the version this node pins — never "whatever the image happens
+    /// to contain", since the same string is what the bundle carries and what
+    /// both checks compare against.
     pub version: String,
     /// Harnesses outside the ones every node runs that this node also runs
-    /// (`adapter::EXPERIMENTAL`; none today). Off by default, because every
-    /// harness a node runs needs its image before any session starts.
+    /// (`adapter::EXPERIMENTAL`; none today). Off by default.
     #[serde(default)]
     pub experimental: Vec<String>,
-    /// A Linux `tracon-agent` binary for the native harness image, in place of
-    /// the release asset: one built from this tree (`just native-agent`), for
-    /// a node whose own version has no release yet. Empty: the release.
-    #[serde(default)]
-    pub native_binary: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Boundary {
     /// The podman binary. Empty: resolved from PATH, then well-known install
-    /// locations — a node launched from Finder inherits launchd's minimal
-    /// PATH, which has no Homebrew.
+    /// locations — a node launched from a desktop launcher inherits a minimal
+    /// PATH.
     pub podman: String,
-    pub network: String,
-    pub subnet: String,
-    pub gateway_ip: String,
+    /// The name a harness reaches the node's gateways by: in a Podman
+    /// sandbox, a hosts entry for its own loopback, where the tunnels listen.
+    /// Once also the gateway container's name, which an upgraded node
+    /// removes under it (`boundary::podman::setup::retire_gateway`).
     pub gateway_container: String,
-    pub gateway_image: String,
-    pub harness_image: String,
-    /// Podman needs `label=disable` for bind mounts on SELinux hosts.
+    /// Whether an image-only service's sidecar container, which shares the
+    /// session sandbox's network namespace, runs with `label=disable` on an
+    /// SELinux host. Unset: whenever SELinux is enforcing.
     pub selinux_label_disable: Option<bool>,
-    /// macOS: start the podman machine when the boundary finds it stopped.
-    /// Nothing else starts it at login, and a node run by the service is up
-    /// before any terminal is.
-    pub start_machine: bool,
     /// Seconds between the SIGTERM a stopped harness container's init receives
     /// and the SIGKILL that follows. It bounds how long a stop can take, not
     /// how thorough it is: the container's PID namespace goes either way, and
     /// with it every process the harness started. The same
     /// number is the pod's `terminationGracePeriodSeconds`.
     pub stop_timeout_secs: u16,
-    /// Bring the network, images, allowlist and gateway in step with this
-    /// binary by itself: when the node starts, and when what an image is
-    /// built from changes under it. Off, they change only when `tracon setup`
-    /// runs, and the boundary check refuses until it has.
+    /// Bring the harness bundle and the stock base in step with this binary
+    /// by itself: when the node starts, and when what it fetches changes
+    /// under it. Off, they change only when `tracon setup` runs, and the
+    /// boundary check refuses until it has.
     pub auto_reconcile: bool,
     /// What every runtime volume and container this node names begins with,
     /// before a `-`: the shared harness state, the boundary probes, each
@@ -3007,6 +3021,7 @@ impl Default for Config {
             metrics: Metrics::default(),
             sandbox: Sandbox::default(),
             digitalocean: Default::default(),
+            retired: RetiredNames::default(),
             harness: Harness {
                 id: crate::adapter::claude::ClaudeAdapter::ID.into(),
                 version: crate::adapter::claude::ClaudeAdapter::PINNED_VERSION.into(),
@@ -3015,18 +3030,11 @@ impl Default for Config {
                 // of which hold whatever the harness offers.
                 tools: Vec::new(),
                 experimental: Vec::new(),
-                native_binary: String::new(),
             },
             boundary: Boundary {
                 podman: String::new(),
-                network: "tracon-int".into(),
-                subnet: "10.89.0.0/24".into(),
-                gateway_ip: "10.89.0.2".into(),
                 gateway_container: "tracon-gw".into(),
-                gateway_image: "localhost/tracon-gateway".into(),
-                harness_image: "localhost/tracon-harness-claude".into(),
                 selinux_label_disable: None,
-                start_machine: true,
                 stop_timeout_secs: 10,
                 auto_reconcile: true,
                 resource_prefix: DEFAULT_RESOURCE_PREFIX.into(),
@@ -3165,36 +3173,10 @@ fn hostname() -> String {
 }
 
 impl Config {
-    /// The Podman image a harness runs in. `[boundary] harness_image` names
-    /// the image for the configured `[harness] id`, as it always has; every
-    /// other supported harness runs from the image setup builds for it under
-    /// the conventional name, so a node can hold both without the operator
-    /// naming both.
-    ///
-    /// The conventional name follows `harness_image` where that ends in the
-    /// configured id (`localhost/scratch-harness-claude` gives
-    /// `localhost/scratch-harness-native`): a second node on the machine that
-    /// names its own images builds and checks its own, rather than rebuilding
-    /// the first node's as it sets itself up.
-    pub fn podman_harness_image(&self, harness_id: &str) -> String {
-        // No harness images at all: every harness runs from the bundle.
-        if crate::sandbox_images::enabled(self) {
-            return crate::sandbox_images::base_image(self);
-        }
-        if harness_id == self.harness.id {
-            return self.boundary.harness_image.clone();
-        }
-        let suffix = format!("-{}", self.harness.id);
-        match self.boundary.harness_image.strip_suffix(&suffix) {
-            Some(stem) if !stem.is_empty() => format!("{stem}-{harness_id}"),
-            _ => format!("localhost/tracon-harness-{harness_id}"),
-        }
-    }
-
-    /// The same for a pod-hosted node: the configured image for the configured
-    /// harness, the release's own image for the other. Over the sandbox
-    /// protocol there are no harness images: every harness runs from the
-    /// bundle on the stock base, as on Podman with `sandbox_images`.
+    /// The image a harness runs in on a pod-hosted node: the configured image
+    /// for the configured harness, the release's own image for the other.
+    /// Over the sandbox protocol there are no harness images: every harness
+    /// runs from the bundle on the stock base, as on Podman and Apple.
     pub fn kubernetes_harness_image(&self, harness_id: &str) -> String {
         if crate::boundary::kubernetes::uses_sandbox_protocol(self) {
             return crate::sandbox_images::base_image(self);
@@ -3292,15 +3274,6 @@ impl Config {
                 .unwrap_or_else(|| Self::runtime_dir().join("sandbox")),
             HarnessListen::Tcp(_) => Self::runtime_dir().join("sandbox"),
         }
-    }
-
-    /// Where `tracon setup` writes the embedded container definitions.
-    pub fn containers_dir() -> PathBuf {
-        Self::state_dir().join("containers")
-    }
-
-    pub fn allow_file() -> PathBuf {
-        Self::state_dir().join("gateway/allow.txt")
     }
 
     /// The `[[repo]]` table as it stands now: what the operator last saved
@@ -3431,11 +3404,21 @@ impl Config {
             config.providers.entry(name).or_insert(provider);
         }
         config.review.lift_retired_defaults();
-        config.runtime.podman.settle(text);
-        for key in deprecated_podman_settings(text, config.runtime.kind) {
+        config.retired = RetiredNames::from_text(text);
+        refuse_retired_podman_switches(text, config.runtime.kind)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        for key in ignored_podman_switches(text, config.runtime.kind) {
             tracing::warn!(
-                "{}: [runtime.podman] {key} = false keeps a deprecated path that a later \
-                 release removes; delete the line to run the default",
+                "{}: [runtime.podman] {key} is ignored; Podman always runs that way now, so \
+                 the line can go",
+                path.display()
+            );
+        }
+        for key in retired_boundary_keys(text) {
+            tracing::warn!(
+                "{}: {key} configured the gateway container or the harness images, which \
+                 were removed; it only names what an upgraded node removes, and can go once \
+                 `tracon setup` has run",
                 path.display()
             );
         }
@@ -3479,7 +3462,7 @@ impl Config {
         crate::provider::digitalocean::validate(
             &config.digitalocean,
             &config.mesh,
-            config.runtime.kind == RuntimeKind::Podman && config.runtime.podman.sandbox_images,
+            config.runtime.kind == RuntimeKind::Podman,
         )
         .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_services(&config.service)
@@ -3596,40 +3579,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("resource_prefix"), "{error}");
-    }
-
-    #[test]
-    fn the_other_harness_image_follows_the_configured_one() {
-        // Harness images are the deprecated path's; on the sandbox images
-        // every harness runs in the base, from the bundle.
-        let mut cfg = Config::default();
-        cfg.runtime.podman = PodmanRuntime::legacy();
-        assert_eq!(
-            cfg.podman_harness_image("native"),
-            "localhost/tracon-harness-native"
-        );
-        assert_eq!(
-            cfg.podman_harness_image("claude"),
-            "localhost/tracon-harness-claude"
-        );
-        cfg.boundary.harness_image = "localhost/spike-u2-harness-claude".into();
-        assert_eq!(
-            cfg.podman_harness_image("native"),
-            "localhost/spike-u2-harness-native"
-        );
-        // A name that does not end in the configured id says nothing about
-        // the other's.
-        cfg.boundary.harness_image = "localhost/mine:1".into();
-        assert_eq!(
-            cfg.podman_harness_image("native"),
-            "localhost/tracon-harness-native"
-        );
-        cfg.harness.id = "native".into();
-        cfg.boundary.harness_image = "localhost/spike-u2-harness-native".into();
-        assert_eq!(
-            cfg.podman_harness_image("claude"),
-            "localhost/spike-u2-harness-claude"
-        );
     }
 
     #[test]
@@ -4021,54 +3970,77 @@ mod tests {
         );
     }
 
-    /// The Podman sandbox switches are on by default on Linux. Turning the
-    /// protocol off turns off what stands on it, unless the file turns that
-    /// on beside it (and is then refused), and every switch turned off is
-    /// named as deprecated.
+    /// A retired `[runtime.podman]` switch turned off is refused on a Podman
+    /// node, naming every one and the way over; turned on it only asks for
+    /// what always happens. Another kind's node is not refused for a table it
+    /// does not read.
     #[test]
-    fn podman_sandbox_switches_default_on_and_an_explicit_off_is_deprecated() {
-        let linux = cfg!(target_os = "linux");
+    fn a_retired_podman_switch_turned_off_is_refused_with_the_way_over() {
         let load = |text: &str| Config::from_toml(text, Path::new("node.toml"));
-        let fresh = load("").unwrap().runtime.podman;
-        assert_eq!(
-            (
-                fresh.sandbox_protocol,
-                fresh.sandbox_files,
-                fresh.sandbox_tunnels,
-                fresh.sandbox_images,
-                fresh.sandbox_services,
-                fresh.sandbox_init,
-            ),
-            (linux, linux, linux, linux, linux, false)
-        );
+        assert!(load("").is_ok());
+        let on = "[runtime.podman]\nsandbox_protocol = true\nsandbox_images = true\nsandbox_init = true\n";
+        assert!(load(on).unwrap().runtime.podman.sandbox_init);
 
-        // The protocol off takes the rest with it, so the file still loads.
-        let off = load("[runtime.podman]\nsandbox_protocol = false\n").unwrap();
-        let podman = &off.runtime.podman;
-        assert!(!podman.sandbox_files && !podman.sandbox_tunnels);
-        assert!(!podman.sandbox_images && !podman.sandbox_services);
-        assert!(!crate::sandbox_images::enabled(&off));
+        let error = load("[runtime.podman]\nsandbox_tunnels = false\nsandbox_images = false\n")
+            .unwrap_err();
+        assert!(error.contains("node.toml"), "{error}");
         assert!(
-            load("[runtime.podman]\nsandbox_protocol = false\nsandbox_images = true\n")
-                .unwrap_err()
-                .contains("needs runtime.podman.sandbox_protocol = true")
+            error
+                .contains("sandbox_tunnels = false, sandbox_images = false is no longer supported"),
+            "{error}"
         );
-        // One switch off leaves the others as they were.
-        let one = load("[runtime.podman]\nsandbox_tunnels = false\n").unwrap();
-        assert!(!one.runtime.podman.sandbox_tunnels);
-        assert_eq!(one.runtime.podman.sandbox_images, linux);
+        assert!(error.contains("Delete the lines"), "{error}");
+        assert!(error.contains("tracon gc --legacy"), "{error}");
+        let one = load("[runtime.podman]\nsandbox_protocol = false\n").unwrap_err();
+        assert!(one.contains("Delete the line and"), "{one}");
 
-        let text = "[runtime.podman]\nsandbox_protocol = true\nsandbox_tunnels = false\n\
-                    sandbox_images = false\nsandbox_init = false\n";
+        let kube = "[runtime]\nkind = \"kubernetes\"\n[runtime.podman]\nsandbox_protocol = false\n";
+        assert!(refuse_retired_podman_switches(kube, RuntimeKind::Kubernetes).is_ok());
         assert_eq!(
-            deprecated_podman_settings(text, RuntimeKind::Podman),
-            match linux {
-                true => vec!["sandbox_tunnels", "sandbox_images"],
-                false => Vec::new(),
+            retired_podman_switches(on),
+            [("sandbox_protocol", true), ("sandbox_images", true)]
+        );
+        assert!(retired_podman_switches("[runtime.podman]\nsandbox_init = true\n").is_empty());
+        assert_eq!(
+            ignored_podman_switches(on, RuntimeKind::Podman),
+            ["sandbox_protocol", "sandbox_images"]
+        );
+        assert!(ignored_podman_switches(on, RuntimeKind::Kubernetes).is_empty());
+        assert!(ignored_podman_switches(on, RuntimeKind::Apple).is_empty());
+    }
+
+    /// The keys only the gateway container and harness images read still
+    /// load, are named, and are what an upgraded node finds the old gateway
+    /// and images by.
+    #[test]
+    fn retired_boundary_keys_load_are_named_and_name_what_to_remove() {
+        let text = "[boundary]\nnetwork = \"scratch-int\"\nsubnet = \"10.89.7.0/24\"\n\
+                    harness_image = \"localhost/scratch-harness-claude\"\nstart_machine = true\n\
+                    gateway_container = \"scratch-gw\"\n[harness]\nnative_binary = \"/x\"\n";
+        let cfg = Config::from_toml(text, Path::new("node.toml")).unwrap();
+        assert_eq!(
+            retired_boundary_keys(text),
+            [
+                "boundary.network",
+                "boundary.subnet",
+                "boundary.harness_image",
+                "boundary.start_machine",
+                "harness.native_binary"
+            ]
+        );
+        assert_eq!(
+            cfg.retired,
+            RetiredNames {
+                network: "scratch-int".into(),
+                gateway_ip: DEFAULT_GATEWAY_IP.into(),
+                gateway_image: DEFAULT_GATEWAY_IMAGE.into(),
+                harness_image: "localhost/scratch-harness-claude".into(),
             }
         );
-        assert!(deprecated_podman_settings(text, RuntimeKind::Apple).is_empty());
-        assert!(deprecated_podman_settings("", RuntimeKind::Podman).is_empty());
+        assert_eq!(cfg.boundary.gateway_container, "scratch-gw");
+        let fresh = Config::from_toml("", Path::new("node.toml")).unwrap();
+        assert_eq!(fresh.retired, RetiredNames::default());
+        assert!(retired_boundary_keys("").is_empty());
     }
 
     /// The OpenCode harness's own tables still load, and are named rather
@@ -4177,7 +4149,10 @@ mod tests {
         assert_eq!(parsed.review.max_diff_lines, d.review.max_diff_lines);
         assert_eq!(parsed.embed.dim, d.embed.dim);
         assert_eq!(parsed.embed.batch, d.embed.batch);
-        assert_eq!(parsed.boundary.subnet, d.boundary.subnet);
+        assert_eq!(
+            parsed.boundary.gateway_container,
+            d.boundary.gateway_container
+        );
         assert_eq!(
             parsed.providers["anthropic"].upstream,
             d.providers["anthropic"].upstream
@@ -4352,17 +4327,7 @@ mod tests {
         let toml = |runtime: &str| {
             format!("{runtime}\n[[repo]]\npath = \"/srv/code/app\"\nbuild = [\"apt-get update\"]\n")
         };
-        let legacy = Config::from_toml(
-            &toml("[runtime.podman]\nsandbox_images = false"),
-            Path::new("node.toml"),
-        )
-        .unwrap_err();
-        assert!(
-            legacy.contains("runtime.podman.sandbox_images = true"),
-            "{legacy}"
-        );
-        let fresh = Config::from_toml(&toml(""), Path::new("node.toml"));
-        assert_eq!(fresh.is_ok(), cfg!(target_os = "linux"));
+        Config::from_toml(&toml(""), Path::new("node.toml")).unwrap();
         Config::from_toml(&toml("[runtime]\nkind = \"apple\""), Path::new("node.toml")).unwrap();
         let kube = Config::from_toml(
             &toml("[runtime]\nkind = \"kubernetes\""),

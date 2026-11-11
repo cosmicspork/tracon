@@ -11,8 +11,9 @@
 //!
 //! Runs only with `TRACON_PODMAN_TESTS=1` (`just check-podman`), against a
 //! Claude Code harness image built from this tree's definitions and named in
-//! `TRACON_CLAUDE_IMAGE`, on a network of its own: see `support::podman`.
-//! Every image and network made here is removed again.
+//! `TRACON_CLAUDE_IMAGE`, with the probe run in a sandbox from the bundle in
+//! `TRACON_SANDBOX_BUNDLE`: see `support::podman`. Every image made here is
+//! removed again.
 
 #[path = "support/mod.rs"]
 mod support;
@@ -21,7 +22,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use support::podman::{podman, Network};
+use support::podman::podman;
 use tracon::adapter::claude::ClaudeAdapter;
 use tracon::boundary::podman::PodmanBackend;
 use tracon::boundary::Backend;
@@ -37,7 +38,9 @@ const PINNED: &str = ClaudeAdapter::PINNED_VERSION;
 
 struct Rig {
     harness: String,
-    network: Network,
+    /// A harness bundle with `bin/tracon-sandbox` from this tree, which the
+    /// layer's probe runs under.
+    bundle: std::path::PathBuf,
 }
 
 fn rig() -> Option<Rig> {
@@ -72,10 +75,16 @@ fn rig() -> Option<Rig> {
         podman(&["image", "exists", DEBIAN]).is_some(),
         "{DEBIAN} is not in the local store; building the harness image leaves it there"
     );
-    Some(Rig {
-        harness,
-        network: Network::create(),
-    })
+    let bundle = std::path::PathBuf::from(
+        std::env::var("TRACON_SANDBOX_BUNDLE")
+            .unwrap_or_else(|_| panic!("TRACON_PODMAN_TESTS=1 needs TRACON_SANDBOX_BUNDLE")),
+    );
+    assert!(
+        bundle.join("bin/tracon-sandbox").is_file(),
+        "{} has no bin/tracon-sandbox",
+        bundle.display()
+    );
+    Some(Rig { harness, bundle })
 }
 
 /// The label every base here carries, and so every image built over one,
@@ -157,19 +166,20 @@ fn base(images: &mut Images, name: &str, extra: &str) -> String {
     tag
 }
 
-/// Layer Claude Code onto `base` as a session would, for `kind`'s profile.
+/// Layer Claude Code onto `base` as a pod-hosted node off the sandbox
+/// protocol would, the only one that still layers a harness: the layer built
+/// and its probe run here by Podman, in a sandbox from `rig.bundle`.
 async fn layer(
     images: &mut Images,
     rig: &Rig,
     base: &str,
-    kind: RuntimeKind,
 ) -> (tracon::repo_image::SessionImage, Arc<Store>, String) {
     let repo = tempfile::tempdir().unwrap();
     let mut cfg = Config::default();
     cfg.harness.id = ClaudeAdapter::ID.into();
-    cfg.boundary.harness_image = rig.harness.clone();
-    cfg.boundary.network = rig.network.0.clone();
-    cfg.runtime.kind = kind;
+    cfg.runtime.kind = RuntimeKind::Kubernetes;
+    cfg.runtime.kubernetes.harness_image = rig.harness.clone();
+    cfg.sandbox.bundle = Some(rig.bundle.clone());
     cfg.repo = vec![Repo {
         path: repo.path().to_path_buf(),
         image: Some(base.into()),
@@ -237,19 +247,6 @@ fn assert_session_image(image: &str, user: &str, home: &str) {
     assert!(out.contains("no-home-config"), "{out}");
 }
 
-/// The Podman profile: Claude Code on the repository's image, with none of
-/// the configuration the image held, and the three variables the session
-/// sets for itself let through.
-#[tokio::test]
-async fn claude_runs_on_a_repository_image_without_its_configuration() {
-    let Some(rig) = rig() else { return };
-    let mut images = Images::new();
-    let base = base(&mut images, "plain", "");
-    let (got, _store, _repo) = layer(&mut images, &rig, &base, RuntimeKind::Podman).await;
-    let image = got.image.clone().unwrap_or_else(|| panic!("{got:?}"));
-    assert_session_image(&image, "0:0", "/root");
-}
-
 /// The pod profile, built here with Podman: the same, as the harness uid,
 /// with its init.
 #[tokio::test]
@@ -257,7 +254,7 @@ async fn claude_runs_on_a_pod_profile_image_as_the_harness_uid() {
     let Some(rig) = rig() else { return };
     let mut images = Images::new();
     let base = base(&mut images, "pod", "");
-    let (got, _store, _repo) = layer(&mut images, &rig, &base, RuntimeKind::Kubernetes).await;
+    let (got, _store, _repo) = layer(&mut images, &rig, &base).await;
     let image = got.image.clone().unwrap_or_else(|| panic!("{got:?}"));
     let user = podman(&["image", "inspect", "--format", "{{.Config.User}}", &image]).unwrap();
     assert_eq!(user, "65532:65532");
@@ -322,7 +319,7 @@ async fn an_image_that_would_change_claude_is_refused_by_name() {
     ] {
         let mut images = Images::new();
         let base = base(&mut images, name, &extra);
-        let (got, store, repo) = layer(&mut images, &rig, &base, RuntimeKind::Podman).await;
+        let (got, store, repo) = layer(&mut images, &rig, &base).await;
         assert_eq!(got.image, None, "{name}");
         assert_eq!(got.note.as_deref(), Some(note.as_str()), "{name}");
         let row = store

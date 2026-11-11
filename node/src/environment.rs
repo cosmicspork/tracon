@@ -343,9 +343,10 @@ pub fn session_environment(cfg: &Config, store: &Store, session_id: &str) -> Rep
 /// The image the node's own sessions run in, for this runtime kind.
 pub fn harness_image(cfg: &Config) -> String {
     match cfg.runtime.kind {
-        crate::config::RuntimeKind::Podman => cfg.podman_harness_image(&cfg.harness.id),
         crate::config::RuntimeKind::Kubernetes => cfg.kubernetes_harness_image(&cfg.harness.id),
-        crate::config::RuntimeKind::Apple => crate::sandbox_images::base_image(cfg),
+        crate::config::RuntimeKind::Podman | crate::config::RuntimeKind::Apple => {
+            crate::sandbox_images::base_image(cfg)
+        }
     }
 }
 
@@ -1095,8 +1096,8 @@ mod tests {
     fn a_repo_entry_overrides_only_what_it_names() {
         let image =
             "localhost/tc@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let mut cfg = Config::podman_legacy();
-        cfg.boundary.harness_image = "localhost/harness".into();
+        let mut cfg = Config::pod_hosted();
+        cfg.runtime.kubernetes.harness_image = "localhost/harness".into();
         cfg.supervision.checks = vec![" just check ".into(), String::new()];
         cfg.supervision.timeout_secs = 900;
         cfg.repo = vec![
@@ -1270,7 +1271,7 @@ mod tests {
                 path: "git.example.com/group/app".into(),
                 ..Default::default()
             }],
-            ..Config::podman_legacy()
+            ..Config::pod_hosted()
         };
         let operator = Path::new("/home/me/src/app");
         let mut env = std::collections::BTreeMap::new();
