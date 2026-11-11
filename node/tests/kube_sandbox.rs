@@ -508,6 +508,7 @@ fn own_sandbox_policy(port: i32) -> k8s_openapi::api::networking::v1::NetworkPol
             }]),
         }),
     }
+}
 
 /// What the builder was asked to build.
 #[derive(Debug, Clone)]

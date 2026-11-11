@@ -534,6 +534,8 @@ fn another_policy_selecting_a_sandbox_widens_its_route() {
     assert_eq!(
         widening_policies(&policies, &own, &pod),
         ["spike-sandbox", "everything", "by-expression"]
+    );
+}
 
 /// A snapshot is the image the preparation ran, with its cache and its
 /// prepared `/work` on top, owned by the sandbox's user: nothing else of the
