@@ -1561,9 +1561,9 @@ pub struct Repo {
     /// built image has a digest too (`podman image inspect` reports
     /// `RepoDigests`), so this costs a local build nothing.
     ///
-    /// Refused where every repository runs on the stock base
-    /// (`repo_image::stock_base_only`), as is a `dockerfile` that does not
-    /// begin `FROM ${TRACON_SANDBOX_BASE}`.
+    /// Refused, as every repository runs on the stock base
+    /// (`repo_image::refusal`), as is a `dockerfile` that does not begin
+    /// `FROM ${TRACON_SANDBOX_BASE}`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
     /// The repository's own dev environment, as a path inside it (commonly

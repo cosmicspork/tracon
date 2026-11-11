@@ -1048,7 +1048,7 @@ pub(crate) fn approved_image(
 ) -> Result<String, EnvironmentError> {
     match selected {
         // Nothing in the devcontainer: the repository's own toolchain image,
-        // which is the harness image when the operator has named none. This is
+        // which is the stock base when it has none. This is
         // the same resolution required checks use, so preparation validates the
         // environment those checks will actually get.
         None => Ok(environment.image.clone()),

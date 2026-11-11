@@ -39,16 +39,16 @@ pub struct ClaudeAdapter {
 impl ClaudeAdapter {
     pub const ID: &'static str = "claude";
 
-    /// Where the harness image installs the binary, and where a repository's
-    /// image layered with it (`repo_image`) has it too. Named by path, so a
-    /// repository image whose `PATH` holds another `claude` cannot stand in
+    /// The path the adapter launches the binary by, which a sandbox runs as
+    /// the bundle's copy (`sandbox_images::bundled_argv0`). Named by path, so
+    /// a repository image whose `PATH` holds another `claude` cannot stand in
     /// for the one the node pinned.
     pub const BINARY: &'static str = "/usr/local/bin/claude";
 
-    /// The version this node's harness image installs.
-    /// `containers/harness-claude/Containerfile` fetches exactly this release
-    /// at exactly one digest; `the_image_installs_the_pinned_claude` keeps the
-    /// two from drifting apart.
+    /// The version the harness bundle carries. `scripts/claude-code.env`
+    /// fetches exactly this release at exactly one digest per architecture;
+    /// `the_bundle_carries_the_pinned_claude` keeps the two from drifting
+    /// apart.
     pub const PINNED_VERSION: &'static str = "2.1.295";
 
     /// Claude Code's contract is the stream-json control protocol, which

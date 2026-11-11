@@ -36,11 +36,12 @@ pub struct NativeAdapter {
 impl NativeAdapter {
     pub const ID: &'static str = "native";
 
-    /// Where the harness image installs it.
+    /// The path the adapter launches it by, which a sandbox runs as the
+    /// bundle's copy (`sandbox_images::bundled_argv0`).
     pub const BINARY: &'static str = "/usr/local/bin/tracon-agent";
 
     /// Built from this workspace on the same release train, so the version
-    /// this node drives is its own. The image installs the release asset of
+    /// this node drives is its own. The bundle carries the release asset of
     /// that version, or a binary the operator built from the same tree.
     pub const PINNED_VERSION: &'static str = env!("CARGO_PKG_VERSION");
 

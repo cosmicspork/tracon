@@ -35,7 +35,7 @@ pub async fn list(State(s): State<AppState>) -> ApiResult<Json<Value>> {
         // An entry that keeps lending credentials to a preparation a
         // peer's recipe changed builds nothing until it is started.
         let hold = crate::mesh::recipe::held(s.store(), entry);
-        let refused = refused(&s.cfg, entry, builds.first().map(|b| b.repo_path.as_str())).await;
+        let refused = refused(entry, builds.first().map(|b| b.repo_path.as_str())).await;
         entries.push(json!({ "entry": entry, "builds": builds, "hold": hold, "refused": refused }));
     }
     Ok(Json(json!({
@@ -50,16 +50,13 @@ pub async fn list(State(s): State<AppState>) -> ApiResult<Json<Value>> {
 /// node, so the operator reads it here before starting one. A Dockerfile is
 /// read from a clone the entry answers for: one it built in, else its own
 /// path, else the managed clone at it.
-async fn refused(cfg: &Config, entry: &Repo, built_in: Option<&str>) -> Option<String> {
-    if !repo_image::stock_base_only(cfg) {
-        return None;
-    }
+async fn refused(entry: &Repo, built_in: Option<&str>) -> Option<String> {
     let clone = match built_in {
         Some(path) => PathBuf::from(path),
         None if entry.path.is_absolute() => entry.path.clone(),
         None => crate::forge::managed_root(&Config::state_dir()).join(&entry.path),
     };
-    repo_image::refusal(cfg, &clone, entry).await
+    repo_image::refusal(&clone, entry).await
 }
 
 #[derive(Deserialize)]
@@ -164,7 +161,6 @@ fn warm_newly_lent(s: &AppState, before: &[Repo], after: &[Repo]) {
             tracing::debug!(path = %entry.path.display(), "newly lent entry names no one repository; not warmed");
             continue;
         };
-        repo_image::forget_warmed(&repo);
         let (backend, cfg, store) = (
             s.manager.backend().clone(),
             s.cfg.clone(),
@@ -273,7 +269,7 @@ pub async fn build(
                 )
             })?;
     }
-    let recipe = repo_image::recipe(&repo, &entry, &repo_image::RunAs::of(&s.cfg))
+    let recipe = repo_image::recipe(&repo, &entry, &repo_image::RunAs::sandbox())
         .await
         .map_err(unprocessable)?;
     // A build of this recipe already running is the one this request gets

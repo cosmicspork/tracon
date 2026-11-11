@@ -243,9 +243,10 @@ any provider that is not Anthropic's runs on it.
    ```
 
    Also add the upstream host to `[gateway] allow_hosts`.
-2. Run `tracon setup`. It builds `tracon-harness-native` from this version's release asset.
-   For a version with no release yet, build a binary with `just native-agent`, set
-   `[harness] native_binary` to the path it prints, and run `tracon setup` again.
+2. Run `tracon setup`. It fetches this version's harness bundle, which carries
+   `tracon-agent`. For a version with no release yet, build a binary with
+   `just native-agent`, assemble a bundle with `just bundle <arch> --agent <path>`, and
+   point `[sandbox] bundle` at it.
 
 Models on that provider then start on `native` directly.
 

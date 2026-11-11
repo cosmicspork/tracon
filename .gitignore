@@ -47,6 +47,3 @@ Thumbs.db
 .opencode/
 AGENTS.md
 CLAUDE.md
-
-# A locally built tracon-agent staged for the native harness image
-/containers/harness-native/local/tracon-agent

@@ -486,10 +486,6 @@ impl Backend for PodmanBackend {
         })
     }
 
-    fn runs_sessions_in_repository_images(&self) -> bool {
-        true
-    }
-
     async fn import_volume(&self, volume: &str, source: &Path) -> Result<(), BoundaryError> {
         if let Some(store) = self.files_for(volume) {
             return Self::files_import(&store, volume, source);

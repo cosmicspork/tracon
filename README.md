@@ -588,8 +588,8 @@ session already running keeps the image and the egress it started with. A hand e
 Or let a session draft it. `repo_setup_draft` reads the default branch (its devcontainer,
 lockfiles, a `just check` recipe or `package.json` scripts) and drafts the entry with where
 each field came from. `repo_setup_try` runs a draft the way required checks run, in a fresh
-container. A draft that names a Dockerfile is tried in the image built from it, never in the
-harness image instead. An image this node already built from the same Dockerfile and context
+container. A draft that names a Dockerfile is tried in the image built from it, never on the
+stock base instead. An image this node already built from the same Dockerfile and context
 is reused; building a new one is yours to allow on a card, because the build runs with the
 network outside the boundary, and the entry you later allow uses that image rather than
 building it again. A trial prepares under an egress grant of its own, so a host its
@@ -1487,7 +1487,7 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
 # no_cache = false                  # true: build without BuildKit's cache, for a daemon shared with others
 # do_token_file = "/etc/tracon/do/token"  # DigitalOcean only: an API token for removing old images,
                                     # when the registry refuses a delete; left out, the credential's own
-# approved_images = []              # digest-pinned project images preparation may use besides the harness image
+# approved_images = []              # digest-pinned project images preparation may use besides the stock base
 
 # [[repo]]                          # one repository's environment (also Settings → Repositories and
                                     # `tracon repo set`, which apply without a restart); everything but

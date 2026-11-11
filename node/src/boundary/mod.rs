@@ -342,10 +342,10 @@ pub trait Backend: Send + Sync {
     /// configured harness is only the default; a session runs the one it
     /// names.
     fn runner_for(&self, harness_id: &str, extra_mounts: Vec<Mount>) -> Arc<dyn Runner>;
-    /// A runner for a named harness in an image other than its own: the
-    /// repository's, with the harness layered on. Everything else is the
-    /// boundary's, exactly as `runner_for` has it. A runtime that cannot run
-    /// one keeps the harness's image.
+    /// A runner for a named harness in an image other than the stock base:
+    /// the repository's, or its prepared snapshot, with the harness from the
+    /// bundle. Everything else is the boundary's, exactly as `runner_for` has
+    /// it. A runtime that cannot run one keeps the stock base.
     fn runner_in(
         &self,
         harness_id: &str,
@@ -354,12 +354,6 @@ pub trait Backend: Send + Sync {
     ) -> Arc<dyn Runner> {
         let _ = image;
         self.runner_for(harness_id, extra_mounts)
-    }
-    /// Whether `runner_in` runs a session in the image it is given. Where it
-    /// does not, a session keeps the harness's image and nothing is layered
-    /// for it: a layer no session runs in would only be built and reported.
-    fn runs_sessions_in_repository_images(&self) -> bool {
-        false
     }
     /// Each supported harness's image and its state: `current`, `stale`,
     /// `missing`, or `unknown` where this runtime cannot say. For display;
@@ -395,12 +389,6 @@ pub trait Backend: Send + Sync {
     /// Podman: a cluster's BuildKit. `None` where nothing here can.
     fn registry_builder(&self) -> Option<Arc<dyn ImageBuilder>> {
         None
-    }
-    /// The image a named harness runs in here: the stock base, from which
-    /// every harness runs out of the bundle.
-    fn harness_image(&self, cfg: &Config, harness_id: &str) -> String {
-        let _ = harness_id;
-        crate::sandbox_images::base_image(cfg)
     }
     /// Copy an explicitly staged directory into runtime-owned storage. The
     /// source is never mounted into a harness.

@@ -2,12 +2,9 @@
 
 default: check
 
-# The node image for pod-hosted nodes, and the Claude Code harness image those
-# pods pull. The native harness image installs a released tracon-agent, so the
-# release workflow builds that one.
+# The node image for pod-hosted nodes.
 node-image tag="dev":
     podman build -f Dockerfile.node -t ghcr.io/cosmicspork/tracon-node:{{tag}} .
-    podman build -f containers/harness-claude/Containerfile -t ghcr.io/cosmicspork/tracon-harness-claude:{{tag}} containers/harness-claude
 
 # Build the SPA into spa/dist (embedded by the node at compile time).
 spa:

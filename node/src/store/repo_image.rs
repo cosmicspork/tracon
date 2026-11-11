@@ -123,17 +123,6 @@ impl Store {
         Ok(())
     }
 
-    /// Forget the session layers of `repo_path` that failed, so the next
-    /// session tries each again. What the operator's `tracon repo build`
-    /// means for them: a failure stands against its key until then.
-    pub fn forget_failed_session_layers(&self, repo_path: &str) -> Result<usize> {
-        Ok(self.repo_image_conn()?.execute(
-            "DELETE FROM repo_image WHERE repo_path = ?1 AND kind LIKE 'session:%' \
-             AND status = 'failed'",
-            params![repo_path],
-        )?)
-    }
-
     /// Record the image a build stands on once it is known: for a
     /// repository's own image, the image built from its Dockerfile before the
     /// node's layer, by digest, so it can be removed by what it was rather
@@ -218,11 +207,14 @@ impl Store {
             .optional()?)
     }
 
-    /// Every repository this node has built for, with its newest build.
+    /// Every repository this node has built for, with its newest build of
+    /// each kind. An older node's session layers (`session:<harness>`), which
+    /// nothing runs in now, are left out.
     pub fn repo_images(&self) -> Result<Vec<RepoImageRow>> {
         let conn = self.repo_image_conn()?;
         let mut stmt = conn.prepare(&format!(
-            "SELECT {COLUMNS} FROM repo_image r WHERE started_ms = (SELECT MAX(started_ms) \
+            "SELECT {COLUMNS} FROM repo_image r WHERE kind NOT LIKE 'session:%' \
+             AND started_ms = (SELECT MAX(started_ms) \
              FROM repo_image WHERE repo_path = r.repo_path AND kind = r.kind) \
              ORDER BY repo_path, kind"
         ))?;
@@ -239,5 +231,39 @@ impl Store {
             params![now_ms()],
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An older node's session layers stay in the table but are no build of
+    /// the repository's any more.
+    #[test]
+    fn an_older_nodes_session_layers_are_not_listed() {
+        let store = Store::open_in_memory().unwrap();
+        for kind in ["base", "session:claude", "snapshot"] {
+            let id = store
+                .start_repo_image(&RepoImageStart {
+                    repo_path: "/src/app",
+                    kind,
+                    recipe_hash: "r",
+                    source_ref: "",
+                    source_commit: "",
+                    parent_image: "",
+                })
+                .unwrap();
+            store
+                .finish_repo_image(&id, Ok(&format!("localhost/{kind}")), "", &[])
+                .unwrap();
+        }
+        let kinds: Vec<String> = store
+            .repo_images()
+            .unwrap()
+            .into_iter()
+            .map(|row| row.kind)
+            .collect();
+        assert_eq!(kinds, ["base", "snapshot"]);
     }
 }

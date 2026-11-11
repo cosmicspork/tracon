@@ -2,15 +2,15 @@ name: sandbox-base
 
 # The stock sandbox base image and the harness bundle, built for both
 # architectures on every PR that touches either, each on a native runner, and
-# smoke-tested together the way a session mounts them. Not a required check:
-# nothing a node runs today uses either yet. `release.yml` publishes both.
+# smoke-tested together the way a session mounts them. Not a required check.
+# `release.yml` publishes both.
 on:
   pull_request:
     paths:
       - containers/sandbox-base/**
       - scripts/harness-bundle.sh
       # The bundle takes Claude Code's version and digests from here.
-      - containers/harness-claude/Containerfile
+      - scripts/claude-code.env
       - .github/workflows/sandbox-base.yml
   workflow_dispatch:
 

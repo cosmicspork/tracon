@@ -210,20 +210,21 @@ fn kept_images(
         let retired = owners.retired_repositories.contains(&repo);
         let mut kinds = HashSet::new();
         for row in store.ready_repo_images(&repo)? {
+            // A session layer (`session:<harness>`) is from before sessions
+            // ran from the bundle: nothing runs in it, so it keeps nothing.
             if row.kind == crate::sandbox_images::SNAPSHOT
+                || row.kind.starts_with("session:")
                 || (retired && row.kind != crate::repo_image::TRIAL)
                 || !kinds.insert(row.kind.clone())
             {
                 continue;
             }
-            let legacy = row.kind.starts_with("session:");
             let why = format!("the current {} build of {repo}", row.kind);
             for reference in [&row.image, &row.parent_image] {
                 if !reference.is_empty() {
                     kept.push(Kept {
                         reference: reference.clone(),
                         why: why.clone(),
-                        legacy,
                     });
                 }
             }
@@ -233,7 +234,6 @@ fn kept_images(
         kept.push(Kept {
             reference: snapshot.clone(),
             why: "a repository's current prepared snapshot".into(),
-            legacy: false,
         });
     }
     for session in &owners.open_sessions {
@@ -245,7 +245,6 @@ fn kept_images(
                 kept.push(Kept {
                     reference: image.to_string(),
                     why: format!("session {session} is open and started from it"),
-                    legacy: false,
                 });
             }
         }
@@ -570,8 +569,8 @@ pub struct Sweep {
     /// Dependency caches are candidates too.
     pub caches: bool,
     pub apply: bool,
-    /// What sandbox images retired (harness images, layered and `-src`
-    /// repository images) is a candidate too.
+    /// What older nodes made that nothing runs any more (harness images,
+    /// layered and superseded `-src` repository images) is a candidate too.
     pub legacy: bool,
     /// Unlabelled images named as this node's are taken as its own.
     pub adopt_unlabelled: bool,
@@ -605,16 +604,15 @@ pub fn image_knowledge(
     node_id: &str,
     sweep: &Sweep,
 ) -> crate::image_gc::Knowledge {
-    let bundled = crate::sandbox_images::bundled(cfg);
     crate::image_gc::Knowledge {
         prefix: owners.prefix.clone(),
         node_id: node_id.to_string(),
-        base_repository: bundled
-            .then(|| crate::image_gc::repository_of(&cfg.sandbox.base_image_ref()).to_string()),
-        pinned_base: bundled.then(crate::sandbox_images::active_base).flatten(),
+        base_repository: Some(
+            crate::image_gc::repository_of(&cfg.sandbox.base_image_ref()).to_string(),
+        ),
+        pinned_base: crate::sandbox_images::active_base(),
         bases_are_ours: owners.prefix == crate::config::DEFAULT_RESOURCE_PREFIX,
         kept: owners.kept_images.clone(),
-        bundled,
         legacy_repositories: legacy_repositories(cfg),
         now_ms: owners.now_ms,
         legacy: sweep.legacy,

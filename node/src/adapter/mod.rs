@@ -695,46 +695,49 @@ mod tests {
 
     /// The pin has to be one fact, not two that happen to agree today: the
     /// node checks what the harness reports against this constant, and the
-    /// image build fetches a release by the `ARG` below. If they drift, a node
-    /// running its own image refuses every session, and the reason ("found X,
+    /// bundle fetches a release by the version in `scripts/claude-code.env`.
+    /// If they drift, every session is refused, and the reason ("found X,
     /// pinned Y") reads like a broken harness rather than a stale constant.
-    fn container_arg(containerfile: &str, arg: &str) -> String {
-        let prefix = format!("ARG {arg}=");
-        containerfile
-            .lines()
-            .find_map(|line| line.trim().strip_prefix(&prefix))
-            .unwrap_or_else(|| panic!("{arg} is set in the Containerfile"))
-            .trim()
-            .to_string()
-    }
-
     #[test]
-    fn the_image_installs_the_pinned_claude() {
+    fn the_bundle_carries_the_pinned_claude() {
+        let pins = include_str!("../../../scripts/claude-code.env");
+        let pinned = |key: &str| {
+            pins.lines()
+                .find_map(|line| line.strip_prefix(&format!("{key}=")))
+                .unwrap_or_else(|| panic!("{key} is set in scripts/claude-code.env"))
+                .to_string()
+        };
         assert_eq!(
-            container_arg(
-                include_str!("../../../containers/harness-claude/Containerfile"),
-                "CLAUDE_VERSION"
-            ),
+            pinned("CLAUDE_VERSION"),
             claude::ClaudeAdapter::PINNED_VERSION
         );
+        for arch in ["X64", "ARM64"] {
+            let digest = pinned(&format!("CLAUDE_LINUX_{arch}_SHA256"));
+            assert!(
+                digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()),
+                "{arch}: {digest}"
+            );
+        }
     }
 
-    /// The native image fetches release assets by name; the release has to
-    /// publish exactly those names, for both architectures a node's Podman
-    /// may run.
+    /// The bundle fetches tracon-agent's release assets by name; the release
+    /// has to publish exactly those names, for both architectures a sandbox
+    /// may run on.
     #[test]
-    fn the_native_image_fetches_what_the_release_publishes() {
-        let image = include_str!("../../../containers/harness-native/Containerfile");
+    fn the_bundle_fetches_what_the_release_publishes() {
+        let bundle = include_str!("../../../scripts/harness-bundle.sh");
         let release = include_str!("../../../.github/workflows/release.yml");
         for triple in ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"] {
-            assert!(image.contains(triple), "the image does not fetch {triple}");
+            assert!(
+                bundle.contains(triple),
+                "the bundle does not fetch {triple}"
+            );
             assert!(
                 release.contains(&format!("target: {triple}")),
                 "the release builds nothing for {triple}"
             );
         }
-        assert!(image.contains("tracon-agent-${triple}"));
-        assert!(image.contains("ARG TRACON_AGENT_VERSION"));
+        assert!(bundle.contains("release_asset tracon-agent "));
         assert_eq!(
             native::NativeAdapter::PINNED_VERSION,
             env!("CARGO_PKG_VERSION")
@@ -772,28 +775,23 @@ mod tests {
         assert_eq!(a.pinned_version(), native::NativeAdapter::PINNED_VERSION);
     }
 
-    /// Only the harnesses with an adapter have images. The retired harnesses
-    /// had them, `containers/harness` and `containers/harness-opencode`, and
-    /// they are gone: a build that still carried one would be an image
-    /// nothing can launch.
+    /// No harness has an image: every one runs from the bundle on the stock
+    /// base. A build that still carried a harness image directory would be
+    /// an image nothing launches.
     #[test]
-    fn only_the_supported_harnesses_have_images() {
+    fn no_harness_has_an_image() {
         assert_eq!(KNOWN, ["claude", "native"]);
         assert!(EXPERIMENTAL.is_empty());
         let containers = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../containers");
-        for retired in ["harness", "harness-opencode"] {
+        for id in [
+            "harness",
+            "harness-opencode",
+            "harness-claude",
+            "harness-native",
+        ] {
             assert!(
-                !containers.join(retired).exists(),
-                "the retired {retired} image directory is still here"
-            );
-        }
-        for id in KNOWN.iter().chain(EXPERIMENTAL) {
-            assert!(
-                containers
-                    .join(format!("harness-{id}"))
-                    .join("Containerfile")
-                    .exists(),
-                "{id} has no Containerfile"
+                !containers.join(id).exists(),
+                "the retired {id} image directory is still here"
             );
         }
     }
