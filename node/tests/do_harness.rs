@@ -818,7 +818,7 @@ async fn templates_and_their_builds() {
         .client
         .create_template(
             "tracon-hdr-rebase-test",
-            "sandbox",
+            "coding-base",
             "ghcr.io/example/base:1",
         )
         .await
@@ -849,7 +849,7 @@ async fn templates_and_their_builds() {
     let seen = api.seen();
     assert_eq!(
         seen[1].json(),
-        json!({ "name": "tracon-hdr-rebase-test", "base_template": "sandbox",
+        json!({ "name": "tracon-hdr-rebase-test", "base_template": "coding-base",
                 "source_oci_ref": "ghcr.io/example/base:1" })
     );
     assert_eq!(seen[3].method, "PUT");
