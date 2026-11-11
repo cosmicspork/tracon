@@ -3,7 +3,9 @@
 //! `off`, holding the sandbox listener, the template and the upkeep, and
 //! making the runner a session placed there runs in.
 
-use std::sync::{Arc, OnceLock};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use super::listener::DoListener;
@@ -32,11 +34,48 @@ const SWEEP_EVERY: Duration = Duration::from_secs(30 * 60);
 /// How long placement waits on the runtime's answer about capacity.
 const CAPACITY_WITHIN: Duration = Duration::from_secs(15);
 
+/// How long a peer's answer to a template request is waited for; the
+/// request waits in the outbox longer, and the peer's hello says the rest.
+const PEER_ANSWER_WITHIN: Duration = Duration::from_secs(60);
+
 pub struct DoRuntime {
     provider: Arc<DoProvider>,
     /// Why the hub cannot carry sandboxes over its own URL, once its
     /// `/v0/info` has said so.
     hub_refused: std::sync::Mutex<Option<String>>,
+    /// What asks peers for templates (`templates = "peer"`).
+    mesh: OnceLock<Arc<crate::mesh::client::MeshClient>>,
+    /// With `templates = "peer"`: what the stock base's key is made of here.
+    peer_base: OnceLock<PeerBase>,
+    /// The stock base's portable image, or why it is not known yet.
+    peer_default: Mutex<Result<String, String>>,
+    /// The images whose templates are being looked at until ready.
+    preparing: Mutex<HashSet<String>>,
+    /// The keys being prepared here for peers.
+    peer_jobs: Mutex<HashSet<String>>,
+    /// The repositories being prepared for a peer's key: the snapshot each
+    /// makes is taken for that key as it is made.
+    expected: Mutex<HashMap<PathBuf, String>>,
+}
+
+/// What the stock base's portable key is made of on a node that takes its
+/// templates from a peer, read from its configuration at start.
+#[derive(Debug, Clone)]
+pub struct PeerBase {
+    /// `[sandbox] base_image`, as configured.
+    pub base_ref: String,
+    pub harness: String,
+    pub services: Vec<(String, String)>,
+}
+
+impl PeerBase {
+    pub fn of(cfg: &Config) -> Self {
+        PeerBase {
+            base_ref: cfg.sandbox.base_image_ref(),
+            harness: super::portable::harness_release(cfg),
+            services: super::portable::services(cfg),
+        }
+    }
 }
 
 /// How often an unanswered look at the hub's `/v0/info` is tried again.
@@ -105,9 +144,17 @@ impl DoRuntime {
             host: Arc::new(crate::mesh::sandbox_relay::current_host),
             hub_url: cfg.mesh.hub_url.clone(),
         };
-        let source = match settings.image.is_empty() {
-            false => Source::Given(settings.image.clone()),
-            true => Source::Built {
+        let source = match (settings.templates, settings.image.is_empty()) {
+            (super::TemplateSource::Peer, _) => Source::Peer {
+                builder: (!settings.builder.trim().is_empty())
+                    .then(|| settings.builder.trim().to_string()),
+                services: super::portable::services(cfg)
+                    .into_iter()
+                    .map(|(name, _)| name)
+                    .collect(),
+            },
+            (_, false) => Source::Given(settings.image.clone()),
+            (_, true) => Source::Built {
                 registry: settings.registry.clone(),
                 prefix: crate::config::resource_prefix().to_string(),
                 bundle: crate::bundle::effective(cfg)
@@ -115,6 +162,7 @@ impl DoRuntime {
                 services: crate::service_bundle::mounts(cfg),
             },
         };
+        let peer = matches!(source, Source::Peer { .. });
         let runtime = Self::with(
             client,
             settings,
@@ -124,6 +172,9 @@ impl DoRuntime {
             listener,
             relay,
         )?;
+        if peer {
+            let _ = runtime.peer_base.set(PeerBase::of(cfg));
+        }
         let _ = RUNTIME.set(runtime.clone());
         tokio::spawn(runtime.clone().upkeep());
         if let (super::Reach::HubUrl { .. }, Some(hub_url)) =
@@ -149,11 +200,18 @@ impl DoRuntime {
         relay: HubRelay,
     ) -> Result<Arc<Self>, String> {
         let reach = settings.reach(relay.hub_url.as_deref())?;
-        let templates = Arc::new(Templates::new(
-            source,
-            &settings.base_template,
-            &owner.template_stem(),
-        )?);
+        // A builder keeps what peers asked for across restarts.
+        let shared = match &source {
+            Source::Built { .. } => super::shared::Shared::load(
+                crate::config::Config::state_dir().join(super::shared::FILE),
+            ),
+            _ => super::shared::Shared::in_memory(),
+        };
+        let templates = Arc::new(
+            Templates::new(source, &settings.base_template, &owner.template_stem())?
+                .with_team(&super::portable::team_stem(&owner.prefix))
+                .with_shared(shared),
+        );
         let provider = DoProvider::new(
             client,
             Options {
@@ -171,7 +229,31 @@ impl DoRuntime {
         Ok(Arc::new(DoRuntime {
             provider: Arc::new(provider),
             hub_refused: std::sync::Mutex::new(None),
+            mesh: OnceLock::new(),
+            peer_base: OnceLock::new(),
+            peer_default: Mutex::new(Err(
+                "the stock base's release digest is not known yet".into()
+            )),
+            preparing: Mutex::new(HashSet::new()),
+            peer_jobs: Mutex::new(HashSet::new()),
+            expected: Mutex::new(HashMap::new()),
         }))
+    }
+
+    /// Ask peers for templates over `mesh`.
+    pub fn set_mesh(&self, mesh: Arc<crate::mesh::client::MeshClient>) {
+        let _ = self.mesh.set(mesh);
+    }
+
+    /// Take templates from a peer, keying the stock base's on `base`: what
+    /// `start` does with `templates = "peer"`, for a test's stand-ins.
+    #[doc(hidden)]
+    pub fn set_peer_base(&self, base: PeerBase) {
+        let _ = self.peer_base.set(base);
+    }
+
+    fn takes_from_peer(&self) -> bool {
+        matches!(self.provider.templates().source(), Source::Peer { .. })
     }
 
     /// Ask the hub, until it answers, whether it serves the relay's
@@ -207,11 +289,224 @@ impl DoRuntime {
     }
 
     /// The image a session there runs in when it has none of its own: the
-    /// operator's, else this node's pinned base.
+    /// operator's, else this node's pinned base, or with templates from a
+    /// peer the stock base's portable key.
     pub fn default_image(&self) -> Option<String> {
-        self.provider
-            .templates()
-            .default_image(crate::sandbox_images::active_base())
+        let fallback = match self.takes_from_peer() {
+            true => self.peer_default.lock().unwrap().clone().ok(),
+            false => crate::sandbox_images::active_base(),
+        };
+        self.provider.templates().default_image(fallback)
+    }
+
+    /// The image a session on `origin` runs in there: its repository's
+    /// prepared snapshot when that has a template ready, else the default.
+    /// One with none yet has it made in the background (here, or asked of
+    /// a peer), for the sessions after this one.
+    pub async fn session_image(
+        self: &Arc<Self>,
+        backend: &dyn crate::boundary::Backend,
+        cfg: &Config,
+        store: &crate::store::Store,
+        origin: Option<&Path>,
+        environment: &crate::environment::RepoEnvironment,
+    ) -> Option<String> {
+        if !self.takes_from_peer() {
+            // Never prepared for this session.
+            let own = match origin {
+                Some(origin) => {
+                    crate::sandbox_images::snapshot_for(
+                        backend,
+                        cfg,
+                        store,
+                        origin,
+                        environment,
+                        false,
+                    )
+                    .await
+                }
+                None => None,
+            };
+            return self.image_for(own);
+        }
+        if let Some(origin) = origin.filter(|_| !environment.prepare.is_empty()) {
+            match self.peer_repo_image(cfg, origin).await {
+                Ok((image, identity, commit)) => {
+                    let ready = self.provider.templates().ready(&image).is_ok();
+                    self.ask_peer(&image, &identity, &commit);
+                    if ready {
+                        return Some(image);
+                    }
+                }
+                Err(why) => {
+                    tracing::info!(repo = %origin.display(), %why, "no DigitalOcean template from a peer for this repository")
+                }
+            }
+        }
+        let image = self.default_image()?;
+        self.ask_peer(&image, "", "");
+        Some(image)
+    }
+
+    /// `origin`'s portable image, its forge identity and the commit its
+    /// key was read at.
+    async fn peer_repo_image(
+        &self,
+        cfg: &Config,
+        origin: &Path,
+    ) -> Result<(String, String, String), String> {
+        let identity = super::portable::forge_identity(cfg, origin)
+            .await
+            .ok_or("its forge identity is not known")?;
+        let (inputs, commit) = super::portable::repo_inputs(cfg, origin, &identity).await?;
+        Ok((inputs.image(), identity, commit))
+    }
+
+    /// Ask a peer to make `image`'s template, or tell it the template is
+    /// still in use, when it is time to ([`super::peers::should_ask`]).
+    /// `repository` is empty for the stock base. The answer is waited for in
+    /// the background.
+    pub fn ask_peer(self: &Arc<Self>, image: &str, repository: &str, commit: &str) {
+        let Source::Peer { builder, .. } = self.provider.templates().source() else {
+            return;
+        };
+        let Some(key) = super::portable::key_of(image) else {
+            return;
+        };
+        let now = crate::store::now_ms();
+        let state = super::peers::state(key, builder.as_deref(), now);
+        if !super::peers::should_ask(key, &state, now) {
+            return;
+        }
+        let Some((peer, name)) = super::peers::builder_for(key, builder.as_deref(), now) else {
+            return;
+        };
+        let Some(mesh) = self.mesh.get().cloned() else {
+            return;
+        };
+        super::peers::asked(key, &name, now);
+        tracing::info!(peer = %name, %repository, %key, "asking a peer for a DigitalOcean template");
+        let command = proto::frame::Command::DoTemplatePrepare {
+            repository: repository.to_string(),
+            commit: commit.to_string(),
+            key: key.to_string(),
+        };
+        let key = key.to_string();
+        tokio::spawn(async move {
+            match mesh.command(&peer, command, PEER_ANSWER_WITHIN).await {
+                Ok(_) => super::peers::answered(&key, &name, None),
+                Err(crate::mesh::forward::CommandError::Refused(why)) => {
+                    tracing::warn!(peer = %name, %key, %why, "a peer refused to make a DigitalOcean template");
+                    super::peers::answered(&key, &name, Some(why));
+                }
+                // Its hello says the rest.
+                Err(error) => {
+                    tracing::info!(peer = %name, %key, %error, "a peer has not answered a DigitalOcean template request")
+                }
+            }
+        });
+    }
+
+    /// Work out the stock base's portable image, once its release is known.
+    async fn refresh_peer_default(&self) {
+        let Some(base) = self.peer_base.get() else {
+            return;
+        };
+        let known = super::portable::base_release(&base.base_ref)
+            .await
+            .map(|release| {
+                super::portable::PortableInputs {
+                    base: release,
+                    harness: base.harness.clone(),
+                    services: base.services.clone(),
+                    repo: None,
+                }
+                .image()
+            });
+        if let Err(why) = &known {
+            tracing::warn!(%why, "the stock base's DigitalOcean template key is not known");
+        }
+        *self.peer_default.lock().unwrap() = known;
+    }
+
+    /// Whether `key` is being prepared here for a peer.
+    pub fn is_preparing_key(&self, key: &str) -> bool {
+        self.peer_jobs.lock().unwrap().contains(key)
+    }
+
+    pub(super) fn done_preparing_key(&self, key: &str) {
+        self.peer_jobs.lock().unwrap().remove(key);
+    }
+
+    /// Prepare `key`'s template for a peer in the background, unless it is
+    /// being prepared already.
+    pub(super) fn start_peer_job(
+        self: &Arc<Self>,
+        builder: super::shared::Builder,
+        repo: Option<PathBuf>,
+        repository: String,
+        commit: String,
+        key: String,
+    ) {
+        if !self.peer_jobs.lock().unwrap().insert(key.clone()) {
+            return;
+        }
+        tokio::spawn(super::shared::peer_job(
+            self.clone(),
+            builder,
+            repo,
+            repository,
+            commit,
+            key,
+        ));
+    }
+
+    /// Take `image`'s template for a peer's `key`.
+    pub fn adopt(&self, image: &str, key: &str) {
+        let templates = self.provider.templates();
+        match templates.own_name_for(image) {
+            Ok(own) => templates.shared().adopt(key, image, &own),
+            Err(why) => templates.shared().fail(key, &why),
+        }
+    }
+
+    pub(super) fn expect_snapshot(&self, repo: &Path, key: &str) {
+        self.expected
+            .lock()
+            .unwrap()
+            .insert(repo.to_path_buf(), key.to_string());
+    }
+
+    pub(super) fn unexpect_snapshot(&self, repo: &Path) {
+        self.expected.lock().unwrap().remove(repo);
+    }
+
+    /// Prepare the template of `repo`'s new snapshot `image`, when this node
+    /// has a DigitalOcean provider: taken for a peer's key first when it was
+    /// prepared for one.
+    pub fn prepare_snapshot_if_running(repo: &Path, image: &str) {
+        if let Some(runtime) = global() {
+            let key = runtime.expected.lock().unwrap().get(repo).cloned();
+            if let Some(key) = key {
+                runtime.adopt(image, &key);
+            }
+            runtime.prepare(image.to_string());
+        }
+    }
+
+    /// What this node says in its hello of the templates it made for
+    /// peers, when it builds them.
+    pub fn advertised(&self) -> Option<serde_json::Value> {
+        let templates = self.provider.templates();
+        if !matches!(templates.source(), Source::Built { .. }) {
+            return None;
+        }
+        let adverts = super::shared::Adverts {
+            templates: templates
+                .shared()
+                .adverts(|name| templates.state_named(name)),
+        };
+        serde_json::to_value(adverts).ok()
     }
 
     /// The image a session there runs in: `own` (its repository's prepared
@@ -231,20 +526,27 @@ impl DoRuntime {
     /// Register `image`'s template in the background, looking until it is
     /// ready or failed: part of preparing that image, never of a session.
     pub fn prepare(self: &Arc<Self>, image: String) {
-        if !self.provider.templates().serves(&image) {
+        if self.takes_from_peer() || !self.provider.templates().serves(&image) {
+            return;
+        }
+        if !self.preparing.lock().unwrap().insert(image.clone()) {
             return;
         }
         let runtime = self.clone();
         tokio::spawn(async move {
             loop {
                 match runtime.ensure_template(&image).await {
-                    TemplateState::Ready { .. } | TemplateState::Failed { .. } => return,
+                    TemplateState::Ready { .. }
+                    | TemplateState::Failed { .. }
+                    | TemplateState::OnPeer { .. }
+                    | TemplateState::NoBuilder { .. } => break,
                     TemplateState::Preparing
                     | TemplateState::Building { .. }
                     | TemplateState::Unknown => {}
                 }
                 tokio::time::sleep(TEMPLATE_BUILDING_POLL).await;
             }
+            runtime.preparing.lock().unwrap().remove(&image);
         });
     }
 
@@ -257,8 +559,8 @@ impl DoRuntime {
         }
     }
 
-    /// The templates this node keeps: the default image's and each current
-    /// snapshot's.
+    /// The templates this node keeps: the default image's, each current
+    /// snapshot's, and each a peer asked for within `shared::PEER_KEEP`.
     async fn wanted(&self) -> std::collections::HashSet<String> {
         let templates = self.provider.templates();
         let mut images: Vec<String> = self.default_image().into_iter().collect();
@@ -273,7 +575,31 @@ impl DoRuntime {
         images
             .iter()
             .flat_map(|image| templates.kept(image))
+            .chain(templates.shared().wanted(crate::store::now_ms()))
             .collect()
+    }
+
+    /// Look again at each template a peer still wants: registered again if
+    /// it has gone, and its state known for the hello after a restart.
+    fn keep_shared(self: &Arc<Self>) {
+        let templates = self.provider.templates();
+        let wanted: HashSet<String> = templates
+            .shared()
+            .wanted(crate::store::now_ms())
+            .into_iter()
+            .collect();
+        for record in templates.shared().records() {
+            if record.image.is_empty() || record.failed.is_some() || !wanted.contains(&record.name)
+            {
+                continue;
+            }
+            if !matches!(
+                templates.state_named(&record.name),
+                Some(TemplateState::Ready { .. })
+            ) {
+                self.prepare(record.image);
+            }
+        }
     }
 
     /// Orphans once, then the template until it is ready and the sweeps.
@@ -294,13 +620,21 @@ impl DoRuntime {
         }
         let mut swept_at: Option<tokio::time::Instant> = None;
         loop {
+            if self.takes_from_peer() {
+                self.refresh_peer_default().await;
+            }
             let ready = match self.default_image() {
+                Some(image) if self.takes_from_peer() => {
+                    self.ask_peer(&image, "", "");
+                    self.provider.templates().ready(&image).is_ok()
+                }
                 Some(image) => matches!(
                     self.ensure_template(&image).await,
                     TemplateState::Ready { .. }
                 ),
                 None => false,
             };
+            self.keep_shared();
             if swept_at.is_none_or(|at| at.elapsed() >= SWEEP_EVERY) {
                 self.sweep().await;
                 swept_at = Some(tokio::time::Instant::now());
@@ -352,6 +686,9 @@ impl DoRuntime {
             crate::store::now_ms(),
         )
         .await;
+        if let Ok(swept) = &swept {
+            self.provider.templates().shared().forget(&swept.templates);
+        }
         match &swept {
             Ok(s)
                 if s.configs.is_empty()
@@ -380,9 +717,12 @@ impl DoRuntime {
                     .into(),
             );
         }
-        let image = self
-            .default_image()
-            .ok_or("this node has not pinned its base image yet")?;
+        let image = match self.takes_from_peer() {
+            true => self.peer_default.lock().unwrap().clone()?,
+            false => self
+                .default_image()
+                .ok_or("this node has not pinned its base image yet")?,
+        };
         self.provider.templates().ready(&image)?;
         if let Some(why) = self.hub_refused.lock().unwrap().clone() {
             return Err(why);

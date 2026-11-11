@@ -796,6 +796,11 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     };
     if let Some(m) = &state.mesh {
         m.set_executor(Arc::new(state.clone()));
+        // A node that takes its DigitalOcean templates from a peer asks for
+        // them over the mesh.
+        if let Some(runtime) = crate::provider::digitalocean::runtime::global() {
+            runtime.set_mesh(m.clone());
+        }
     }
     // External candidates' checks a restart interrupted, and the reviewers
     // that were waiting on them.

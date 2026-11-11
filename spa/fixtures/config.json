@@ -3989,6 +3989,42 @@
       "apply": "restart",
       "editable": true,
       "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "digitalocean.templates",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "choices": [
+          "own",
+          "peer"
+        ],
+        "kind": "enum",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "digitalocean.builder",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
       "editable_by_peer": false,
       "exec_path": false,
       "fs_path": false,

@@ -545,6 +545,22 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         statement: Option<AdminStatement>,
     },
+    /// Ask a node that builds DigitalOcean templates to make one for a
+    /// portable template key: `repository` (a forge identity, empty for the
+    /// stock base) prepared at its default branch, which the sender read at
+    /// `commit`. The builder computes its own key for the repository and
+    /// refuses when it differs, so it never registers a template the sender
+    /// did not describe. Answered at once; the build is reported in the
+    /// builder's hello. A repeat for a key it holds marks it still wanted.
+    /// An older peer cannot read this op and answers that it runs an older
+    /// build.
+    DoTemplatePrepare {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        repository: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        commit: String,
+        key: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1342,6 +1358,23 @@ mod tests {
             serde_json::json!({ "op": "start_reviewer", "review_id": "rv1" })
         );
         assert_eq!(serde_json::from_value::<Command>(v).unwrap(), start);
+    }
+
+    /// A template request names itself on the wire; the stock base's leaves
+    /// the repository and commit off it.
+    #[test]
+    fn do_template_prepare_wire_name_is_stable() {
+        let base = Command::DoTemplatePrepare {
+            repository: String::new(),
+            commit: String::new(),
+            key: "ab".into(),
+        };
+        let v = serde_json::to_value(&base).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({ "op": "do_template_prepare", "key": "ab" })
+        );
+        assert_eq!(serde_json::from_value::<Command>(v).unwrap(), base);
     }
 
     #[derive(serde::Deserialize)]

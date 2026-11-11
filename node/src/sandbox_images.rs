@@ -801,7 +801,9 @@ async fn make_snapshot(
             // Its DigitalOcean template too, where sessions may run there:
             // pushed from Podman's store.
             if backend.kind() == "podman" {
-                crate::provider::digitalocean::runtime::DoRuntime::prepare_if_running(&pinned);
+                crate::provider::digitalocean::runtime::DoRuntime::prepare_snapshot_if_running(
+                    repo, &pinned,
+                );
             }
             Ok(Some(pinned))
         }

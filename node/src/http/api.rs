@@ -6935,6 +6935,26 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                 crate::http::evidence::forwarded_candidates(self, sender, query)
             }
             C::ReviewDetail { request } => forwarded_review_detail(self, sender, request).await,
+            // Prepared here under this node's own recipe and policy; the
+            // answer is where the template stands, the rest in the hello.
+            C::DoTemplatePrepare {
+                repository,
+                commit,
+                key,
+            } => crate::provider::digitalocean::shared::prepare_for_peer(
+                crate::provider::digitalocean::shared::Builder {
+                    backend: self.manager.backend().clone(),
+                    cfg: self.cfg.clone(),
+                    store: self.store().clone(),
+                    broker: self.tools.broker.clone(),
+                    node_id: self.node_id.clone(),
+                },
+                sender,
+                repository,
+                commit,
+                key,
+            )
+            .map_err(|refusal| ApiError(StatusCode::CONFLICT, refusal)),
             C::RecipeOffer {
                 recipe,
                 from_channel,

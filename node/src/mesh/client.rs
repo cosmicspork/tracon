@@ -1469,8 +1469,15 @@ impl MeshClient {
             return Err(HubError::Local("no self node row yet".into()));
         };
         let ring = self.keyring(MESH_CHANNEL)?;
+        let mut node = row.to_json();
+        // A DigitalOcean template builder says which it holds for peers.
+        if let Some(adverts) =
+            crate::provider::digitalocean::runtime::global().and_then(|rt| rt.advertised())
+        {
+            node["do_templates"] = adverts;
+        }
         let payload = Payload::Hello {
-            node: row.to_json(),
+            node,
             contract: proto::CONTRACT_VERSION,
         };
         let env = Envelope::seal_channel(

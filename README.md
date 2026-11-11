@@ -1646,6 +1646,23 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
                                     # session, so a release or a new browser bundle makes a new one and
                                     # the old is swept; until a snapshot's is ready its sessions there
                                     # run in the base's
+                                    # A node with registry also makes templates for peers that ask
+                                    # (do_template_prepare) by portable key: the base by its release
+                                    # (index digest), the repository by forge identity, its recipe
+                                    # (build or Dockerfile, prepare, egress, lockfiles), the harness
+                                    # release and each service bundle's name and version. It refuses
+                                    # a key its own recipe does not make (accept the peer's recipe
+                                    # offer first), lists each such template in its hello, names it
+                                    # <prefix>-tp-<key> (its own sessions in that image start from it
+                                    # too) and keeps it 14 days past the last peer's request
+# templates = "own"                 # own (image or registry) | peer: a node that cannot build amd64,
+                                    # which is all the runtime runs (an Apple node), takes ready
+                                    # templates a peer with registry lists for its keys, and asks it
+                                    # to make one it lacks; meanwhile sessions there run in the base's,
+                                    # and Settings says "preparing on <peer>". Name neither image nor
+                                    # registry; needs [mesh] hub_url
+# builder = ""                      # with templates = "peer": the one peer (node name or id) to take
+                                    # templates from; empty for any that lists them
 # image = "…@sha256:…"              # or one image of your own for every session there, built with
                                     # containers/do-sandbox from this release's bundle (and any
                                     # service bundles, which the node takes on trust); name this or

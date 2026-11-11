@@ -3316,24 +3316,19 @@ impl Manager {
                 requirements,
             } => {
                 // Its repository's prepared snapshot where that has a
-                // template there; never prepared for this session.
-                let own = match &origin {
-                    Some(origin) => {
-                        crate::sandbox_images::snapshot_for(
-                            self.backend.as_ref(),
-                            &self.cfg,
-                            &self.store,
-                            origin,
-                            &environment,
-                            false,
-                        )
-                        .await
-                    }
-                    None => None,
-                };
-                let image = runtime.image_for(own).ok_or_else(|| {
-                    anyhow::anyhow!("DigitalOcean has no image to run this session in yet")
-                })?;
+                // template there (this node's, or a peer's by portable key).
+                let image = runtime
+                    .session_image(
+                        self.backend.as_ref(),
+                        &self.cfg,
+                        &self.store,
+                        origin.as_deref(),
+                        &environment,
+                    )
+                    .await
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("DigitalOcean has no image to run this session in yet")
+                    })?;
                 started_elsewhere = Some(image.clone());
                 (
                     runtime.runner(&self.cfg, requirements.clone(), mounts, image, adapter.id()),
