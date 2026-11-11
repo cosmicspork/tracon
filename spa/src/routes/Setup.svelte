@@ -21,12 +21,20 @@
 
   const message = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
+  // One look at a time: a slow `container system status` must not let the
+  // timer stack another on top of it.
+  let refreshing = false
+
   async function refresh() {
+    if (refreshing) return
+    refreshing = true
     error = null
     try {
       status = await setupStatus()
     } catch (e) {
       error = message(e)
+    } finally {
+      refreshing = false
     }
   }
 
@@ -76,9 +84,9 @@
               <code>{s.command}</code>
             {/if}
             {#if s.href}
-              <a href={s.href} target="_blank" rel="noreferrer">Podman installation instructions</a>
+              <a href={s.href} target="_blank" rel="noreferrer">{s.hrefLabel ?? s.href}</a>
             {/if}
-            {#if s.id === 'machine' && status.machine === 'error'}
+            {#if s.id === 'services' && !s.done}
               <button class="btn" disabled={busy !== null} onclick={() => refresh()}>Retry detection</button>
             {/if}
             {#if s.id === 'service' && (canRestartNode(status) || (!s.done && status.owner !== 'foreign'))}

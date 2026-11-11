@@ -13,46 +13,50 @@ const fresh: SetupStatus = {
   service_running: false,
   service_failing: false,
   service_error: null,
-  podman: '/opt/homebrew/bin/podman',
-  machine: 'stopped',
-  machine_error: null,
+  podman: null,
+  container: '/usr/local/bin/container',
+  services: 'running',
+  services_error: null,
 }
 
 const byId = (s: SetupStatus) => Object.fromEntries(setupSteps(s).map((x) => [x.id, x]))
 
-test('a fresh mac with podman is asked for the service and the CLI', () => {
+test('a fresh mac with container running is asked for the service and the CLI', () => {
   const steps = byId(fresh)
-  expect(steps.podman.done).toBe(true)
-  // A stopped machine is fine: the node starts it.
-  expect(steps.machine.done).toBe(true)
+  expect(steps.container.done).toBe(true)
+  expect(steps.services.done).toBe(true)
+  expect(steps.podman).toBeUndefined()
   expect(steps.service.done).toBe(false)
   expect(steps.cli.done).toBe(false)
   expect(blocked(setupSteps(fresh))).toBe(false)
 })
 
-test('missing Podman blocks setup and points Linux users to installation guidance', () => {
-  const none = setupSteps({ ...fresh, podman: null, machine: null })
+test('a mac without container is pointed at its package, never at Podman', () => {
+  const none = setupSteps({ ...fresh, container: null, services: null })
   expect(blocked(none)).toBe(true)
-  expect(none.map((s) => s.id)).toEqual(['podman', 'service', 'cli'])
-  expect(none[0].command).toBe('brew install podman')
-  const linux = setupSteps({ ...fresh, platform: 'linux', podman: null, machine: null })
-  expect(linux[0].href).toBe('https://podman.io/docs/installation')
+  expect(none.map((s) => s.id)).toEqual(['container', 'service', 'cli'])
+  expect(none[0].href).toBe('https://github.com/apple/container/releases')
+  expect(none[0].hrefLabel).toBeDefined()
 })
 
-test('missing and failed machine detection both block setup but give distinct recovery guidance', () => {
-  const noMachine = byId({ ...fresh, machine: 'missing' })
-  expect(noMachine.machine.detail).toContain('No Podman machine')
-  expect(noMachine.machine.command).toBe('podman machine init')
-  const probeFailed = byId({ ...fresh, machine: 'error', machine_error: 'permission denied' })
-  expect(probeFailed.machine.detail).toContain('Could not verify')
-  expect(probeFailed.machine.reason).toBe('permission denied')
-  expect(probeFailed.machine.command).toBe('podman machine list --format json')
-  expect(blocked(setupSteps({ ...fresh, machine: 'missing' }))).toBe(true)
-  expect(blocked(setupSteps({ ...fresh, machine: 'error' }))).toBe(true)
+test('stopped and unaskable services both block setup with distinct recovery', () => {
+  const stopped = byId({ ...fresh, services: 'stopped', services_error: 'apiserver is not running' })
+  expect(stopped.services.command).toBe('container system start --enable-kernel-install')
+  expect(stopped.services.reason).toBe('apiserver is not running')
+  const failed = byId({ ...fresh, services: 'error', services_error: 'permission denied' })
+  expect(failed.services.detail).toContain('too old or broken')
+  expect(failed.services.command).toBe('container system status')
+  expect(blocked(setupSteps({ ...fresh, services: 'stopped' }))).toBe(true)
+  expect(blocked(setupSteps({ ...fresh, services: 'error' }))).toBe(true)
 })
 
-test('linux has no machine step', () => {
-  expect(setupSteps({ ...fresh, platform: 'linux', machine: null }).map((s) => s.id)).toEqual(['podman', 'service', 'cli'])
+test('linux asks for Podman and has no container steps', () => {
+  const linux = { ...fresh, platform: 'linux' as const, container: null, services: null }
+  const missing = setupSteps({ ...linux, podman: null })
+  expect(missing.map((s) => s.id)).toEqual(['podman', 'service', 'cli'])
+  expect(missing[0].href).toBe('https://podman.io/docs/installation')
+  expect(blocked(missing)).toBe(true)
+  expect(blocked(setupSteps({ ...linux, podman: '/usr/bin/podman' }))).toBe(false)
 })
 
 test('everything done under the service', () => {
@@ -63,7 +67,6 @@ test('everything done under the service', () => {
     service_installed: true,
     service_running: true,
     cli_version: '0.15.0',
-    machine: 'running',
   })
   expect(done.every((s) => s.done)).toBe(true)
 })
@@ -85,7 +88,9 @@ test('a service whose node keeps exiting says why, and can be restarted', () => 
   const failing: SetupStatus = {
     ...fresh,
     platform: 'linux',
-    machine: null,
+    podman: '/usr/bin/podman',
+    container: null,
+    services: null,
     service_installed: true,
     service_failing: true,
     service_error: 'the `omp` harness was removed at the OpenCode cutover.',

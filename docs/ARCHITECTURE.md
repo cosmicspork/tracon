@@ -783,10 +783,10 @@ reachable, an unlisted host refused.
 Contact-derived rules that stay rules: a bind mount over a symlink does not mask it,
 so the harness state directory is built empty and only named files are mounted in —
 nothing of the operator's leaks into a session, the same commitment as "nothing in
-project repos" applied in the other direction. On a Podman machine the node forward
-is TCP through the VM; on Linux it is a Unix socket and the gateway runs
-`label=disable` so the harness never touches the socket while keeping its own
-confinement.
+project repos" applied in the other direction. Where a gateway container still
+runs (Podman with the sandbox switches off), the node forward is a Unix socket and
+the gateway runs `label=disable` so the harness never touches the socket while
+keeping its own confinement.
 
 ### Credential classes
 

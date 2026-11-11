@@ -57,7 +57,8 @@ pub fn default_image(provider: ProviderKind, cfg: &crate::config::Config) -> Str
 
 /// What one probe saw. Each line is printed as it happens.
 pub async fn run(options: ProbeOptions) -> Result<()> {
-    let cfg = crate::config::Config::load();
+    let cfg = crate::config::Config::load()
+        .map_err(|error| anyhow::anyhow!("node.toml does not load: {error}"))?;
     let bundle = match &options.bundle {
         Some(bundle) => bundle.clone(),
         None => {

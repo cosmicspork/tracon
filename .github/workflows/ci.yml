@@ -290,7 +290,7 @@ jobs:
   # it — that is how sqlite-vec's missing typedefs were found.
   #
   # tracon-sandbox runs inside every sandbox, which may be arm64 (an Apple
-  # Silicon Mac's Podman machine, an arm64 provider), so it is also
+  # Silicon Mac's Apple Containerization VMs, an arm64 provider), so it is also
   # cross-built for aarch64 here: clang compiles ring's C for the target and
   # the toolchain's own rust-lld links against Rust's bundled musl, so no
   # cross gcc is needed. Then the x86_64 build runs as a container's PID 1.

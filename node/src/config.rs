@@ -1123,10 +1123,15 @@ impl ReviewLimits {
     }
 }
 
-/// Which boundary this node establishes. `podman` is a laptop or Linux host
-/// with rootless Podman; `kubernetes` is a node running as a pod that owns
-/// harness pods; `apple` is a Mac running each sandbox in a lightweight VM of
-/// its own with Apple's `container`.
+/// Which boundary this node establishes. `podman` is a Linux host with
+/// rootless Podman; `kubernetes` is a node running as a pod that owns harness
+/// pods; `apple` is a Mac running each sandbox in a lightweight VM of its own
+/// with Apple's `container`, and the only kind a Mac runs.
+///
+/// The type's own default is `podman`, which is what a file that names no
+/// kind gets everywhere but a Mac: a load settles that by the host
+/// ([`RuntimeKind::for_host`]), so the defaults a test builds stay the same
+/// on every platform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum RuntimeKind {
@@ -1144,6 +1149,90 @@ impl RuntimeKind {
             Self::Apple => "apple",
         }
     }
+
+    /// The kind a node runs when its `node.toml` names none: Apple
+    /// Containerization on a Mac, Podman elsewhere.
+    pub fn for_host() -> Self {
+        Self::for_host_on(HOST_IS_MAC)
+    }
+
+    fn for_host_on(mac: bool) -> Self {
+        match mac {
+            true => Self::Apple,
+            false => Self::Podman,
+        }
+    }
+}
+
+/// Whether this host is a Mac, for [`HostRules::here`].
+const HOST_IS_MAC: bool = cfg!(target_os = "macos");
+
+/// What the host a `node.toml` is read for decides about it, beyond what
+/// the file says: the kind a file that names none runs, and whether
+/// `kind = "podman"` is refused (a Mac's). Only a node's own load and its own
+/// edits apply this host's rules; another node's file, read here to check an
+/// edit before it goes there, is that node's to judge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostRules {
+    /// The kind a file that names none runs; `None` leaves the type's
+    /// default.
+    pub default_kind: Option<RuntimeKind>,
+    /// Refuse `kind = "podman"`.
+    pub mac: bool,
+}
+
+impl HostRules {
+    /// No host's: what the file says, and nothing a host would add.
+    pub const NEUTRAL: Self = Self {
+        default_kind: None,
+        mac: false,
+    };
+
+    /// This host's, for this node's own `node.toml`.
+    pub fn here() -> Self {
+        Self::of_host(HOST_IS_MAC)
+    }
+
+    fn of_host(mac: bool) -> Self {
+        Self {
+            default_kind: Some(RuntimeKind::for_host_on(mac)),
+            mac,
+        }
+    }
+
+    /// Another node's `node.toml`, read here: the kind that node said it
+    /// runs where its file names none, and nothing refused that only its own
+    /// host would refuse, since it checks the edit again itself.
+    pub fn peer(runs: Option<RuntimeKind>) -> Self {
+        Self {
+            default_kind: runs,
+            mac: false,
+        }
+    }
+}
+
+/// What a Mac is told when its `node.toml` says `kind = "podman"`.
+pub const PODMAN_ON_MAC: &str = "runtime.kind = \"podman\" is not supported on macOS: a Mac \
+    runs its sandboxes with Apple Containerization. Set `kind = \"apple\"` under [runtime] \
+    (or delete the line), install Apple's container package, and run \
+    `container system start --enable-kernel-install` once (README, \"On a Mac with Apple \
+    Containerization\")";
+
+/// Refuse a runtime the host cannot run: Podman on a Mac, whose sandboxes
+/// are Apple Containerization VMs.
+fn validate_runtime_kind(kind: RuntimeKind, mac: bool) -> Result<(), String> {
+    match (kind, mac) {
+        (RuntimeKind::Podman, true) => Err(PODMAN_ON_MAC.into()),
+        _ => Ok(()),
+    }
+}
+
+/// Whether `text` names `[runtime] kind` itself.
+fn names_runtime_kind(text: &str) -> bool {
+    toml::from_str::<toml::Value>(text)
+        .ok()
+        .and_then(|value| value.get("runtime")?.get("kind").cloned())
+        .is_some()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -3262,11 +3351,12 @@ impl Config {
     }
 
     /// This node's configuration, which also fixes the process's
-    /// [`resource_prefix`].
-    pub fn load() -> Self {
-        let config = Self::load_from(&Self::config_path());
-        config.claim_resource_prefix();
-        config
+    /// [`resource_prefix`]. A missing file is the defaults; one that is there
+    /// and does not load is an error with the reason, never the defaults in
+    /// its place: a one-shot command would otherwise act as a node other
+    /// than this one (another name, no hub, another runtime).
+    pub fn load() -> Result<Self, String> {
+        Self::try_load()
     }
 
     /// The first configuration this process loads as its own names its
@@ -3275,12 +3365,12 @@ impl Config {
         let _ = RESOURCE_PREFIX.set(self.boundary.resource_prefix.clone());
     }
 
-    /// Lenient load for one-shot commands: a bad file logs and yields defaults.
-    pub fn load_from(path: &Path) -> Self {
-        Self::try_load_from(path).unwrap_or_else(|e| {
-            tracing::warn!(path = %path.display(), error = %e, "bad node.toml, using defaults");
-            Self::default()
-        })
+    /// The defaults a node on this host runs with no `node.toml`: those of
+    /// [`Config::default`], on this host's runtime kind.
+    pub fn for_host() -> Self {
+        let mut config = Self::default();
+        config.runtime.kind = RuntimeKind::for_host();
+        config
     }
 
     /// Strict load for `serve`, `setup` and `check-boundary`: a file that
@@ -3308,24 +3398,35 @@ impl Config {
                     }
                     None => text,
                 };
-                Self::from_toml(&text, path)
+                Self::from_toml_with(&text, path, HostRules::here())
             }
             // No file is a node on its defaults; one that is there and
             // cannot be read is as wrong as one that does not parse.
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::for_host()),
             Err(error) => Err(format!("{}: {error}", path.display())),
         }
     }
 
-    /// A `node.toml` text as the node loads it, with every check a load
-    /// makes; `path` is only for the message. What `config::edit` holds a
-    /// result to before it writes it.
+    /// A `node.toml` text with every check a load makes, and no host's
+    /// rules ([`HostRules::NEUTRAL`]); `path` is only for the message.
     pub fn from_toml(text: &str, path: &Path) -> Result<Self, String> {
+        Self::from_toml_with(text, path, HostRules::NEUTRAL)
+    }
+
+    /// A `node.toml` text as a node on a host with `host`'s rules loads it,
+    /// with every check a load makes; `path` is only for the message. What
+    /// `config::edit` holds a result to before it writes it.
+    pub fn from_toml_with(text: &str, path: &Path, host: HostRules) -> Result<Self, String> {
         let mut config: Self =
             toml::from_str(text).map_err(|error| format!("{}: {error}", path.display()))?;
         // From the text, not the struct: a file with no
         // `[providers]` at all deserializes to the defaults whole.
         config.declared_providers = declared_providers(text);
+        if let Some(kind) = host.default_kind.filter(|_| !names_runtime_kind(text)) {
+            config.runtime.kind = kind;
+        }
+        validate_runtime_kind(config.runtime.kind, host.mac)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
         for (name, provider) in default_providers() {
             config.providers.entry(name).or_insert(provider);
         }
@@ -3820,6 +3921,88 @@ mod tests {
         assert_eq!(retired_qa_section("[review]\nmax_files = 1\n"), None);
     }
 
+    /// A Mac runs Apple Containerization and nothing else: a file that names
+    /// no kind runs it there, and one that names Podman is refused with the
+    /// way over. Elsewhere Podman stays the default.
+    #[test]
+    fn a_mac_runs_apple_and_refuses_podman() {
+        assert_eq!(RuntimeKind::for_host_on(true), RuntimeKind::Apple);
+        assert_eq!(RuntimeKind::for_host_on(false), RuntimeKind::Podman);
+        let refused = validate_runtime_kind(RuntimeKind::Podman, true).unwrap_err();
+        assert!(refused.contains("kind = \"apple\""), "{refused}");
+        assert!(refused.contains("container system start"), "{refused}");
+        assert!(validate_runtime_kind(RuntimeKind::Apple, true).is_ok());
+        assert!(validate_runtime_kind(RuntimeKind::Kubernetes, true).is_ok());
+        assert!(validate_runtime_kind(RuntimeKind::Podman, false).is_ok());
+
+        assert!(names_runtime_kind("[runtime]\nkind = \"podman\"\n"));
+        assert!(!names_runtime_kind(
+            "[runtime.podman]\nsandbox_init = true\n"
+        ));
+        assert!(!names_runtime_kind(""));
+
+        let path = Path::new("node.toml");
+        let podman = "[runtime]\nkind = \"podman\"\n";
+        // A Mac's own file: no kind is Apple, Podman is refused.
+        let mac = HostRules::of_host(true);
+        assert_eq!(
+            Config::from_toml_with("", path, mac).unwrap().runtime.kind,
+            RuntimeKind::Apple
+        );
+        let refused = Config::from_toml_with(podman, path, mac).unwrap_err();
+        assert!(refused.contains("not supported on macOS"), "{refused}");
+        // Anywhere else's own file: no kind is Podman.
+        let linux = HostRules::of_host(false);
+        assert_eq!(
+            Config::from_toml_with("", path, linux)
+                .unwrap()
+                .runtime
+                .kind,
+            RuntimeKind::Podman
+        );
+        assert!(Config::from_toml_with(podman, path, linux).is_ok());
+        // A file read without a host's rules says only what it says.
+        assert_eq!(
+            Config::from_toml("", path).unwrap().runtime.kind,
+            RuntimeKind::default()
+        );
+        assert!(Config::from_toml(podman, path).is_ok());
+        // Another node's: the kind it runs where its file names none, and
+        // nothing refused for this host's sake.
+        let peer_mac = HostRules::peer(Some(RuntimeKind::Apple));
+        assert_eq!(
+            Config::from_toml_with("", path, peer_mac)
+                .unwrap()
+                .runtime
+                .kind,
+            RuntimeKind::Apple
+        );
+        assert_eq!(
+            Config::from_toml_with(podman, path, HostRules::peer(None))
+                .unwrap()
+                .runtime
+                .kind,
+            RuntimeKind::Podman
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("node.toml");
+        let missing = Config::try_load_from(&file).unwrap();
+        assert_eq!(missing.runtime.kind, RuntimeKind::for_host());
+        // This node's own file is held to this host's rules.
+        std::fs::write(&file, podman).unwrap();
+        match HOST_IS_MAC {
+            true => {
+                let refused = Config::try_load_from(&file).unwrap_err();
+                assert!(refused.contains("not supported on macOS"), "{refused}");
+            }
+            false => assert_eq!(
+                Config::try_load_from(&file).unwrap().runtime.kind,
+                RuntimeKind::Podman
+            ),
+        }
+    }
+
     /// A strict load takes a missing file as the defaults, and refuses one
     /// that is there but does not parse or cannot be read, naming why.
     #[test]
@@ -3831,11 +4014,6 @@ mod tests {
         let error = Config::try_load_from(&missing).unwrap_err();
         assert!(error.contains("node.toml"), "{error}");
         assert!(error.contains("runtime.podman"), "{error}");
-        // The lenient load still falls back, for commands that touch nothing.
-        assert_eq!(
-            Config::load_from(&missing).runtime.podman.sandbox_tunnels,
-            cfg!(target_os = "linux")
-        );
         let unreadable = Config::try_load_from(dir.path()).unwrap_err();
         assert!(
             unreadable.contains(&dir.path().display().to_string()),

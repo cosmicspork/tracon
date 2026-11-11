@@ -14,17 +14,23 @@ export interface SetupStatus {
   service_failing: boolean
   // What the node said as it exited, while it is failing.
   service_error: string | null
+  // Linux only: rootless Podman, the boundary there.
   podman: string | null
-  machine: 'running' | 'starting' | 'stopped' | 'missing' | 'error' | null
-  machine_error: string | null
+  // macOS only: Apple's container CLI, the boundary there, and whether its
+  // services run.
+  container: string | null
+  services: 'running' | 'stopped' | 'error' | null
+  services_error: string | null
 }
 
 export interface SetupStep {
-  id: 'podman' | 'machine' | 'service' | 'cli'
+  id: 'podman' | 'container' | 'services' | 'service' | 'cli'
   title: string
   detail: string
   command?: string
   href?: string
+  // What the link is to.
+  hrefLabel?: string
   // Why it is not working, in the node's own words.
   reason?: string
   done: boolean
@@ -76,8 +82,9 @@ function cliStep(s: SetupStatus): SetupStep {
   return { ...step, done: true, detail: `v${s.cli_version} at ${s.cli_path}.` }
 }
 
-export function setupSteps(s: SetupStatus): SetupStep[] {
-  const steps: SetupStep[] = [
+// Linux: rootless Podman.
+function podmanSteps(s: SetupStatus): SetupStep[] {
+  return [
     s.podman
       ? { id: 'podman', title: 'Podman', done: true, blocking: true, detail: `Found at ${s.podman}.` }
       : {
@@ -86,29 +93,57 @@ export function setupSteps(s: SetupStatus): SetupStep[] {
           done: false,
           blocking: true,
           detail: 'The boundary the agent runs inside. Install it, then this page picks it up.',
-          command: s.platform === 'macos' ? 'brew install podman' : undefined,
-          href: s.platform === 'linux' ? 'https://podman.io/docs/installation' : undefined,
+          href: 'https://podman.io/docs/installation',
+          hrefLabel: 'Podman installation instructions',
         },
   ]
-  if (s.platform === 'macos' && s.podman) {
-    steps.push(
-      s.machine === 'missing'
-        ? { id: 'machine', title: 'Podman machine', done: false, blocking: true, detail: 'No Podman machine was found. Create one, then retry setup.', command: 'podman machine init' }
-        : s.machine === 'error' || s.machine === null
-          ? {
-              id: 'machine',
-              title: 'Podman machine',
-              done: false,
-              blocking: true,
-              detail: 'Could not verify whether a Podman machine exists. Resolve the detection problem and retry.',
-              reason: s.machine_error ?? undefined,
-              command: 'podman machine list --format json',
-            }
-          : { id: 'machine', title: 'Podman machine', done: true, blocking: true, detail: s.machine === 'running' ? 'Running.' : 'Not running; the node starts it.' },
-    )
+}
+
+// macOS: Apple Containerization, each sandbox a VM of its own.
+function containerSteps(s: SetupStatus): SetupStep[] {
+  if (!s.container) {
+    return [
+      {
+        id: 'container',
+        title: 'Apple container',
+        done: false,
+        blocking: true,
+        detail:
+          'The boundary the agent runs inside: each sandbox is a lightweight VM. It needs macOS 26 on Apple silicon. Install the signed package, then this page picks it up.',
+        href: 'https://github.com/apple/container/releases',
+        hrefLabel: 'container releases',
+      },
+    ]
   }
-  steps.push(serviceStep(s), cliStep(s))
-  return steps
+  const found: SetupStep = { id: 'container', title: 'Apple container', done: true, blocking: true, detail: `Found at ${s.container}.` }
+  const services: SetupStep =
+    s.services === 'running'
+      ? { id: 'services', title: 'container services', done: true, blocking: true, detail: 'Running.' }
+      : s.services === 'stopped'
+        ? {
+            id: 'services',
+            title: 'container services',
+            done: false,
+            blocking: true,
+            detail: 'Not running. Start them, then retry setup. The flag installs the kernel the VMs boot without asking for it.',
+            reason: s.services_error ?? undefined,
+            command: 'container system start --enable-kernel-install',
+          }
+        : {
+            id: 'services',
+            title: 'container services',
+            done: false,
+            blocking: true,
+            detail: 'Could not tell whether they run: the container CLI may be too old or broken. Resolve it, then retry.',
+            reason: s.services_error ?? undefined,
+            command: 'container system status',
+          }
+  return [found, services]
+}
+
+export function setupSteps(s: SetupStatus): SetupStep[] {
+  const boundary = s.platform === 'macos' ? containerSteps(s) : podmanSteps(s)
+  return [...boundary, serviceStep(s), cliStep(s)]
 }
 
 // One line for Settings: who runs the node, or why nothing is.

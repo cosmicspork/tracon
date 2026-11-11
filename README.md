@@ -55,8 +55,8 @@ file tree and no editor of its own.
 **The harnesses.** Two, behind one adapter trait, and a session's harness follows the
 credential its model spends: an Anthropic credential runs on Claude Code (through any
 other client Anthropic bills a subscription as extra usage), and ChatGPT/Codex and every
-other provider on `tracon-agent`. On Linux both run from the release's harness bundle, mounted
-into a stock base image; Podman on a Mac builds an image for each at `tracon setup`. A session may
+other provider on `tracon-agent`. Both run from the release's harness bundle, mounted
+into a stock base image. A session may
 name its harness, and naming one its credential cannot run on is refused with the reason.
 The picker tags each model with the harness it runs on, and Settings lists each harness's
 version and image. **Claude Code**, over the stream-json control protocol, is the harness
@@ -70,8 +70,8 @@ together. It is experimental until it has done a week of real work;
 [agent/README.md](agent/README.md) has the details. Subscription sign-in does not run in
 any harness: the node speaks the Anthropic and ChatGPT OAuth flows itself.
 
-**The supported configuration** is the desktop app on macOS or Linux, rootless Podman,
-Claude Code, one node. Everything described below beyond that — `tracon-agent`, the Kubernetes runtime,
+**The supported configuration** is the desktop app, on Linux with rootless Podman or on
+macOS with Apple Containerization, Claude Code, one node. Everything described below beyond that — `tracon-agent`, the Kubernetes runtime,
 the hub and mesh, the installed phone app, handoff between nodes — is built and tested
 but experimental until that configuration is boring; the
 [roadmap](docs/ROADMAP.md#the-supported-configuration) says why.
@@ -88,9 +88,11 @@ any self-update. The cost is that Gatekeeper asks once, on first open — right-
 the app and choose Open, or on macOS 15 and later allow it under System Settings >
 Privacy & Security > Open Anyway (`xattr -d com.apple.quarantine
 /Applications/tracon.app` does the same) — and it never asks again. The app opens on a
-setup page that looks for rootless Podman — the boundary
-the agent runs inside; on a Mac that is `brew install podman`, then
-`podman machine init` once — and then, with one button, installs the `tracon`
+setup page that looks for the boundary the agent runs inside: on Linux, rootless
+Podman; on a Mac, Apple's [`container`](https://github.com/apple/container/releases)
+(macOS 26 on Apple silicon), whose signed package you install and whose services you
+start once with `container system start --enable-kernel-install` — and then, with one
+button, installs the `tracon`
 command in `~/.local/bin` and a user service (launchd, or systemd --user) that runs
 the node whether or not the app is open. From then on the window is the node's own
 interface.
@@ -112,7 +114,8 @@ Linux x86_64, or macOS on Apple Silicon):
 curl -fsSL https://raw.githubusercontent.com/cosmicspork/tracon/main/install.sh | sh
 ```
 
-Then, with rootless Podman on the machine:
+Then, with rootless Podman on a Linux machine, or Apple's `container` running on a Mac
+(see [On a Mac with Apple Containerization](#on-a-mac-with-apple-containerization)):
 
 ```sh
 tracon setup                   # pull the sandbox base image and fetch the harness bundle for this release
@@ -122,9 +125,9 @@ tracon service install         # run this binary as the node under systemd or la
 
 If `tracon setup` cannot find podman — a node started from a desktop launcher
 inherits a minimal PATH — set `podman` under `[boundary]` in `node.toml` to its
-full path. The interface says so too, in the refusal it shows. On macOS the node
-starts the podman machine itself when it finds it stopped; create one once with
-`podman machine init`. The node keeps the boundary in step by itself: when it
+full path. The interface says so too, in the refusal it shows. A Mac runs Apple
+Containerization and nothing else: with no `[runtime] kind` it runs `apple`, and a
+`node.toml` that says `kind = "podman"` there is refused at load, naming the way over. The node keeps the boundary in step by itself: when it
 starts (after an upgrade, or a new pinned Claude Code), and when what an image is
 built from changes under it, it rebuilds any image whose definitions changed,
 recreates a missing network, rewrites the allowlist and replaces the gateway only if
@@ -1404,7 +1407,7 @@ tools = []                          # the only tools a session may use; empty is
 podman = ""                         # empty: found on PATH, then the usual install locations
                                     # network, subnet, gateway_* and harness_image serve only the
                                     # deprecated paths ([runtime.podman] sandbox_tunnels or
-                                    # sandbox_images off) and Podman on a Mac
+                                    # sandbox_images off)
 network = "tracon-int"
 subnet = "10.89.0.0/24"
 gateway_ip = "10.89.0.2"
@@ -1416,7 +1419,6 @@ harness_image = "localhost/tracon-harness-claude"  # the image for [harness] id;
                                     # end in [harness] id), which setup builds too. Unused on
                                     # the sandbox images, where every harness runs from the
                                     # bundle on the base
-start_machine = true                # macOS: start the podman machine when it is stopped
 auto_reconcile = true               # set up the boundary at start and when its definitions
                                     # change; false leaves it to `tracon setup`
 resource_prefix = "tracon"          # every runtime volume and container this node names starts
@@ -1450,9 +1452,10 @@ suspend_published_after_secs = 1800 # a published session idle this long is susp
 # worktree_root = "/private/tmp"    # on macOS; the system temp directory elsewhere
 
 [runtime]
-kind = "podman"                     # or "kubernetes", for a pod-hosted node, or "apple", for a
-                                    # Mac whose sandboxes are VMs (see "On a Mac with Apple
-                                    # Containerization")
+kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted node, or "apple",
+                                    # a Mac's default and the only kind it runs: its sandboxes
+                                    # are VMs (see "On a Mac with Apple Containerization").
+                                    # "podman" on a Mac is refused
 # [runtime.apple]
 # container = ""                    # Apple's container CLI; empty for /usr/local/bin/container
 # limit = 4                         # most sandboxes at once; unset for no limit of its own
@@ -2053,7 +2056,7 @@ action the node reads it for, not one already dispatched.
 |---|---|---|
 | `node.toml` | `~/Library/Application Support/tracon/` | `~/.config/tracon/` |
 | database, credentials, identity, harness volume, managed repos, scratch | `~/Library/Application Support/tracon/` | `~/.local/state/tracon/` |
-| harness socket | (TCP `127.0.0.1:7421` through the VM) | `$XDG_RUNTIME_DIR/tracon/harness.sock` |
+| harness socket | (TCP `127.0.0.1:7421`) | `$XDG_RUNTIME_DIR/tracon/harness.sock` |
 | the CLI, and the binary the service runs | `~/.local/bin/tracon` | `~/.local/bin/tracon` |
 | the service | `~/Library/LaunchAgents/com.tracon.node.plist`, logs in `~/Library/Logs/tracon.log` | `~/.config/systemd/user/tracon.service` |
 
@@ -2398,9 +2401,17 @@ untagged manifests a rebuild under the same tag leaves behind go too.
 
 On Apple silicon with macOS 26, `[runtime] kind = "apple"` runs every harness, check and
 preparation in a lightweight VM of its own, made with Apple's
-[`container`](https://github.com/apple/container) CLI. No Podman is involved. Install
-`container`'s signed package, then run `container system start --enable-kernel-install`
-once. Without that flag, starting it prompts for a kernel and fails when there is no TTY.
+[`container`](https://github.com/apple/container) CLI. It is a Mac's default and the only
+kind a Mac runs; Podman is not supported there, and `kind = "podman"` is refused at load.
+Install `container`'s signed package, then run
+`container system start --enable-kernel-install` once. Without that flag, starting it
+prompts for a kernel and fails when there is no TTY. The desktop app's setup page checks
+both, and installs the service only once `container system status` says its services run.
+
+A Mac that ran Podman before needs nothing in `node.toml` beyond removing any
+`kind = "podman"`: its next start runs on `container`. Sessions opened under Podman stay on
+the Podman machine's volumes, which the node no longer reads; finish or export them first.
+The Podman machine itself is left alone (`podman machine rm` when nothing else uses it).
 
 - **Route.** Each VM has `--network none` and no resolver. Its only way out is the
   sandbox protocol's socket, which `container` publishes from the VM to a socket under
@@ -2480,7 +2491,7 @@ named from `node.toml`, so a scratch node with its own values shares none of the
 one's harness state, images, probes or sockets, and neither node's `tracon gc` lists the
 other's volumes. On Linux its sandboxes have no network and no gateway of their own, so a
 prefix of its own is all the boundary needs. A node with the sandbox switches off
-(deprecated), or Podman on a Mac, also names its own `network`, `subnet`, `gateway_ip`,
+(deprecated) also names its own `network`, `subnet`, `gateway_ip`,
 `gateway_container`, `gateway_image` and `harness_image` under `[boundary]` (say
 `scratch-int`, `10.89.7.0/24`, `10.89.7.2`, `scratch-gw`, `localhost/scratch-gateway`
 and `localhost/scratch-harness-claude`), since the gateway, its user service and the

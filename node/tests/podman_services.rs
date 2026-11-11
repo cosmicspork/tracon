@@ -154,7 +154,7 @@ fn claim_resource_prefix(prefix: &str) {
         )
         .unwrap();
     }
-    Config::load();
+    Config::load().unwrap();
     assert!(
         !tracon::config::resource_prefix().starts_with("tracon"),
         "the test's runtime names must not be a node's"
