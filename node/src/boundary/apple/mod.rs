@@ -715,6 +715,10 @@ impl Backend for AppleBackend {
         Some(self)
     }
 
+    fn sandbox_files_store(&self) -> Option<FilesStore> {
+        Some(self.files_store())
+    }
+
     async fn prepared_snapshots(&self) -> Vec<String> {
         let ours = format!("{}-", crate::sandbox_images::snapshot_repo());
         let mut pinned: Vec<String> = self

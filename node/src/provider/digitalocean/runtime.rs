@@ -11,7 +11,8 @@ use std::time::Duration;
 use super::listener::DoListener;
 use super::templates::{Source, TemplateState, Templates};
 use super::{upkeep, ClientSource, DoProvider, HubRelay, Options, Owner, Settings};
-use crate::config::Config;
+use crate::boundary::{Backend, ImageBuilder};
+use crate::config::{Config, RuntimeKind};
 use crate::provider::requirements::DoMode;
 use crate::provider::{Candidate, ProviderKind, Requirements, SandboxProvider as _};
 use crate::runner::{Mount, Runner};
@@ -56,6 +57,9 @@ pub struct DoRuntime {
     /// The repositories being prepared for a peer's key: the snapshot each
     /// makes is taken for that key as it is made.
     expected: Mutex<HashMap<PathBuf, String>>,
+    /// The node's runtime and store, which say which prepared snapshots are
+    /// current and so whose templates are kept.
+    node: OnceLock<(Arc<dyn Backend>, Arc<crate::store::Store>)>,
 }
 
 /// What the stock base's portable key is made of on a node that takes its
@@ -125,11 +129,14 @@ fn client_source(
 
 impl DoRuntime {
     /// Start the provider for `cfg`, or nothing when it is not configured
-    /// on. Binding its listener is the one failure that stops it.
+    /// on. Binding its listener, and a node that cannot build the templates
+    /// it is to build, are the failures that stop it.
     pub async fn start(
         cfg: &Config,
         broker: crate::broker::SharedBroker,
         node_id: &str,
+        backend: Arc<dyn Backend>,
+        store: Arc<crate::store::Store>,
     ) -> Result<Option<Arc<Self>>, String> {
         if !enabled(cfg) {
             return Ok(None);
@@ -163,18 +170,26 @@ impl DoRuntime {
             },
         };
         let peer = matches!(source, Source::Peer { .. });
-        let runtime = Self::with(
+        let builder = match source {
+            Source::Built { .. } => source_builder(cfg, backend.as_ref())?,
+            _ => None,
+        };
+        let runtime = Self::assemble(
             client,
             settings,
             source,
             Owner::new(crate::config::resource_prefix(), node_id),
-            cfg.boundary.gateway_container.clone(),
+            // The name the harness's own configuration gives the gateway,
+            // which the sandbox's hosts file makes its loopback.
+            backend.harness_host(),
             listener,
             relay,
+            builder,
         )?;
         if peer {
             let _ = runtime.peer_base.set(PeerBase::of(cfg));
         }
+        runtime.set_node(backend, store);
         let _ = RUNTIME.set(runtime.clone());
         tokio::spawn(runtime.clone().upkeep());
         if let (super::Reach::HubUrl { .. }, Some(hub_url)) =
@@ -199,6 +214,30 @@ impl DoRuntime {
         listener: Arc<DoListener>,
         relay: HubRelay,
     ) -> Result<Arc<Self>, String> {
+        Self::assemble(
+            client,
+            settings,
+            source,
+            owner,
+            gateway_host,
+            listener,
+            relay,
+            None,
+        )
+    }
+
+    /// `with`, building its sources on `builder` where Podman does not.
+    #[allow(clippy::too_many_arguments)]
+    fn assemble(
+        client: ClientSource,
+        settings: Settings,
+        source: Source,
+        owner: Owner,
+        gateway_host: String,
+        listener: Arc<DoListener>,
+        relay: HubRelay,
+        builder: Option<Arc<dyn ImageBuilder>>,
+    ) -> Result<Arc<Self>, String> {
         let reach = settings.reach(relay.hub_url.as_deref())?;
         // A builder keeps what peers asked for across restarts.
         let shared = match &source {
@@ -207,11 +246,14 @@ impl DoRuntime {
             ),
             _ => super::shared::Shared::in_memory(),
         };
-        let templates = Arc::new(
+        let mut templates =
             Templates::new(source, &settings.base_template, &owner.template_stem())?
                 .with_team(&super::portable::team_stem(&owner.prefix))
-                .with_shared(shared),
-        );
+                .with_shared(shared);
+        if let Some(builder) = builder {
+            templates = templates.with_builder(builder);
+        }
+        let templates = Arc::new(templates);
         let provider = DoProvider::new(
             client,
             Options {
@@ -237,7 +279,14 @@ impl DoRuntime {
             preparing: Mutex::new(HashSet::new()),
             peer_jobs: Mutex::new(HashSet::new()),
             expected: Mutex::new(HashMap::new()),
+            node: OnceLock::new(),
         }))
+    }
+
+    /// Keep the templates of the prepared snapshots `backend` holds and
+    /// `store` has ready: what `start` does, for a test's stand-ins.
+    pub fn set_node(&self, backend: Arc<dyn Backend>, store: Arc<crate::store::Store>) {
+        let _ = self.node.set((backend, store));
     }
 
     /// Ask peers for templates over `mesh`.
@@ -564,13 +613,13 @@ impl DoRuntime {
     async fn wanted(&self) -> std::collections::HashSet<String> {
         let templates = self.provider.templates();
         let mut images: Vec<String> = self.default_image().into_iter().collect();
-        if matches!(templates.source(), Source::Built { .. }) {
-            images.extend(
-                crate::sandbox_images::snapshot_images()
-                    .await
-                    .into_iter()
-                    .map(|(pinned, _)| pinned),
-            );
+        if let (Source::Built { .. }, Some((backend, store))) =
+            (templates.source(), self.node.get())
+        {
+            // A runtime that keeps its snapshots in a registry lists none;
+            // the store's ready rows are the current ones either way.
+            images.extend(backend.prepared_snapshots().await);
+            images.extend(crate::sandbox_images::ready_snapshots(store));
         }
         images
             .iter()
@@ -712,8 +761,9 @@ impl DoRuntime {
         if !crate::boundary::sandboxes_over_protocol(cfg) {
             return Err(
                 "a DigitalOcean sandbox needs this node to run its own sandboxes over the \
-                 sandbox protocol (runtime.kind = \"podman\" or \"apple\"): it mounts nothing \
-                 and has no gateway of its own"
+                 sandbox protocol (runtime.kind = \"podman\" or \"apple\", or \"kubernetes\" \
+                 with [runtime.kubernetes] sandbox_protocol = true): it mounts nothing and has \
+                 no gateway of its own"
                     .into(),
             );
         }
@@ -889,27 +939,6 @@ impl DoRuntime {
             .collect()
     }
 
-    /// The runner a session placed here runs in: its trees over the files
-    /// channel, its gateways through tunnels, its isolation read back and
-    /// held to `requirements` before anything reaches it.
-    pub fn runner(
-        &self,
-        cfg: &Config,
-        requirements: Requirements,
-        mounts: Vec<Mount>,
-        image: String,
-        harness_id: &str,
-    ) -> Arc<dyn Runner> {
-        self.runner_with(
-            cfg,
-            requirements,
-            mounts,
-            image,
-            harness_id,
-            crate::runner::sandbox_files::FilesStore::for_node(),
-        )
-    }
-
     /// Every process's environment in a sandbox here. The runtime's init
     /// gives the supervisor the runtime's own: its proxy, which admits the
     /// node's way in and nothing else, and a `NO_PROXY` without the
@@ -932,6 +961,10 @@ impl DoRuntime {
         env
     }
 
+    /// The runner a session placed here runs in: its trees over the files
+    /// channel from `files` (where this node's own sandboxes keep theirs),
+    /// its gateways through tunnels, its isolation read back and held to
+    /// `requirements` before anything reaches it.
     pub fn runner_with(
         &self,
         cfg: &Config,
@@ -962,13 +995,48 @@ impl DoRuntime {
                 .with_mounts(mounts)
                 .with_workdir("/work")
                 .with_files(files)
-                .with_tunnels(crate::runner::tunnels::gateway_tunnels(cfg))
+                .with_tunnels(do_tunnels(cfg))
                 .with_env(self.sandbox_env(cfg, harness_id))
                 .with_sandbox_services(true)
                 .with_service_refusal(refusal)
                 .with_requirements(requirements)
                 .with_token_window(TOKEN_WINDOW),
         )
+    }
+}
+
+/// The tunnels a sandbox there gets to the node's gateways: those this
+/// node's own sandboxes get, which lead to the listeners its runtime serves.
+/// A pod-hosted node serves its allowlist proxy itself on a port, where a
+/// Podman or Apple node serves it on a socket.
+pub fn do_tunnels(cfg: &Config) -> Vec<crate::runner::tunnels::TunnelSpec> {
+    match cfg.runtime.kind {
+        RuntimeKind::Kubernetes => crate::runner::tunnels::kube_tunnels(cfg),
+        RuntimeKind::Podman | RuntimeKind::Apple => crate::runner::tunnels::gateway_tunnels(cfg),
+    }
+}
+
+/// What builds `[digitalocean] registry`'s template sources here: Podman
+/// itself (`None`), or a Kubernetes node's BuildKit. DigitalOcean runs
+/// amd64 alone, and either builds for this machine.
+fn source_builder(
+    cfg: &Config,
+    backend: &dyn Backend,
+) -> Result<Option<Arc<dyn ImageBuilder>>, String> {
+    let arch = crate::boundary::registry::host_architecture();
+    if arch != "amd64" {
+        return Err(format!(
+            "digitalocean.registry builds templates for amd64, which is all DigitalOcean runs, \
+             and this node is {arch}: take them from a peer (templates = \"peer\")"
+        ));
+    }
+    match cfg.runtime.kind {
+        RuntimeKind::Kubernetes => backend.registry_builder().map(Some).ok_or_else(|| {
+            "digitalocean.registry builds templates on [runtime.kubernetes.builder] here, \
+             which is not usable: see the runtime check"
+                .to_string()
+        }),
+        RuntimeKind::Podman | RuntimeKind::Apple => Ok(None),
     }
 }
 

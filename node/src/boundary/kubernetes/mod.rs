@@ -208,8 +208,9 @@ impl KubeBackend {
     /// stock base pinned by the manifest its registry holds for this
     /// machine's architecture, which is every sandbox's, since affinity keeps
     /// them on the node pod's machine. Nothing is pulled here; a pod's
-    /// kubelet pulls the pinned digest. `Ok(true)` when the bundle was
-    /// fetched or the pin moved.
+    /// kubelet pulls the pinned digest. With `[digitalocean] registry`, the
+    /// release's browser bundle too, which the templates it builds hold.
+    /// `Ok(true)` when a bundle was fetched or the pin moved.
     pub async fn converge_images(&self) -> Result<bool, String> {
         if !uses_sandbox_protocol(&self.cfg) {
             return Ok(false);
@@ -222,6 +223,9 @@ impl KubeBackend {
             Ok(_) => false,
             Err(error) => return Err(format!("harness bundle: {error}")),
         };
+        // The DigitalOcean templates this node builds hold the browser, and a
+        // peer's request waits on it: fetched whether or not the pin succeeds.
+        let browser = crate::service_bundle::converge(&self.cfg).await;
         let configured = self.cfg.sandbox.base_image_ref();
         // The builder's credential for a base kept in its registry; a base
         // anywhere else (the release's, on GHCR) is public and read without.
@@ -257,7 +261,7 @@ impl KubeBackend {
             tracing::info!(image = %pinned, "pinned the sandbox base for linux/{arch}");
         }
         crate::sandbox_images::pin(&configured, &pinned);
-        Ok(fetched || moved)
+        Ok(fetched || moved || browser?)
     }
 
     pub fn egress_port(&self) -> &EgressPort {
@@ -600,6 +604,17 @@ impl Backend for KubeBackend {
         cfg.kubernetes_harness_image(harness_id)
     }
 
+    fn sandbox_files_store(&self) -> Option<crate::runner::sandbox_files::FilesStore> {
+        Some(self.files_store())
+    }
+
+    fn registry_builder(&self) -> Option<Arc<dyn super::ImageBuilder>> {
+        match &self.builder {
+            Some(Ok(builder)) => Some(builder.clone()),
+            _ => None,
+        }
+    }
+
     /// Pods pull on use, so a cluster names each image and says nothing of it.
     /// Over the sandbox protocol that is one image for every harness: the
     /// base, which the bundle completes.
@@ -923,6 +938,71 @@ mod tests {
                 .seeds_session_cache("tracon-cache-base-x", true)
                 .await
         );
+    }
+
+    /// A node that builds DigitalOcean's templates fetches the release's
+    /// browser bundle for them as it converges, whatever becomes of the
+    /// base's pin; it keeps its trees where its own sandboxes do and hands
+    /// out its builder for the templates.
+    #[tokio::test]
+    async fn a_digitalocean_template_builder_fetches_the_browser() {
+        use crate::service_bundle::{self, CHROME_VERSION};
+        let Some(arch) = crate::bundle::host_arch() else {
+            return;
+        };
+        let release = tempfile::tempdir().unwrap();
+        let published = release
+            .path()
+            .join(format!("v{}", env!("CARGO_PKG_VERSION")));
+        std::fs::create_dir_all(&published).unwrap();
+        service_bundle::tests::tarball(
+            &published,
+            CHROME_VERSION,
+            arch,
+            service_bundle::tests::FILES,
+        );
+        let (url, _) = crate::bundle::tests::serve(release.path().to_path_buf()).await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.runtime.kind = crate::config::RuntimeKind::Kubernetes;
+        cfg.runtime.kubernetes.sandbox_protocol = true;
+        cfg.runtime.kubernetes.state_mount = tmp.path().to_path_buf();
+        cfg.runtime.kubernetes.builder = Some(crate::config::KubeBuilder {
+            registry: "registry.digitalocean.com/acme".into(),
+            ..Default::default()
+        });
+        // A bundle of the operator's, so nothing else is fetched, and a base
+        // no pod could pull, so the pin fails.
+        cfg.sandbox.bundle = Some(tmp.path().join("bundle"));
+        cfg.sandbox.base_image = Some("localhost/spike-base:1".into());
+        cfg.sandbox.release_url = Some(url);
+        cfg.service = vec![crate::config::Service {
+            name: "browser".into(),
+            bundle: Some(service_bundle::RELEASE.into()),
+            port: 9222,
+            ..Default::default()
+        }];
+        cfg.digitalocean.credential = "do".into();
+        cfg.digitalocean.image = String::new();
+        cfg.digitalocean.registry = "registry.digitalocean.com/acme".into();
+        cfg.placement.digitalocean = crate::provider::requirements::DoMode::Overflow;
+        let browser = service_bundle::managed_dir(&Config::state_dir(), CHROME_VERSION, arch);
+        let _ = std::fs::remove_dir_all(&browser);
+
+        let backend = KubeBackend::new(&cfg);
+        let pinned = backend.converge_images().await.unwrap_err();
+        assert!(pinned.contains("only in a local image store"), "{pinned}");
+        assert!(browser.join("run").is_file(), "{}", browser.display());
+        let _ = std::fs::remove_dir_all(&browser);
+
+        assert!(backend.sandbox_files_store().is_some());
+        let builder = backend.registry_builder().expect("a builder");
+        assert_eq!(
+            builder.registry().as_deref(),
+            Some("registry.digitalocean.com/acme")
+        );
+        assert_eq!(builder.scratch_dir(), Some(tmp.path().join(build::SCRATCH)));
     }
 
     /// Without `[runtime.kubernetes.builder]` nothing builds and the check

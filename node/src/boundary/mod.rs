@@ -284,6 +284,11 @@ pub trait ImageBuilder: Send + Sync {
     fn retains_previous(&self) -> bool {
         false
     }
+    /// The registry every build is pushed to, without a trailing slash;
+    /// `None` for a builder whose images stay in a local store.
+    fn registry(&self) -> Option<String> {
+        None
+    }
 }
 
 /// One harness's image as the runtime holds it.
@@ -374,10 +379,22 @@ pub trait Backend: Send + Sync {
         None
     }
     /// Every prepared snapshot of this node's that the runtime holds, pinned;
-    /// its image builder removes one. Podman's are listed by
-    /// `sandbox_images::snapshot_images`.
+    /// its image builder removes one. A runtime that keeps them in a registry
+    /// lists none: the store's ready rows say which are current.
     async fn prepared_snapshots(&self) -> Vec<String> {
         Vec::new()
+    }
+    /// Where a sandbox's trees are kept while it runs over the sandbox
+    /// protocol, for a sandbox elsewhere (DigitalOcean's) that runs beside
+    /// this node's own. `None` for a runtime whose sandboxes mount them.
+    fn sandbox_files_store(&self) -> Option<crate::runner::sandbox_files::FilesStore> {
+        None
+    }
+    /// What builds a DigitalOcean template's source and pushes it to a
+    /// registry the runtime pulls from, where that is not the node's own
+    /// Podman: a cluster's BuildKit. `None` where nothing here can.
+    fn registry_builder(&self) -> Option<Arc<dyn ImageBuilder>> {
+        None
     }
     /// The image a named harness runs in here, which a repository's image
     /// copies the harness from where one is layered: a pod-hosted node's
@@ -703,7 +720,10 @@ pub async fn backend_for(cfg: &Config) -> Arc<dyn Backend> {
 /// reach the node only through tunnels: what a sandbox that mounts nothing
 /// and has no network of its own (DigitalOcean's) needs of the node.
 pub fn sandboxes_over_protocol(cfg: &Config) -> bool {
-    matches!(cfg.runtime.kind, RuntimeKind::Apple | RuntimeKind::Podman)
+    match cfg.runtime.kind {
+        RuntimeKind::Apple | RuntimeKind::Podman => true,
+        RuntimeKind::Kubernetes => kubernetes::uses_sandbox_protocol(cfg),
+    }
 }
 
 #[cfg(test)]

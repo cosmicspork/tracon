@@ -3330,8 +3330,21 @@ impl Manager {
                         anyhow::anyhow!("DigitalOcean has no image to run this session in yet")
                     })?;
                 started_elsewhere = Some(image.clone());
+                // Its trees are kept where this node's own sandboxes keep
+                // theirs, which is where its workspace was made.
+                let files = self
+                    .backend
+                    .sandbox_files_store()
+                    .unwrap_or_else(crate::runner::sandbox_files::FilesStore::for_node);
                 (
-                    runtime.runner(&self.cfg, requirements.clone(), mounts, image, adapter.id()),
+                    runtime.runner_with(
+                        &self.cfg,
+                        requirements.clone(),
+                        mounts,
+                        image,
+                        adapter.id(),
+                        files,
+                    ),
                     Vec::new(),
                 )
             }

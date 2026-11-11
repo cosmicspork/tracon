@@ -1633,15 +1633,21 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
                                     # proxy through the tunnel, not the runtime's. A [[service]] with a
                                     # bundle runs inside, from the template's copy; one with only an
                                     # image is refused there. Settings' capability view shows how it is
-                                    # reached and why it cannot take a session. Needs a Podman
-                                    # node (or Apple): nothing is mounted there
+                                    # reached and why it cannot take a session. Needs a node whose
+                                    # own sandboxes run over the sandbox protocol (Podman, Apple, or
+                                    # Kubernetes with sandbox_protocol): nothing is mounted there
 # credential = "do"                 # a broker credential holding DIGITALOCEAN_ACCESS_TOKEN
 # registry = "registry.digitalocean.com/acme"  # where the node pushes the template sources it
                                     # builds: its pinned base and each repository's prepared snapshot,
                                     # with the bundle it verified, each [[service]] bundle it holds
                                     # (the release's browser is fetched for it) and the tracon-sandbox
-                                    # service (containers/do-sandbox). Needs a Podman node. Each is
-                                    # registered as a template once per image digest and what goes
+                                    # service (containers/do-sandbox). A Podman node builds and pushes
+                                    # with the token; a Kubernetes node over the sandbox protocol
+                                    # builds on [runtime.kubernetes.builder]'s BuildKit and pushes with
+                                    # its credential, so this must be that builder's registry. amd64
+                                    # nodes only (all the runtime runs); Apple takes them from a
+                                    # peer. Each is registered as a template once per image digest
+                                    # and what goes
                                     # into it (about seven minutes), as part of preparing it, never per
                                     # session, so a release or a new browser bundle makes a new one and
                                     # the old is swept; until a snapshot's is ready its sessions there
@@ -2246,6 +2252,20 @@ checks that no name resolves and that the node pod's forward port is not reachab
 directly. Names follow `[boundary] resource_prefix`: the policies a node reads are
 `<prefix>-sandbox`, `<prefix>-harness` and `<prefix>-node`, and the repository images
 it pushes are `<registry>/<prefix>-repo-…`.
+
+**DigitalOcean from a Kubernetes node.** A pod-hosted node over the sandbox protocol can
+place its sessions on DigitalOcean's Harness Runtime and build templates for itself and
+its peers, as a Podman node does. Its trees are sent from the state claim and its
+gateways are the same tunnels its own sandboxes get. Set `[digitalocean] credential`,
+`registry` (equal to `[runtime.kubernetes.builder] registry`: BuildKit builds each
+template's source on the cluster and pushes it with the builder's credential), and reach
+the node through the hub relay: `relay = true`, `listen = "127.0.0.1:<port>"` on a port
+other than the sandbox port (7426), and `[mesh.sandbox_relay] target` the same address.
+The node pod's own egress is open, so it reaches `api.digitalocean.com` and the hub with
+no policy change. The node must run on amd64, which is all the runtime runs, and it
+fetches the release's browser bundle into `<state>/bundles` for the templates to hold.
+Prepared snapshots stay in the builder's registry; the store's ready ones keep their
+templates from the sweep.
 
 **Two nodes in one namespace.** Give the second its own `resource_prefix` (say
 `spike`) and its own Deployment, whose selector and pod template carry

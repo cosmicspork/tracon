@@ -1,6 +1,7 @@
 //! A builder's side of templates made for peers: a node with `[digitalocean]
-//! registry` (an amd64 Podman node) that another node asks, by portable key
-//! ([`super::portable`]), to make a template (`do_template_prepare`).
+//! registry` (an amd64 Podman node, or a Kubernetes node with BuildKit) that
+//! another node asks, by portable key ([`super::portable`]), to make a
+//! template (`do_template_prepare`).
 //!
 //! It prepares the repository at its own default branch, builds, pushes and
 //! registers the template under the key's team-wide name, and says how each

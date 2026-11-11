@@ -460,6 +460,18 @@ impl Backend for PodmanBackend {
         Some(self)
     }
 
+    async fn prepared_snapshots(&self) -> Vec<String> {
+        crate::sandbox_images::snapshot_images()
+            .await
+            .into_iter()
+            .map(|(pinned, _)| pinned)
+            .collect()
+    }
+
+    fn sandbox_files_store(&self) -> Option<crate::runner::sandbox_files::FilesStore> {
+        Some(crate::runner::sandbox_files::FilesStore::for_node())
+    }
+
     fn preparer(&self) -> Option<crate::sandbox_images::Preparer> {
         let cfg = &self.cfg;
         Some(crate::sandbox_images::Preparer {

@@ -527,6 +527,24 @@ pub async fn current(
         .then_some(row.image)
 }
 
+/// Each repository's current prepared snapshot, as the store has it ready:
+/// what a session there starts from, wherever the runtime keeps it.
+pub fn ready_snapshots(store: &Store) -> Vec<String> {
+    let repos: std::collections::BTreeSet<String> = store
+        .repo_images()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|row| row.kind == SNAPSHOT)
+        .map(|row| row.repo_path)
+        .collect();
+    repos
+        .iter()
+        .filter_map(|repo| store.ready_repo_image(repo, SNAPSHOT).ok().flatten())
+        .map(|row| row.image)
+        .filter(|image| !image.is_empty())
+        .collect()
+}
+
 /// Whether `image` is one of this node's prepared snapshots, by its name:
 /// `localhost/<prefix>-snapshot-…` in a local store, or the same name under
 /// a registry, where a pod-hosted node's builder pushes it.
@@ -798,13 +816,10 @@ async fn make_snapshot(
             }
             record_seed(&environment.cache_volume, &pinned);
             tracing::info!(repo = %repo.display(), snapshot = %pinned, "prepared the repository and snapshotted it");
-            // Its DigitalOcean template too, where sessions may run there:
-            // pushed from Podman's store.
-            if backend.kind() == "podman" {
-                crate::provider::digitalocean::runtime::DoRuntime::prepare_snapshot_if_running(
-                    repo, &pinned,
-                );
-            }
+            // Its DigitalOcean template too, where sessions may run there.
+            crate::provider::digitalocean::runtime::DoRuntime::prepare_snapshot_if_running(
+                repo, &pinned,
+            );
             Ok(Some(pinned))
         }
         Err(error) => {

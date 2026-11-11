@@ -594,6 +594,10 @@ impl ImageBuilder for BuildKitBuilder {
         true
     }
 
+    fn registry(&self) -> Option<String> {
+        Some(self.prefix.clone())
+    }
+
     /// Only what this node pushed, `<registry>/<prefix>-repo-…` and
     /// `<registry>/<prefix>-snapshot-…`: a harness image, or one an entry
     /// pinned by hand in this registry or another, is never this node's to
@@ -1257,6 +1261,62 @@ mod tests {
             .await
             .unwrap_err();
         assert!(failed.error.contains("build metadata"), "{}", failed.error);
+    }
+
+    /// A DigitalOcean template's source is built from its staged context and
+    /// pushed under the name it was given, in this registry, and named by the
+    /// digest the daemon pushed; it is none of this node's to remove.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_digitalocean_template_source_is_pushed_as_named() {
+        const FROM: &str = "registry.example.com/cs/tracon-snapshot-app@sha256:aaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = settings("registry.example.com/cs");
+        config.buildctl = stub(
+            tmp.path(),
+            &format!(
+                "for a in \"$@\"; do case \"$a\" in context=*) cp \"${{a#context=}}/Containerfile\" {log}/containerfile;; esac; done\n\
+                 while [ \"$1\" != --metadata-file ]; do shift; done\n\
+                 printf '{{\"containerimage.digest\":\"{DIGEST}\"}}' > \"$2\"",
+                log = tmp.path().display()
+            ),
+        );
+        let scratch = tmp.path().join("state").join(SCRATCH);
+        let builder = BuildKitBuilder::new(&config, scratch.clone()).unwrap();
+        let bundle = tmp.path().join("bundle");
+        std::fs::create_dir_all(bundle.join("bin")).unwrap();
+        std::fs::write(bundle.join("bin/tracon-sandbox"), "x").unwrap();
+        let pushed = crate::provider::digitalocean::images::build_and_push_with(
+            &builder,
+            FROM,
+            &crate::provider::digitalocean::images::Contents {
+                bundle: &bundle,
+                services: &[],
+            },
+            "registry.example.com/cs",
+            "tracon",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            pushed,
+            format!("registry.example.com/cs/tracon-do-sandbox@{DIGEST}")
+        );
+        let argv = std::fs::read_to_string(tmp.path().join("argv")).unwrap();
+        assert!(
+            argv.contains(
+                "type=image,name=registry.example.com/cs/tracon-do-sandbox:aaaaaaaaaaaaaaaa,push=true"
+            ),
+            "{argv}"
+        );
+        assert!(
+            argv.contains(&format!("context={}", scratch.display())),
+            "{argv}"
+        );
+        assert!(!argv.contains("build-arg:"), "{argv}");
+        let containerfile = std::fs::read_to_string(tmp.path().join("containerfile")).unwrap();
+        assert!(containerfile.contains(&format!("ARG BASE={FROM}\n")));
+        assert!(!builder.pushed_here(&pushed));
     }
 
     /// A build past its deadline is given up, and the client is killed with
