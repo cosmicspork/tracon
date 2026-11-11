@@ -818,7 +818,7 @@ async fn templates_and_their_builds() {
         .client
         .create_template(
             "tracon-hdr-rebase-test",
-            "sandbox",
+            "coding-base",
             "ghcr.io/example/base:1",
         )
         .await
