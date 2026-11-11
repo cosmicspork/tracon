@@ -549,6 +549,9 @@ pub(crate) mod tests {
             service: vec![service("browser", Some("release"))],
             ..Config::default()
         };
+        // The node's own sandboxes run no services.
+        cfg.runtime.podman = crate::config::PodmanRuntime::legacy();
+        assert!(!wanted(&cfg));
         cfg.digitalocean.credential = "do".into();
         cfg.digitalocean.registry = "registry.digitalocean.com/acme".into();
         assert!(!wanted(&cfg), "placement is off");

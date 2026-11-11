@@ -491,6 +491,9 @@ mod tests {
     /// The user's directories are made its own, a tree whose top is not is
     /// made its own throughout, and the bootstrap names the user and where
     /// it works. Run as the test's own user, the one it can hand them to.
+    /// Linux only, as the script is: it runs inside a Linux sandbox, with
+    /// GNU `stat` and `chown`.
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_delivery_hands_the_sandbox_to_its_user() {
         let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
