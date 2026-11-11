@@ -3295,6 +3295,9 @@ impl Manager {
             materialize::own_state(&mut mounts, &scratch.volume);
         }
         mounts.push(workspace.mount("/work", false));
+        // The image a session placed elsewhere started from: its template's
+        // there, which `image` (this node's runtime's) knows nothing of.
+        let mut started_elsewhere = None;
         let (runner, cache_env) = match &placed {
             placing::Placed::DigitalOcean {
                 runtime,
@@ -3319,6 +3322,7 @@ impl Manager {
                 let image = runtime.image_for(own).ok_or_else(|| {
                     anyhow::anyhow!("DigitalOcean has no image to run this session in yet")
                 })?;
+                started_elsewhere = Some(image.clone());
                 (
                     runtime.runner(&self.cfg, requirements.clone(), mounts, image, adapter.id()),
                     Vec::new(),
@@ -3450,8 +3454,14 @@ impl Manager {
                 "harness_version": compat.version,
                 "harness_expected": adapter.pinned_version(),
                 "harness_protocol": compat.protocol,
-                "image": image.reported(&self.cfg),
-                "image_source": image.source(&self.cfg),
+                "image": started_elsewhere.clone().or_else(|| image.reported(&self.cfg)),
+                "image_source": match &started_elsewhere {
+                    Some(started_in) => crate::repo_image::source_elsewhere(
+                        started_in,
+                        &crate::sandbox_images::base_image(&self.cfg),
+                    ),
+                    None => image.source(&self.cfg),
+                },
                 "toolchain_image": image.toolchain_image,
                 "image_note": image.note,
                 "resumed": reopened.is_some(),

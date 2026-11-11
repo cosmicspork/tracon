@@ -857,6 +857,23 @@ pub struct SessionImage {
 /// `image_source` for a session from the bundle on the release's own base.
 pub const STOCK_BASE: &str = "stock base";
 
+/// `image_source` for a session on another provider in the image the
+/// operator gave it (`[digitalocean] image`).
+pub const OPERATOR_IMAGE: &str = "operator image";
+
+/// The `image_source` of a session placed on another provider, which
+/// started from `started_in`'s template there. Its [`SessionImage`] holds
+/// nothing of this node's runtime, so it cannot say.
+pub fn source_elsewhere(started_in: &str, base: &str) -> &'static str {
+    if crate::sandbox_images::is_snapshot(started_in) {
+        crate::sandbox_images::SNAPSHOT_SOURCE
+    } else if started_in == base {
+        STOCK_BASE
+    } else {
+        OPERATOR_IMAGE
+    }
+}
+
 impl SessionImage {
     /// The one `image_source` a session reports. With the harness from the
     /// bundle there is no harness image: a session with no image of its own
@@ -2243,6 +2260,24 @@ mod tests {
     use super::*;
     use crate::runner::local::LocalRunner;
     use async_trait::async_trait;
+
+    #[test]
+    fn a_session_elsewhere_reports_the_image_its_template_was_made_from() {
+        let base = "ghcr.io/cosmicspork/tracon-sandbox-base@sha256:c9d6";
+        let snapshot = format!(
+            "localhost/{}-snapshot-mesa-fb857314f4@sha256:ece8",
+            crate::config::resource_prefix()
+        );
+        assert_eq!(
+            source_elsewhere(&snapshot, base),
+            crate::sandbox_images::SNAPSHOT_SOURCE
+        );
+        assert_eq!(source_elsewhere(base, base), STOCK_BASE);
+        assert_eq!(
+            source_elsewhere("registry.example/team/sandbox@sha256:aaaa", base),
+            OPERATOR_IMAGE
+        );
+    }
 
     /// Records what it was asked to build and reads the Containerfile and
     /// context while they still exist, as a real build would.
