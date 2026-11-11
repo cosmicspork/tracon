@@ -1647,7 +1647,9 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node, or
                                     # client work never goes. The runtime's init starts the supervisor
                                     # as root; it becomes the stock base's user (uid 65532, home
                                     # /home/harness, working in /work) before it starts anything, as
-                                    # on Podman and Apple, and every process gets the node's allowlist
+                                    # on Podman and Apple, with no-new-privileges; a sandbox whose
+                                    # supervisor says it runs as anyone else (an image built from an
+                                    # older release) is refused. Every process gets the node's allowlist
                                     # proxy through the tunnel, not the runtime's. A [[service]] with a
                                     # bundle runs inside, from the template's copy; one with only an
                                     # image is refused there. Settings' capability view shows how it is

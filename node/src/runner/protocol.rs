@@ -25,6 +25,10 @@ use crate::provider::{
 };
 use crate::telemetry::{run_kind, telemetry};
 
+/// Why a catalogue service (by name) cannot run in the sandbox `handle`
+/// (`None`: not known to this process), if it cannot.
+pub type ServiceRefusal = Arc<dyn Fn(Option<&Handle>, &str) -> Option<String> + Send + Sync>;
+
 /// How long a sandbox has to start and connect.
 pub const CONNECT_WITHIN: Duration = Duration::from_secs(60);
 
@@ -251,9 +255,9 @@ pub struct ProtocolRunner {
     /// under what each sets itself: for a provider that does not set it on
     /// the sandbox, whose supervisor's own environment is the provider's.
     env: Vec<(String, String)>,
-    /// Catalogue services refused in this runner's sandboxes, and why, said
-    /// before anything reaches a sandbox.
-    refused_services: BTreeMap<String, String>,
+    /// Why a catalogue service cannot run in one of this runner's
+    /// sandboxes, said before anything reaches it.
+    service_refusal: Option<ServiceRefusal>,
 }
 
 impl ProtocolRunner {
@@ -273,7 +277,7 @@ impl ProtocolRunner {
             requirements: None,
             token_window: None,
             env: Vec::new(),
-            refused_services: BTreeMap::new(),
+            service_refusal: None,
         }
     }
 
@@ -284,10 +288,10 @@ impl ProtocolRunner {
         self
     }
 
-    /// Refuse each catalogue service named in `refused` with its reason, at
-    /// `service_start`, rather than letting it fail inside the sandbox.
-    pub fn with_refused_services(mut self, refused: BTreeMap<String, String>) -> Self {
-        self.refused_services = refused;
+    /// Refuse a catalogue service at `service_start` when `refusal` says
+    /// why, rather than letting it fail inside the sandbox.
+    pub fn with_service_refusal(mut self, refusal: ServiceRefusal) -> Self {
+        self.service_refusal = Some(refusal);
         self
     }
 
@@ -300,8 +304,15 @@ impl ProtocolRunner {
             .name
             .strip_prefix(&format!("{}-svc-", sidecar.session_container))
             .unwrap_or(&sidecar.name);
-        if let Some(why) = self.refused_services.get(service) {
-            return Some(why.clone());
+        if let Some(refusal) = &self.service_refusal {
+            let handle = running()
+                .lock()
+                .unwrap()
+                .get(&sidecar.session_container)
+                .map(|(handle, _)| handle.clone());
+            if let Some(why) = refusal(handle.as_ref(), service) {
+                return Some(why);
+            }
         }
         // A tunnel's port matters only to a service inside the sandbox.
         self.in_sandbox(sidecar)?;

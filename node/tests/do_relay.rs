@@ -239,6 +239,9 @@ async fn a_digitalocean_sandbox_reaches_the_node_over_the_hubs_url() {
     )
     .unwrap();
     let provider = runtime.provider().clone();
+    // The stand-in's supervisor is this test's own loop, as its user.
+    let me = tracon_sandbox::inside::user::current().uid;
+    provider.expect_uid(Some(me));
     assert_eq!(provider.capabilities().route, Route::Unverified);
     // This hub serves the relay's WebSocket, so nothing is held against it.
     runtime.clone().check_hub(hub_url.clone()).await;

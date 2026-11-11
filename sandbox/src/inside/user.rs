@@ -10,7 +10,11 @@
 //!
 //! This is consistency, not a boundary: the sandbox is the provider's VM,
 //! whose root is its own, and a provider's isolation is read back from the
-//! provider, never from inside.
+//! provider, never from inside. Root does not come back by another door
+//! either: the supervisor sets no-new-privileges ([`no_new_privileges`]),
+//! which everything it starts inherits, so a setuid or file-capability
+//! binary in the image (`su`, `mount`, a `sudo` a snapshot carries) gains
+//! nothing, as under Podman's `no-new-privileges`.
 
 use std::io;
 
@@ -65,7 +69,7 @@ pub fn current() -> User {
 #[cfg(not(target_os = "linux"))]
 pub fn become_user(user: User) -> io::Result<()> {
     match current() == user {
-        true => Ok(()),
+        true => no_new_privileges(),
         false => Err(io::Error::new(
             io::ErrorKind::Unsupported,
             format!("becoming {user} is supported on Linux only"),
@@ -91,7 +95,7 @@ pub fn become_user(user: User) -> io::Result<()> {
         uids.iter().all(|&u| u == user.uid) && gids.iter().all(|&g| g == user.gid)
     };
     if is(ids()) {
-        return Ok(());
+        return no_new_privileges();
     }
     let now = current();
     if now.uid != 0 {
@@ -122,6 +126,28 @@ pub fn become_user(user: User) -> io::Result<()> {
             "became {user}, and could still become root again"
         )));
     }
+    no_new_privileges()
+}
+
+/// Set no-new-privileges on this process, which every process it starts
+/// inherits and none can clear: an exec of a setuid or file-capability
+/// binary then runs with the caller's own credentials. Failing to set it is
+/// an error, never a sandbox running without it.
+#[cfg(target_os = "linux")]
+pub fn no_new_privileges() -> io::Result<()> {
+    // SAFETY: a plain prctl on this process.
+    match unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } {
+        0 => Ok(()),
+        _ => Err(io::Error::other(format!(
+            "set no-new-privileges: {}",
+            io::Error::last_os_error()
+        ))),
+    }
+}
+
+/// Elsewhere there is nothing to set.
+#[cfg(not(target_os = "linux"))]
+pub fn no_new_privileges() -> io::Result<()> {
     Ok(())
 }
 

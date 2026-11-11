@@ -272,7 +272,7 @@ impl DoRuntime {
         }
         images
             .iter()
-            .filter_map(|image| templates.name_for(image).ok())
+            .flat_map(|image| templates.kept(image))
             .collect()
     }
 
@@ -478,13 +478,9 @@ impl DoRuntime {
             line(
                 "privilege",
                 caps.privilege.as_str(),
-                format!(
-                    "the harness and its services run as uid {}; root is the VM's own",
-                    crate::sandbox_images::USER
-                        .split(':')
-                        .next()
-                        .unwrap_or_default()
-                ),
+                "root is the VM's own; which user the harness runs as is the user line, as \
+                 its sandboxes report it"
+                    .into(),
             ),
             line(
                 "runtime_socket",
@@ -521,42 +517,33 @@ impl DoRuntime {
                 why: candidate.health.err(),
                 capacity: candidate.capacity,
                 services,
+                expected_uid: self.provider.expected_uid(),
+                reported: self.provider.reported().map(|info| {
+                    crate::provider::capabilities::Reported {
+                        version: info.version,
+                        uid: info.uid,
+                    }
+                }),
             }),
         }
     }
 
-    /// Whether each catalogue service can run in a sandbox here, and why
-    /// not. One with a bundle runs inside, under the sandbox's supervisor,
-    /// from the copy its template holds: nothing is mounted here and nothing
-    /// runs beside a sandbox, so a service with only an image cannot, and
-    /// nor can one whose bundle the node did not bake into the template.
-    /// Its traffic is the sandbox's own: the node's allowlist proxy through
-    /// the tunnel, never a wider egress for the sandbox.
+    /// Whether each catalogue service can run in a sandbox here now, and
+    /// why not: in the template a new sandbox would start from (or, before
+    /// there is one, the template the node would build).
     pub fn service_support(&self, cfg: &Config) -> Vec<(String, Result<(), String>)> {
-        let held = self.provider.templates().held_services();
+        let templates = self.provider.templates();
+        let template = self
+            .default_image()
+            .and_then(|image| templates.ready(&image).ok());
+        let held = match &template {
+            Some(name) => templates.services_of(name),
+            None => templates.current_services(),
+        };
         cfg.service
             .iter()
             .map(|service| {
-                let support = match (&service.bundle, &held) {
-                    (None, _) => Err(format!(
-                        "service {} runs as a container of its own beside a session, and \
-                         DigitalOcean runs nothing beside its sandboxes: give it a bundle \
-                         ([[service]] bundle) to run it inside one",
-                        service.name
-                    )),
-                    (Some(_), Some(held)) if !held.contains(&service.name) => Err(format!(
-                        "service {}'s bundle is not in DigitalOcean's template: {}",
-                        service.name,
-                        match crate::service_bundle::resolve(service) {
-                            Some(dir) => format!(
-                                "{} was not on this node when the template was built",
-                                dir.display()
-                            ),
-                            None => "this node has no copy of it".into(),
-                        }
-                    )),
-                    (Some(_), _) => Ok(()),
-                };
+                let support = service_support(service, held.as_deref(), template.as_deref());
                 (service.name.clone(), support)
             })
             .collect()
@@ -615,11 +602,19 @@ impl DoRuntime {
         files: crate::runner::sandbox_files::FilesStore,
     ) -> Arc<dyn Runner> {
         let provider: Arc<dyn crate::provider::SandboxProvider> = self.provider.clone();
-        let refused = self
-            .service_support(cfg)
-            .into_iter()
-            .filter_map(|(name, support)| support.err().map(|why| (name, why)))
-            .collect();
+        // Judged against the template each sandbox was made from.
+        let refusal: crate::runner::protocol::ServiceRefusal = {
+            let made = self.provider.clone();
+            let catalogue = cfg.service.clone();
+            Arc::new(move |handle, name| {
+                let service = catalogue.iter().find(|s| s.name == name)?;
+                let template = handle.and_then(|h| made.template_of(h));
+                let held = template
+                    .as_deref()
+                    .and_then(|t| made.templates().services_of(t));
+                service_support(service, held.as_deref(), template.as_deref()).err()
+            })
+        };
         Arc::new(
             crate::runner::protocol::ProtocolRunner::new(provider, image)
                 // The template's image holds the bundle at /opt/tracon.
@@ -630,9 +625,44 @@ impl DoRuntime {
                 .with_tunnels(crate::runner::tunnels::gateway_tunnels(cfg))
                 .with_env(self.sandbox_env(cfg, harness_id))
                 .with_sandbox_services(true)
-                .with_refused_services(refused)
+                .with_service_refusal(refusal)
                 .with_requirements(requirements)
                 .with_token_window(TOKEN_WINDOW),
         )
+    }
+}
+
+/// Whether `service` runs in a sandbox made from `template`, which holds
+/// the service bundles `held` (`None`: an image of the operator's, taken on
+/// trust). One with a bundle runs inside, under the sandbox's supervisor,
+/// from the template's copy: nothing is mounted there and nothing runs
+/// beside a sandbox, so one with only an image cannot, and nor can one whose
+/// bundle that template does not hold. Its traffic is the sandbox's own: the
+/// node's allowlist proxy through the tunnel, never a wider egress.
+fn service_support(
+    service: &crate::config::Service,
+    held: Option<&[String]>,
+    template: Option<&str>,
+) -> Result<(), String> {
+    match (&service.bundle, held) {
+        (None, _) => Err(format!(
+            "service {} runs as a container of its own beside a session, and DigitalOcean \
+             runs nothing beside its sandboxes: give it a bundle ([[service]] bundle) to run \
+             it inside one",
+            service.name
+        )),
+        (Some(_), Some(held)) if !held.contains(&service.name) => Err(format!(
+            "service {}'s bundle is not in DigitalOcean's template{}: {}",
+            service.name,
+            template.map(|t| format!(" {t}")).unwrap_or_default(),
+            match crate::service_bundle::resolve(service) {
+                Some(dir) if dir.is_dir() => format!(
+                    "{} was not on this node when the template was built; the next one holds it",
+                    dir.display()
+                ),
+                _ => "this node has no copy of it".into(),
+            }
+        )),
+        (Some(_), _) => Ok(()),
     }
 }

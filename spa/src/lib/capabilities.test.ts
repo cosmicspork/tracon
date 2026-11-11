@@ -28,6 +28,8 @@ const there = (over: Partial<Elsewhere> = {}): Elsewhere => ({
   healthy: true,
   capacity: { running: 1, limit: 4 },
   services: [],
+  expected_uid: 65532,
+  reported: null,
   ...over,
 })
 
@@ -63,9 +65,18 @@ describe('a provider elsewhere', () => {
         ],
       }),
     )
-    expect(lines.slice(3)).toEqual([
+    expect(lines.slice(4)).toEqual([
       { label: 'service browser', tone: '', text: 'runs inside' },
       { label: 'service pg', tone: 'off', text: 'refused', detail: 'give it a bundle' },
     ])
+  })
+
+  test('says who the harness runs as only once a sandbox has said', () => {
+    expect(elsewhereLines(there())[3]).toMatchObject({ label: 'user', tone: 'off', text: 'not established' })
+    const ok = elsewhereLines(there({ reported: { version: '0.50.0', uid: 65532 } }))[3]
+    expect(ok).toMatchObject({ tone: '', text: 'uid 65532' })
+    const root = elsewhereLines(there({ reported: { version: '0.48.1', uid: null } }))[3]
+    expect(root.tone).toBe('bad')
+    expect(root.detail).toContain('0.48.1 did not become uid 65532')
   })
 })

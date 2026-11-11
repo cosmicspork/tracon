@@ -1672,6 +1672,10 @@ export interface Elsewhere {
   why?: string
   capacity: { running: number; limit: number | null }
   services: ServiceSupport[]
+  /** The uid a sandbox's supervisor must say it runs as. */
+  expected_uid: number | null
+  /** What the last sandbox to connect said of itself; absent until one has. */
+  reported: { version: string; uid: number | null } | null
 }
 
 /**

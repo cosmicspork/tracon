@@ -1101,7 +1101,7 @@ async fn it_becomes_its_bootstrap_user_and_works_where_it_is_told() {
     let output = sandbox
         .conn
         .spawn(sh(
-            r#"echo "$(id -u):$(id -g) $PWD"; env | grep -c ^TRACON_SANDBOX_ || true"#,
+            r#"echo "$(id -u):$(id -g) $PWD"; env | grep -c ^TRACON_SANDBOX_ || true; grep ^NoNewPrivs: /proc/self/status"#,
         ))
         .await
         .unwrap()
@@ -1112,9 +1112,14 @@ async fn it_becomes_its_bootstrap_user_and_works_where_it_is_told() {
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
         format!(
-            "{uid}:{gid} {}\n0\n",
+            "{uid}:{gid} {}\n0\nNoNewPrivs:\t1\n",
             dir.path().canonicalize().unwrap().display()
         )
+    );
+    assert_eq!(
+        sandbox.conn.info().uid,
+        Some(uid),
+        "its hello says who it is"
     );
     assert!(sandbox.finish().await.success());
 }
@@ -1153,4 +1158,26 @@ async fn a_user_it_cannot_become_stops_it_before_it_dials() {
     let out = command.output().await.unwrap();
     assert_eq!(out.status.code(), Some(64));
     assert!(String::from_utf8_lossy(&out.stderr).contains("TRACON_SANDBOX_WORKDIR"));
+}
+
+/// Nothing the supervisor starts may gain privileges by an exec, whether or
+/// not it was asked to become a user: a setuid or file-capability binary in
+/// the image runs with its caller's credentials.
+#[tokio::test]
+async fn nothing_it_starts_gains_privileges_by_an_exec() {
+    let sandbox = start().await;
+    let output = sandbox
+        .conn
+        .spawn(sh("grep ^NoNewPrivs: /proc/self/status"))
+        .await
+        .unwrap()
+        .output()
+        .await
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "NoNewPrivs:\t1\n"
+    );
+    assert!(sandbox.finish().await.success());
 }

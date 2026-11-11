@@ -56,7 +56,9 @@ pub const SERVICE_DIR: &str = "/etc/services.d/tracon-sandbox";
 /// script, then the user the supervisor becomes (`uid:gid`, empty to stay
 /// root), its working directory, and the directories made that user's
 /// (`:`-separated). The token is written before the bootstrap that names it,
-/// so the service never starts without one.
+/// so the service never starts without one. Everything under `/run/tracon`
+/// is root's alone (`umask 077`); the user's directories, and any parent
+/// they need (`/home` in an image without one), are made traversable.
 ///
 /// The runtime's proxy settings are in this exec's environment but need not
 /// be in the service's, so a WebSocket dial gets a copy under the
@@ -90,7 +92,7 @@ if [ -n "$8" ]; then
   old_ifs=$IFS
   IFS=:
   for dir in ${10}; do
-    mkdir -p "$dir"
+    (umask 022 && mkdir -p "$dir")
     [ "$(stat -c %u:%g "$dir")" = "$8" ] || chown -R -h "$8" "$dir"
   done
   IFS=$old_ifs
@@ -431,6 +433,13 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(run.join("token")).unwrap(), d.token);
         assert_eq!(
+            std::os::unix::fs::PermissionsExt::mode(
+                &std::fs::metadata(&run).unwrap().permissions()
+            ) & 0o777,
+            0o700,
+            "the bootstrap's directory stays root's alone"
+        );
+        assert_eq!(
             std::fs::read_to_string(&hosts).unwrap(),
             format!("127.0.0.1 {}\n", d.gateway_host)
         );
@@ -519,6 +528,12 @@ mod tests {
             );
         }
         assert!(tmp.path().join("work/kept").is_file());
+        // A parent the image lacked is made for the user to pass through.
+        let parent = std::fs::metadata(tmp.path().join("home")).unwrap();
+        assert_eq!(
+            std::os::unix::fs::PermissionsExt::mode(&parent.permissions()) & 0o777,
+            0o755
+        );
         // The variables it names are the ones the supervisor reads.
         let main = include_str!("../../../../sandbox/src/main.rs");
         assert!(

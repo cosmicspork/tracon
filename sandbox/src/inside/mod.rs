@@ -238,6 +238,7 @@ async fn handshake(
         pid: std::process::id(),
         init: is_init(),
         resumable: true,
+        uid: Some(user::current().uid),
     };
     write_frame(&mut tls, &hello)
         .await

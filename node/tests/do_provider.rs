@@ -282,6 +282,9 @@ async fn a_session_runs_on_digitalocean_minus_digitalocean() {
     )
     .unwrap();
     let provider = runtime.provider().clone();
+    // The stand-in's supervisor is this test's own loop, as its user.
+    let me = tracon_sandbox::inside::user::current().uid;
+    provider.expect_uid(Some(me));
 
     // Each exec plays the template's service: read the bootstrap the node
     // delivered and dial as a sandbox there would.
@@ -350,6 +353,8 @@ async fn a_session_runs_on_digitalocean_minus_digitalocean() {
     assert_eq!(value("route"), "node-only");
     assert_eq!(value("dns"), "provider-open");
     assert_eq!(value("privilege"), "root-in-vm");
+    // No sandbox has said who it runs as yet.
+    assert!(report["elsewhere"]["reported"].is_null(), "{report}");
     assert_eq!(value("image_identity"), "derived");
     let elsewhere = &report["elsewhere"];
     assert_eq!(elsewhere["reach"], "address");
@@ -458,6 +463,32 @@ async fn a_session_runs_on_digitalocean_minus_digitalocean() {
     for thread in ended {
         join(thread).await.unwrap();
     }
+    // Settings says who the harness ran as, from the supervisor's hello.
+    let report = serde_json::to_value(runtime.report(&cfg).await).unwrap();
+    assert_eq!(report["elsewhere"]["reported"]["uid"], me);
+    assert_eq!(report["elsewhere"]["expected_uid"], me);
+
+    // A supervisor that is not the sandbox's user (an older one that never
+    // dropped root, say) is refused before anything is sent into it.
+    provider.expect_uid(Some(me + 1));
+    let refused = runner
+        .run_capture(RunnerCommand {
+            argv: vec!["true".into()],
+            name: "tracon-h-do4".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains(&format!("not uid {}", me + 1)),
+        "{refused}"
+    );
+    provider.expect_uid(Some(me));
+    let ended = std::mem::take(&mut *threads.lock().unwrap());
+    for thread in ended {
+        let _ = join(thread).await;
+    }
 
     // A spent token is refused: a second sandbox presenting it gets nowhere.
     let refused_before = listener.refused();
@@ -513,7 +544,7 @@ async fn a_session_runs_on_digitalocean_minus_digitalocean() {
     {
         let api = fake.api.lock().unwrap();
         assert!(api.sessions.is_empty(), "{:?}", api.sessions);
-        assert_eq!(api.deleted_configs.len(), 3);
+        assert_eq!(api.deleted_configs.len(), 4);
     }
 
     // Read back: paused is not lost, gone is lost, and only this node's

@@ -370,6 +370,9 @@ struct Made {
     run: String,
     /// The local image it runs (its template's source).
     image: String,
+    /// The template it was made from: the image's current one, or while
+    /// that builds the image's previous one.
+    template: String,
     config_id: Option<String>,
     /// Taken by the first `connect`.
     arrival: Option<oneshot::Receiver<SandboxConn>>,
@@ -438,6 +441,11 @@ pub struct DoProvider {
     templates: Arc<Templates>,
     server_name: ServerName,
     made: Mutex<HashMap<String, Made>>,
+    /// The uid a sandbox's supervisor must say it runs as, the stock base's
+    /// ([`bootstrap::RunAs`]); `None` takes any.
+    expect_uid: Mutex<Option<u32>>,
+    /// What the last sandbox to connect said of itself.
+    reported: Mutex<Option<tracon_sandbox::protocol::SandboxInfo>>,
 }
 
 fn failed(error: impl std::fmt::Display) -> ProviderError {
@@ -519,6 +527,14 @@ impl DoProvider {
             templates,
             server_name,
             made: Mutex::new(HashMap::new()),
+            expect_uid: Mutex::new(
+                bootstrap::RunAs::SANDBOX
+                    .user
+                    .parse::<tracon_sandbox::inside::user::User>()
+                    .ok()
+                    .map(|user| user.uid),
+            ),
+            reported: Mutex::new(None),
         }
     }
 
@@ -536,6 +552,34 @@ impl DoProvider {
 
     pub fn listener(&self) -> &Arc<DoListener> {
         &self.listener
+    }
+
+    /// Hold every sandbox's supervisor to saying it runs as `uid` (`None`:
+    /// any), for a stand-in whose supervisor runs as the test's own user.
+    #[doc(hidden)]
+    pub fn expect_uid(&self, uid: Option<u32>) {
+        *self.expect_uid.lock().unwrap() = uid;
+    }
+
+    /// The uid every sandbox's supervisor must say it runs as.
+    pub fn expected_uid(&self) -> Option<u32> {
+        *self.expect_uid.lock().unwrap()
+    }
+
+    /// What the last sandbox to connect said of itself: its version, and
+    /// the user it runs as. `None` until one has.
+    pub fn reported(&self) -> Option<tracon_sandbox::protocol::SandboxInfo> {
+        self.reported.lock().unwrap().clone()
+    }
+
+    /// The template the sandbox `handle` was made from, while it is this
+    /// node process's.
+    pub fn template_of(&self, handle: &Handle) -> Option<String> {
+        self.made
+            .lock()
+            .unwrap()
+            .get(&handle.0)
+            .map(|m| m.template.clone())
     }
 
     fn server_name(&self) -> Result<String, ProviderError> {
@@ -647,7 +691,7 @@ impl DoProvider {
         &self,
         client: &Client,
         session: Session,
-        image: &str,
+        (image, template): (&str, &str),
         bootstrap: &Bootstrap,
     ) -> Result<Handle, ProviderError> {
         let id = session.session_id.clone();
@@ -665,6 +709,7 @@ impl DoProvider {
                     Made {
                         run: bootstrap.run.clone(),
                         image: image.to_string(),
+                        template: template.to_string(),
                         config_id: ready.config_id.or(session.config_id),
                         arrival: Some(arrival),
                     },
@@ -752,7 +797,7 @@ impl SandboxProvider for DoProvider {
         self.server_name()?;
         let client = self.client()?;
         let session = client.create_session(&manifest).await.map_err(failed)?;
-        self.start_run(&client, session, spec.image, spec.bootstrap)
+        self.start_run(&client, session, (spec.image, &template), spec.bootstrap)
             .await
     }
 
@@ -777,7 +822,31 @@ impl SandboxProvider for DoProvider {
         let arrival =
             arrival.ok_or_else(|| failed(format!("{} has connected already", handle.0)))?;
         match tokio::time::timeout(within, arrival).await {
-            Ok(Ok(conn)) => Ok(conn),
+            Ok(Ok(conn)) => {
+                let info = conn.info();
+                *self.reported.lock().unwrap() = Some(info.clone());
+                let want = *self.expect_uid.lock().unwrap();
+                match want {
+                    Some(uid) if info.uid != Some(uid) => {
+                        // Before anything is sent into it: an older
+                        // supervisor, or one whose drop did not happen,
+                        // would run the harness as root.
+                        self.listener.forget(&run);
+                        Err(failed(format!(
+                            "DigitalOcean session {}'s supervisor (tracon-sandbox {}) runs as {}, \
+                             not uid {uid}: its template's image is older than this release's \
+                             containers/do-sandbox, or did not let it become its user",
+                            handle.0,
+                            info.version,
+                            info.uid
+                                .map_or("a user it did not say".to_string(), |u| format!(
+                                    "uid {u}"
+                                ))
+                        )))
+                    }
+                    _ => Ok(conn),
+                }
+            }
             Ok(Err(_)) | Err(_) => {
                 self.listener.forget(&run);
                 Err(failed(format!(
@@ -874,12 +943,12 @@ impl SandboxProvider for DoProvider {
             .0
             .split_once('/')
             .ok_or_else(|| failed(format!("{} is not a DigitalOcean checkpoint", snapshot.0)))?;
-        let image = self
+        let (image, template) = self
             .made
             .lock()
             .unwrap()
             .get(session)
-            .map(|m| m.image.clone())
+            .map(|m| (m.image.clone(), m.template.clone()))
             .unwrap_or_default();
         let client = self.client()?;
         let child = client
@@ -889,24 +958,21 @@ impl SandboxProvider for DoProvider {
             .into_iter()
             .next()
             .ok_or_else(|| failed("DigitalOcean forked no session"))?;
-        self.start_run(&client, child, &image, bootstrap).await
+        self.start_run(&client, child, (&image, &template), bootstrap)
+            .await
     }
 
     /// Derived: the runtime rebuilt the image as its template, under a
     /// digest of its own that this API does not report, so the template
     /// stands for it.
     async fn image_identity(&self, handle: &Handle) -> Result<ImageIdentity, ProviderError> {
-        let image = self
+        let (image, template) = self
             .made
             .lock()
             .unwrap()
             .get(&handle.0)
-            .map(|m| m.image.clone())
+            .map(|m| (m.image.clone(), m.template.clone()))
             .ok_or_else(|| ProviderError::NotFound(handle.0.clone()))?;
-        let template = self
-            .templates
-            .ready(&image)
-            .map_err(ProviderError::Failed)?;
         Ok(ImageIdentity::Derived {
             from: templates::digest_of(&image)
                 .map_err(ProviderError::Failed)?

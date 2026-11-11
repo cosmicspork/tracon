@@ -124,7 +124,10 @@ fn identity_from_env() -> Result<Identity, String> {
 }
 
 /// Become the bootstrap's user, once what only root may read is read, and
-/// move to its working directory.
+/// move to its working directory. Whatever the user, nothing it starts may
+/// gain privileges by an exec (a setuid binary, a file capability): set on
+/// every provider, under Podman's `no-new-privileges` or an init that sets
+/// nothing (DigitalOcean's s6) alike.
 fn assume(identity: &Identity) -> Result<(), String> {
     if let Some(user) = identity.user {
         inside::user::become_user(user).map_err(|e| format!("TRACON_SANDBOX_USER {user}: {e}"))?;
@@ -133,7 +136,7 @@ fn assume(identity: &Identity) -> Result<(), String> {
         std::env::set_current_dir(dir)
             .map_err(|e| format!("TRACON_SANDBOX_WORKDIR {}: {e}", dir.display()))?;
     }
-    Ok(())
+    inside::user::no_new_privileges().map_err(|e| e.to_string())
 }
 
 fn main() -> ExitCode {

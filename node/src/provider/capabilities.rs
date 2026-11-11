@@ -141,6 +141,19 @@ pub struct Elsewhere {
     pub capacity: super::Capacity,
     /// Each catalogue service, and whether it runs in a sandbox there.
     pub services: Vec<ServiceSupport>,
+    /// The uid a sandbox's supervisor must say it runs as; one that says
+    /// otherwise, or nothing, is refused before anything is sent in.
+    pub expected_uid: Option<u32>,
+    /// What the last sandbox to connect said of itself; `None` until one
+    /// has, so who the harness runs as is not established.
+    pub reported: Option<Reported>,
+}
+
+/// What a sandbox's supervisor said of itself in its hello.
+#[derive(Debug, Clone, Serialize)]
+pub struct Reported {
+    pub version: String,
+    pub uid: Option<u32>,
 }
 
 /// Whether one catalogue service runs on a provider, and why not.

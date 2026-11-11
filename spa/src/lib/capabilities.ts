@@ -60,6 +60,7 @@ export function elsewhereLines(e: Elsewhere): ElsewhereLine[] {
       tone: e.placement === 'off' ? 'off' : '',
       text: `${e.placement} · ${e.capacity.running}${limit} running`,
     },
+    userLine(e),
   ]
   for (const s of e.services) {
     lines.push(
@@ -69,4 +70,36 @@ export function elsewhereLines(e: Elsewhere): ElsewhereLine[] {
     )
   }
   return lines
+}
+
+/**
+ * Who a sandbox's harness runs as, on the evidence of what its supervisor
+ * said: not established until one has connected, and a caution when it
+ * said another user (such a sandbox is refused).
+ */
+function userLine(e: Elsewhere): ElsewhereLine {
+  const want = e.expected_uid === null ? 'its user' : `uid ${e.expected_uid}`
+  if (!e.reported) {
+    return {
+      label: 'user',
+      tone: 'off',
+      text: 'not established',
+      detail: `no sandbox has connected since the node started; one whose supervisor is not ${want} is refused`,
+    }
+  }
+  const said = e.reported.uid === null ? 'no uid' : `uid ${e.reported.uid}`
+  if (e.expected_uid === null || e.reported.uid === e.expected_uid) {
+    return {
+      label: 'user',
+      tone: '',
+      text: said,
+      detail: `as tracon-sandbox ${e.reported.version} reported it; the harness and its services run as it`,
+    }
+  }
+  return {
+    label: 'user',
+    tone: 'bad',
+    text: said,
+    detail: `tracon-sandbox ${e.reported.version} did not become ${want}, so its sandbox was refused: rebuild the template's image from this release`,
+  }
 }
