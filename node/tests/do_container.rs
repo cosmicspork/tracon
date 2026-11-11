@@ -172,6 +172,7 @@ async fn the_template_image_runs_a_session_as_a_digitalocean_sandbox_would() {
         Requirements::default(),
         vec![Mount::volume("spike-p8-workspace-1", "/work", false)],
         image.clone(),
+        tracon::adapter::claude::ClaudeAdapter::ID,
         store.clone(),
     );
     let port = cfg.gateway.forward_port;

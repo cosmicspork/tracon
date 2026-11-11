@@ -247,6 +247,10 @@ pub struct ProtocolRunner {
     /// How long a run's token may wait to be redeemed; `None` for as long
     /// as the run lasts.
     token_window: Option<Duration>,
+    /// Every process this runner starts gets this environment, under what
+    /// each command sets itself: for a provider that does not set it on the
+    /// sandbox, whose supervisor's own environment is the provider's.
+    env: Vec<(String, String)>,
 }
 
 impl ProtocolRunner {
@@ -265,7 +269,15 @@ impl ProtocolRunner {
             sandbox_services: false,
             requirements: None,
             token_window: None,
+            env: Vec::new(),
         }
+    }
+
+    /// Give every process this runner starts `env`, under what each command
+    /// sets itself.
+    pub fn with_env(mut self, env: Vec<(String, String)>) -> Self {
+        self.env = env;
+        self
     }
 
     /// Hold every sandbox to `requirements`, as its provider reads its
@@ -447,8 +459,10 @@ impl ProtocolRunner {
             .iter()
             .any(|m| m.target == workdir)
             .then(|| workdir.into());
-        let env: BTreeMap<String, String> = cmd
-            .plain_env()
+        let env: BTreeMap<String, String> = self
+            .env
+            .iter()
+            .chain(cmd.plain_env())
             .chain(cmd.secret_env.iter())
             .cloned()
             .collect();

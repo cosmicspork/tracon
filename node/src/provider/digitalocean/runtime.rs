@@ -433,14 +433,38 @@ impl DoRuntime {
         requirements: Requirements,
         mounts: Vec<Mount>,
         image: String,
+        harness_id: &str,
     ) -> Arc<dyn Runner> {
         self.runner_with(
             cfg,
             requirements,
             mounts,
             image,
+            harness_id,
             crate::runner::sandbox_files::FilesStore::for_node(),
         )
+    }
+
+    /// Every process's environment in a sandbox here. The runtime's init
+    /// gives the supervisor the runtime's own: its proxy, which admits the
+    /// node's way in and nothing else, and a `NO_PROXY` without the
+    /// gateway's name, so a harness left with them sends its MCP, model and
+    /// egress traffic to that proxy and is refused. So, as an image or a
+    /// container gives a local sandbox: the stock base's home, where a
+    /// `harness_id` harness keeps its state, and the node's allowlist proxy
+    /// through the tunnel, in both spellings, with the gateway's name
+    /// reached directly. The supervisor's own dial is not affected: it uses
+    /// the bootstrap's copy of the runtime's proxy (`TRACON_SANDBOX_PROXY`).
+    pub fn sandbox_env(&self, cfg: &Config, harness_id: &str) -> Vec<(String, String)> {
+        let gateway = &self.provider.options().gateway_host;
+        let proxy = format!("http://{gateway}:{}", cfg.gateway.proxy_port);
+        let mut env =
+            crate::sandbox_images::harness_env(gateway, cfg.gateway.proxy_port, harness_id);
+        env.extend([
+            ("https_proxy".to_string(), proxy.clone()),
+            ("http_proxy".to_string(), proxy),
+        ]);
+        env
     }
 
     pub fn runner_with(
@@ -449,6 +473,7 @@ impl DoRuntime {
         requirements: Requirements,
         mounts: Vec<Mount>,
         image: String,
+        harness_id: &str,
         files: crate::runner::sandbox_files::FilesStore,
     ) -> Arc<dyn Runner> {
         let provider: Arc<dyn crate::provider::SandboxProvider> = self.provider.clone();
@@ -460,6 +485,7 @@ impl DoRuntime {
                 .with_workdir("/work")
                 .with_files(files)
                 .with_tunnels(crate::runner::tunnels::gateway_tunnels(cfg))
+                .with_env(self.sandbox_env(cfg, harness_id))
                 .with_requirements(requirements)
                 .with_token_window(TOKEN_WINDOW),
         )

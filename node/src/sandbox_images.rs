@@ -356,6 +356,28 @@ pub fn sandbox_env() -> Vec<(String, String)> {
         .collect()
 }
 
+/// Every process's environment in a sandbox of a provider that does not
+/// set it on the sandbox itself, for a `harness_id` harness: its home, the
+/// allowlist proxy at the tunnel on `gateway_host`, which the harness reaches
+/// directly, where it keeps its state, and [`sandbox_env`].
+pub fn harness_env(gateway_host: &str, proxy_port: u16, harness_id: &str) -> Vec<(String, String)> {
+    let proxy = format!("http://{gateway_host}:{proxy_port}");
+    let no_proxy = crate::runner::no_proxy(gateway_host);
+    let mut env: Vec<(String, String)> = vec![
+        ("HOME".into(), HOME.into()),
+        ("HTTPS_PROXY".into(), proxy.clone()),
+        ("HTTP_PROXY".into(), proxy),
+        ("NO_PROXY".into(), no_proxy.clone()),
+        ("no_proxy".into(), no_proxy),
+    ];
+    let layout = crate::adapter::layout(harness_id);
+    if !layout.env.is_empty() {
+        env.push((layout.env.into(), format!("{HOME}/{}", layout.dir)));
+    }
+    env.extend(sandbox_env());
+    env
+}
+
 /// A lockfile of the default branch, by its Git object id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lockfile {

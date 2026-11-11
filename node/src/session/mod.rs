@@ -3250,11 +3250,17 @@ impl Manager {
         // Whose name the session's commits carry: the account behind the
         // channel's bound forge credential, else the host's own Git identity.
         let identity = self.commit_identity(&spec.channel, &repo).await;
+        // On DigitalOcean the harness's home is the stock base's, whatever
+        // this node's own runtime uses: its state is placed where it looks.
+        let harness_home = match placed.is_elsewhere() {
+            true => crate::sandbox_images::HOME.to_string(),
+            false => self.backend.harness_home(),
+        };
         let scratch = materialize::scratch_for(
             id,
             &snapshot,
             &repo,
-            &self.backend.harness_home(),
+            &harness_home,
             adapter.as_ref(),
             &wiring,
             &orientation,
@@ -3298,7 +3304,7 @@ impl Manager {
                     anyhow::anyhow!("DigitalOcean has no image to run this session in yet")
                 })?;
                 (
-                    runtime.runner(&self.cfg, requirements.clone(), mounts, image),
+                    runtime.runner(&self.cfg, requirements.clone(), mounts, image, adapter.id()),
                     Vec::new(),
                 )
             }
@@ -3324,7 +3330,7 @@ impl Manager {
         )?;
 
         let (mut harness_env, harness_secret_env) =
-            harness_environment(&wiring, egress.as_ref(), &self.backend.harness_home());
+            harness_environment(&wiring, egress.as_ref(), &harness_home);
         harness_env.extend(cache_env);
 
         let (cmd_tx, cmd_rx) = mpsc::channel(16);
@@ -3332,7 +3338,7 @@ impl Manager {
             cwd_in_runner: "/work".into(),
             model: spec.model.clone(),
             container_name: container.clone(),
-            harness_home: self.backend.harness_home(),
+            harness_home: harness_home.clone(),
             mcp_servers,
             tools: self.cfg.harness.tools.clone(),
             env: harness_env,
