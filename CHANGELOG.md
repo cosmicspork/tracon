@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.50.0](https://github.com/cosmicspork/tracon/compare/v0.49.0...v0.50.0) (2026-11-11)
+
+
+### ⚠ BREAKING CHANGES
+
+* **node:** run Podman over the sandbox protocol only ([#872](https://github.com/cosmicspork/tracon/issues/872))
+* **node:** run a Mac on Apple Containerization only ([#871](https://github.com/cosmicspork/tracon/issues/871))
+* **node:** run Podman sandboxes over the protocol by default ([#864](https://github.com/cosmicspork/tracon/issues/864))
+
+### Features
+
+* **digitalocean:** run as uid 65532, run services, show the provider in Settings ([#867](https://github.com/cosmicspork/tracon/issues/867)) ([21e5a0a](https://github.com/cosmicspork/tracon/commit/21e5a0aaa543f5f8d451c4d3c38278689facb5ec))
+* **digitalocean:** share templates between nodes by a portable key ([#875](https://github.com/cosmicspork/tracon/issues/875)) ([2d5a738](https://github.com/cosmicspork/tracon/commit/2d5a7382ca3d4a8fc275446fc5506b7aae30a42e))
+* **kubernetes:** build steps and prepared snapshots on the stock base ([#866](https://github.com/cosmicspork/tracon/issues/866)) ([455ddb1](https://github.com/cosmicspork/tracon/commit/455ddb1dc5c50d5c0cb476c5c299566ac9170fc9))
+* **kubernetes:** tell two nodes in one namespace apart and probe the provider ([#865](https://github.com/cosmicspork/tracon/issues/865)) ([71bdc11](https://github.com/cosmicspork/tracon/commit/71bdc11f4203beacb2516c27b0cac5a8b3ed134a))
+* **node:** run a Mac on Apple Containerization only ([#871](https://github.com/cosmicspork/tracon/issues/871)) ([1237e01](https://github.com/cosmicspork/tracon/commit/1237e015d4c042c07fea4e50018b573c60d896ee))
+* **node:** run Podman over the sandbox protocol only ([#872](https://github.com/cosmicspork/tracon/issues/872)) ([54381ed](https://github.com/cosmicspork/tracon/commit/54381ed8317735d0981fe1e1a69601dc0ce070d0))
+* **node:** run Podman sandboxes over the protocol by default ([#864](https://github.com/cosmicspork/tracon/issues/864)) ([f003f60](https://github.com/cosmicspork/tracon/commit/f003f60d0a3241fb3c9abf70b7b3e885c371640f))
+
+
+### Bug Fixes
+
+* **digitalocean:** default base_template to coding-base ([#860](https://github.com/cosmicspork/tracon/issues/860)) ([ea39d04](https://github.com/cosmicspork/tracon/commit/ea39d0407f3cac410deac1628c4b47eeb28cdcdd))
+* **digitalocean:** give the harness the node's proxy, not the runtime's ([#863](https://github.com/cosmicspork/tracon/issues/863)) ([15ab37d](https://github.com/cosmicspork/tracon/commit/15ab37db2e1d5a8ba90c3ff935ed9e10327dcf3e))
+* **digitalocean:** read an absent manifest harness as none ([#870](https://github.com/cosmicspork/tracon/issues/870)) ([c151b08](https://github.com/cosmicspork/tracon/commit/c151b086c3a1843a4213d833355b63e7b1ceacfc))
+* **digitalocean:** report the image a session's template was made from ([#873](https://github.com/cosmicspork/tracon/issues/873)) ([182824c](https://github.com/cosmicspork/tracon/commit/182824c0591570b2eff513120ac331f59d28179e))
+* **node:** carry a session on in the image its kept sandbox runs ([#859](https://github.com/cosmicspork/tracon/issues/859)) ([59506f1](https://github.com/cosmicspork/tracon/commit/59506f1861233f533eb0ad2e3f27fb5e8bcef744))
+* stop parallel test races in settings and loop, and an identity seed race ([#861](https://github.com/cosmicspork/tracon/issues/861)) ([74c94e1](https://github.com/cosmicspork/tracon/commit/74c94e1f62234d4da3278f47267d5699ac4ea057))
+
 ## [0.49.0](https://github.com/cosmicspork/tracon/compare/v0.48.1...v0.49.0) (2026-11-10)
 
 
