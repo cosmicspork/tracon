@@ -21,8 +21,11 @@ use std::time::Duration;
 
 use k8s_openapi::api::core::v1::Pod;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+use tracon::boundary::{BuildFailure, BuiltImage, ImageBuild, ImageBuilder};
 use tracon::config::{Config, RuntimeKind};
-use tracon::provider::kubernetes::{KubeSandboxOptions, KubeSandboxProvider, SANDBOX_ROLE};
+use tracon::provider::kubernetes::{
+    KubeSandboxOptions, KubeSandboxProvider, Snapshots, SANDBOX_ROLE,
+};
 use tracon::provider::SandboxProvider as _;
 use tracon::runner::kube::{KubeSpec, PodEnv, ROLE_LABEL};
 use tracon::runner::protocol::ProtocolRunner;
@@ -366,6 +369,107 @@ async fn kubernetes_sandboxes_over_the_protocol() {
         .unwrap_err();
     assert!(refused.to_string().contains("not made by this provider"));
 
+    // A preparation, snapshotted: a pod cannot be committed, so what the
+    // preparation left in its trees is read back over the protocol and built
+    // onto the image the pod ran, by the node's builder.
+    let recorded: Arc<Mutex<Vec<Recorded>>> = Arc::default();
+    let trees = disk.path().join("sandbox/prepared");
+    std::fs::create_dir_all(&trees).unwrap();
+    let snapshots = Snapshots {
+        trees: vec![
+            ("cache".into(), trees.join("cache").to_string_lossy().into()),
+            ("work".into(), trees.join("work").to_string_lossy().into()),
+        ],
+        ..Snapshots::new(
+            Arc::new(Recording(recorded.clone())),
+            Duration::from_secs(60),
+        )
+    };
+    let held = tracon::sandbox_images::Held::start(
+        Arc::new(provider.with_snapshots(snapshots)),
+        None,
+        server.clone(),
+        "tracon-w-1",
+        "registry.example/app@sha256:aa",
+        &[],
+    )
+    .await
+    .unwrap();
+    let prepared = held
+        .run_capture(RunnerCommand {
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                format!(
+                    "mkdir -p {t}/cache/npm {t}/work/node_modules/x && echo cached > \
+                     {t}/cache/npm/blob && echo installed > {t}/work/node_modules/x/index.js \
+                     && ln -s /usr/bin/env {t}/work/node_modules/x/env",
+                    t = trees.display()
+                ),
+            ],
+            name: "tracon-w-1-p0".into(),
+            workdir: Some(trees.to_string_lossy().into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(prepared.status.success(), "{prepared:?}");
+    let snapshot = held
+        .conclude(
+            Ok(()),
+            "localhost/tracon-snapshot-app-0123:k1",
+            &[("io.tracon.snapshot.key".into(), "k1".into())],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot,
+        "registry.example/cs/tracon-snapshot-app-0123@sha256:5555"
+    );
+    let recorded = recorded.lock().unwrap().clone();
+    let [built] = recorded.as_slice() else {
+        panic!("one build: {recorded:?}");
+    };
+    assert_eq!(built.tag, "localhost/tracon-snapshot-app-0123:k1");
+    assert!(
+        built
+            .containerfile
+            .starts_with("FROM registry.example/app@sha256:aa\n"),
+        "{}",
+        built.containerfile
+    );
+    assert!(
+        built
+            .containerfile
+            .contains("COPY --chown=65532:65532 cache/ "),
+        "{}",
+        built.containerfile
+    );
+    for (path, content) in [
+        ("cache/npm/blob", "cached\n"),
+        ("work/node_modules/x/index.js", "installed\n"),
+    ] {
+        assert_eq!(
+            built.files.get(path).map(String::as_str),
+            Some(content),
+            "{path} in {:?}",
+            built.files
+        );
+    }
+    // A link that leaves its tree comes back as the link it is, never
+    // followed.
+    assert_eq!(
+        built
+            .files
+            .get("work/node_modules/x/env")
+            .map(String::as_str),
+        Some("-> /usr/bin/env")
+    );
+    assert!(built
+        .labels
+        .contains(&("io.tracon.snapshot.key".into(), "k1".into())));
+    assert!(!api.live().contains(&"tracon-w-1".to_string()));
+
     kubelet.task.abort();
     kubelet.settle().await;
 }
@@ -404,6 +508,60 @@ fn own_sandbox_policy(port: i32) -> k8s_openapi::api::networking::v1::NetworkPol
             }]),
         }),
     }
+
+/// What the builder was asked to build.
+#[derive(Debug, Clone)]
+struct Recorded {
+    tag: String,
+    containerfile: String,
+    labels: Vec<(String, String)>,
+    /// Every file in the context by its path: its content, or `-> target`
+    /// for a link.
+    files: BTreeMap<String, String>,
+}
+
+/// A builder that records each build and reports it pushed.
+struct Recording(Arc<Mutex<Vec<Recorded>>>);
+
+#[async_trait::async_trait]
+impl ImageBuilder for Recording {
+    async fn build(&self, build: ImageBuild<'_>) -> Result<BuiltImage, BuildFailure> {
+        fn walk(root: &std::path::Path, at: &std::path::Path, out: &mut BTreeMap<String, String>) {
+            for entry in std::fs::read_dir(root.join(at)).unwrap() {
+                let entry = entry.unwrap();
+                let rel = at.join(entry.file_name());
+                let meta = std::fs::symlink_metadata(entry.path()).unwrap();
+                let key = rel.to_string_lossy().into_owned();
+                if meta.is_dir() {
+                    walk(root, &rel, out);
+                } else if meta.file_type().is_symlink() {
+                    let target = std::fs::read_link(entry.path()).unwrap();
+                    out.insert(key, format!("-> {}", target.display()));
+                } else {
+                    out.insert(key, std::fs::read_to_string(entry.path()).unwrap());
+                }
+            }
+        }
+        let mut files = BTreeMap::new();
+        walk(build.context, std::path::Path::new(""), &mut files);
+        self.0.lock().unwrap().push(Recorded {
+            tag: build.tag.into(),
+            containerfile: std::fs::read_to_string(build.containerfile).unwrap(),
+            labels: build.labels.to_vec(),
+            files,
+        });
+        Ok(BuiltImage {
+            image: "registry.example/cs/tracon-snapshot-app-0123@sha256:5555".into(),
+            log_tail: String::new(),
+        })
+    }
+    async fn exists(&self, _image: &str) -> bool {
+        true
+    }
+    async fn identity(&self, image: &str) -> Option<String> {
+        Some(image.into())
+    }
+    async fn remove(&self, _image: &str) {}
 }
 
 /// A sandbox pod as the provider renders it, for a read-back.

@@ -534,5 +534,22 @@ fn another_policy_selecting_a_sandbox_widens_its_route() {
     assert_eq!(
         widening_policies(&policies, &own, &pod),
         ["spike-sandbox", "everything", "by-expression"]
+
+/// A snapshot is the image the preparation ran, with its cache and its
+/// prepared `/work` on top, owned by the sandbox's user: nothing else of the
+/// pod, and the image's own user, home and directory kept.
+#[test]
+fn a_snapshot_layers_the_prepared_trees_onto_the_image_it_ran() {
+    let snapshots = Snapshots::new(
+        Arc::new(crate::boundary::kubernetes::build::Unusable(
+            "unused".into(),
+        )),
+        Duration::from_secs(60),
+    );
+    assert_eq!(
+        snapshot_containerfile("registry.example/app@sha256:aa", &snapshots.trees),
+        "FROM registry.example/app@sha256:aa\n\
+         COPY --chown=65532:65532 cache/ /cache/\n\
+         COPY --chown=65532:65532 work/ /work/\n"
     );
 }

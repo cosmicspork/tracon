@@ -3095,8 +3095,13 @@ impl Config {
     }
 
     /// The same for a pod-hosted node: the configured image for the configured
-    /// harness, the release's own image for the other.
+    /// harness, the release's own image for the other. Over the sandbox
+    /// protocol there are no harness images: every harness runs from the
+    /// bundle on the stock base, as on Podman with `sandbox_images`.
     pub fn kubernetes_harness_image(&self, harness_id: &str) -> String {
+        if crate::boundary::kubernetes::uses_sandbox_protocol(self) {
+            return crate::sandbox_images::base_image(self);
+        }
         if harness_id == self.harness.id {
             return self.runtime.kubernetes.harness_image.clone();
         }

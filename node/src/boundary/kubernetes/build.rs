@@ -20,6 +20,27 @@
 //! prefix is the configured registry here: a build under one pushes to the
 //! registry, and `exists`, `identity` and `remove` take either spelling.
 //!
+//! **Build steps.** A `[[repo]]` entry's root `build` steps are a
+//! Containerfile the node writes on the pinned stock base
+//! (`repo_image::steps_containerfile`), built and pushed here like any other.
+//! Rootless BuildKit runs a step with the daemon's own network, which
+//! nothing here can narrow, so a step is sent through the node instead: each
+//! build gets a grant of the node's per-client egress proxy for exactly the
+//! entry's `egress` hosts, at the node pod's address, passed as BuildKit's
+//! predefined proxy arguments (`HTTPS_PROXY` and the rest), which every
+//! `RUN` sees, no image's history keeps and no cache key counts. A host the
+//! entry does not name is refused by the proxy with a reason. That holds for
+//! every tool that honours a proxy; a step that goes around it is held only
+//! by the daemon's own NetworkPolicy, which is the deployment's: a daemon
+//! whose policy reaches nothing but the node's egress port and the registry
+//! holds every step to its list, as Podman and Apple do. The grant is revoked
+//! when the build ends.
+//!
+//! **Snapshots.** A prepared snapshot is built here too, from its sandbox's
+//! trees (`provider::kubernetes::snapshot_containerfile`), and pushed under
+//! `<prefix>-snapshot-…` beside the repository images, which this node also
+//! removes when they are superseded.
+//!
 //! What a build stages (the context, the Containerfile, `buildctl`'s own
 //! `TMPDIR`) goes under `<state_mount>/tmp` on the state volume, not the
 //! node container's `/tmp`: a repository's tree can be larger than a pod's
@@ -66,6 +87,12 @@ fn own_stem() -> String {
     crate::config::resource_name("repo-")
 }
 
+/// What this node pushes as a prepared snapshot, by name under the
+/// registry: `<prefix>-snapshot-` (`sandbox_images::snapshot_repo`).
+fn snapshot_stem() -> String {
+    crate::config::resource_name("snapshot-")
+}
+
 /// A local image's name under the registry, with this node's stem.
 fn registry_rest(rest: &str) -> String {
     restemmed(rest, &own_stem())
@@ -94,6 +121,57 @@ pub struct BuildKitBuilder {
     registry: Registry,
     /// Where builds stage, and `buildctl`'s `TMPDIR`.
     scratch: PathBuf,
+    /// Where a build's steps reach the node's egress proxy. `None` on a node
+    /// that does not know its pod's address, which then builds no steps.
+    steps_egress: Option<StepsEgress>,
+}
+
+/// The node's per-client egress proxy as a build step reaches it: the grants
+/// the node serves there, and its `host:port` on the pod network.
+#[derive(Clone)]
+pub struct StepsEgress {
+    pub grants: crate::gateway::proxy::Grants,
+    pub proxy: String,
+}
+
+/// One build's grant, revoked when the build ends, however it ends.
+struct StepsGrant {
+    grants: crate::gateway::proxy::Grants,
+    token: String,
+}
+
+impl StepsGrant {
+    fn issue(egress: &StepsEgress, hosts: &[String]) -> Result<Self, BuildFailure> {
+        let token = egress
+            .grants
+            .issue(crate::gateway::proxy::GrantSpec {
+                client: "build".into(),
+                hosts: hosts.to_vec(),
+                refusal: crate::boundary::BUILD_REFUSAL.into(),
+                ..Default::default()
+            })
+            .map_err(|error| BuildFailure::transient(format!("build egress grant: {error}")))?;
+        Ok(StepsGrant {
+            grants: egress.grants.clone(),
+            token,
+        })
+    }
+
+    /// The proxy variables every `RUN` of the build gets, in both spellings:
+    /// BuildKit's predefined arguments, which no image's history keeps.
+    fn build_args(&self, proxy: &str) -> Vec<(String, String)> {
+        let url = format!("http://build:{}@{proxy}", self.token);
+        crate::boundary::BUILD_PROXY_VARS
+            .iter()
+            .map(|var| (var.to_string(), url.clone()))
+            .collect()
+    }
+}
+
+impl Drop for StepsGrant {
+    fn drop(&mut self) {
+        self.grants.revoke(&self.token);
+    }
 }
 
 /// A `[runtime.kubernetes.builder]` that cannot be a builder. Handed out in
@@ -175,7 +253,22 @@ impl BuildKitBuilder {
             prefix,
             registry,
             scratch,
+            steps_egress: None,
         })
+    }
+
+    /// Build steps through `egress`, the node's per-client egress proxy.
+    pub fn with_steps_egress(mut self, egress: StepsEgress) -> Self {
+        self.steps_egress = Some(egress);
+        self
+    }
+
+    /// Whether this node pushed `image` (a reference under the registry):
+    /// a repository image or a prepared snapshot of its own.
+    fn pushed_here(&self, image: &str) -> bool {
+        [own_stem(), snapshot_stem()]
+            .iter()
+            .any(|stem| image.starts_with(&format!("{}/{stem}", self.prefix)))
     }
 
     #[cfg(test)]
@@ -223,8 +316,15 @@ impl BuildKitBuilder {
         ]
     }
 
-    /// `buildctl … build` for one image.
-    pub fn argv(&self, build: &ImageBuild<'_>, target: &str, metadata: &Path) -> Vec<OsString> {
+    /// `buildctl … build` for one image, with `build_args` (`--opt
+    /// build-arg:`) for its `RUN` steps.
+    pub fn argv(
+        &self,
+        build: &ImageBuild<'_>,
+        target: &str,
+        metadata: &Path,
+        build_args: &[(String, String)],
+    ) -> Vec<OsString> {
         let directory = build
             .containerfile
             .parent()
@@ -249,6 +349,9 @@ impl BuildKitBuilder {
         argv.extend(["--opt".into(), filename_opt]);
         for (name, value) in build.labels {
             argv.extend(["--opt".into(), format!("label:{name}={value}").into()]);
+        }
+        for (name, value) in build_args {
+            argv.extend(["--opt".into(), format!("build-arg:{name}={value}").into()]);
         }
         argv.extend([
             "--output".into(),
@@ -419,6 +522,77 @@ fn untagged(name: &str) -> &str {
 #[async_trait]
 impl ImageBuilder for BuildKitBuilder {
     async fn build(&self, build: ImageBuild<'_>) -> Result<BuiltImage, BuildFailure> {
+        self.build_with_args(build, &[]).await
+    }
+
+    /// The steps' Containerfile, built with their `RUN`s sent through a
+    /// grant of the node's egress proxy for exactly `steps.hosts`.
+    async fn build_steps(
+        &self,
+        build: ImageBuild<'_>,
+        steps: &crate::boundary::StepsBuild<'_>,
+    ) -> Result<BuiltImage, BuildFailure> {
+        let Some(egress) = &self.steps_egress else {
+            return Err(BuildFailure::transient(
+                "build steps reach the network through the node's egress proxy, at its pod's \
+                 address, which this node does not know (TRACON_POD_IP)",
+            ));
+        };
+        let grant = StepsGrant::issue(egress, steps.hosts)?;
+        let built = self
+            .build_with_args(build, &grant.build_args(&egress.proxy))
+            .await;
+        drop(grant);
+        built
+    }
+
+    async fn exists(&self, image: &str) -> bool {
+        self.registry.exists(&self.resolve(image)).await
+    }
+
+    async fn identity(&self, image: &str) -> Option<String> {
+        self.registry.identity(&self.resolve(image)).await
+    }
+
+    fn scratch_dir(&self) -> Option<PathBuf> {
+        Some(self.scratch.clone())
+    }
+
+    async fn presence(&self, image: &str) -> crate::boundary::Presence {
+        self.registry.presence(&self.resolve(image)).await
+    }
+
+    async fn unavailable(&self) -> Option<String> {
+        self.check().await.err().map(|why| unusable(&why))
+    }
+
+    /// A pod already scheduled on the image a rebuild replaces may not have
+    /// pulled it yet.
+    fn retains_previous(&self) -> bool {
+        true
+    }
+
+    /// Only what this node pushed, `<registry>/<prefix>-repo-…` and
+    /// `<registry>/<prefix>-snapshot-…`: a harness image, or one an entry
+    /// pinned by hand in this registry or another, is never this node's to
+    /// delete.
+    async fn remove(&self, image: &str) {
+        let image = self.resolve(image);
+        if !self.pushed_here(&image) {
+            return;
+        }
+        if let Err(error) = self.registry.remove(&image).await {
+            tracing::warn!(%image, %error, "could not remove a superseded image from the registry");
+        }
+    }
+}
+
+impl BuildKitBuilder {
+    async fn build_with_args(
+        &self,
+        build: ImageBuild<'_>,
+        build_args: &[(String, String)],
+    ) -> Result<BuiltImage, BuildFailure> {
         let failure = |error: String, log: &[u8]| BuildFailure {
             error,
             log_tail: crate::boundary::podman::log_tail(log),
@@ -431,7 +605,7 @@ impl ImageBuilder for BuildKitBuilder {
                 BuildFailure::transient(unusable(&format!("{}: {error}", self.scratch.display())))
             })?;
         let metadata = stage.path().join("metadata.json");
-        let argv = self.argv(&build, &target, &metadata);
+        let argv = self.argv(&build, &target, &metadata, build_args);
         let timeout = self
             .settings
             .timeout_secs
@@ -491,45 +665,6 @@ impl ImageBuilder for BuildKitBuilder {
             image: format!("{}@{digest}", untagged(&target)),
             log_tail: crate::boundary::podman::log_tail(&log),
         })
-    }
-
-    async fn exists(&self, image: &str) -> bool {
-        self.registry.exists(&self.resolve(image)).await
-    }
-
-    async fn identity(&self, image: &str) -> Option<String> {
-        self.registry.identity(&self.resolve(image)).await
-    }
-
-    fn scratch_dir(&self) -> Option<PathBuf> {
-        Some(self.scratch.clone())
-    }
-
-    async fn presence(&self, image: &str) -> crate::boundary::Presence {
-        self.registry.presence(&self.resolve(image)).await
-    }
-
-    async fn unavailable(&self) -> Option<String> {
-        self.check().await.err().map(|why| unusable(&why))
-    }
-
-    /// A pod already scheduled on the image a rebuild replaces may not have
-    /// pulled it yet.
-    fn retains_previous(&self) -> bool {
-        true
-    }
-
-    /// Only what this node pushed, `<registry>/tracon-repo-…`: a harness
-    /// image, or one an entry pinned by hand in this registry or another, is
-    /// never this node's to delete.
-    async fn remove(&self, image: &str) {
-        let image = self.resolve(image);
-        if !image.starts_with(&format!("{}/{}", self.prefix, own_stem())) {
-            return;
-        }
-        if let Err(error) = self.registry.remove(&image).await {
-            tracing::warn!(%image, %error, "could not remove a superseded image from the registry");
-        }
     }
 }
 
@@ -639,7 +774,7 @@ mod tests {
             labels: &labels,
             timeout: Duration::from_secs(60),
         };
-        let argv = strings(&builder.argv(&build, &target, Path::new("/tmp/stage/meta.json")));
+        let argv = strings(&builder.argv(&build, &target, Path::new("/tmp/stage/meta.json"), &[]));
         assert_eq!(
             argv,
             [
@@ -692,6 +827,140 @@ mod tests {
         assert_eq!(duration_words(Duration::from_secs(45 * 60)), "45 minutes");
         assert_eq!(untagged("host:5000/a/b:t"), "host:5000/a/b");
         assert_eq!(untagged("host:5000/a/b"), "host:5000/a/b");
+    }
+
+    /// A build's steps reach exactly their hosts through a grant of the
+    /// node's egress proxy, at the node pod's address, in both spellings of
+    /// BuildKit's predefined proxy arguments; the grant goes with the build.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn build_steps_go_through_a_grant_of_their_hosts_that_ends_with_the_build() {
+        let tmp = tempfile::tempdir().unwrap();
+        let containerfile = tmp.path().join("Steps.Containerfile");
+        std::fs::write(&containerfile, "FROM base\nRUN [\"true\"]\n").unwrap();
+        let mut config = settings("registry.example.com/cs");
+        config.buildctl = stub(
+            tmp.path(),
+            &format!(
+                "while [ \"$1\" != --metadata-file ]; do shift; done\n\
+                 printf '{{\"containerimage.digest\":\"{DIGEST}\"}}' > \"$2\""
+            ),
+        );
+        async fn build(
+            builder: &BuildKitBuilder,
+            containerfile: &Path,
+            context: &Path,
+        ) -> Result<BuiltImage, BuildFailure> {
+            builder
+                .build_steps(
+                    ImageBuild {
+                        tag: "localhost/tracon-repo-a:t",
+                        containerfile,
+                        context,
+                        labels: &[],
+                        timeout: Duration::from_secs(30),
+                    },
+                    &crate::boundary::StepsBuild {
+                        base: "base",
+                        steps: &["true".to_string()],
+                        hosts: &["deb.debian.org".to_string()],
+                    },
+                )
+                .await
+        }
+
+        // Without the node pod's address there is nowhere to send them.
+        let unplaced = BuildKitBuilder::new_for_test(&config).unwrap();
+        let refused = build(&unplaced, &containerfile, tmp.path())
+            .await
+            .unwrap_err();
+        assert!(refused.transient, "{}", refused.error);
+        assert!(refused.error.contains("TRACON_POD_IP"), "{}", refused.error);
+
+        let grants = crate::gateway::proxy::Grants::default();
+        let builder = BuildKitBuilder::new_for_test(&config)
+            .unwrap()
+            .with_steps_egress(StepsEgress {
+                grants: grants.clone(),
+                proxy: "10.244.0.9:7424".into(),
+            });
+        let built = build(&builder, &containerfile, tmp.path()).await.unwrap();
+        assert_eq!(
+            built.image,
+            format!("registry.example.com/cs/tracon-repo-a@{DIGEST}")
+        );
+        let argv = std::fs::read_to_string(tmp.path().join("argv")).unwrap();
+        let args: Vec<&str> = argv.lines().collect();
+        let mut token = None;
+        for var in ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"] {
+            let prefix = format!("build-arg:{var}=http://build:");
+            let arg = args
+                .iter()
+                .find_map(|arg| arg.strip_prefix(&prefix))
+                .unwrap_or_else(|| panic!("no {var} in {argv}"));
+            let (granted, at) = arg.split_once('@').unwrap();
+            assert_eq!(at, "10.244.0.9:7424");
+            assert_eq!(*token.get_or_insert(granted.to_string()), granted);
+        }
+        // Revoked once the build ended.
+        assert!(grants.holder(&token.unwrap()).is_none());
+
+        // What the grant reaches while it stands: the steps' hosts alone.
+        let egress = StepsEgress {
+            grants: grants.clone(),
+            proxy: "10.244.0.9:7424".into(),
+        };
+        let grant = StepsGrant::issue(&egress, &["deb.debian.org".to_string()]).unwrap();
+        let held = grants.holder(&grant.token).unwrap();
+        assert!(held.allows("deb.debian.org"));
+        assert!(!held.allows("example.com"));
+        let token = grant.token.clone();
+        drop(grant);
+        assert!(grants.holder(&token).is_none());
+    }
+
+    /// The overlay lets the default daemon, and only it, reach the node's
+    /// egress port, where its steps' grants are served.
+    #[test]
+    fn the_overlay_admits_the_daemon_on_the_egress_port() {
+        let overlay =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../deploy/kubernetes/sandbox-protocol");
+        let policy =
+            std::fs::read_to_string(overlay.join("networkpolicy-node-build.yaml")).unwrap();
+        let port = crate::config::Config::default().gateway.egress_port;
+        let ports: Vec<&str> = policy.lines().filter(|l| l.contains("port:")).collect();
+        assert_eq!(ports, [format!("          port: {port}")], "{policy}");
+        assert!(policy.contains("kubernetes.io/metadata.name: tracon-build"));
+        assert!(policy.contains("app.kubernetes.io/name: buildkitd"));
+        assert!(KubeBuilder::default().addr.contains(".tracon-build.svc:"));
+        assert!(std::fs::read_to_string(overlay.join("kustomization.yaml"))
+            .unwrap()
+            .contains("- networkpolicy-node-build.yaml"));
+    }
+
+    /// A snapshot is pushed under this node's own snapshot stem, and only
+    /// what this node pushed is ever its to remove.
+    #[test]
+    fn this_nodes_repository_images_and_snapshots_are_its_own() {
+        let builder =
+            BuildKitBuilder::new_for_test(&settings("registry.digitalocean.com/cs")).unwrap();
+        assert_eq!(
+            builder.pushed_name("localhost/tracon-snapshot-app-0123:k1"),
+            "registry.digitalocean.com/cs/tracon-snapshot-app-0123:k1"
+        );
+        for own in [
+            "registry.digitalocean.com/cs/tracon-repo-app@sha256:00",
+            "registry.digitalocean.com/cs/tracon-snapshot-app@sha256:00",
+        ] {
+            assert!(builder.pushed_here(own), "{own}");
+        }
+        for theirs in [
+            "registry.digitalocean.com/cs/spike-snapshot-app@sha256:00",
+            "registry.digitalocean.com/cs/tracon-sandbox-base@sha256:00",
+            "ghcr.io/cosmicspork/tracon-snapshot-app@sha256:00",
+        ] {
+            assert!(!builder.pushed_here(theirs), "{theirs}");
+        }
     }
 
     #[test]

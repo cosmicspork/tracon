@@ -37,7 +37,7 @@ const RECIPE_LABEL: &str = "io.tracon.recipe";
 /// Long enough for a cold build of a full dev environment, short enough that a
 /// build waiting on a prompt it will never get does not hold a session's start
 /// for ever.
-const BUILD_TIMEOUT: Duration = Duration::from_secs(45 * 60);
+pub(crate) const BUILD_TIMEOUT: Duration = Duration::from_secs(45 * 60);
 
 /// What a repository's image is built from, at one commit of its default
 /// branch.
@@ -798,7 +798,7 @@ fn layered(base: &str, harness_image: &str, layer: &HarnessLayer, run_as: &RunAs
 /// home the base made that user's; an image of the repository's own has none
 /// of them, and no layer over an arbitrary image can be trusted to add them.
 pub fn stock_base_only(cfg: &Config) -> bool {
-    crate::sandbox_images::bundled(cfg) || crate::boundary::kubernetes::uses_sandbox_protocol(cfg)
+    crate::sandbox_images::bundled(cfg)
 }
 
 /// Why `entry` is refused on this node, if it is: it names an `image`, or a
@@ -2129,8 +2129,8 @@ const STEPS_SCHEME: &str = "steps-2";
 
 /// Why an entry's `build` steps have no recipe yet.
 const STEPS_UNPINNED: &str = "build steps stand on the stock sandbox base, which this node \
-     has not pinned: it pins it when the boundary converges with \
-     [runtime.podman] sandbox_images or on Apple, and Kubernetes does not build steps yet";
+     has not pinned yet: it pins it when the boundary converges, with [runtime.podman] \
+     sandbox_images, on Apple, or with [runtime.kubernetes] sandbox_protocol";
 
 /// The recipe of an entry's `build` steps on `base`, the pinned stock base.
 /// What the image is built from is the base and the steps alone (there is no

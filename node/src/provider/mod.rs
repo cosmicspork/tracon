@@ -327,6 +327,22 @@ pub trait SandboxProvider: Send + Sync {
         Err(self.unsupported("snapshot_as"))
     }
 
+    /// [`Self::snapshot_as`] for a sandbox made from `image` and still
+    /// connected as `conn`. A provider that can commit a sandbox does that;
+    /// one that cannot (a pod) reads what a preparation left back over the
+    /// connection instead, and builds the image from `image` and that.
+    async fn snapshot_from(
+        &self,
+        handle: &Handle,
+        conn: &SandboxConn,
+        image: &str,
+        reference: &str,
+        labels: &[(String, String)],
+    ) -> Result<SnapshotId, ProviderError> {
+        let _ = (conn, image);
+        self.snapshot_as(handle, reference, labels).await
+    }
+
     /// A new sandbox from a snapshot, with its own bootstrap: a fork is a
     /// different run and never holds its parent's token.
     async fn fork(

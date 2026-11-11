@@ -41,6 +41,15 @@
 //! it inside TLS, which binds the same way: taken only from that pod's
 //! address, and only for its run.
 //!
+//! **Snapshots.** A pod cannot be committed. A repository's preparation runs
+//! in one sandbox pod as on every provider (`sandbox_images::Held`); what it
+//! left in `/cache` and `/work` is then read back over the files channel and
+//! layered onto the image the pod ran, by the node's builder
+//! (`[runtime.kubernetes.builder]`), which pushes it where the sandboxes'
+//! pods pull from ([`KubeSandboxProvider::with_snapshots`]). The pod's other
+//! storage (its home, `/tmp`) is its own and goes with it, as it does for a
+//! session.
+//!
 //! Isolation is read back from the API (the admitted pod, the policies),
 //! never from inside.
 
@@ -69,7 +78,7 @@ use super::capabilities::{
 };
 use super::{
     Capacity, CreateSpec, Handle, ImageIdentity, Network, ProviderError, ProviderKind,
-    SandboxProvider, Shape, Status,
+    SandboxProvider, Shape, SnapshotId, Status,
 };
 use crate::runner::kube::{
     harness_status, normalize_image_id, pending_reason, pod_labels, quota_refused, refusal,
@@ -111,6 +120,54 @@ const READ_FAILURES: u32 = 10;
 const HOLD: Duration = Duration::from_secs(15);
 /// Most connections held at once.
 const HOLD_MAX: usize = 64;
+
+/// What a prepared snapshot carries of its sandbox, and where its image
+/// puts each: `(directory in the build's context, path in the sandbox)`. The
+/// dependency cache, and what `prepare` left in `/work` beside the tracked
+/// files it removed first.
+pub const SNAPSHOT_TREES: [(&str, &str); 2] = [
+    ("cache", "/cache"),
+    ("work", crate::sandbox_images::PREPARED_TREE),
+];
+
+/// The Containerfile a snapshot is built from: the image the preparation ran
+/// in, which keeps its user, home, directory and environment, and `trees`
+/// read back from it, owned by the sandbox's user as they were.
+pub fn snapshot_containerfile(image: &str, trees: &[(String, String)]) -> String {
+    let mut out = format!("FROM {image}\n");
+    for (dir, target) in trees {
+        out.push_str(&format!(
+            "COPY --chown={} {dir}/ {target}/\n",
+            crate::sandbox_images::USER
+        ));
+    }
+    out
+}
+
+/// What builds a sandbox's snapshot here: the node's builder, which pushes it
+/// to the registry the sandboxes' pods pull from, how long one build may
+/// take, and which of the sandbox's trees it carries.
+#[derive(Clone)]
+pub struct Snapshots {
+    pub builder: Arc<dyn crate::boundary::ImageBuilder>,
+    pub timeout: Duration,
+    /// `(directory in the build's context, path in the sandbox)`:
+    /// [`SNAPSHOT_TREES`].
+    pub trees: Vec<(String, String)>,
+}
+
+impl Snapshots {
+    pub fn new(builder: Arc<dyn crate::boundary::ImageBuilder>, timeout: Duration) -> Self {
+        Snapshots {
+            builder,
+            timeout,
+            trees: SNAPSHOT_TREES
+                .iter()
+                .map(|(dir, target)| (dir.to_string(), target.to_string()))
+                .collect(),
+        }
+    }
+}
 
 /// The NetworkPolicy a sandbox pod is selected by: `<prefix>-sandbox`.
 pub fn sandbox_policy() -> String {
@@ -603,6 +660,8 @@ pub struct KubeSandboxProvider {
     client: kube::Client,
     options: KubeSandboxOptions,
     pending: Mutex<HashMap<String, Pending>>,
+    /// How a sandbox is snapshotted, where the node can build images.
+    snapshots: Option<Snapshots>,
 }
 
 /// How each of the runner's shapes is sized: as the harness pod it stands
@@ -656,7 +715,15 @@ impl KubeSandboxProvider {
             client,
             options,
             pending: Mutex::new(HashMap::new()),
+            snapshots: None,
         }
+    }
+
+    /// Snapshot sandboxes by building their prepared trees onto their image
+    /// with `snapshots`' builder.
+    pub fn with_snapshots(mut self, snapshots: Snapshots) -> Self {
+        self.snapshots = Some(snapshots);
+        self
     }
 
     pub fn options(&self) -> &KubeSandboxOptions {
@@ -739,6 +806,13 @@ impl KubeSandboxProvider {
         if !k.state_env.is_empty() {
             env.push((k.state_env, format!("{}/{}", k.home, k.state_dir)));
         }
+        // What a harness image set and the stock base does not.
+        let sandbox_env = crate::sandbox_images::sandbox_env();
+        env.extend(
+            sandbox_env
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.clone())),
+        );
         env.extend([
             ("TRACON_SANDBOX_ADDR", dial.to_string()),
             ("TRACON_SANDBOX_PIN", spec.bootstrap.cert_pin.clone()),
@@ -1393,6 +1467,71 @@ impl SandboxProvider for KubeSandboxProvider {
         let expected = self.dispatcher().await?.expect(&ips);
         take_back(server.clone(), expected, conn);
         Ok(())
+    }
+
+    /// What the preparation left in the pod ([`SNAPSHOT_TREES`]), read back
+    /// over `conn` into the builder's scratch and built onto `image` as
+    /// `reference`, labelled with `labels`, and pushed: the pinned image.
+    async fn snapshot_from(
+        &self,
+        handle: &Handle,
+        conn: &SandboxConn,
+        image: &str,
+        reference: &str,
+        labels: &[(String, String)],
+    ) -> Result<SnapshotId, ProviderError> {
+        let Some(snapshots) = &self.snapshots else {
+            return Err(self.unsupported("snapshot"));
+        };
+        let scratch = snapshots
+            .builder
+            .scratch_dir()
+            .unwrap_or_else(std::env::temp_dir);
+        let stage = std::fs::create_dir_all(&scratch)
+            .and_then(|()| {
+                tempfile::Builder::new()
+                    .prefix("snapshot-")
+                    .tempdir_in(&scratch)
+            })
+            .map_err(|e| failed(format!("stage a snapshot in {}: {e}", scratch.display())))?;
+        let context = stage.path().join("context");
+        for (dir, target) in &snapshots.trees {
+            conn.export_tar(
+                target.as_str(),
+                tracon_sandbox::protocol::Exclusions::None,
+                &context.join(dir),
+                crate::runner::sandbox_files::PREPARED_LIMITS,
+            )
+            .await
+            .map_err(|e| failed(format!("{}: read {target} back: {e}", handle.0)))?;
+        }
+        let containerfile = stage.path().join("Snapshot.Containerfile");
+        std::fs::write(
+            &containerfile,
+            snapshot_containerfile(image, &snapshots.trees),
+        )
+        .map_err(|e| failed(format!("stage a snapshot: {e}")))?;
+        let built = snapshots
+            .builder
+            .build(crate::boundary::ImageBuild {
+                tag: reference,
+                containerfile: &containerfile,
+                context: &context,
+                labels,
+                timeout: snapshots.timeout,
+            })
+            .await
+            .map_err(|failure| {
+                failed(match failure.log_tail.trim().is_empty() {
+                    true => format!("build the snapshot {reference}: {}", failure.error),
+                    false => format!(
+                        "build the snapshot {reference}: {}\n{}",
+                        failure.error,
+                        failure.log_tail.trim()
+                    ),
+                })
+            })?;
+        Ok(SnapshotId(built.image))
     }
 
     async fn destroy(&self, handle: &Handle) -> Result<(), ProviderError> {

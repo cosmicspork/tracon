@@ -11,6 +11,14 @@
 //! both halves are known to hold: the policies let a harness pod reach that
 //! port, and the node may keep the grant's credentials in a Secret of the
 //! run's own rather than in its pod spec.
+//!
+//! Over the sandbox protocol (`sandbox_protocol`) there are no harness
+//! images: every sandbox runs the stock base, or a repository's image built
+//! on it from its `build` steps, with the harness from the bundle. The node
+//! pins the base by the manifest its registry holds for this machine's
+//! architecture when it converges (nothing is pulled here: a pod's kubelet
+//! pulls the digest), and with `[runtime.kubernetes.builder]` it builds the
+//! steps and each repository's prepared snapshot on the cluster's BuildKit.
 
 pub mod build;
 pub mod checks;
@@ -51,7 +59,7 @@ pub struct KubeBackend {
     secret_rights: SecretRights,
     /// `[runtime.kubernetes.builder]`, or why it is not a builder. `None`
     /// where none is configured.
-    builder: Option<Result<build::BuildKitBuilder, build::Unusable>>,
+    builder: Option<Result<Arc<build::BuildKitBuilder>, build::Unusable>>,
     /// Every live per-client grant, served on the egress port.
     grants: Grants,
     /// Whether the policies let a harness pod reach the egress port, as the
@@ -64,17 +72,43 @@ pub struct KubeBackend {
 }
 
 /// The builder `[runtime.kubernetes.builder]` configures, if any, staging on
-/// the state volume.
-fn builder_for(cfg: &Config) -> Option<Result<build::BuildKitBuilder, build::Unusable>> {
+/// the state volume. Its build steps reach the node's egress proxy, served
+/// from `grants`, at the node pod's address when it is known.
+fn builder_for(
+    cfg: &Config,
+    env: Option<&PodEnv>,
+    grants: &Grants,
+) -> Option<Result<Arc<build::BuildKitBuilder>, build::Unusable>> {
     let settings = cfg.runtime.kubernetes.builder.as_ref()?;
     let scratch = cfg.runtime.kubernetes.state_mount.join(build::SCRATCH);
     Some(
-        build::BuildKitBuilder::new(settings, scratch).map_err(|why| {
-            build::Unusable(format!(
-                "[runtime.kubernetes.builder] is not usable ({why})"
-            ))
-        }),
+        build::BuildKitBuilder::new(settings, scratch)
+            .map(|builder| {
+                let builder = match env.map(|env| egress_address(&env.pod_ip, cfg)) {
+                    Some(proxy) => builder.with_steps_egress(build::StepsEgress {
+                        grants: grants.clone(),
+                        proxy,
+                    }),
+                    None => builder,
+                };
+                Arc::new(builder)
+            })
+            .map_err(|why| {
+                build::Unusable(format!(
+                    "[runtime.kubernetes.builder] is not usable ({why})"
+                ))
+            }),
     )
+}
+
+/// The node's per-client egress listener as a pod reaches it: the node pod's
+/// address, the egress port.
+fn egress_address(pod_ip: &str, cfg: &Config) -> String {
+    let port = cfg.gateway.egress_port;
+    match pod_ip.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(_)) => format!("[{pod_ip}]:{port}"),
+        _ => format!("{pod_ip}:{port}"),
+    }
 }
 
 /// Whether a harness pod can reach the node's egress port: the harness
@@ -128,15 +162,17 @@ impl KubeBackend {
     ) -> Self {
         let refusal = Refusal::cluster(&cfg.runtime.kubernetes.internal_cidrs)
             .map_err(|error| format!("[runtime.kubernetes] internal_cidrs: {error}"));
+        let grants = Grants::default();
+        let builder = builder_for(cfg, env.as_ref().ok(), &grants);
         Self {
             cfg: cfg.clone(),
             env,
             client,
             secret_rights: SecretRights::default(),
-            grants: Grants::default(),
+            grants,
             egress_port: EgressPort::default(),
             refusal,
-            builder: builder_for(cfg),
+            builder,
         }
     }
 
@@ -159,6 +195,62 @@ impl KubeBackend {
 
     pub fn secret_rights(&self) -> &SecretRights {
         &self.secret_rights
+    }
+
+    /// Over the sandbox protocol: the bundle fetched or checked, and the
+    /// stock base pinned by the manifest its registry holds for this
+    /// machine's architecture, which is every sandbox's, since affinity keeps
+    /// them on the node pod's machine. Nothing is pulled here; a pod's
+    /// kubelet pulls the pinned digest. `Ok(true)` when the bundle was
+    /// fetched or the pin moved.
+    pub async fn converge_images(&self) -> Result<bool, String> {
+        if !uses_sandbox_protocol(&self.cfg) {
+            return Ok(false);
+        }
+        let fetched = match crate::bundle::ensure(&self.cfg).await {
+            Ok(Some(crate::bundle::Ensured::Fetched(path))) => {
+                tracing::info!(bundle = %path.display(), "fetched the harness bundle for this release");
+                true
+            }
+            Ok(_) => false,
+            Err(error) => return Err(format!("harness bundle: {error}")),
+        };
+        let configured = self.cfg.sandbox.base_image_ref();
+        // The builder's credential for a base kept in its registry; a base
+        // anywhere else (the release's, on GHCR) is public and read without.
+        let docker_config = self
+            .cfg
+            .runtime
+            .kubernetes
+            .builder
+            .as_ref()
+            .and_then(|builder| {
+                let host = builder
+                    .registry
+                    .trim()
+                    .split('/')
+                    .next()
+                    .unwrap_or_default();
+                (!host.is_empty() && configured.starts_with(&format!("{host}/")))
+                    .then(|| builder.docker_config.clone())
+            });
+        let registry = crate::boundary::registry::Registry::new(docker_config);
+        let arch = crate::boundary::registry::host_architecture();
+        let pinned = crate::sandbox_images::resolve_base(&registry, &configured, arch)
+            .await
+            .map_err(|error| format!("pin the sandbox base {configured}: {error}"))?
+            .ok_or_else(|| {
+                format!(
+                    "the sandbox base {configured} is only in a local image store, which no pod \
+                     pulls from: set [sandbox] base_image to an image in a registry"
+                )
+            })?;
+        let moved = crate::sandbox_images::active_base().as_deref() != Some(pinned.as_str());
+        if moved {
+            tracing::info!(image = %pinned, "pinned the sandbox base for linux/{arch}");
+        }
+        crate::sandbox_images::pin(&configured, &pinned);
+        Ok(fetched || moved)
     }
 
     pub fn egress_port(&self) -> &EgressPort {
@@ -405,6 +497,7 @@ impl Backend for KubeBackend {
     async fn setup(&self, _cfg: &Config, _rebuild: bool) -> Result<(), BoundaryError> {
         // Nothing to build: images come from the release, and what the pod
         // needs around it is applied by the operator. Say what that is.
+        self.converge_images().await.map_err(BoundaryError::Other)?;
         println!("{}", Self::manifests());
         eprintln!(
             "apply the manifests above (kubectl apply -k deploy/kubernetes/base, or an overlay of it); \
@@ -426,12 +519,60 @@ impl Backend for KubeBackend {
         report
     }
 
+    async fn converge(&self, _cfg: &Config) -> Result<bool, BoundaryError> {
+        self.converge_images().await.map_err(BoundaryError::Other)
+    }
+
+    /// Only over the sandbox protocol, where there is a bundle to fetch and a
+    /// base to pin; the cluster's manifests stay the operator's either way.
+    fn converges(&self) -> bool {
+        uses_sandbox_protocol(&self.cfg)
+    }
+
+    fn definitions(&self, cfg: &Config) -> Option<String> {
+        uses_sandbox_protocol(cfg).then(|| {
+            format!(
+                "{}\u{1f}{}\u{1f}{:?}",
+                env!("CARGO_PKG_VERSION"),
+                cfg.sandbox.base_image_ref(),
+                cfg.sandbox.bundle
+            )
+        })
+    }
+
     fn image_builder(&self) -> Option<&dyn super::ImageBuilder> {
         match &self.builder {
-            Some(Ok(builder)) => Some(builder),
+            Some(Ok(builder)) => Some(builder.as_ref()),
             Some(Err(unusable)) => Some(unusable),
             None => None,
         }
+    }
+
+    /// Over the sandbox protocol, with a builder to push each snapshot: the
+    /// node's own sandboxes, whose snapshots are built from what their
+    /// preparation left.
+    fn preparer(&self) -> Option<crate::sandbox_images::Preparer> {
+        if !uses_sandbox_protocol(&self.cfg) {
+            return None;
+        }
+        let Some(Ok(builder)) = &self.builder else {
+            return None;
+        };
+        let Some(Ok(client)) = self.client.get() else {
+            return None;
+        };
+        let spec = self.spec().ok()?;
+        let provider = self.provider_for(client.clone(), spec).with_snapshots(
+            crate::provider::kubernetes::Snapshots::new(
+                builder.clone(),
+                crate::repo_image::BUILD_TIMEOUT,
+            ),
+        );
+        Some(crate::sandbox_images::Preparer {
+            provider: Arc::new(provider),
+            files: Some(self.files_store()),
+            tunnels: crate::runner::tunnels::kube_tunnels(&self.cfg),
+        })
     }
 
     fn harness_image(&self, cfg: &Config, harness_id: &str) -> String {
@@ -439,6 +580,8 @@ impl Backend for KubeBackend {
     }
 
     /// Pods pull on use, so a cluster names each image and says nothing of it.
+    /// Over the sandbox protocol that is one image for every harness: the
+    /// base, which the bundle completes.
     async fn harness_images(&self, cfg: &Config) -> Vec<crate::boundary::HarnessImage> {
         crate::adapter::KNOWN
             .iter()
@@ -642,6 +785,20 @@ impl Backend for KubeBackend {
         refuse_live(volume)?;
         crate::boundary::remove_directory_volume(&self.cfg.runtime.kubernetes.state_mount, volume)
     }
+
+    /// A snapshot carries the cache its preparation filled in its image.
+    async fn seeds_session_cache(&self, base: &str, from_snapshot: bool) -> bool {
+        match uses_sandbox_protocol(&self.cfg) {
+            true => !from_snapshot && self.files_store().holds(base),
+            false => true,
+        }
+    }
+
+    /// Over the sandbox protocol every tree is sent onto the pod's own
+    /// storage, and from a snapshot onto its image's own `/work`.
+    fn workspace_over_image(&self) -> bool {
+        uses_sandbox_protocol(&self.cfg)
+    }
 }
 
 /// A volume a running sandbox holds is its, not the claim's copy: as a
@@ -697,6 +854,54 @@ mod tests {
         cfg.runtime.kind = crate::config::RuntimeKind::Kubernetes;
         cfg.runtime.kubernetes.state_mount = state.to_path_buf();
         KubeBackend::new(&cfg)
+    }
+
+    /// Over the sandbox protocol the node has a bundle to fetch and a base to
+    /// pin, so it converges; every harness runs on the base; a workspace goes
+    /// over a snapshot's own `/work`. Without a builder nothing is
+    /// snapshotted. Off, none of that changes.
+    #[tokio::test]
+    async fn over_the_protocol_every_harness_runs_on_the_base() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.runtime.kind = crate::config::RuntimeKind::Kubernetes;
+        cfg.runtime.kubernetes.state_mount = tmp.path().to_path_buf();
+        let plain = KubeBackend::new(&cfg);
+        assert!(!plain.converges());
+        assert!(plain.definitions(&cfg).is_none());
+        assert!(!plain.workspace_over_image());
+        assert!(!crate::sandbox_images::bundled(&cfg));
+        assert_eq!(
+            Backend::harness_image(&plain, &cfg, "claude"),
+            cfg.runtime.kubernetes.harness_image
+        );
+        assert_eq!(plain.converge_images().await, Ok(false));
+
+        cfg.runtime.kubernetes.sandbox_protocol = true;
+        let protocol = KubeBackend::new(&cfg);
+        assert!(protocol.converges());
+        assert!(protocol
+            .definitions(&cfg)
+            .is_some_and(|d| d.contains(&cfg.sandbox.base_image_ref())));
+        assert!(protocol.workspace_over_image());
+        assert!(crate::sandbox_images::bundled(&cfg));
+        assert!(crate::repo_image::stock_base_only(&cfg));
+        for harness in ["claude", "native"] {
+            assert_eq!(
+                Backend::harness_image(&protocol, &cfg, harness),
+                crate::sandbox_images::base_image(&cfg)
+            );
+        }
+        assert_eq!(
+            crate::environment::harness_image(&cfg),
+            crate::sandbox_images::base_image(&cfg)
+        );
+        assert!(protocol.preparer().is_none());
+        assert!(
+            !protocol
+                .seeds_session_cache("tracon-cache-base-x", true)
+                .await
+        );
     }
 
     /// Without `[runtime.kubernetes.builder]` nothing builds and the check

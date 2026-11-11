@@ -1,0 +1,32 @@
+# A repository's `build` steps reach the network through the node: each build
+# is given a grant of the node's per-client egress proxy, on the egress port
+# (7424), for exactly its entry's `egress` hosts, and BuildKit hands it to
+# every RUN step as its proxy. The steps run in the daemon's pod, so the node
+# admits that pod on that port, and nothing else from it. Without this rule a
+# step that honours its proxy cannot reach anything, and a build with steps
+# fails on its first fetch.
+#
+# The daemon is `[runtime.kubernetes.builder] addr`'s, by default
+# buildkitd.tracon-build.svc; change the selectors if yours is elsewhere. Its
+# own egress policy must allow the node pod on this port too, and decides
+# whether a step can go around the proxy (README, "Images on Kubernetes").
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tracon-node-build
+spec:
+  podSelector:
+    matchLabels:
+      tracon.dev/role: node
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tracon-build
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: buildkitd
+      ports:
+        - protocol: TCP
+          port: 7424
