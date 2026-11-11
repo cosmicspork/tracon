@@ -161,6 +161,8 @@ impl Rig {
             recording_server(origin.clone(), Default::default(), "hello from the origin").await;
 
         let mut cfg = Config::default();
+        // Each switch this suite runs is set below; the rest stay off.
+        cfg.runtime.podman = tracon::config::PodmanRuntime::legacy();
         // Never created: a node-only sandbox joins no network.
         cfg.boundary.network = format!("{prefix}net");
         cfg.boundary.harness_image = image.clone();

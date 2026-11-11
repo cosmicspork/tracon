@@ -67,6 +67,8 @@ impl Rig {
             .tempdir_in("/tmp")
             .unwrap();
         let mut cfg = Config::default();
+        // Each switch this suite runs is set below; the rest stay off.
+        cfg.runtime.podman = tracon::config::PodmanRuntime::legacy();
         cfg.boundary.network = network.clone();
         cfg.boundary.gateway_container = format!("{prefix}gw");
         cfg.gateway.harness_listen = HarnessListen::Unix(short.path().join("harness.sock"));

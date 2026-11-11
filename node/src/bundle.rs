@@ -87,7 +87,7 @@ pub fn managed(cfg: &Config) -> bool {
 /// given none: Podman's with `sandbox_images`, and a pod-hosted node's with
 /// `[runtime.kubernetes] sandbox_protocol`, whose init containers copy it in.
 fn fetches_own(cfg: &Config) -> bool {
-    cfg.runtime.podman.sandbox_images
+    crate::sandbox_images::enabled(cfg)
         || crate::boundary::kubernetes::uses_sandbox_protocol(cfg)
         || cfg.runtime.kind == crate::config::RuntimeKind::Apple
 }
@@ -691,8 +691,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn default_off_means_no_managed_bundle() {
+    fn only_a_node_on_the_sandbox_images_fetches_its_bundle() {
+        let linux = cfg!(target_os = "linux");
+        assert_eq!(managed(&Config::default()), linux);
+        let mut kube = Config::default();
+        kube.runtime.kind = crate::config::RuntimeKind::Kubernetes;
+        assert!(!managed(&kube), "the Podman switches are not a pod's");
         let mut cfg = Config::default();
+        cfg.runtime.podman = crate::config::PodmanRuntime::legacy();
         assert_eq!(effective(&cfg), None);
         assert!(!managed(&cfg));
         cfg.sandbox.bundle = Some("/opt/bundle".into());
@@ -703,7 +709,10 @@ pub(crate) mod tests {
         assert!(!managed(&cfg));
         assert_eq!(effective(&cfg), Some(PathBuf::from("/opt/bundle")));
         cfg.sandbox.bundle = None;
-        assert!(managed(&cfg));
+        assert_eq!(managed(&cfg), linux);
+        if !linux {
+            return;
+        }
         let managed = effective(&cfg).unwrap();
         assert!(managed.ends_with(format!(
             "{DIR}/{}/{}",

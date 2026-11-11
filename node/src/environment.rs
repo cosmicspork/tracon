@@ -1095,7 +1095,7 @@ mod tests {
     fn a_repo_entry_overrides_only_what_it_names() {
         let image =
             "localhost/tc@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let mut cfg = Config::default();
+        let mut cfg = Config::podman_legacy();
         cfg.boundary.harness_image = "localhost/harness".into();
         cfg.supervision.checks = vec![" just check ".into(), String::new()];
         cfg.supervision.timeout_secs = 900;
@@ -1270,7 +1270,7 @@ mod tests {
                 path: "git.example.com/group/app".into(),
                 ..Default::default()
             }],
-            ..Default::default()
+            ..Config::podman_legacy()
         };
         let operator = Path::new("/home/me/src/app");
         let mut env = std::collections::BTreeMap::new();

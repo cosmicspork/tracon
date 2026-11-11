@@ -2475,7 +2475,7 @@ mod tests {
         ensure_with(
             builder,
             &LocalRunner,
-            &Config::default(),
+            &Config::podman_legacy(),
             store,
             repo,
             &entry(repo),
@@ -2616,7 +2616,7 @@ mod tests {
                 prepare: vec!["npm ci".into()],
                 ..entry(repo)
             }],
-            ..Default::default()
+            ..Config::podman_legacy()
         };
         let warms = || *pulling.builder.warms.lock().unwrap();
 
@@ -2921,7 +2921,7 @@ mod tests {
         let repo_path = repo.to_string_lossy();
         let store = Store::open_in_memory().unwrap();
         let builder = FakeBuilder::default();
-        let cfg = Config::default();
+        let cfg = Config::podman_legacy();
 
         let first = recipe(repo, &entry(repo), &RunAs::Root).await.unwrap();
         assert_eq!(
@@ -3039,7 +3039,7 @@ mod tests {
         let unavailable = ensure_with(
             &builder,
             &LocalRunner,
-            &Config::default(),
+            &Config::podman_legacy(),
             &store,
             repo,
             &missing,
@@ -3142,7 +3142,7 @@ mod tests {
             note: None,
         };
         let layered = image("localhost/tracon-session-claude-1", BASE_IMAGE);
-        let podman = Config::default();
+        let podman = Config::podman_legacy();
         assert_eq!(SessionImage::default().source(&podman), "harness image");
         assert_eq!(SessionImage::default().reported(&podman), None);
         assert_eq!(layered.source(&podman), "repository image");
@@ -3150,7 +3150,7 @@ mod tests {
         let mut sandboxed: Config =
             toml::from_str("[runtime.podman]\nsandbox_protocol = true\nsandbox_images = true\n")
                 .unwrap();
-        let mut apple = Config::default();
+        let mut apple = Config::podman_legacy();
         apple.runtime.kind = crate::config::RuntimeKind::Apple;
         sandboxed.sandbox.base_image = Some("ghcr.io/x/tracon-sandbox-base:1".into());
         let mut bundled = vec![apple];
@@ -3191,7 +3191,7 @@ mod tests {
     }
 
     fn kubernetes() -> Config {
-        let mut cfg = Config::default();
+        let mut cfg = Config::podman_legacy();
         cfg.runtime.kind = crate::config::RuntimeKind::Kubernetes;
         cfg
     }
@@ -3212,7 +3212,7 @@ mod tests {
         let image = first.image.clone().expect("the session image is built");
         assert_eq!(first.toolchain_image.as_deref(), Some(BASE_IMAGE));
         assert_eq!(first.note, None);
-        assert_eq!(first.source(&Config::default()), "repository image");
+        assert_eq!(first.source(&Config::podman_legacy()), "repository image");
         // Proven in the image that was built, not in the harness's own.
         assert_eq!(
             runner.ran_in.lock().unwrap().as_slice(),
@@ -3277,7 +3277,7 @@ mod tests {
             let got =
                 ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
             assert_eq!(got.image, None, "{says}");
-            assert_eq!(got.source(&Config::default()), "harness image");
+            assert_eq!(got.source(&Config::podman_legacy()), "harness image");
             assert!(got.note.unwrap().contains("does not run"), "{says}");
             let row = store
                 .latest_repo_image("/src/musl-app", "session:claude")
@@ -3312,7 +3312,7 @@ mod tests {
                 image: Some(BASE_IMAGE.into()),
                 ..Default::default()
             }],
-            ..Default::default()
+            ..Config::podman_legacy()
         });
         let ask = |repo: &'static str, harness: &'static str| {
             let (backend, cfg, store) = (backend.clone(), cfg.clone(), store.clone());
@@ -3420,7 +3420,7 @@ mod tests {
                 image: Some(BASE_IMAGE.into()),
                 ..Default::default()
             }],
-            ..Default::default()
+            ..Config::podman_legacy()
         });
         let got = session_image(
             &backend,
@@ -3591,15 +3591,15 @@ mod tests {
     /// with what to do instead. Without them nothing changes.
     #[test]
     fn the_sandbox_providers_refuse_a_repository_off_the_stock_base() {
-        let legacy = Config::default();
-        let mut podman = Config::default();
+        let legacy = Config::podman_legacy();
+        let mut podman = Config::podman_legacy();
         podman.runtime.podman.sandbox_protocol = true;
         podman.runtime.podman.sandbox_images = true;
-        let mut apple = Config::default();
+        let mut apple = Config::podman_legacy();
         apple.runtime.kind = crate::config::RuntimeKind::Apple;
         let mut kube = kubernetes();
         kube.runtime.kubernetes.sandbox_protocol = true;
-        let mut protocol_only = Config::default();
+        let mut protocol_only = Config::podman_legacy();
         protocol_only.runtime.podman.sandbox_protocol = true;
 
         let image = Repo {
@@ -3618,8 +3618,11 @@ mod tests {
             "# comment\nfrom $TRACON_SANDBOX_BASE as tools\nFROM rust AS other\n",
         ];
 
+        // A fresh node, which runs the sandbox switches by default.
+        let fresh = Config::default();
         for (cfg, refuses) in [
             (&legacy, false),
+            (&fresh, cfg!(target_os = "linux")),
             (&protocol_only, false),
             (&kubernetes(), false),
             (&podman, cfg!(target_os = "linux")),
@@ -3670,7 +3673,7 @@ mod tests {
     #[tokio::test]
     async fn a_refused_repository_builds_and_starts_nothing() {
         let tmp = checkout();
-        let mut cfg = Config::default();
+        let mut cfg = Config::podman_legacy();
         cfg.runtime.kind = crate::config::RuntimeKind::Apple;
         cfg.repo = vec![entry(tmp.path())];
         let cfg = Arc::new(cfg);
@@ -3939,7 +3942,7 @@ ENTRYPOINT []
         assert_eq!(pulling.builder.builds.lock().unwrap().len(), 1);
         let on_podman = ask(Config {
             repo: entries,
-            ..Default::default()
+            ..Config::podman_legacy()
         })
         .await;
         assert_ne!(on_podman.image, Some(image));
@@ -4022,7 +4025,7 @@ ENTRYPOINT []
         // its own to build.
         let backend = crate::runner::local::LocalBackend;
         assert_eq!(
-            ensure_base(&backend, &Config::default(), &store, repo, true).await,
+            ensure_base(&backend, &Config::podman_legacy(), &store, repo, true).await,
             Ensured::Unconfigured
         );
         let retried =
@@ -4053,7 +4056,7 @@ ENTRYPOINT []
         };
         let cfg = Arc::new(Config {
             repo: vec![held_entry.clone()],
-            ..Default::default()
+            ..Config::podman_legacy()
         });
         let hold = CredentialHoldRow {
             path: repo.to_string_lossy().into(),
@@ -4194,7 +4197,7 @@ WORKDIR /work
     #[tokio::test]
     async fn build_steps_are_what_the_stock_base_refusal_points_at() {
         let dir = tempfile::tempdir().unwrap();
-        let mut apple = Config::default();
+        let mut apple = Config::podman_legacy();
         apple.runtime.kind = crate::config::RuntimeKind::Apple;
         let mut kube = kubernetes();
         kube.runtime.kubernetes.sandbox_protocol = true;

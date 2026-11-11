@@ -198,6 +198,100 @@ pub fn own_state(mounts: &mut [Mount], scratch_volume: &str) {
     }
 }
 
+/// A session reopened after its node moved to keeping harness state per
+/// session (`own_state`, with `[runtime.podman] sandbox_files` on by default)
+/// had its state in the runtime's volumes: its scratch volume (the native
+/// harness's journal, under `harness/run`) and, for Claude Code, its
+/// transcript in the volume every session shared. Without them its resume
+/// finds no conversation. Before the scratch is first sent into the node's
+/// store, this carries the old scratch volume under the new staging (the
+/// staging wins where both have a file) and copies only this conversation's
+/// transcript out of the shared volume into `state/`, never another
+/// session's. Nothing to carry, or a failure, leaves the launch as it was:
+/// the reopening is then refused as a conversation the harness no longer has.
+pub async fn carry_from_runtime_volumes(
+    backend: &dyn crate::boundary::Backend,
+    scratch: &Scratch,
+    harness_session_id: &str,
+) {
+    if crate::runner::sandbox_files::FilesStore::for_node().holds(&scratch.volume) {
+        return;
+    }
+    match carry(backend, scratch, harness_session_id).await {
+        Ok(false) => {}
+        Ok(true) => tracing::info!(
+            volume = %scratch.volume,
+            "carried a session's harness state from before it was kept per session"
+        ),
+        Err(error) => tracing::warn!(
+            volume = %scratch.volume,
+            %error,
+            "could not carry a session's harness state from before it was kept per session"
+        ),
+    }
+}
+
+async fn carry(
+    backend: &dyn crate::boundary::Backend,
+    scratch: &Scratch,
+    harness_session_id: &str,
+) -> Result<bool, String> {
+    let tmp = tempfile::tempdir_in(Config::state_dir()).map_err(|e| e.to_string())?;
+    let mut carried = false;
+    if backend.volume_exists(&scratch.volume).await {
+        let old = tmp.path().join("scratch");
+        backend
+            .export_volume(&scratch.volume, &old)
+            .await
+            .map_err(|e| e.to_string())?;
+        let merged = tmp.path().join("merged");
+        crate::workspace::copy_tree(&old, &merged, false).map_err(|e| e.to_string())?;
+        crate::workspace::copy_tree(&scratch.dir, &merged, false).map_err(|e| e.to_string())?;
+        std::fs::remove_dir_all(&scratch.dir).map_err(|e| e.to_string())?;
+        std::fs::rename(&merged, &scratch.dir).map_err(|e| e.to_string())?;
+        carried = true;
+    }
+    let shared = harness_state_volume();
+    // A name that could leave `projects/<dir>/` is never looked for.
+    let plain = !harness_session_id.is_empty()
+        && harness_session_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if plain && backend.volume_exists(&shared).await {
+        let all = tmp.path().join("shared");
+        backend
+            .export_volume(&shared, &all)
+            .await
+            .map_err(|e| e.to_string())?;
+        let projects = all.join("projects");
+        for project in std::fs::read_dir(&projects).into_iter().flatten().flatten() {
+            let dest = scratch
+                .dir
+                .join(OWN_STATE)
+                .join("projects")
+                .join(project.file_name());
+            for name in [
+                format!("{harness_session_id}.jsonl"),
+                harness_session_id.into(),
+            ] {
+                let source = project.path().join(&name);
+                let Ok(meta) = std::fs::symlink_metadata(&source) else {
+                    continue;
+                };
+                std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
+                if meta.is_dir() {
+                    crate::workspace::copy_tree(&source, &dest.join(&name), false)
+                        .map_err(|e| e.to_string())?;
+                } else if meta.is_file() {
+                    std::fs::copy(&source, dest.join(&name)).map_err(|e| e.to_string())?;
+                }
+                carried = true;
+            }
+        }
+    }
+    Ok(carried)
+}
+
 /// A pre-volume credential database is retired rather than copied forward.
 pub fn retire_harness_credentials() -> Option<PathBuf> {
     let db = Config::harness_state_dir().join("agent/agent.db");
@@ -376,6 +470,65 @@ pub fn remove(session_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A session from before its harness state was its own is reopened
+    /// with its old scratch volume under the new staging and only its own
+    /// transcript out of the shared volume; the new staging wins.
+    #[tokio::test]
+    async fn a_reopened_pre_upgrade_session_carries_its_own_state_and_no_other() {
+        let runtime = Config::state_dir().join("local-runtime");
+        let volume = crate::workspace::scratch_volume_name("test-carry-old");
+        let old = runtime.join(&volume);
+        let _ = std::fs::remove_dir_all(&old);
+        std::fs::create_dir_all(old.join("harness/run/sessions")).unwrap();
+        std::fs::write(old.join("harness/run/sessions/j1.jsonl"), "journal").unwrap();
+        std::fs::write(old.join("orientation.md"), "old").unwrap();
+        let shared = runtime.join(harness_state_volume()).join("projects/-work");
+        std::fs::create_dir_all(shared.join("carry-c1")).unwrap();
+        std::fs::write(shared.join("carry-c1.jsonl"), "transcript").unwrap();
+        std::fs::write(shared.join("carry-c1/agent.jsonl"), "subagent").unwrap();
+        std::fs::write(shared.join("carry-other.jsonl"), "another session").unwrap();
+
+        let staged = tempfile::tempdir_in(Config::state_dir()).unwrap();
+        let scratch = Scratch {
+            dir: staged.path().join("s"),
+            volume: volume.clone(),
+            mounts: Vec::new(),
+            orientation_path: String::new(),
+        };
+        std::fs::create_dir_all(&scratch.dir).unwrap();
+        std::fs::write(scratch.dir.join("orientation.md"), "new").unwrap();
+        let backend = crate::runner::local::LocalBackend;
+        carry_from_runtime_volumes(&backend, &scratch, "carry-c1").await;
+
+        let read = |rel: &str| std::fs::read_to_string(scratch.dir.join(rel)).ok();
+        assert_eq!(read("orientation.md").as_deref(), Some("new"));
+        assert_eq!(
+            read("harness/run/sessions/j1.jsonl").as_deref(),
+            Some("journal")
+        );
+        let own = "state/projects/-work";
+        assert_eq!(
+            read(&format!("{own}/carry-c1.jsonl")).as_deref(),
+            Some("transcript")
+        );
+        assert_eq!(
+            read(&format!("{own}/carry-c1/agent.jsonl")).as_deref(),
+            Some("subagent")
+        );
+        assert_eq!(read(&format!("{own}/carry-other.jsonl")), None);
+
+        // A name that is a path is never looked for.
+        let other = Scratch {
+            dir: staged.path().join("t"),
+            volume: crate::workspace::scratch_volume_name("test-carry-none"),
+            ..scratch
+        };
+        std::fs::create_dir_all(&other.dir).unwrap();
+        carry_from_runtime_volumes(&backend, &other, "../carry-c1").await;
+        assert!(!other.dir.join(OWN_STATE).exists());
+        let _ = std::fs::remove_dir_all(&old);
+    }
 
     /// The session's commits are the operator's: the gitconfig names the
     /// forge identity it was given, and nothing names tracon.

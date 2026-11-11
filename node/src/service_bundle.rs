@@ -518,6 +518,8 @@ pub(crate) mod tests {
             service: vec![service("browser", Some("release"))],
             ..Config::default()
         };
+        assert_eq!(wanted(&cfg), cfg!(target_os = "linux"));
+        cfg.runtime.podman = crate::config::PodmanRuntime::legacy();
         assert!(!wanted(&cfg));
         assert_eq!(missing(&cfg, false), None);
         cfg.runtime.podman.sandbox_protocol = true;
