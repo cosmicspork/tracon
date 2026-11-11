@@ -43,6 +43,7 @@
 pub mod bootstrap;
 pub mod images;
 pub mod listener;
+pub mod portable;
 pub mod runtime;
 pub mod templates;
 pub mod upkeep;
