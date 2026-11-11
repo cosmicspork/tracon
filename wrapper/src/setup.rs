@@ -48,11 +48,16 @@ pub struct SetupStatus {
     pub service_failing: bool,
     /// What the node said as it exited, when it is failing.
     pub service_error: Option<String>,
+    /// Linux only: rootless Podman, the boundary there.
     pub podman: Option<String>,
-    /// macOS only: `running`, `starting`, `stopped`, `missing` or `error`.
-    pub machine: Option<&'static str>,
-    /// Why Podman could not determine the macOS machine state.
-    pub machine_error: Option<String>,
+    /// macOS only: Apple's `container` CLI, the boundary there.
+    pub container: Option<String>,
+    /// macOS only: `running`, `stopped` or `error`, as
+    /// `container system status` answers.
+    pub services: Option<&'static str>,
+    /// Why `container system status` said they are not running, or could
+    /// not be asked.
+    pub services_error: Option<String>,
 }
 
 /// Podman as the node will find it: the PATH a login shell would add, then
@@ -61,71 +66,78 @@ fn find_podman() -> Option<PathBuf> {
     let path = node::enriched_path(std::env::var("PATH").ok());
     std::env::split_paths(&path)
         .map(|d| d.join("podman"))
-        .chain(
-            [
-                "/opt/homebrew/bin/podman",
-                "/usr/local/bin/podman",
-                "/usr/bin/podman",
-            ]
-            .map(PathBuf::from),
-        )
+        .chain(["/usr/local/bin/podman", "/usr/bin/podman"].map(PathBuf::from))
         .find(|p| p.is_file())
 }
 
-/// The default machine in `podman machine list --format json`, else the
-/// first one listed. A valid empty array confirms there is no machine.
-fn machine_state_from(list: &serde_json::Value) -> Result<&'static str, String> {
-    let machines = list.as_array().ok_or_else(|| {
-        "Podman returned invalid machine-list JSON (expected an array).".to_string()
-    })?;
-    let Some(m) = machines
-        .iter()
-        .find(|m| m["Default"].as_bool() == Some(true))
-        .or_else(|| machines.first())
-    else {
-        return Ok("missing");
-    };
-    if m["Running"].as_bool() == Some(true) {
-        Ok("running")
-    } else if m["Starting"].as_bool() == Some(true) {
-        Ok("starting")
-    } else if m["Running"].as_bool() == Some(false) {
-        Ok("stopped")
-    } else {
-        Err("Podman returned machine data without a valid Running state.".into())
-    }
+/// Apple's `container` as the node will find it: where its installer puts
+/// it, which is where the node looks when `[runtime.apple] container` is
+/// empty, then the PATH a login shell would add.
+fn find_container() -> Option<PathBuf> {
+    let path = node::enriched_path(std::env::var("PATH").ok());
+    std::iter::once(PathBuf::from("/usr/local/bin/container"))
+        .chain(std::env::split_paths(&path).map(|d| d.join("container")))
+        .find(|p| p.is_file())
 }
 
-async fn machine_state(podman: &Path) -> Result<&'static str, String> {
-    let out = tokio::process::Command::new(podman)
-        .args(["machine", "list", "--format", "json"])
+/// `container system status`: zero when its services run. A non-zero exit
+/// is them stopped, with what it said; a CLI that will not run is an error.
+async fn services_state(container: &Path) -> (&'static str, Option<String>) {
+    let out = match tokio::process::Command::new(container)
+        .args(["system", "status"])
+        .stdin(std::process::Stdio::null())
         .output()
         .await
-        .map_err(|e| format!("Could not run `podman machine list`: {e}"))?;
-    if !out.status.success() {
-        let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return Err(if detail.is_empty() {
-            format!("`podman machine list` exited with {}.", out.status)
-        } else {
-            format!("`podman machine list` failed: {detail}")
-        });
-    }
-    let list: serde_json::Value = serde_json::from_slice(&out.stdout)
-        .map_err(|e| format!("Podman returned invalid machine-list JSON: {e}"))?;
-    machine_state_from(&list)
+    {
+        Ok(out) => out,
+        Err(e) => {
+            return (
+                "error",
+                Some(format!("Could not run `container system status`: {e}")),
+            )
+        }
+    };
+    services_state_from(out.status.success(), &out.stdout, &out.stderr)
 }
 
-fn machine_failure(status: &SetupStatus) -> Option<String> {
-    if status.platform != "macos" {
-        return None;
+fn services_state_from(
+    success: bool,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> (&'static str, Option<String>) {
+    if success {
+        return ("running", None);
     }
-    match status.machine {
-        Some("running" | "starting" | "stopped") => None,
-        Some("missing") => Some("No Podman machine exists. Create one with `podman machine init`.".into()),
-        Some("error") | None => Some(status.machine_error.clone().unwrap_or_else(|| {
-            "Could not verify the Podman machine. Retry detection before installing the service.".into()
-        })),
-        _ => Some("Could not verify the Podman machine. Retry detection before installing the service.".into()),
+    let said = [stderr, stdout]
+        .iter()
+        .map(|bytes| String::from_utf8_lossy(bytes).trim().to_string())
+        .find(|text| !text.is_empty());
+    ("stopped", said)
+}
+
+/// Why the service cannot be installed yet, if it cannot: the boundary the
+/// node runs every sandbox in is missing or not running.
+fn boundary_failure(status: &SetupStatus) -> Option<String> {
+    if status.platform != "macos" {
+        return status.podman.is_none().then(|| {
+            "Podman is required before installing the service. Install Podman, then retry setup."
+                .into()
+        });
+    }
+    if status.container.is_none() {
+        return Some(
+            "Apple's container is required before installing the service. Install its signed \
+             package, then retry setup."
+                .into(),
+        );
+    }
+    match status.services {
+        Some("running") => None,
+        _ => Some(
+            "container's services are not running. Start them with \
+             `container system start --enable-kernel-install`, then retry setup."
+                .into(),
+        ),
     }
 }
 
@@ -144,13 +156,15 @@ pub async fn status(http: &reqwest::Client, url: &str) -> SetupStatus {
         Some(dir) => node::path_hint(dir).await,
         None => None,
     };
-    let podman = find_podman();
-    let (machine, machine_error) = match &podman {
-        Some(p) if cfg!(target_os = "macos") => match machine_state(p).await {
-            Ok(state) => (Some(state), None),
-            Err(error) => (Some("error"), Some(error)),
-        },
-        _ => (None, None),
+    let mac = cfg!(target_os = "macos");
+    let podman = if mac { None } else { find_podman() };
+    let container = if mac { find_container() } else { None };
+    let (services, services_error) = match &container {
+        Some(bin) => {
+            let (state, error) = services_state(bin).await;
+            (Some(state), error)
+        }
+        None => (None, None),
     };
     SetupStatus {
         platform: if cfg!(target_os = "macos") {
@@ -173,8 +187,9 @@ pub async fn status(http: &reqwest::Client, url: &str) -> SetupStatus {
             None
         },
         podman: podman.map(|p| p.display().to_string()),
-        machine_error,
-        machine,
+        container: container.map(|p| p.display().to_string()),
+        services,
+        services_error,
     }
 }
 
@@ -191,13 +206,7 @@ async fn blocking<T: Send + 'static>(
 /// for the node to answer.
 pub async fn install_service(http: &reqwest::Client, url: &str) -> Result<SetupStatus, String> {
     let initial = status(http, url).await;
-    if initial.podman.is_none() {
-        return Err(
-            "Podman is required before installing the service. Install Podman, then retry setup."
-                .into(),
-        );
-    }
-    if let Some(reason) = machine_failure(&initial) {
+    if let Some(reason) = boundary_failure(&initial) {
         return Err(reason);
     }
     match initial.owner {
@@ -250,7 +259,6 @@ pub async fn restart_node(http: &reqwest::Client, url: &str) -> Result<SetupStat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn the_owner_is_whoever_runs_what_answers() {
@@ -270,24 +278,24 @@ mod tests {
     }
 
     #[test]
-    fn the_machine_state_is_the_default_machines() {
-        let one = |running: bool, starting: bool| json!([{"Name": "m", "Default": true, "Running": running, "Starting": starting}]);
-        assert_eq!(machine_state_from(&one(true, false)), Ok("running"));
-        assert_eq!(machine_state_from(&one(false, true)), Ok("starting"));
-        assert_eq!(machine_state_from(&one(false, false)), Ok("stopped"));
-        assert_eq!(machine_state_from(&json!([])), Ok("missing"));
-        let two = json!([
-            {"Name": "other", "Default": false, "Running": true},
-            {"Name": "main", "Default": true, "Running": false}
-        ]);
-        assert_eq!(machine_state_from(&two), Ok("stopped"));
-        assert!(machine_state_from(&json!({"machines": []})).is_err());
-        assert!(machine_state_from(&json!([{"Name": "main"}])).is_err());
+    fn the_services_state_is_what_container_system_status_exits_with() {
+        assert_eq!(
+            services_state_from(true, b"apiserver is running", b""),
+            ("running", None)
+        );
+        assert_eq!(
+            services_state_from(false, b"", b"apiserver is not running\n"),
+            ("stopped", Some("apiserver is not running".into()))
+        );
+        assert_eq!(
+            services_state_from(false, b"not registered\n", b"  "),
+            ("stopped", Some("not registered".into()))
+        );
+        assert_eq!(services_state_from(false, b"", b""), ("stopped", None));
     }
 
-    #[test]
-    fn service_install_requires_a_verified_machine_on_macos() {
-        let mut status = SetupStatus {
+    fn mac() -> SetupStatus {
+        SetupStatus {
             platform: "macos",
             owner: Owner::None,
             node_version: None,
@@ -299,16 +307,42 @@ mod tests {
             service_running: false,
             service_failing: false,
             service_error: None,
-            podman: Some("/usr/bin/podman".into()),
-            machine: Some("error"),
-            machine_error: Some("probe failed".into()),
-        };
-        assert_eq!(machine_failure(&status).as_deref(), Some("probe failed"));
-        status.machine = Some("missing");
-        assert!(machine_failure(&status)
+            podman: None,
+            container: Some("/usr/local/bin/container".into()),
+            services: Some("running"),
+            services_error: None,
+        }
+    }
+
+    #[test]
+    fn service_install_on_a_mac_needs_container_and_its_services_running() {
+        let mut status = mac();
+        assert_eq!(boundary_failure(&status), None);
+        // Podman is not what a Mac runs, so it is never asked for there.
+        assert!(status.podman.is_none());
+        status.services = Some("stopped");
+        assert!(boundary_failure(&status)
             .unwrap()
-            .contains("podman machine init"));
-        status.machine = Some("stopped");
-        assert_eq!(machine_failure(&status), None);
+            .contains("container system start --enable-kernel-install"));
+        status.services = Some("error");
+        assert!(boundary_failure(&status).is_some());
+        status.container = None;
+        status.services = None;
+        assert!(boundary_failure(&status)
+            .unwrap()
+            .contains("Apple's container is required"));
+    }
+
+    #[test]
+    fn service_install_on_linux_needs_podman() {
+        let mut status = SetupStatus {
+            platform: "linux",
+            container: None,
+            services: None,
+            ..mac()
+        };
+        assert!(boundary_failure(&status).unwrap().contains("Podman"));
+        status.podman = Some("/usr/bin/podman".into());
+        assert_eq!(boundary_failure(&status), None);
     }
 }

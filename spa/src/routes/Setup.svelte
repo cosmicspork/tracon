@@ -76,9 +76,9 @@
               <code>{s.command}</code>
             {/if}
             {#if s.href}
-              <a href={s.href} target="_blank" rel="noreferrer">Podman installation instructions</a>
+              <a href={s.href} target="_blank" rel="noreferrer">{s.hrefLabel ?? s.href}</a>
             {/if}
-            {#if s.id === 'machine' && status.machine === 'error'}
+            {#if s.id === 'services' && !s.done}
               <button class="btn" disabled={busy !== null} onclick={() => refresh()}>Retry detection</button>
             {/if}
             {#if s.id === 'service' && (canRestartNode(status) || (!s.done && status.owner !== 'foreign'))}

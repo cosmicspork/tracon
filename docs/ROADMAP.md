@@ -27,8 +27,8 @@ waits until its absence is felt in real work.
 ### The supported configuration
 
 One configuration is what daily use runs on, and what a defect has to be in to enter
-**Now**: the desktop app on macOS or Linux, rootless Podman, Claude Code as the managed
-harness, a single node. Everything else — the native harness, the Kubernetes runtime, the hub and mesh, the installed phone app, handoff between nodes — is built and
+**Now**: the desktop app, on Linux with rootless Podman or on macOS with Apple
+Containerization, Claude Code as the managed harness, a single node. Everything else — the native harness, the Kubernetes runtime, the hub and mesh, the installed phone app, handoff between nodes — is built and
 tested but *experimental* until that configuration is boring. The homelab node keeps running the
 hub and serving the phone; work on those surfaces is deferred, not removed.
 
