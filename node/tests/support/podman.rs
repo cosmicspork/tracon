@@ -4,8 +4,8 @@
 //! Podman is often one running a node, and a test left to find Podman for
 //! itself shares that node's Podman machine while its sessions are working. Asked
 //! for, a test borrows nothing of the node's: it names its image, and every
-//! name it gives a runtime resource is its own. `just check-podman` builds the
-//! image and runs them.
+//! name it gives a runtime resource is its own. Each suite says at its top
+//! what it needs and how to run it.
 
 use std::process::Command;
 
@@ -18,7 +18,7 @@ pub const OPT_IN: &str = "TRACON_PODMAN_TESTS";
 pub fn requested() -> bool {
     let asked = std::env::var(OPT_IN).is_ok_and(|v| v == "1");
     if !asked {
-        eprintln!("skipped: real-container tests run only with {OPT_IN}=1 (`just check-podman`)");
+        eprintln!("skipped: real-container tests run only with {OPT_IN}=1");
     }
     asked
 }

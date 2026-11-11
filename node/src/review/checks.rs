@@ -1593,8 +1593,8 @@ mod tests {
 
     /// The container/pod name `run_required` builds for a check
     /// (`tracon-c-{index}-{hash}`) becomes, unmodified apart from
-    /// `KubeRunner::run_capture`'s `-{pid}` suffix, both the Kubernetes pod
-    /// name and the `tracon.dev/session` label value in `KubeSpec::pod`
+    /// `ProtocolRunner::capture_name`'s `-{pid}` suffix, both the Kubernetes pod
+    /// name and the `tracon.dev/session` label value of a sandbox pod
     /// (29c4086). Both are capped at 63 characters; confirm the bound holds
     /// even at the largest realistic index and process id.
     #[test]
@@ -2043,10 +2043,23 @@ mod tests {
         "localhost/tc@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
     /// A candidate from a session in `/src/app`, on a node whose `[[repo]]`
-    /// entry for it names an image, its own check, a preparation and the
-    /// registry that preparation needs.
+    /// entry for it has build steps (whose image the node built), its own
+    /// check, a preparation and the registry that preparation needs.
     fn prepared_repo(id: &str) -> (Store, Config, CandidateRow) {
         let store = store_with_node();
+        let build = store
+            .start_repo_image(&crate::store::RepoImageStart {
+                repo_path: "/src/app",
+                kind: crate::repo_image::BASE,
+                recipe_hash: "r1",
+                source_ref: "origin/main",
+                source_commit: "c1",
+                parent_image: "",
+            })
+            .unwrap();
+        store
+            .finish_repo_image(&build, Ok(TOOLCHAIN), "", &[])
+            .unwrap();
         store
             .insert_session(&session_row("s-app", "/src/app"))
             .unwrap();
@@ -2065,7 +2078,7 @@ mod tests {
         cfg.supervision.checks = vec!["node-wide check".into()];
         cfg.repo = vec![crate::config::Repo {
             path: "/src/app".into(),
-            image: Some(TOOLCHAIN.into()),
+            build: vec!["apt-get install -y bun".into()],
             checks: Some(vec!["just check".into()]),
             timeout_secs: Some(1800),
             prepare: vec!["bun install --frozen-lockfile".into()],
@@ -2106,7 +2119,7 @@ mod tests {
             "the repository's own check, never the node-wide one"
         );
         assert_eq!(report.image, TOOLCHAIN);
-        assert_eq!(report.image_source, "repository toolchain");
+        assert_eq!(report.image_source, crate::environment::REPOSITORY_BUILD);
 
         assert_eq!(
             *recorded.log.lock().unwrap(),

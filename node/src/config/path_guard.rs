@@ -36,7 +36,7 @@
 //!
 //! What "an agent can write" means here: the state directory (workspaces,
 //! sessions and caches are staged there), the state volume on Kubernetes
-//! (`runtime.kubernetes.state_mount`, which harness pods mount), the session
+//! (`runtime.kubernetes.state_mount`, whose volumes sandboxes write), the session
 //! worktree root, Podman's container storage (where named volumes and
 //! container layers live), and the node's runtime directory. Every path is
 //! resolved through its symbolic links first, and each link's own directory
@@ -436,7 +436,7 @@ pub struct Layout {
     /// The `PATH` a bare program name is looked up on.
     pub path_var: Option<OsString>,
     /// The volume the state directory lives on, when that volume is one
-    /// harness pods mount (on Kubernetes): found from the running process,
+    /// whose volumes sandboxes write (on Kubernetes): found from the running process,
     /// not from `node.toml`, so no edit can move it.
     pub state_volume: Option<PathBuf>,
     /// Places an agent can write besides those `node.toml` names.
@@ -491,8 +491,8 @@ impl Layout {
         }
         let config_path = Config::config_path();
         let state_dir = Config::state_dir();
-        // In a pod, the state directory is on the claim every harness pod
-        // mounts a part of. Which part is not the guard's to know, so all
+        // In a pod, the state directory is on the claim whose volumes every
+        // sandbox is sent a part of. Which part is not the guard's to know, so all
         // of it counts.
         let state_dir = absolute(state_dir);
         let state_volume =
@@ -1046,7 +1046,7 @@ impl Guard {
         // The configuration directory's secrets are the node's own even
         // where that directory sits in the state directory (macOS) or on
         // the state volume (Kubernetes, `/state/config`): nothing an agent
-        // sends is staged there, and a harness pod mounts only the claim's
+        // sends is staged there, and a sandbox is sent only the claim's
         // top-level `tracon-*` volumes.
         // Decided by spelling alone, written and resolved: a link an agent
         // made into the secrets directory does not make its own path one.
@@ -2167,7 +2167,7 @@ mod tests {
     #[test]
     fn a_path_entry_inside_the_state_volume_is_never_used_or_passed_on() {
         // Kubernetes: HOME is /state/home, so ~/.local/bin is on the volume
-        // harness pods mount.
+        // sandboxes write.
         let node = Node::new();
         node.program("volume/home/.local/bin/buildctl");
         let mut layout = node.layout();
@@ -2822,7 +2822,7 @@ mod tests {
     }
 
     /// Kubernetes: the claim is mounted at `/state`, the state directory is
-    /// `/state/tracon`, harness pods mount `/state/tracon-*`, and the
+    /// `/state/tracon`, sandboxes are sent `/state/tracon-*`, and the
     /// configuration is in `/state/config/tracon`.
     fn pod(node: &Node) -> Layout {
         let mut layout = node.layout();

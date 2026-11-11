@@ -7,9 +7,9 @@
 //! node's own pod facts, client and `[runtime.kubernetes]` settings: one
 //! sandbox pod beside the node's, which dials this process on the sandbox
 //! port and fetches the bundle there, held to the sandbox NetworkPolicy the
-//! deployment carries, which `verify_isolation` reads back. It is for a node
-//! about to turn `sandbox_protocol` on: a node already serving its sandboxes
-//! holds the port, and its boundary check covers the same ground.
+//! deployment carries, which `verify_isolation` reads back. It is for a pod
+//! whose node is not serving yet: a node serving its sandboxes holds the
+//! port, and its boundary check covers the same ground.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -187,9 +187,9 @@ async fn kubernetes(
     match crate::provider::kubernetes::Dispatcher::bind(listen).await {
         Ok(_) => Ok(provider),
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => bail!(
-            "port {} is already taken, most likely by the node itself serving its sandboxes \
-             ([runtime.kubernetes] sandbox_protocol is on): the probe is for a node about to \
-             turn it on; with it on, the node's boundary check covers the same ground",
+            "port {} is already taken, most likely by the node itself serving its sandboxes: \
+             the probe is for a pod whose node is not serving yet; once it is, the node's \
+             boundary check (`tracon check-boundary --deep`) covers the same ground",
             listen.port()
         ),
         Err(error) => bail!("listen for the sandbox on {listen}: {error}"),

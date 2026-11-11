@@ -1,7 +1,7 @@
-# One volume, ReadWriteOnce, shared by the node and every harness pod. The
-# node keeps its own state under /state/tracon; a harness sees only the
-# subPaths the node mounts for its session. RWO is why harness pods are
-# pinned to the node's Kubernetes node.
+# One volume, ReadWriteOnce, the node's alone: its own state under
+# /state/tracon, its worktrees, and every session's files, which travel to
+# and from each sandbox pod over the sandbox protocol. No sandbox mounts any
+# of it.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

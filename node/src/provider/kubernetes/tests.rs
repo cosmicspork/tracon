@@ -1,13 +1,14 @@
 use super::*;
 use crate::config::Config;
+use crate::provider::kubernetes::pod::{
+    PodEnv, CHANNEL_LABEL, KIND_LABEL, REPO_LABEL, SIZING_LABEL,
+};
 use crate::provider::{Bootstrap, Resources};
-use crate::runner::kube::{PodEnv, CHANNEL_LABEL, KIND_LABEL, REPO_LABEL, SIZING_LABEL};
 use crate::runner::{Mount, RunKind, RunLabels};
 
 fn options() -> KubeSandboxOptions {
     let mut cfg = Config::default();
     cfg.runtime.kind = crate::config::RuntimeKind::Kubernetes;
-    cfg.runtime.kubernetes.sandbox_protocol = true;
     let spec = KubeSpec::from_config(
         &cfg,
         PodEnv {

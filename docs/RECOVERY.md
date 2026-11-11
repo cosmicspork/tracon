@@ -37,8 +37,8 @@ podman volume export tracon-workspace-<workspace-id> -o work.tar
 ```
 
 The workspace id is the one the session row records, and `node.db` still has it
-with nothing running. On the Kubernetes backend the volume is the session's
-claim; on the local backend used by tests it is
+with nothing running. On the Kubernetes backend the volume is a directory of that
+name on the node's state claim; on the local backend used by tests it is
 `local-runtime/tracon-workspace-<workspace-id>` under the state directory. The `[docs] export_dir` mirror, if it is configured, is
 already on disk and needs nothing running at all.
 
@@ -135,9 +135,10 @@ naming what it changed:
 - `[harness] id` becomes `"claude"`, and a pinned `version` is cleared (empty is
   the version this node's Claude Code image installs);
 - `[boundary] harness_image` and `[runtime.kubernetes] harness_image` are
-  replaced only when they are a retired harness's own defaults
+  removed only when they are a retired harness's own defaults
   (`localhost/tracon-harness`, `localhost/tracon-harness-opencode`, and their
-  `ghcr.io/cosmicspork/…:<tag>` counterparts); an image you chose is kept. A file
+  `ghcr.io/cosmicspork/…:<tag>` counterparts); an image you chose is kept, and
+  ignored with a line in the log, since neither key configures anything now. A file
   that names one of those images under a supported id is migrated for the image
   alone.
 
@@ -260,9 +261,8 @@ no passkey; or edit `node.toml` by hand and restart.
 
 Some keys are only ever changed at the node, and an edit from elsewhere is refused
 with that reason: `runtime.kubernetes.state_mount` (not even by an edit there; change
-it in the file), and `gateway.harness_listen`, `sandbox.base_image`, `sandbox.bundle`,
-`sandbox.release_url` and `runtime.kubernetes.harness_image` (an edit through the
-port-forward, or by hand). A remote save that lists more sensitive keys than one
+it in the file), and `gateway.harness_listen`, `sandbox.base_image`, `sandbox.bundle`
+and `sandbox.release_url` (an edit through the port-forward, or by hand). A remote save that lists more sensitive keys than one
 prompt can show is refused with "split it into smaller edits".
 
 **A window was signed in that you did not approve** (a push says "Signed in from

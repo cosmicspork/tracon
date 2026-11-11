@@ -121,14 +121,13 @@ pub fn enabled(cfg: &Config) -> bool {
 }
 
 /// Whether this node's sandboxes run harnesses from the bundle on the stock
-/// base or a repository's image, with no harness images: a Podman or Apple
-/// node's always, and a pod-hosted node's over the sandbox protocol. A repository with a `prepare` starts from its prepared snapshot
-/// on any of them (on Kubernetes, once `[runtime.kubernetes.builder]` can
+/// base or a repository's image, with no harness images: every runtime's
+/// do. A repository with a `prepare` starts from its prepared snapshot on
+/// any of them (on Kubernetes, once `[runtime.kubernetes.builder]` can
 /// build one).
 pub fn bundled(cfg: &Config) -> bool {
-    enabled(cfg)
-        || cfg.runtime.kind == crate::config::RuntimeKind::Apple
-        || crate::boundary::kubernetes::uses_sandbox_protocol(cfg)
+    let _ = cfg;
+    true
 }
 
 /// The base image as configured, and as this process pinned it.
@@ -1552,7 +1551,7 @@ mod tests {
         assert!(crate::config::validate_sandbox(&cfg).is_err());
         let mut kube = Config::default();
         kube.runtime.kind = crate::config::RuntimeKind::Kubernetes;
-        assert!(!enabled(&kube) && !bundled(&kube));
+        assert!(!enabled(&kube) && bundled(&kube));
         assert_eq!(definitions(&kube), "");
     }
 

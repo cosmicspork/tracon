@@ -346,8 +346,16 @@ impl Backend for Building {
 
 /// A dev Dockerfile on the default branch.
 fn dev_dockerfile(root: &std::path::Path) {
+    dockerfile_from(root, "debian");
+}
+
+fn dockerfile_from(root: &std::path::Path, from: &str) {
     std::fs::create_dir_all(root.join(".devcontainer")).unwrap();
-    std::fs::write(root.join(".devcontainer/Dockerfile"), "FROM debian\n").unwrap();
+    std::fs::write(
+        root.join(".devcontainer/Dockerfile"),
+        format!("FROM {from}\n"),
+    )
+    .unwrap();
     git(root, &["add", ".devcontainer"]);
     git(root, &["commit", "-qm", "devcontainer"]);
     git(root, &["push", "-q", "origin", "main"]);
@@ -488,13 +496,10 @@ async fn a_dockerfile_is_never_tried_in_the_harness_image_instead() {
 #[tokio::test]
 async fn a_dockerfile_the_entry_already_names_is_built_without_a_card() {
     let backend = Arc::new(Building::default());
-    // A Dockerfile off the stock base, which only a pod-hosted node off the
-    // sandbox protocol still builds.
-    let mut cfg = Config::default();
-    cfg.runtime.kind = tracon::config::RuntimeKind::Kubernetes;
-    let h = harness_on(cfg, backend.clone()).await;
+    // An entry's Dockerfile has to begin on the stock base.
+    let h = harness_on(Config::default(), backend.clone()).await;
     let dir = repository_for(&h, "s-held");
-    dev_dockerfile(dir.path());
+    dockerfile_from(dir.path(), "${TRACON_SANDBOX_BASE}");
     h.manager.cfg().live_repo.set(vec![tracon::config::Repo {
         path: dir.path().to_path_buf(),
         dockerfile: Some(".devcontainer/Dockerfile".into()),

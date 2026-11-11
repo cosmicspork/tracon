@@ -1,12 +1,10 @@
 //! How the node gets a harness process. `ProtocolRunner` puts it inside a
-//! sandbox provider's sandbox over the sandbox protocol (Podman's, Apple's,
-//! DigitalOcean's, and a pod's with `[runtime.kubernetes] sandbox_protocol`),
-//! and the Kubernetes runner inside a harness pod otherwise. `PodmanRunner`
+//! sandbox provider's sandbox over the sandbox protocol: Podman's, Apple's,
+//! DigitalOcean's, or a Kubernetes pod's. `PodmanRunner`
 //! answers for a Podman sandbox's image identity and image-only services;
 //! `LocalRunner` (tests only) runs the argv on the host so the adapter can be
 //! exercised without containers.
 
-pub mod kube;
 pub mod podman;
 pub mod protocol;
 pub mod reattach;
@@ -187,7 +185,7 @@ impl RunKind {
 
 /// What a run means to someone reading the cluster: its kind, and the
 /// repository, channel, harness and phase it was run for. Rendered as pod
-/// labels on Kubernetes (`runner::kube`), where a metrics stack joins them to
+/// labels on Kubernetes (`provider::kubernetes::pod`), where a metrics stack joins them to
 /// a pod's CPU and memory. Values are the raw names; the runtime sanitizes
 /// them. Nothing here may be a secret, a branch, a path or a prompt: labels
 /// are readable by anyone with `get pods`.
@@ -281,7 +279,7 @@ pub enum RunnerError {
     Other(String),
     /// The cluster refused to run the command for lack of capacity, before
     /// anything of it started. `reason` classifies it
-    /// (`runner::kube::Refusal::as_str`); `message` names the resource and
+    /// (`provider::kubernetes::pod::Refusal::as_str`); `message` names the resource and
     /// the setting that sizes it.
     #[error("{message}")]
     Refused {

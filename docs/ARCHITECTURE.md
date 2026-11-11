@@ -402,8 +402,8 @@ runs. `config::path_guard` holds each such key to rules for what it names
   directory, and never changed by an edit at all: it decides where agents can write, so
   it is changed in `node.toml` on the host. It holds the state and configuration
   directories by design, and everything under it counts as a place an agent can write,
-  except the configuration directory's `secrets` (a harness pod mounts only the claim's
-  top-level `tracon-*` volumes, never `config/`).
+  except the configuration directory's `secrets` (a sandbox is sent only the claim's
+  top-level `tracon-*` volumes, over the files channel, never `config/`).
 
 The node's own areas (the export area, the state and data directories for the bundle,
 the configuration directory's `secrets`) are an exception to "never in a place an agent
@@ -665,16 +665,13 @@ serves its interface and relays so the refusal is visible from anywhere.
 The boundary is capability-driven, not tied to an OS or product. Three
 implementations exist — rootless Podman on a Linux host and Apple Containerization on a
 Mac (each sandbox capability-dropped with no network at all, its one route the sandbox
-protocol's socket to the node, over which the node serves the MCP and model gateway, the
-allowlist CONNECT proxy and the egress proxy as tunnels on the sandbox's loopback) and
-Kubernetes (one harness pod per session, a NetworkPolicy making the node the harness's
-only route, the node serving the allowlist proxy itself). All answer the same checks
-behind the same seam. The harness reaches exactly two things: allowlisted provider
-hosts through the proxy, and the node through the forward. On Podman and Apple a third
-tunnel carries the node's per-client egress proxy, which opens nothing to a caller that
-presents no grant; on Kubernetes a harness pod reaches the same proxy at the node's pod,
-on `[gateway] egress_port`, which both policies must open before the node issues a
-grant. The proxy never dials this machine or its link for a grant. In a cluster it sits
+protocol's socket to the node) and Kubernetes (one sandbox pod per run, a NetworkPolicy
+making the node pod's sandbox port its only route). Over that one connection the node
+serves the MCP and model gateway, the allowlist CONNECT proxy and the egress proxy as
+tunnels on the sandbox's loopback. All answer the same checks behind the same seam. The
+harness reaches exactly two things: allowlisted provider hosts through the proxy, and
+the node through the forward. A third tunnel carries the node's per-client egress proxy,
+which opens nothing to a caller that presents no grant. The proxy never dials this machine or its link for a grant. In a cluster it sits
 beside the API server and every service, so there it, and the allowlist proxy the node
 serves there, also refuse private and carrier-grade NAT addresses,
 `[runtime.kubernetes] internal_cidrs`, and cluster names (`.svc`, `.cluster.local`,
@@ -698,36 +695,34 @@ returns. A Podman or Apple sandbox has no route out at
 all, so a denied connection fails at `connect(2)` and a denied name fails at
 resolution, both in milliseconds; the allowlist proxy refuses an unlisted host with a
 status rather than silence. `--deep` measures this rather than assuming it, and fails a
-boundary whose denials take longer than a few seconds. Kubernetes is the caveat: a
-NetworkPolicy drops by nature and there is no portable way to make it reject, so
-there the bound has to come from a cluster that can express one, and until it does
-that runtime is honest about it rather than claiming the property.
+boundary whose denials take longer than a few seconds. On Kubernetes a NetworkPolicy
+drops by nature and there is no portable way to make it reject, which is why a
+sandbox's one route goes to the node and everything else it reaches is a tunnel there:
+a sandbox that dials anything else is dropped, and `--deep` reports that as the
+runtime's limitation rather than claiming the property.
 
 **A harness container is a PID namespace with an init at its head.** A harness
 need not reap what it and its tools start, and a stop that signals one process
 leaves the rest. So the runner stops the container rather than the process: the init
 takes the signal, the stop timeout bounds the wait, and tearing the namespace down is
-what actually collects whatever was left running. A pod
-gets the same number as its termination grace period and needs no shared process
-namespace, because the container carries its own init.
+what actually collects whatever was left running. A sandbox pod
+gets the same number as its termination grace period; its first process is
+`tracon-sandbox`, which supervises and reaps what it starts.
 
 **A command run to completion in a pod reports what it did.** A check, a preparation or
-a probe on Kubernetes is a pod of its own. Its exit code is its container's
-`terminated.exitCode`, so a failing check (2) and a missing tool (127) stay apart; a pod
-that ends without one (an eviction) is an error, never a made-up 1. Its output is the
-pod log, where the cluster has already merged stdout and stderr, so it all arrives as
-stdout and an empty stderr says nothing. Only the start is bounded by the runner
-(`[runtime.kubernetes] start_timeout_secs`, 15 minutes by default, enough for a first
-pull of a large image), and a start that runs out says what the pod was waiting for.
-The run itself has no runner limit, as under Podman: the caller's own timeout stops it
-by removing the pod, and a caller that stops waiting removes it too. The harness
-image's entrypoint is named only when the pod runs the harness image; a repository
-image runs the command as given. The identity a check's evidence is keyed on is the
-image reference itself when it is pinned by digest, because the kubelet runs nothing
-else under it, so an approval asked of a runner that has run nothing still finds it. A
-tag is confirmed only by the `imageID` a run of that same tag reported.
+a probe on Kubernetes is a sandbox pod of its own, its process run over the sandbox
+protocol, so its exit code and its stdout and stderr come back over the connection as
+on every provider. A pod that never connects (an image that cannot be pulled, an
+eviction) is an error naming what its log said, never a made-up exit code. Only the
+start is bounded by the provider (`[runtime.kubernetes] start_timeout_secs`, 15 minutes
+by default, enough for a first pull of a large image), and a start that runs out says
+what the pod was waiting for. The run itself has no runner limit: the caller's own
+timeout stops it by removing the pod, and a caller that stops waiting removes it too.
+The identity a check's evidence is keyed on is the image reference itself when it is
+pinned by digest, because the kubelet runs nothing else under it, so an approval asked
+of a runner that has run nothing still finds it. A tag is never an identity.
 
-**A harness pod is sized and given what a browser needs.** Every pod names its own
+**A sandbox pod is sized and given what a browser needs.** Every pod names its own
 CPU and memory requests and a memory limit (`[runtime.kubernetes.resources]`), because
 a namespace's LimitRange fills in whatever a pod leaves out and refuses a request above
 its default limit at admission. A session and a command run to completion are sized
@@ -736,41 +731,41 @@ and 2Gi, both limited to 4Gi of memory and neither to CPU, which suits one share
 4 vCPU / 8 GB node where a Laravel suite with Vite and Playwright peaks around 2 to
 3 GiB. A limit below its request is refused when `node.toml` loads. Each pod gets a
 memory-backed `/dev/shm` (`shm_size`, 1Gi), since a container runtime's 64 MiB crashes
-Chromium, and an emptyDir at `/tmp` that `TMPDIR` names, so a repository image whose
-own `/tmp` the harness uid cannot write still has scratch space. Neither emptyDir
-carries anything the node did not put there, so the boundary's volume check holds.
+Chromium, and an emptyDir at `/tmp` that `TMPDIR` names, so an image whose own `/tmp`
+the sandbox's uid cannot write still has scratch space. Neither emptyDir carries
+anything the node did not put there, so the boundary's volume check holds.
 `image_pull_secrets` names the Secrets a pod pulls with; left empty, the pod names
 none and the namespace's default service account supplies its own, which is how a
 registry integration that patches that account keeps working.
 
-**A harness pod says what it is for.** Beside `tracon.dev/role=harness` and
-`tracon.dev/session=<pod name>`, which the NetworkPolicies and the boundary checks
-select on and which are unchanged, every pod carries `tracon.dev/kind` (`session`,
-`check`, `prepare` or `probe`, set by each caller on `RunnerCommand::labels`, since a
-runner is made fresh per call), `tracon.dev/sizing` (`session`, `command` or `probe`:
-the `[runtime.kubernetes.resources.*]` table that sized it, the knob a downsizing
-turns), and where they apply `tracon.dev/repo` (the repository's short name),
-`tracon.dev/channel`, `tracon.dev/harness` (the adapter id, on session pods and harness
-probes) and `tracon.dev/phase` (on session pods). A cluster's metrics stack joins its
-per-pod CPU and memory to these through `kube_pod_labels` rather than parsing pod-name
-prefixes, which are not a contract. Values are sanitized to what a label allows
-(`runner::kube::label_value`: lowercased, other characters made `-`, at most 63) and
-left out when nothing is left. Labels are readable by anyone with `get pods`, so none
-is ever a credential, a branch, a prompt or a path; the owner of a repository is left
-out too. A session's labels live on its `LaunchSpec`, so a relaunch keeps them.
+**A sandbox pod says what it is for.** Beside `tracon.dev/role=sandbox`,
+`tracon.dev/node=<prefix>` and `tracon.dev/session=<pod name>`, which the
+NetworkPolicies, affinity and the boundary checks select on, every pod carries
+`tracon.dev/kind` (`session`, `check`, `prepare` or `probe`, set by each caller on
+`RunnerCommand::labels`, since a runner is made fresh per call), `tracon.dev/sizing`
+(`session`, `command` or `probe`: the `[runtime.kubernetes.resources.*]` table that
+sized it, the knob a downsizing turns), and where they apply `tracon.dev/repo` (the
+repository's short name), `tracon.dev/channel`, `tracon.dev/harness` (the adapter id,
+on session pods and harness probes) and `tracon.dev/phase` (on session pods). A
+cluster's metrics stack joins its per-pod CPU and memory to these through
+`kube_pod_labels` rather than parsing pod-name prefixes, which are not a contract.
+Values are sanitized to what a label allows (`provider::kubernetes::pod::label_value`:
+lowercased, other characters made `-`, at most 63) and left out when nothing is left.
+Labels are readable by anyone with `get pods`, so none is ever a credential, a branch,
+a prompt or a path; the owner of a repository is left out too. A session's labels live
+on its `LaunchSpec`, so a relaunch keeps them.
 
-**A pod the node cannot fit is refused, and says why.** Pods are bound to the node's own
-Kubernetes node by `nodeName`, so the scheduler never weighs them: one that does not
-fit is failed by the kubelet's admission (phase Failed, reason `OutOfcpu`,
-`OutOfmemory`, ..., no container ever started), and a namespace's ResourceQuota or
-LimitRange refuses one at create. The runner reports either as a refusal
-(`RunnerError::Refused`, classified `out_of_cpu`, `out_of_memory`, `out_of_pods`,
-`out_of_ephemeral_storage`, `out_of_other` or `quota`) naming the resource, what the pod
-requested and the `[runtime.kubernetes.resources.*]` key that sizes it, rather than as
-a session that failed to attach or a capture that ended without an exit code. A quota
-that covers a resource the pod leaves unset (`failed quota: ...: must specify
-limits.cpu`, which every pod meets while `cpu_limit` is unset) is a `quota` refusal
-that names the key to set.
+**A pod the node cannot fit is refused, and says why.** Sandbox pods are placed beside
+the node's own pod by affinity, through the scheduler: one that does not fit is failed
+by the kubelet's admission (phase Failed, reason `OutOfcpu`, `OutOfmemory`, ..., no
+container ever started), and a namespace's ResourceQuota or LimitRange refuses one at
+create. The provider reports either as a refusal (`RunnerError::Refused`, classified
+`out_of_cpu`, `out_of_memory`, `out_of_pods`, `out_of_ephemeral_storage`,
+`out_of_other` or `quota`) naming the resource, what the pod requested and the
+`[runtime.kubernetes.resources.*]` key that sizes it, rather than as a run that never
+connected. A quota that covers a resource the pod leaves unset (`failed quota: ...:
+must specify limits.cpu`, which every pod meets while `cpu_limit` is unset) is a
+`quota` refusal that names the key to set.
 
 **The checks verify what runs.** They render the same run specification a session
 uses onto a probe that is created but never started, so a mutating admission webhook
@@ -1002,7 +997,7 @@ candidate, which could then choose its own gate, and a table a running node take
 live rather than waiting for a restart, so an entry saved from Settings or the CLI
 applies to the next session and check without ending the ones in progress — over the
 node-wide checks and the
-harness image where the entry names none; a command that image has no tool for is
+stock base where the entry names none; a command that image has no tool for is
 recorded `not_runnable` — never a pass, never reusable evidence, and never a failure
 the agent is asked to fix. The checks belong to the node, not to the tool call that
 asked for them: `submit_review` starts them in a task of its own and waits only as long
@@ -1015,75 +1010,33 @@ the id the review will have, `review_status` carries the wait and then reports t
 review or the same refusal the call would have given, and a retry of the same candidate
 against the same check definitions attaches to the run instead of starting another. A
 restart interrupts whatever was still `running` and closes the sessions that asked for
-it, like every other live session. Where sandboxes run on the stock base (a Podman or
-Apple node, and Kubernetes with `[runtime.kubernetes] sandbox_protocol`), an entry gives
-root `build` steps instead: the node layers them on the pinned `tracon-sandbox-base` as
-the repository's one image, every harness runs in it from the mounted bundle with no
-layer of the node's, and an `image` or a Dockerfile not `FROM ${TRACON_SANDBOX_BASE}` is
-refused (`repo_image::stock_base_only`). A Dockerfile that is on the base is built as
-below, under the same layer. What follows is otherwise the path that remains for
-Kubernetes without the protocol. An entry may name the repository's
-Dockerfile instead of an image: the node then builds it (`crate::repo_image`) from the **default branch**, read
-through Git's object store and never from a working tree, adds one layer of its own,
-and records the digest it built in its own state — the recipe is configuration, the
-digest is not, because a locally built image has a different one on every node. That
-is also why a recipe can be offered to another node (see Mesh frames) and its digest
-never is. The
-layer depends on who a run is (`repo_image::RunAs`), which is never root: it makes
-`/work`, `/cache` and the home owned by the run's uid (the stock base's 65532 on Podman
-and Apple, `[runtime.kubernetes] uid` in a pod), sets `HOME` to that home, ends on that
-`USER` and clears the entrypoint, and a pod says `runAsNonRoot` with the same uid. That
-makes a contract the node cannot enforce: what the repository's Dockerfile installs must
-be readable and executable by any uid. The profile is part of the recipe's hash and of
-the session layer's key, so an image built for one runtime's profile is never used by
-another's. A check run builds first when the recipe has moved; an
-approval only reads, so it cannot start a build, and a merged Dockerfile change is a
-different execution image and therefore different evidence. Image builds are the one
-place repository-authored commands run with the network and outside the boundary,
-which is why the operator names each one. The build goes through the runtime's
-`ImageBuilder`: Podman builds into its local store; on Kubernetes the node runs
-`buildctl` against a BuildKit daemon over mutual TLS, sends the materialised context
-itself, pushes to the configured registry, and takes the digest from the build's
-metadata. The registry credential is mounted only in the node's pod, but BuildKit's
-session auth hands it to the daemon on request during a build, so it is scoped to the
-registry alone. `exists`, `identity` and `remove` are answered by a runtime-neutral
-OCI distribution client (`boundary::registry`); a registry that cannot be asked keeps
-the standing image in use, a builder that cannot build is never held against the
-recipe, and a registry's superseded image is kept one generation longer for pods
-still about to pull it. A session runs in the same image with the
-harness layered on: a second image, `FROM` the repository's by digest with the harness
-binary copied out of the harness image, keyed on both digests and probed before any
-session is told to launch in it. On Kubernetes the builder is BuildKit, the harness is
-copied from the release's harness image in its registry, and the layer also copies that
-image's static `tini` to `/usr/libexec/tracon/tini`, which the session's pod runs as
-`tini --` in front of the harness: a pod's first process is PID 1, which ignores
-signals it does not handle and inherits orphans, and Kubernetes has nothing like
-Podman's `--init`. The probe runs in a pod as the harness uid. Both harnesses are
-layered. Claude Code is one binary and the environment its image sets; `tracon-agent` is
-one static binary and sets none. Each layer begins by refusing what would configure its
-harness underneath the node (`repo_image::layer_guard`): an image with a non-empty
-`/etc/ld.so.preload`, one whose environment sets `LD_PRELOAD` or `LD_AUDIT` (each would
-reach the harness wherever the launch sets no value of its own), and one where `/usr`,
-`/usr/local`, `/usr/local/bin`, `/usr/libexec` or `/usr/libexec/tracon` is a symbolic
-link that would send the copied files somewhere the image chose, such as the workspace.
-`LD_LIBRARY_PATH` is allowed: it only changes where the loader looks, `tracon-agent` is
-static, and the image is already trusted for every command a session runs.
-Claude Code's layer also removes `/etc/claude-code`,
-the managed-settings directory Claude Code reads on Linux whatever its environment says,
-whose policy outranks the node's flags, and any `.claude` or `.claude.json` in the
-harness's home. It refuses `CLAUDE_*` and `ANTHROPIC_*` variables other than the three
-every session sets for itself, as well as `NODE_OPTIONS` and `BUN_*`. The launch states
-`BUN_OPTIONS` empty, because Claude Code's binary is Bun and a `--preload` there runs a
-script inside it. `tracon-agent`'s layer refuses `TRACON_AGENT_*` variables, which would
-steer the endpoint or key it reads. Each probe checks that the binary, and a pod's init,
-resolve to themselves. The trust model is that the operator's image is trusted as its
-Dockerfile is: it builds with the network and supplies every command the agent runs. So
-these checks catch accidental configuration, not a hostile image; the boundary is the
-runtime around the session. Each harness is launched by its absolute path, never by a
-`PATH` lookup. Checks stay on the repository's image, so a harness
-upgrade rebuilds only the layer and no evidence moves. The session's start event
-records the image it ran in, the repository image under it, and the reason when it ran
-in the harness image instead. Dependencies arrive by **preparation**: the entry's `prepare`
+it, like every other live session. Sandboxes run on the stock base on every runtime, so
+an entry gives root `build` steps: the node layers them on the pinned
+`tracon-sandbox-base` as the repository's one image, every harness runs in it from the
+mounted bundle with no layer of the node's, and an `image` or a Dockerfile not
+`FROM ${TRACON_SANDBOX_BASE}` is refused (`repo_image::stock_base_only`). A Dockerfile
+that is on the base is built (`crate::repo_image`) from the **default branch**, read
+through Git's object store and never from a working tree, and the node records the
+digest it built in its own state — the recipe is configuration, the digest is not,
+because a locally built image has a different one on every node. That is also why a
+recipe can be offered to another node (see Mesh frames) and its digest never is. Every
+sandbox runs as the base's own user (65532), never root, with `/work`, `/cache` and its
+home the base made that user's; the profile is part of the recipe's hash. A check run
+builds first when the recipe has moved; an approval only reads, so it cannot start a
+build, and a merged recipe change is a different execution image and therefore
+different evidence. The build goes through the runtime's `ImageBuilder`: Podman builds
+into its local store; on Kubernetes the node runs `buildctl` against a BuildKit daemon
+over mutual TLS, sends the materialised context itself, pushes to the configured
+registry, and takes the digest from the build's metadata. The registry credential is
+mounted only in the node's pod, but BuildKit's session auth hands it to the daemon on
+request during a build, so it is scoped to the registry alone. `exists`, `identity` and
+`remove` are answered by a runtime-neutral OCI distribution client
+(`boundary::registry`); a registry that cannot be asked keeps the standing image in
+use, a builder that cannot build is never held against the recipe, and a registry's
+superseded image is kept one generation longer for pods still about to pull it. Each
+harness is launched by its absolute path in the bundle, never by a `PATH` lookup. The
+session's start event records the image it ran in, the repository image under it, and
+the reason when it ran on the stock base instead. Dependencies arrive by **preparation**: the entry's `prepare`
 commands run once per run, on a copy of the candidate, with a cache writable and an
 egress grant for exactly the hosts the entry names, revoked again before any check
 starts; every check then runs on its own copy of the prepared tree with the cache
@@ -1953,9 +1906,9 @@ needs to decide how big a node must be is a scrape target: `[metrics] listen` (u
 default, 7425 by convention) serves `GET /metrics` from one process-global registry
 (`telemetry`, the Prometheus project's `prometheus-client`), on a router that has
 nothing else, needs no credential and takes no input. Its port is refused at load when
-another of the node's listeners has it, and the harness NetworkPolicy does not admit it.
-Nor does the shipped node NetworkPolicy (`deploy/kubernetes/base/networkpolicy-node.yaml`),
-which admits only harness pods, on 7421, 8888 and 7424: an in-cluster Prometheus cannot
+another of the node's listeners has it, and a sandbox reaches only its tunnels, never
+it. The shipped node NetworkPolicy (`deploy/kubernetes/base/networkpolicy-node.yaml`)
+admits only the node's sandboxes, on 7426: an in-cluster Prometheus cannot
 scrape 7425 until an overlay adds an ingress rule admitting the scraper alone.
 
 | Family | Labels |

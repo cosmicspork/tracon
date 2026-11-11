@@ -1,10 +1,10 @@
 # Exactly the verbs the node's `runtime` check asserts, and no more: it
-# creates, watches, attaches to, reads the logs of, and deletes its harness
-# pods, and reads the NetworkPolicy it verifies. It cannot edit that policy.
-# The secrets rule is the one optional set: a run lent credentials (or an
-# egress grant) keeps them in a Secret of its own, `<pod>-env`, rather than
-# in its pod spec. Without the rule the node still runs, and refuses those
-# runs instead of putting the values in plaintext.
+# creates, reads, lists and deletes its sandbox pods, reads the log of one
+# that stopped before connecting, and reads and lists the NetworkPolicies it
+# verifies (it cannot edit them; a list finds any other policy that also
+# selects its sandboxes and would widen their route). Nothing on Secrets, no
+# attach: a sandbox's stdio and its run's secret environment travel over the
+# sandbox protocol.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -12,22 +12,10 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["create", "get", "list", "watch", "delete"]
-  # Attach is a GET that upgrades to a WebSocket, which the API server
-  # authorises as `get`; `create` covers the POST form. Both, or the node can
-  # create a harness it cannot talk to.
-  - apiGroups: [""]
-    resources: ["pods/attach"]
-    verbs: ["create", "get"]
+    verbs: ["create", "get", "list", "delete"]
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
-    verbs: ["get"]
-  # Create before the pod, patch its owner to the pod, delete once the pod
-  # has started, list what a node that died left. Nothing reads one back, so
-  # no `get`.
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["create", "patch", "delete", "list"]
+    verbs: ["get", "list"]

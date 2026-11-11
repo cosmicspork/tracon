@@ -449,7 +449,6 @@ async fn build_steps_reach_only_their_egress_and_end_as_the_bases_user() {
         ..Default::default()
     }];
     crate::config::validate_repos(&cfg.repo).unwrap();
-    crate::config::validate_repo_builds(&cfg).unwrap();
     let b = AppleBackend::new(&cfg);
     b.converge_images().await.unwrap();
     let store = crate::store::Store::open_in_memory().unwrap();

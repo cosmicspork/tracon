@@ -290,35 +290,25 @@ tracon's immutable candidates, isolated checks and brokered publication.
 
 ## Current limitations
 
-- Where sandboxes run on the stock base (a Podman or Apple node, Kubernetes with
-  `sandbox_protocol`), a repository's toolchain is its `[[repo]]`
-  `build` steps on `tracon-sandbox-base`, and a repository with none runs on the base
-  itself. Kubernetes does not build steps yet. Elsewhere (Kubernetes without the
-  protocol):
-  required checks run in the image, and after the preparation, the operator named for the
-  repository (`[[repo]]`), and in the harness image — which has no project toolchain —
-  when they named none. A session of either harness runs in that same image with the
-  harness layered on, so it has its checks' tools, and reaches the registries its
-  repository opens to sessions (`session_egress`). On Kubernetes that takes a builder, and the
-  image runs as uid 65532, so its tools must be readable by any uid. An image the node
-  builds from a repository's Dockerfile is built by Podman, or on Kubernetes by a
-  BuildKit daemon the deployment runs (`[runtime.kubernetes.builder]`) and pushed to a
-  registry. A superseded one is removed only when nothing still runs from it under
+- Sandboxes run on the stock base on every runtime, so a repository's toolchain is its
+  `[[repo]]` `build` steps (or a Dockerfile `FROM ${TRACON_SANDBOX_BASE}`) on
+  `tracon-sandbox-base`, and a repository with none runs on the base itself. Required
+  checks and a session of either harness run in that image, after the preparation, and a
+  session reaches the registries its repository opens to sessions (`session_egress`).
+  The image is built by Podman, by `container` on Apple, or on Kubernetes by a BuildKit
+  daemon the deployment runs (`[runtime.kubernetes.builder]`) and pushed to a registry;
+  a Kubernetes node without one builds nothing, and its repositories run on the base. A superseded one is removed only when nothing still runs from it under
   Podman; a registry's copy is deleted by digest, and frees space only when the
   registry's garbage collection runs. No other node reuses a pushed image: each node
   builds and pins its own.
 - A run's dependency cache and each check's tree are copies. Where the runtime's storage
   has no reflinks they are full copies, made once per run and once per check. The base
-  cache they start from is filled when the node builds a repository's image; an entry
-  that names a hand-pinned `image` has none, so its runs prepare from empty. A check run
+  cache they start from is filled when the node builds a repository's image. A check run
   keeps no build output: every run of a compiled project's checks builds from nothing
   (three minutes for tracon's own test build, 2026-10-01). Sessions keep theirs, but only
   Cargo's is moved out of the tree; a bundler's cache inside `node_modules` lives and goes
   with the workspace.
-- Per-client egress (a session's, a preparation's) on Kubernetes needs the egress port
-  open in both shipped policies and the Secrets rule in the node's Role. A node missing
-  either runs and issues no grants, so a `[[repo]]` entry that names `egress` cannot
-  prepare there, and the checks say which is missing. A grant filters by host, not by
+- A per-client egress grant (a session's, a preparation's) filters by host, not by
   method: a registry that accepts uploads accepts them from the client that was granted
   it.
 - macOS releases are unsigned — the publisher holds no Apple Developer ID — and are
@@ -327,8 +317,8 @@ tracon's immutable candidates, isolated checks and brokered publication.
 - The Kubernetes backend **drops** denied egress rather than refusing it. A NetworkPolicy
   has no reject verb and no portable CNI option turns a drop into an ICMP or RST refusal,
   so what Podman gets from having no route out has to come from the cluster. Until one that
-  can express it is configured, a harness pod has no protection against a tool that
-  fetches with no timeout of its own. `check-boundary --deep` measures the same bound
+  can express it is configured, a sandbox pod has no protection against a tool that
+  dials around its tunnels with no timeout of its own. `check-boundary --deep` measures the same bound
   on both backends. It fails Podman if it drops, and on Kubernetes records the drop as the
   runtime's limitation rather than failing.
 - Mesh transfers are capped at 2 MB, and an imported transfer is the carried tree under a

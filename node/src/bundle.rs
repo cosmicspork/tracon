@@ -65,31 +65,19 @@ pub fn host_arch() -> Option<&'static str> {
 }
 
 /// The bundle this node's sandboxes mount: `[sandbox] bundle` when set,
-/// else, on Podman and Apple (or a pod-hosted node with
-/// `sandbox_protocol`), the one the node fetches for itself.
-/// `None` when neither applies.
+/// else the one the node fetches for itself (a pod-hosted node's init
+/// containers copy it in). `None` on an architecture no release is built
+/// for.
 pub fn effective(cfg: &Config) -> Option<PathBuf> {
     if let Some(bundle) = &cfg.sandbox.bundle {
         return Some(bundle.clone());
-    }
-    if !fetches_own(cfg) {
-        return None;
     }
     host_arch().map(|arch| managed_dir(&Config::state_dir(), env!("CARGO_PKG_VERSION"), arch))
 }
 
 /// Whether the node fetches its bundle rather than being given one.
 pub fn managed(cfg: &Config) -> bool {
-    fetches_own(cfg) && cfg.sandbox.bundle.is_none()
-}
-
-/// Whether the node's sandboxes run a bundle it fetches for itself when it is
-/// given none: Podman's and Apple's, and a pod-hosted node's with
-/// `[runtime.kubernetes] sandbox_protocol`, whose init containers copy it in.
-fn fetches_own(cfg: &Config) -> bool {
-    crate::sandbox_images::enabled(cfg)
-        || crate::boundary::kubernetes::uses_sandbox_protocol(cfg)
-        || cfg.runtime.kind == crate::config::RuntimeKind::Apple
+    cfg.sandbox.bundle.is_none()
 }
 
 pub fn managed_dir(state_dir: &Path, version: &str, arch: &str) -> PathBuf {
@@ -706,15 +694,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_node_on_the_sandbox_images_fetches_its_bundle_unless_given_one() {
+    fn a_node_fetches_its_bundle_unless_given_one() {
         assert!(managed(&Config::default()));
         let mut kube = Config::default();
         kube.runtime.kind = crate::config::RuntimeKind::Kubernetes;
-        assert!(
-            !managed(&kube),
-            "a pod without the protocol runs harness images"
-        );
-        assert_eq!(effective(&kube), None);
+        assert!(managed(&kube));
         let mut cfg = Config::default();
         cfg.sandbox.bundle = Some("/opt/bundle".into());
         // An explicit bundle wins over fetching one.

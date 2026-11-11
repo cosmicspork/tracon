@@ -2058,16 +2058,28 @@ const TOOLCHAIN: &str =
 async fn a_reviewer_starts_in_the_image_of_the_repository_under_review() {
     state::isolate();
     let f = fixture_with(test_name!(), WITH_GH, |c| {
-        // A repository's own image, which only a pod-hosted node off the
-        // sandbox protocol still runs.
-        c.runtime.kind = tracon::config::RuntimeKind::Kubernetes;
+        // A repository's image built from its steps, as the node recorded it.
         c.repo = vec![tracon::config::Repo {
             path: "owner/reviewed-app".into(),
-            image: Some(TOOLCHAIN.into()),
+            build: vec!["apt-get install -y jq".into()],
             ..Default::default()
         }];
     })
     .await;
+    let build = f
+        .store
+        .start_repo_image(&tracon::store::RepoImageStart {
+            repo_path: "/clones/github.com/owner/reviewed-app",
+            kind: tracon::repo_image::BASE,
+            recipe_hash: "r1",
+            source_ref: "origin/main",
+            source_commit: "c1",
+            parent_image: "",
+        })
+        .unwrap();
+    f.store
+        .finish_repo_image(&build, Ok(TOOLCHAIN), "", &[])
+        .unwrap();
     on_repository(&f, "/clones/github.com/owner/reviewed-app");
     bind_review_model(&f);
     let v = f.tool("s1", "submit_review", f.submit_args()).await;
@@ -2086,7 +2098,10 @@ async fn a_reviewer_starts_in_the_image_of_the_repository_under_review() {
     );
     let environment = tracon::environment::session_environment(f.manager.cfg(), &f.store, &rsid);
     assert_eq!(environment.image, TOOLCHAIN);
-    assert_eq!(environment.image_source, "repository toolchain");
+    assert_eq!(
+        environment.image_source,
+        tracon::environment::REPOSITORY_BUILD
+    );
     // The launch looked for that image. This runtime cannot give it one, and
     // the reviewer is told its image may lack the toolchain, so it tries.
     let events = f.store.events_after(&rsid, 0, 500).unwrap();

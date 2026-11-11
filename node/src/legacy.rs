@@ -146,15 +146,10 @@ fn image_retired_by(doc: &mut toml::Table, path: &[&str]) -> Option<&'static str
         .and_then(retired_image)
 }
 
-/// Replace a retired harness's image at `path` with `current`, or with
-/// `None` take the key out: `[boundary] harness_image` is itself retired, and
-/// a value written back would be logged as ignored at every load.
-fn replace_retired_image(
-    doc: &mut toml::Table,
-    path: &[&str],
-    current: Option<&str>,
-    changed: &mut Vec<String>,
-) {
+/// Take a retired harness's image at `path` out: `harness_image` is itself
+/// retired in both tables, and a value written back would be logged as
+/// ignored at every load.
+fn remove_retired_image(doc: &mut toml::Table, path: &[&str], changed: &mut Vec<String>) {
     let Some(table) = table(doc, path) else {
         return;
     };
@@ -165,17 +160,7 @@ fn replace_retired_image(
     if !retired {
         return;
     }
-    match current {
-        Some(current) => {
-            table.insert(
-                "harness_image".into(),
-                toml::Value::String(current.to_string()),
-            );
-        }
-        None => {
-            table.remove("harness_image");
-        }
-    }
+    table.remove("harness_image");
     changed.push(format!("{}.harness_image", path.join(".")));
 }
 
@@ -215,14 +200,8 @@ pub fn migrate_config(text: &str) -> Option<ConfigMigration> {
         }
     }
 
-    let defaults = Config::default();
-    replace_retired_image(&mut doc, &["boundary"], None, &mut changed);
-    replace_retired_image(
-        &mut doc,
-        &["runtime", "kubernetes"],
-        Some(&defaults.runtime.kubernetes.harness_image),
-        &mut changed,
-    );
+    remove_retired_image(&mut doc, &["boundary"], &mut changed);
+    remove_retired_image(&mut doc, &["runtime", "kubernetes"], &mut changed);
     let text = toml::to_string_pretty(&doc).ok()?;
     Some(ConfigMigration {
         from,
@@ -311,15 +290,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `[boundary] harness_image` as a migrated file holds it, if it does: a
-    /// key the node no longer reads but for removing the images it named, so
-    /// a retired harness's own is taken out rather than replaced.
-    fn boundary_harness_image(text: &str) -> Option<String> {
-        let doc: toml::Table = toml::from_str(text).unwrap();
-        doc.get("boundary")?
+    /// `harness_image` in the table at `path` as a migrated file holds it, if
+    /// it does: a key the node no longer reads (but for `[boundary]`'s, to
+    /// remove the images it named), so a retired harness's own is taken out
+    /// rather than replaced.
+    fn harness_image_in(text: &str, path: &[&str]) -> Option<String> {
+        let doc: toml::Value = toml::from_str(text).unwrap();
+        path.iter()
+            .try_fold(&doc, |value, key| value.get(*key))?
             .get("harness_image")?
             .as_str()
             .map(str::to_string)
+    }
+
+    fn boundary_harness_image(text: &str) -> Option<String> {
+        harness_image_in(text, &["boundary"])
+    }
+
+    fn kubernetes_harness_image(text: &str) -> Option<String> {
+        harness_image_in(text, &["runtime", "kubernetes"])
     }
 
     /// What a node.toml written in full by a pre-cutover version looks like,
@@ -352,15 +341,11 @@ state_claim = "tracon-state"
         let migration = migrate_config(PRE_CUTOVER).expect("an omp file migrates");
         assert_eq!(migration.from, "omp");
         let cfg: Config = toml::from_str(&migration.text).unwrap();
-        let defaults = Config::default();
 
         assert_eq!(cfg.harness.id, "claude");
         assert_eq!(cfg.harness.version, "");
         assert_eq!(boundary_harness_image(&migration.text), None);
-        assert_eq!(
-            cfg.runtime.kubernetes.harness_image,
-            defaults.runtime.kubernetes.harness_image
-        );
+        assert_eq!(kubernetes_harness_image(&migration.text), None);
         // The migrated config resolves to an adapter: the node starts.
         assert!(crate::adapter::adapter_for(&cfg).is_ok());
 
@@ -417,8 +402,8 @@ harness_image = "registry.example/team/harness:3"
         assert_eq!(cfg.harness.experimental, ["native"]);
         assert_eq!(boundary_harness_image(&migration.text), None);
         assert_eq!(
-            cfg.runtime.kubernetes.harness_image,
-            "registry.example/team/harness:3"
+            kubernetes_harness_image(&migration.text).as_deref(),
+            Some("registry.example/team/harness:3")
         );
         assert!(crate::adapter::adapter_for(&cfg).is_ok());
         assert_eq!(
@@ -444,10 +429,7 @@ harness_image = "ghcr.io/cosmicspork/tracon-harness-opencode:0.15.0"
         assert_eq!(migration.from, "opencode");
         let cfg: Config = toml::from_str(&migration.text).unwrap();
         assert_eq!(cfg.harness.id, "claude");
-        assert_eq!(
-            cfg.runtime.kubernetes.harness_image,
-            Config::default().runtime.kubernetes.harness_image
-        );
+        assert_eq!(kubernetes_harness_image(&migration.text), None);
         assert_eq!(migration.changed, ["runtime.kubernetes.harness_image"]);
     }
 
@@ -505,7 +487,7 @@ harness_image = "registry.example/team/harness:3"
     /// version wrote onto its state volume. Nobody edits that file by hand,
     /// so the next release has to come up healthy on the migration alone.
     #[test]
-    fn a_pre_cutover_kubernetes_node_comes_up_on_the_published_claude_image() {
+    fn a_pre_cutover_kubernetes_node_comes_up_on_claude() {
         let dir = std::env::temp_dir().join(format!("tracon-legacy-k8s-{}", uuid::Uuid::now_v7()));
         let path = dir.join("state/config/tracon/node.toml");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -539,14 +521,6 @@ state_claim = "tracon-state"
             crate::adapter::image_version("claude")
         );
         assert_eq!(cfg.runtime.kind, crate::config::RuntimeKind::Kubernetes);
-        assert_eq!(
-            cfg.runtime.kubernetes.harness_image,
-            format!(
-                "ghcr.io/cosmicspork/tracon-harness-claude:{}",
-                env!("CARGO_PKG_VERSION")
-            )
-        );
-        assert_eq!(cfg.runtime.kubernetes.state_claim, "tracon-state");
         // The retired image's key is gone, so nothing names another.
         assert_eq!(cfg.retired.harness_image, "localhost/tracon-harness-claude");
         assert_eq!(
@@ -563,15 +537,13 @@ state_claim = "tracon-state"
         // next start (and every one after) loads it without migrating again.
         let written = std::fs::read_to_string(&path).unwrap();
         assert_eq!(migrate_config(&written), None);
+        assert_eq!(kubernetes_harness_image(&written), None);
         assert_eq!(
             std::fs::read_to_string(path.with_file_name("node.toml.pre-omp")).unwrap(),
             original
         );
         let again = Config::try_load_from(&path).unwrap();
-        assert_eq!(
-            again.runtime.kubernetes.harness_image,
-            cfg.runtime.kubernetes.harness_image
-        );
+        assert_eq!(again.harness.id, cfg.harness.id);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

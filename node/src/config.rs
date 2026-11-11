@@ -98,9 +98,8 @@ pub struct Sandbox {
     /// SELinux host.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bundle: Option<PathBuf>,
-    /// The stock image a sandbox runs when its repository names none: on
-    /// Podman, Apple, and Kubernetes with `sandbox_protocol`. Pinned by
-    /// digest once pulled.
+    /// The stock image a sandbox runs when its repository names none, on
+    /// every runtime. Pinned by digest once pulled.
     /// Unset, the release's own `tracon-sandbox-base` at this node's version.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_image: Option<String>,
@@ -210,9 +209,11 @@ pub fn validate_metrics(config: &Config) -> Result<(), String> {
     if let HarnessListen::Tcp(addr) = &gateway.harness_listen {
         taken.push(("gateway.harness_listen", addr.port()));
     }
-    let kube = &config.runtime.kubernetes;
-    if config.runtime.kind == RuntimeKind::Kubernetes && kube.sandbox_protocol {
-        taken.push(("runtime.kubernetes.sandbox_port", kube.sandbox_port));
+    if config.runtime.kind == RuntimeKind::Kubernetes {
+        taken.push((
+            "runtime.kubernetes.sandbox_port",
+            config.runtime.kubernetes.sandbox_port,
+        ));
     }
     match taken.iter().find(|(_, port)| *port == listen.port()) {
         Some((what, port)) => Err(format!(
@@ -1262,9 +1263,8 @@ pub struct PodmanRuntime {
 
 #[cfg(test)]
 impl Config {
-    /// A pod-hosted node off the sandbox protocol: the one runtime that
-    /// still runs repositories' own images with a harness layered on, which
-    /// the tests written against that path cover.
+    /// A pod-hosted node, whose sandboxes run on the stock base over the
+    /// sandbox protocol as every runtime's do.
     pub fn pod_hosted() -> Self {
         let mut config = Self::default();
         config.runtime.kind = RuntimeKind::Kubernetes;
@@ -1340,6 +1340,65 @@ fn refuse_retired_podman_switches(text: &str, kind: RuntimeKind) -> Result<(), S
         off.join(" = false, "),
         if off.len() > 1 { "s" } else { "" },
     ))
+}
+
+/// The `[runtime.kubernetes]` keys only harness pods read: their image, the
+/// claim they mounted, and the uid and home a repository's image was
+/// layered for (every sandbox runs as the stock base's own user now).
+/// Ignored, and worth one line in the log rather than silence.
+const RETIRED_KUBERNETES_KEYS: [&str; 4] = ["harness_image", "state_claim", "uid", "harness_home"];
+
+/// `[runtime.kubernetes] sandbox_protocol` as `text` sets it, if it does.
+fn kubernetes_sandbox_protocol(text: &str) -> Option<bool> {
+    toml::from_str::<toml::Value>(text)
+        .ok()?
+        .get("runtime")?
+        .get("kubernetes")?
+        .get("sandbox_protocol")?
+        .as_bool()
+}
+
+/// The retired `[runtime.kubernetes]` keys `text` sets on a Kubernetes node,
+/// as `runtime.kubernetes.key`. Another kind's node does not read the table.
+fn retired_kubernetes_keys(text: &str, kind: RuntimeKind) -> Vec<String> {
+    if kind != RuntimeKind::Kubernetes {
+        return Vec::new();
+    }
+    let Ok(value) = toml::from_str::<toml::Value>(text) else {
+        return Vec::new();
+    };
+    let Some(kube) = value
+        .get("runtime")
+        .and_then(|runtime| runtime.get("kubernetes"))
+    else {
+        return Vec::new();
+    };
+    RETIRED_KUBERNETES_KEYS
+        .into_iter()
+        .filter(|key| kube.get(*key).is_some())
+        .map(|key| format!("runtime.kubernetes.{key}"))
+        .collect()
+}
+
+/// Refuse a Kubernetes node whose `text` turns `sandbox_protocol` off: the
+/// harness pods it kept are gone, and running sandboxes instead would
+/// change what the operator asked for without saying so, against
+/// manifests that may not admit them.
+fn refuse_kubernetes_without_protocol(text: &str, kind: RuntimeKind) -> Result<(), String> {
+    if kind != RuntimeKind::Kubernetes || kubernetes_sandbox_protocol(text) != Some(false) {
+        return Ok(());
+    }
+    Err(
+        "[runtime.kubernetes] sandbox_protocol = false is no longer supported: Kubernetes runs \
+         every harness, check and preparation in a sandbox pod over the sandbox protocol, on \
+         the stock base with the harnesses from the bundle, and the harness pods, harness \
+         images and run Secrets that setting kept are gone. Apply the shipped manifests \
+         (deploy/kubernetes/base: the node's Role, its NetworkPolicies and the \
+         `tracon-sandbox` policy), delete the line, and run `tracon check-boundary --deep` in \
+         the node pod; a [[repo]] entry with `image =`, or a Dockerfile not on \
+         `FROM ${TRACON_SANDBOX_BASE}`, moves to `build` steps (README, \"Starting work\")"
+            .into(),
+    )
 }
 
 /// The `[boundary]` and `[harness]` keys only the gateway container and the
@@ -1525,8 +1584,7 @@ pub struct Repo {
     /// `apt-get install -y php8.5-cli`, or installing uv or rustup into
     /// `/usr/local`. Each step is one `RUN` of `sh -ec`; the image ends as the
     /// base's own user (65532) in `/work`, and `prepare` runs in it after.
-    /// The steps reach only `egress`. Only where sandboxes run on the stock
-    /// base: Podman, Apple, or Kubernetes with `sandbox_protocol`.
+    /// The steps reach only `egress`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub build: Vec<String>,
     /// This repository's required checks, in place of `[supervision] checks`.
@@ -1803,71 +1861,41 @@ fn validate_build_steps(entry: &Repo) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether this node's sandboxes run on the stock base, which is what an
-/// entry's `build` steps are layered on.
-pub fn builds_on_base(config: &Config) -> bool {
-    match config.runtime.kind {
-        RuntimeKind::Podman | RuntimeKind::Apple => true,
-        RuntimeKind::Kubernetes => config.runtime.kubernetes.sandbox_protocol,
-    }
-}
-
-/// Refuse `build` steps on a node whose sandboxes do not run the stock base:
-/// the harness image they would have to stand on is retired with them.
-pub fn validate_repo_builds(config: &Config) -> Result<(), String> {
-    if builds_on_base(config) {
-        return Ok(());
-    }
-    match config.repo.iter().find(|entry| !entry.build.is_empty()) {
-        Some(entry) => Err(format!(
-            "repo {}: build steps stand on the stock sandbox base, which this node runs only \
-             with runtime.kubernetes.sandbox_protocol = true",
-            entry.path.display()
-        )),
-        None => Ok(()),
-    }
-}
-
-/// The pod-hosted boundary: one harness Pod per session, created by the node
-/// through the API, isolated by the NetworkPolicies the deployment carries
-/// (`deploy/kubernetes/base`), sharing one RWO volume with the node.
+/// The pod-hosted boundary: one sandbox pod per harness, check and
+/// preparation, created by the node through the API and run over the sandbox
+/// protocol (`provider::kubernetes`), isolated by the NetworkPolicies the
+/// deployment carries (`deploy/kubernetes/base`). The node's state claim is
+/// its own: no sandbox mounts it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Kubernetes {
-    /// Namespace for harness pods. Empty: the pod's own.
+    /// Namespace for sandbox pods. Empty: the node pod's own.
     pub namespace: String,
-    pub harness_image: String,
-    /// The PersistentVolumeClaim both the node and every harness mount.
-    pub state_claim: String,
-    /// Where that claim is mounted, in the node and in every harness pod —
-    /// identical, because linked-worktree `.git` pointers are absolute paths.
+    /// Where the node's own state claim is mounted in its pod: where it keeps
+    /// the volumes it sends its sandboxes over the files channel, and its
+    /// builder's scratch space.
     pub state_mount: PathBuf,
-    /// The harness user's home inside its pod; the state directory and
-    /// gitconfig are mounted under it.
-    pub harness_home: String,
-    /// The uid the harness runs as. Non-root, and the same as the node so the
-    /// files each writes on the shared volume are readable by the other.
-    pub uid: i64,
-    /// The name the harness pod resolves to the node's pod IP.
+    /// The name a sandbox resolves to its own loopback, where its tunnels to
+    /// the node listen.
     pub gateway_host: String,
     /// What builds a repository's image here, `[runtime.kubernetes.builder]`.
-    /// Left out, the node builds nothing and a `[[repo]]` entry needs a
-    /// pinned `image`.
+    /// Left out, the node builds nothing, so a `[[repo]]` entry with `build`
+    /// steps or a `prepare` has no image of its own.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub builder: Option<KubeBuilder>,
-    /// How long a harness pod may take to start (scheduling, pulling its
+    /// How long a sandbox pod may take to start (scheduling, pulling its
     /// image, mounting) before the run is given up with the reason it was
     /// still waiting. Only the start is bounded here: a started command runs
     /// until it ends or its caller stops it, as it does under Podman.
     pub start_timeout_secs: u64,
-    /// Requests and limits for harness pods, `[runtime.kubernetes.resources]`.
+    /// Requests and limits for sandbox pods, `[runtime.kubernetes.resources]`.
     pub resources: KubeResources,
-    /// Secrets a harness pod pulls its image with. Empty leaves the pod
+    /// Secrets a sandbox pod pulls its image with. Empty leaves the pod
     /// without any, so the namespace's `default` service account supplies
     /// its own (a registry integration that patches that account works
     /// unchanged). Naming any replaces that account's list for these pods.
     pub image_pull_secrets: Vec<String>,
-    /// Size of the memory-backed `/dev/shm` every harness pod gets. Chromium
+    /// Size of the memory-backed `/dev/shm` every sandbox pod gets. Chromium
     /// keeps its renderers' shared memory there, and the 64 MiB a container
     /// runtime gives by default crashes a browser test. It counts against
     /// the pod's memory limit, so it must fit within both limits.
@@ -1880,21 +1908,12 @@ pub struct Kubernetes {
     /// `64:ff9b::/96`; 6to4, `2002::/16`): an IPv4 address carried inside
     /// such an IPv6 one is not decoded, so the block itself must be named.
     pub internal_cidrs: Vec<String>,
-    /// Run every harness pod as a sandbox over the sandbox protocol
-    /// (`provider::kubernetes`): `tracon-sandbox` from the harness bundle,
-    /// copied in by an init container, dials the node pod on `sandbox_port`
-    /// over TLS, and the harness's process, stdio, files and its routes to the
-    /// MCP gateway, the model gateway and the proxies all travel over that one
-    /// connection. Its workspace and state are on the pod's own emptyDirs, not
-    /// the state claim; no Secret is made for a run; the pod is placed beside
-    /// the node pod by affinity. Needs the `tracon-sandbox` NetworkPolicy
-    /// (`deploy/kubernetes/sandbox-protocol`). The bundle is the node's own
-    /// (`[sandbox] bundle`, else its release's, fetched and checked as
-    /// a Podman node does), which the node hands each pod's init
-    /// container on the same port.
-    pub sandbox_protocol: bool,
     /// The port the node listens on, on its pod address, for its sandboxes'
-    /// connections.
+    /// connections: `tracon-sandbox` from the harness bundle, copied in by an
+    /// init container that fetches it from the same port, dials it over TLS,
+    /// and the harness's process, stdio, files and its routes to the MCP
+    /// gateway, the model gateway and the proxies all travel over that one
+    /// connection. The `tracon-sandbox` NetworkPolicy allows nothing else.
     pub sandbox_port: u16,
 }
 
@@ -1902,7 +1921,7 @@ pub struct Kubernetes {
 /// default.
 pub const KUBE_SANDBOX_PORT: u16 = 7426;
 
-/// What a harness pod asks the scheduler for. Three kinds: a session (the
+/// What a sandbox pod asks the scheduler for. Three kinds: a session (the
 /// harness and whatever it runs while the operator works), a command run to
 /// completion (a check, a preparation), which is where a test suite with a
 /// bundler and a browser lands, and a probe (a version, a `command -v`, a
@@ -1919,7 +1938,7 @@ pub struct KubeResources {
     pub probe: PodResources,
 }
 
-/// One kind of harness pod's requests and limits, as Kubernetes quantities
+/// One kind of sandbox pod's requests and limits, as Kubernetes quantities
 /// (`500m`, `2Gi`). An unset key takes the default for its kind
 /// (`KubeResources::session`, `KubeResources::command`,
 /// `KubeResources::probe`), so a table that changes one value keeps the rest.
@@ -2125,51 +2144,15 @@ impl Kubernetes {
                 .parse::<crate::gateway::proxy::Cidr>()
                 .map_err(|error| format!("runtime.kubernetes.internal_cidrs: {error}"))?;
         }
-        // Both go into the layer the node builds over a repository's image
-        // (`repo_image::RunAs`), in a shell command and a passwd entry, and
-        // the pod refuses root.
-        if self.uid <= 0 {
-            return Err(format!(
-                "runtime.kubernetes.uid: {} is not a non-root uid",
-                self.uid
-            ));
-        }
-        if !safe_home(&self.harness_home) {
-            return Err(format!(
-                "runtime.kubernetes.harness_home: {:?} must be an absolute path of letters, \
-                 digits, '.', '_', '-' and '/', other than /",
-                self.harness_home
-            ));
-        }
         Ok(())
     }
-}
-
-/// An absolute directory that can go unquoted into a shell command, a
-/// Dockerfile `ENV` and a passwd entry: no spaces, quotes, colons or `..`.
-fn safe_home(home: &str) -> bool {
-    home.starts_with('/')
-        && home.len() > 1
-        && !home.ends_with('/')
-        && home
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-'))
-        && !home.split('/').any(|part| part == "." || part == "..")
-        && !home.contains("//")
 }
 
 impl Default for Kubernetes {
     fn default() -> Self {
         Self {
             namespace: String::new(),
-            harness_image: format!(
-                "ghcr.io/cosmicspork/tracon-harness-claude:{}",
-                env!("CARGO_PKG_VERSION")
-            ),
-            state_claim: "tracon-state".into(),
             state_mount: PathBuf::from("/state"),
-            harness_home: "/home/harness".into(),
-            uid: 65532,
             gateway_host: "tracon-gw".into(),
             builder: None,
             // A first pull of a repository image can be gigabytes.
@@ -2178,7 +2161,6 @@ impl Default for Kubernetes {
             image_pull_secrets: Vec::new(),
             shm_size: "1Gi".into(),
             internal_cidrs: Vec::new(),
-            sandbox_protocol: false,
             sandbox_port: KUBE_SANDBOX_PORT,
         }
     }
@@ -3173,23 +3155,6 @@ fn hostname() -> String {
 }
 
 impl Config {
-    /// The image a harness runs in on a pod-hosted node: the configured image
-    /// for the configured harness, the release's own image for the other.
-    /// Over the sandbox protocol there are no harness images: every harness
-    /// runs from the bundle on the stock base, as on Podman and Apple.
-    pub fn kubernetes_harness_image(&self, harness_id: &str) -> String {
-        if crate::boundary::kubernetes::uses_sandbox_protocol(self) {
-            return crate::sandbox_images::base_image(self);
-        }
-        if harness_id == self.harness.id {
-            return self.runtime.kubernetes.harness_image.clone();
-        }
-        format!(
-            "ghcr.io/cosmicspork/tracon-harness-{harness_id}:{}",
-            env!("CARGO_PKG_VERSION")
-        )
-    }
-
     /// Where `node.toml` lives.
     ///
     /// Guarded the way `state_dir` is, and for the same reason: the interface
@@ -3414,6 +3379,24 @@ impl Config {
                 path.display()
             );
         }
+        refuse_kubernetes_without_protocol(text, config.runtime.kind)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        if config.runtime.kind == RuntimeKind::Kubernetes
+            && kubernetes_sandbox_protocol(text) == Some(true)
+        {
+            tracing::warn!(
+                "{}: [runtime.kubernetes] sandbox_protocol is ignored; Kubernetes always runs \
+                 that way now, so the line can go",
+                path.display()
+            );
+        }
+        for key in retired_kubernetes_keys(text, config.runtime.kind) {
+            tracing::warn!(
+                "{}: {key} configured the harness pods, which were removed; it is ignored, \
+                 and the line can go",
+                path.display()
+            );
+        }
         for key in retired_boundary_keys(text) {
             tracing::warn!(
                 "{}: {key} configured the gateway container or the harness images, which \
@@ -3473,7 +3456,6 @@ impl Config {
             .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_metrics(&config).map_err(|error| format!("{}: {error}", path.display()))?;
         validate_sandbox(&config).map_err(|error| format!("{}: {error}", path.display()))?;
-        validate_repo_builds(&config).map_err(|error| format!("{}: {error}", path.display()))?;
         validate_priorities(&config.work.priority)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         upstreams::validate_upstreams(&config.upstreams)
@@ -4009,6 +3991,45 @@ mod tests {
         assert!(ignored_podman_switches(on, RuntimeKind::Apple).is_empty());
     }
 
+    /// `[runtime.kubernetes] sandbox_protocol = false` is refused on a
+    /// Kubernetes node with the way over; `true` asks for what always
+    /// happens. The keys only harness pods read still load, and are named.
+    /// Another kind's node does not read the table.
+    #[test]
+    fn kubernetes_without_the_protocol_is_refused_with_the_way_over() {
+        let load = |text: &str| Config::from_toml(text, Path::new("node.toml"));
+        let kube = "[runtime]\nkind = \"kubernetes\"\n[runtime.kubernetes]\n";
+        let error = load(&format!("{kube}sandbox_protocol = false\n")).unwrap_err();
+        assert!(error.contains("node.toml"), "{error}");
+        assert!(
+            error.contains("sandbox_protocol = false is no longer supported"),
+            "{error}"
+        );
+        assert!(error.contains("deploy/kubernetes/base"), "{error}");
+        assert!(error.contains("`build` steps"), "{error}");
+
+        let retired = format!(
+            "{kube}sandbox_protocol = true\nharness_image = \"ghcr.io/o/h:1\"\n\
+             state_claim = \"tracon-state\"\nuid = 1000\nharness_home = \"/home/agent\"\n"
+        );
+        let cfg = load(&retired).unwrap();
+        assert_eq!(cfg.runtime.kind, RuntimeKind::Kubernetes);
+        assert_eq!(kubernetes_sandbox_protocol(&retired), Some(true));
+        assert_eq!(
+            retired_kubernetes_keys(&retired, RuntimeKind::Kubernetes),
+            [
+                "runtime.kubernetes.harness_image",
+                "runtime.kubernetes.state_claim",
+                "runtime.kubernetes.uid",
+                "runtime.kubernetes.harness_home",
+            ]
+        );
+        assert!(retired_kubernetes_keys(&retired, RuntimeKind::Podman).is_empty());
+        let podman = "[runtime.kubernetes]\nsandbox_protocol = false\n";
+        assert!(refuse_kubernetes_without_protocol(podman, RuntimeKind::Podman).is_ok());
+        assert!(load(podman).is_ok());
+    }
+
     /// The keys only the gateway container and harness images read still
     /// load, are named, and are what an upgraded node finds the old gateway
     /// and images by.
@@ -4284,7 +4305,7 @@ mod tests {
     }
 
     /// Build steps stand on the stock base, never beside an image of the
-    /// entry's own, and only on a node whose sandboxes run that base.
+    /// entry's own, which every runtime's sandboxes run.
     #[test]
     fn build_steps_stand_on_the_stock_base_alone() {
         let stepped = || Repo {
@@ -4329,15 +4350,11 @@ mod tests {
         };
         Config::from_toml(&toml(""), Path::new("node.toml")).unwrap();
         Config::from_toml(&toml("[runtime]\nkind = \"apple\""), Path::new("node.toml")).unwrap();
-        let kube = Config::from_toml(
+        Config::from_toml(
             &toml("[runtime]\nkind = \"kubernetes\""),
             Path::new("node.toml"),
         )
-        .unwrap_err();
-        assert!(
-            kube.contains("runtime.kubernetes.sandbox_protocol = true"),
-            "{kube}"
-        );
+        .unwrap();
     }
 
     /// Credentials are lent only to the default branch's preparation, which
@@ -4818,7 +4835,7 @@ models = [{ id = "gpt-6" }]
         );
     }
 
-    /// Every harness pod renders explicit requests and a memory limit, so a
+    /// Every sandbox pod renders explicit requests and a memory limit, so a
     /// namespace's LimitRange never fills in a default the node did not
     /// choose; a check gets more than a session because a test suite with a
     /// browser needs it.
@@ -4931,29 +4948,6 @@ models = [{ id = "gpt-6" }]
             "[runtime.kubernetes]\nimage_pull_secrets = [\"Registry_Creds\"]\n",
             "\"Registry_Creds\" is not a Secret name",
         );
-        refused(
-            "[runtime.kubernetes]\nuid = 0\n",
-            "uid: 0 is not a non-root uid",
-        );
-        refused("[runtime.kubernetes]\nuid = -1\n", "not a non-root uid");
-        for home in [
-            "home/harness",
-            "/",
-            "/home/harness/",
-            "/home/my harness",
-            "/home/$(id)",
-            "/home/../root",
-            "/home:x",
-        ] {
-            refused(
-                &format!("[runtime.kubernetes]\nharness_home = {home:?}\n"),
-                "runtime.kubernetes.harness_home",
-            );
-        }
-        let mut k = Config::default().runtime.kubernetes;
-        k.harness_home = "/var/lib/agent_home-2.d".into();
-        k.uid = 1000;
-        k.validate().unwrap();
         // Equal is allowed: a Guaranteed pod is a limit that meets its request.
         let mut k = Config::default().runtime.kubernetes;
         k.resources.command.memory_limit = Some("2048Mi".into());

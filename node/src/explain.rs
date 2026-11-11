@@ -239,14 +239,8 @@ fn channel_bindings(store: &Store, channel: &str) -> Value {
         .unwrap_or_else(|| json!({}))
 }
 
-/// The image the boundary would launch a harness from under the configured
-/// runtime. Two fields hold it, and reporting the wrong one would describe an
-/// isolation the session is not in.
+/// The image the boundary would launch a harness from: the stock base on
+/// every runtime, which the bundle completes.
 fn execution_image(cfg: &Config) -> String {
-    match cfg.runtime.kind {
-        crate::config::RuntimeKind::Kubernetes => cfg.runtime.kubernetes.harness_image.clone(),
-        crate::config::RuntimeKind::Podman | crate::config::RuntimeKind::Apple => {
-            crate::sandbox_images::base_image(cfg)
-        }
-    }
+    crate::sandbox_images::base_image(cfg)
 }

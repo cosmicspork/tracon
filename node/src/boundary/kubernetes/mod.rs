@@ -1,24 +1,20 @@
-//! The pod-hosted boundary: the node is an unprivileged pod that creates one
-//! harness pod per session and holds its stdio; two NetworkPolicies make the
-//! node the harness's only route; the node serves the allowlist proxy itself.
-//! Everything the node needs to exist (the claim, the policies, its own
-//! labels and RBAC) is the deployment's, in `deploy/kubernetes/base`, and is
-//! verified rather than created here.
+//! The pod-hosted boundary: the node is an unprivileged pod that runs every
+//! harness, check and preparation in a sandbox pod of its own over the
+//! sandbox protocol (`provider::kubernetes`). One NetworkPolicy makes the
+//! node pod's sandbox port a sandbox's only route, and everything else it
+//! reaches (the MCP and model gateway, the allowlist proxy, the per-client
+//! egress proxy) is a tunnel over that one connection. Everything the node
+//! needs to exist (the claim, the policies, its own labels and RBAC) is the
+//! deployment's, in `deploy/kubernetes/base`, and is verified rather than
+//! created here.
 //!
-//! The node also serves the per-client egress proxy (`gateway::proxy::
-//! serve_granted`), on `[gateway] egress_port`, which a harness pod reaches at
-//! the node's pod address under `gateway_host`. A grant is issued only when
-//! both halves are known to hold: the policies let a harness pod reach that
-//! port, and the node may keep the grant's credentials in a Secret of the
-//! run's own rather than in its pod spec.
-//!
-//! Over the sandbox protocol (`sandbox_protocol`) there are no harness
-//! images: every sandbox runs the stock base, or a repository's image built
-//! on it from its `build` steps, with the harness from the bundle. The node
-//! pins the base by the manifest its registry holds for this machine's
-//! architecture when it converges (nothing is pulled here: a pod's kubelet
-//! pulls the digest), and with `[runtime.kubernetes.builder]` it builds the
-//! steps and each repository's prepared snapshot on the cluster's BuildKit.
+//! There are no harness images: every sandbox runs the stock base, or a
+//! repository's image built on it from its `build` steps, with the harness
+//! from the bundle. The node pins the base by the manifest its registry
+//! holds for this machine's architecture when it converges (nothing is
+//! pulled here: a pod's kubelet pulls the digest), and with
+//! `[runtime.kubernetes.builder]` it builds the steps and each repository's
+//! prepared snapshot on the cluster's BuildKit.
 
 pub mod build;
 pub mod checks;
@@ -31,15 +27,8 @@ use rust_embed::Embed;
 use super::{Backend, BoundaryError, BoundaryReport, EgressGrant};
 use crate::config::Config;
 use crate::gateway::proxy::{GrantSpec, Grants, Refusal};
-use crate::runner::kube::{KubeRunner, KubeSpec, PodEnv, SecretRights};
+use crate::provider::kubernetes::pod::{DigestIdentity, KubeSpec, PodEnv};
 use crate::runner::{Mount, Runner};
-
-/// Whether this node runs its harness pods as sandboxes over the sandbox
-/// protocol (`[runtime.kubernetes] sandbox_protocol`, `provider::kubernetes`).
-pub fn uses_sandbox_protocol(cfg: &Config) -> bool {
-    cfg.runtime.kind == crate::config::RuntimeKind::Kubernetes
-        && cfg.runtime.kubernetes.sandbox_protocol
-}
 
 /// The manifests a node of this kind expects around it, printed by
 /// `tracon setup` for the operator (or the Coder template) to apply.
@@ -52,19 +41,11 @@ pub struct KubeBackend {
     /// Resolved once; a node that cannot learn its own pod facts is not a pod.
     env: Result<PodEnv, String>,
     client: tokio::sync::OnceCell<Result<kube::Client, String>>,
-    /// Whether the node may keep a run's secret environment in a Secret, as
-    /// the runtime check last found. Every runner handed out shares it, so a
-    /// re-check that finds the rights granted (or withdrawn) applies to runs
-    /// that start after it.
-    secret_rights: SecretRights,
     /// `[runtime.kubernetes.builder]`, or why it is not a builder. `None`
     /// where none is configured.
     builder: Option<Result<Arc<build::BuildKitBuilder>, build::Unusable>>,
     /// Every live per-client grant, served on the egress port.
     grants: Grants,
-    /// Whether the policies let a harness pod reach the egress port, as the
-    /// network check last found. Unchecked is closed.
-    egress_port: EgressPort,
     /// What the egress proxy never dials here; an error for an
     /// `internal_cidrs` entry that is not an address block, which turns
     /// per-client egress off and fails the runtime check.
@@ -113,34 +94,6 @@ fn egress_address(pod_ip: &str, cfg: &Config) -> String {
     }
 }
 
-/// Whether a harness pod can reach the node's egress port: the harness
-/// policy's egress and the node's own ingress both allow it. Shared, like
-/// `SecretRights`, so a re-check that finds it opened (or closed) applies to
-/// the grants issued after it.
-#[derive(Clone, Debug, Default)]
-pub struct EgressPort(std::sync::Arc<parking_lot::RwLock<Option<Result<(), String>>>>);
-
-impl EgressPort {
-    /// Open, as if a check had found it so. For tests.
-    pub fn open() -> Self {
-        let port = Self::default();
-        port.set(Ok(()));
-        port
-    }
-
-    pub fn set(&self, verdict: Result<(), String>) {
-        *self.0.write() = Some(verdict);
-    }
-
-    pub fn verdict(&self) -> Option<Result<(), String>> {
-        self.0.read().clone()
-    }
-
-    pub fn is_open(&self) -> bool {
-        matches!(self.verdict(), Some(Ok(())))
-    }
-}
-
 impl KubeBackend {
     pub fn new(cfg: &Config) -> Self {
         Self::built(cfg, PodEnv::detect(cfg), tokio::sync::OnceCell::new())
@@ -175,9 +128,7 @@ impl KubeBackend {
             cfg: cfg.clone(),
             env,
             client,
-            secret_rights: SecretRights::default(),
             grants,
-            egress_port: EgressPort::default(),
             refusal,
             builder,
         }
@@ -200,21 +151,13 @@ impl KubeBackend {
         }
     }
 
-    pub fn secret_rights(&self) -> &SecretRights {
-        &self.secret_rights
-    }
-
-    /// Over the sandbox protocol: the bundle fetched or checked, and the
-    /// stock base pinned by the manifest its registry holds for this
+    /// The bundle fetched or checked, and the stock base pinned by the manifest its registry holds for this
     /// machine's architecture, which is every sandbox's, since affinity keeps
     /// them on the node pod's machine. Nothing is pulled here; a pod's
     /// kubelet pulls the pinned digest. With `[digitalocean] registry`, the
     /// release's browser bundle too, which the templates it builds hold.
     /// `Ok(true)` when a bundle was fetched or the pin moved.
     pub async fn converge_images(&self) -> Result<bool, String> {
-        if !uses_sandbox_protocol(&self.cfg) {
-            return Ok(false);
-        }
         let fetched = match crate::bundle::ensure(&self.cfg).await {
             Ok(Some(crate::bundle::Ensured::Fetched(path))) => {
                 tracing::info!(bundle = %path.display(), "fetched the harness bundle for this release");
@@ -264,49 +207,20 @@ impl KubeBackend {
         Ok(fetched || moved || browser?)
     }
 
-    pub fn egress_port(&self) -> &EgressPort {
-        &self.egress_port
-    }
-
     /// The `internal_cidrs` entry that is not an address block, if one is.
     pub fn refusal_error(&self) -> Option<&str> {
         self.refusal.as_ref().err().map(String::as_str)
     }
 
-    /// Why no grant can be issued right now, naming what to change; `None`
-    /// when one can.
+    /// Why no grant can be issued, naming what to change; `None` when one
+    /// can. A sandbox reaches the egress proxy through its tunnel, and the
+    /// grant's credentials travel over the protocol: neither a policy port
+    /// nor a Secret is involved.
     pub fn egress_unavailable(&self) -> Option<String> {
-        if let Err(error) = &self.refusal {
-            return Some(format!("per-client egress is off on this node: {error}"));
-        }
-        // A sandbox reaches the egress proxy through its tunnel, and the
-        // grant's credentials travel over the protocol: neither a policy port
-        // nor a Secret is involved.
-        if uses_sandbox_protocol(&self.cfg) {
-            return None;
-        }
-        let secrets = match self.secret_rights.verdict() {
-            Some(Ok(())) => None,
-            Some(Err(why)) => Some(why),
-            None => Some("the boundary check has not yet confirmed them".to_string()),
-        };
-        if let Some(why) = secrets {
-            return Some(format!(
-                "per-client egress is off on this node: a grant's credentials travel in a \
-                 Secret of the run's own, and this node may not manage Secrets ({why}). Grant \
-                 the node's Role create, list, patch and delete on secrets \
-                 (deploy/kubernetes/base/role.yaml) and check the boundary again"
-            ));
-        }
-        match self.egress_port.verdict() {
-            Some(Ok(())) => None,
-            Some(Err(why)) => Some(format!("per-client egress is off on this node: {why}")),
-            None => Some(
-                "per-client egress is off on this node: the boundary check has not yet \
-                 confirmed a harness pod can reach the egress port"
-                    .into(),
-            ),
-        }
+        self.refusal
+            .as_ref()
+            .err()
+            .map(|error| format!("per-client egress is off on this node: {error}"))
     }
 
     pub async fn client(&self) -> Result<kube::Client, String> {
@@ -352,12 +266,7 @@ impl KubeBackend {
             Ok(mut spec) => {
                 spec.extra_mounts = extra_mounts;
                 adjust(&mut spec);
-                if uses_sandbox_protocol(&self.cfg) {
-                    return self.protocol_runner(client, spec);
-                }
-                Arc::new(
-                    KubeRunner::new(client, spec).with_secret_rights(self.secret_rights.clone()),
-                )
+                self.protocol_runner(client, spec)
             }
             Err(e) => Arc::new(Unavailable(e)),
         }
@@ -395,31 +304,22 @@ impl KubeBackend {
     }
 
     /// A sandbox per command over the protocol, with its trees sent over the
-    /// files channel and its routes to the node as tunnels. The image identity
-    /// is a plain runner's, which answers a digest-pinned reference without
-    /// running anything.
+    /// files channel and its routes to the node as tunnels. A digest-pinned
+    /// image is its own identity, answered without running anything.
     fn protocol_runner(&self, client: kube::Client, mut spec: KubeSpec) -> Arc<dyn Runner> {
         let mounts = std::mem::take(&mut spec.extra_mounts);
         let image = spec.image.clone();
         let workdir = spec.workdir.clone();
-        let delegate = Arc::new(KubeRunner::new(client.clone(), spec.clone()));
         let provider = self.provider_for(client, spec);
         Arc::new(
             crate::runner::protocol::ProtocolRunner::new(Arc::new(provider), image)
                 .with_mounts(mounts)
                 .with_workdir(workdir)
-                .with_delegate(delegate)
+                .with_delegate(Arc::new(DigestIdentity))
                 .with_files(self.files_store())
                 .with_tunnels(crate::runner::tunnels::kube_tunnels(&self.cfg))
                 .with_bundled_harness(true),
         )
-    }
-
-    pub async fn runner_for(&self, extra_mounts: Vec<Mount>) -> Result<KubeRunner, String> {
-        let mut spec = self.spec()?;
-        spec.extra_mounts = extra_mounts;
-        Ok(KubeRunner::new(self.client().await?, spec)
-            .with_secret_rights(self.secret_rights.clone()))
     }
 
     /// Copy a volume on the claim to a node-owned path through a staging
@@ -534,10 +434,10 @@ impl Backend for KubeBackend {
         self.converge_images().await.map_err(BoundaryError::Other)
     }
 
-    /// Only over the sandbox protocol, where there is a bundle to fetch and a
-    /// base to pin; the cluster's manifests stay the operator's either way.
+    /// A bundle to fetch and a base to pin; the cluster's manifests stay the
+    /// operator's.
     fn converges(&self) -> bool {
-        uses_sandbox_protocol(&self.cfg)
+        true
     }
 
     /// The release, the base and the bundle; and, while the base is not
@@ -545,24 +445,22 @@ impl Backend for KubeBackend {
     /// so the node's upkeep tries again each time it looks rather than
     /// staying unpinned until a restart.
     fn definitions(&self, cfg: &Config) -> Option<String> {
-        uses_sandbox_protocol(cfg).then(|| {
-            let unpinned = match crate::sandbox_images::active_base() {
-                Some(_) => String::new(),
-                None => format!(
-                    "\u{1f}unpinned {}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or_default()
-                ),
-            };
-            format!(
-                "{}\u{1f}{}\u{1f}{:?}{unpinned}",
-                env!("CARGO_PKG_VERSION"),
-                cfg.sandbox.base_image_ref(),
-                cfg.sandbox.bundle
-            )
-        })
+        let unpinned = match crate::sandbox_images::active_base() {
+            Some(_) => String::new(),
+            None => format!(
+                "\u{1f}unpinned {}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or_default()
+            ),
+        };
+        Some(format!(
+            "{}\u{1f}{}\u{1f}{:?}{unpinned}",
+            env!("CARGO_PKG_VERSION"),
+            cfg.sandbox.base_image_ref(),
+            cfg.sandbox.bundle
+        ))
     }
 
     fn image_builder(&self) -> Option<&dyn super::ImageBuilder> {
@@ -573,13 +471,9 @@ impl Backend for KubeBackend {
         }
     }
 
-    /// Over the sandbox protocol, with a builder to push each snapshot: the
-    /// node's own sandboxes, whose snapshots are built from what their
-    /// preparation left.
+    /// With a builder to push each snapshot: the node's own sandboxes, whose
+    /// snapshots are built from what their preparation left.
     fn preparer(&self) -> Option<crate::sandbox_images::Preparer> {
-        if !uses_sandbox_protocol(&self.cfg) {
-            return None;
-        }
         let Some(Ok(builder)) = &self.builder else {
             return None;
         };
@@ -600,10 +494,6 @@ impl Backend for KubeBackend {
         })
     }
 
-    fn harness_image(&self, cfg: &Config, harness_id: &str) -> String {
-        cfg.kubernetes_harness_image(harness_id)
-    }
-
     fn sandbox_files_store(&self) -> Option<crate::runner::sandbox_files::FilesStore> {
         Some(self.files_store())
     }
@@ -614,21 +504,6 @@ impl Backend for KubeBackend {
             _ => None,
         }
     }
-
-    /// Pods pull on use, so a cluster names each image and says nothing of it.
-    /// Over the sandbox protocol that is one image for every harness: the
-    /// base, which the bundle completes.
-    async fn harness_images(&self, cfg: &Config) -> Vec<crate::boundary::HarnessImage> {
-        crate::adapter::KNOWN
-            .iter()
-            .map(|id| crate::boundary::HarnessImage {
-                harness_id: id.to_string(),
-                image: cfg.kubernetes_harness_image(id),
-                state: "unknown",
-            })
-            .collect()
-    }
-
     fn runner(&self, extra_mounts: Vec<Mount>) -> Arc<dyn Runner> {
         Backend::runner_for(self, &self.cfg.harness.id, extra_mounts)
     }
@@ -637,11 +512,8 @@ impl Backend for KubeBackend {
         self.runner_with(harness_id, extra_mounts, |_| {})
     }
 
-    /// As Podman's: the harness's spec with the session image in place of
-    /// the harness image. The session image's own init comes in: `repo_image`
-    /// copies it into every image it layers for a pod. Only the image
-    /// changes; a check or a preparation naming another image does not get
-    /// it.
+    /// The harness's spec with the session's image (its repository's, or
+    /// its prepared snapshot) in place of the base.
     fn runner_in(
         &self,
         harness_id: &str,
@@ -649,19 +521,8 @@ impl Backend for KubeBackend {
         extra_mounts: Vec<Mount>,
     ) -> Arc<dyn Runner> {
         self.runner_with(harness_id, extra_mounts, |spec| {
-            if spec.image != image {
-                spec.image = image.to_string();
-                spec.init = Some(crate::runner::kube::SESSION_INIT.to_string());
-            }
+            spec.image = image.to_string();
         })
-    }
-
-    /// A session runs in its repository's image wherever that image can be
-    /// built and layered, which takes `[runtime.kubernetes.builder]`. One
-    /// that is configured but unusable still says so through the session's
-    /// note, rather than as "this runtime cannot".
-    fn runs_sessions_in_repository_images(&self) -> bool {
-        self.builder.is_some()
     }
 
     async fn import_volume(
@@ -726,25 +587,23 @@ impl Backend for KubeBackend {
     }
 
     fn harness_home(&self) -> String {
-        self.cfg.runtime.kubernetes.harness_home.clone()
+        crate::sandbox_images::HOME.into()
     }
 
     fn proxy_port(&self) -> Option<u16> {
         Some(self.cfg.gateway.proxy_port)
     }
 
-    /// Always served, so a release whose policies open the port later needs
-    /// no restart to use it: a grant is what opens anything, and none is
-    /// issued until the checks say a harness pod can reach the port.
+    /// A sandbox reaches it through its tunnel; a grant is what opens
+    /// anything.
     fn egress_grants(&self) -> Option<&Grants> {
         Some(&self.grants)
     }
 
-    /// As Podman's, with the node's own pod address as the proxy: a harness
-    /// pod reaches it directly under `gateway_host`, with no gateway
-    /// container between. The grant's URL carries its password, so it goes
-    /// in the run's `secret_env` and from there in a Secret of the run's own
-    /// (`runner::kube::secret`); a node that may not do that issues none.
+    /// As Podman's: a sandbox reaches the proxy under `gateway_host`, its
+    /// own loopback, through its tunnel. The grant's URL carries its
+    /// password, so it goes in the run's `secret_env`, which travels with
+    /// the spawn over the protocol.
     fn egress_grant(&self, spec: GrantSpec) -> Result<EgressGrant, BoundaryError> {
         if let Some(why) = self.egress_unavailable() {
             return Err(BoundaryError::Other(why));
@@ -775,38 +634,23 @@ impl Backend for KubeBackend {
             .unwrap_or_else(|_| Refusal::cluster(&[]).expect("the private blocks parse"))
     }
 
-    fn secret_env_refusal(&self) -> Option<String> {
-        // Over the protocol, secret environment goes with the spawn, never
-        // into a pod spec or a Secret.
-        if uses_sandbox_protocol(&self.cfg) {
-            return None;
-        }
-        let why = match self.secret_rights.verdict() {
-            Some(Ok(())) => return None,
-            Some(Err(why)) => why,
-            None => "the boundary check has not yet confirmed them".into(),
-        };
-        Some(format!(
-            "refusing to start a session on Kubernetes: its gateway token and egress grant \
-             travel in a Secret of its own, and this node may not manage Secrets ({why}). \
-             Grant the node's Role create, list, patch and delete on secrets \
-             (deploy/kubernetes/base/role.yaml) and check the boundary again; they are never \
-             put in the pod spec instead"
-        ))
-    }
-
-    /// Remove the named harnesses, and with them any run Secret a node that
-    /// died left behind (`KubeRunner::sweep_run_secrets`).
+    /// Remove the named sandboxes a previous node process left.
     async fn reconcile(&self, names: &[String]) {
-        let Ok(runner) = self.runner_for(Vec::new()).await else {
-            return;
+        use crate::provider::SandboxProvider as _;
+        let provider = match self.sandbox_provider().await {
+            Ok(provider) => provider,
+            Err(error) => {
+                tracing::warn!(%error, "could not remove leftover sandboxes");
+                return;
+            }
         };
         for name in names {
-            let _ = runner.kill(name).await;
-        }
-        let swept = runner.sweep_run_secrets().await;
-        if swept > 0 {
-            tracing::info!(swept, "removed run secrets left by an earlier node");
+            if let Err(error) = provider
+                .destroy(&crate::provider::Handle(name.clone()))
+                .await
+            {
+                tracing::warn!(%name, %error, "could not remove a leftover sandbox");
+            }
         }
     }
 
@@ -824,16 +668,13 @@ impl Backend for KubeBackend {
 
     /// A snapshot carries the cache its preparation filled in its image.
     async fn seeds_session_cache(&self, base: &str, from_snapshot: bool) -> bool {
-        match uses_sandbox_protocol(&self.cfg) {
-            true => !from_snapshot && self.files_store().holds(base),
-            false => true,
-        }
+        !from_snapshot && self.files_store().holds(base)
     }
 
-    /// Over the sandbox protocol every tree is sent onto the pod's own
-    /// storage, and from a snapshot onto its image's own `/work`.
+    /// Every tree is sent onto the pod's own storage, and from a snapshot
+    /// onto its image's own `/work`.
     fn workspace_over_image(&self) -> bool {
-        uses_sandbox_protocol(&self.cfg)
+        true
     }
 }
 
@@ -892,28 +733,15 @@ mod tests {
         KubeBackend::new(&cfg)
     }
 
-    /// Over the sandbox protocol the node has a bundle to fetch and a base to
-    /// pin, so it converges; every harness runs on the base; a workspace goes
-    /// over a snapshot's own `/work`. Without a builder nothing is
-    /// snapshotted. Off, none of that changes.
+    /// The node has a bundle to fetch and a base to pin, so it converges;
+    /// every harness runs on the base; a workspace goes over a snapshot's own
+    /// `/work`. Without a builder nothing is snapshotted.
     #[tokio::test]
-    async fn over_the_protocol_every_harness_runs_on_the_base() {
+    async fn every_harness_runs_on_the_base() {
         let tmp = tempfile::tempdir().unwrap();
         let mut cfg = Config::default();
         cfg.runtime.kind = crate::config::RuntimeKind::Kubernetes;
         cfg.runtime.kubernetes.state_mount = tmp.path().to_path_buf();
-        let plain = KubeBackend::new(&cfg);
-        assert!(!plain.converges());
-        assert!(plain.definitions(&cfg).is_none());
-        assert!(!plain.workspace_over_image());
-        assert!(!crate::sandbox_images::bundled(&cfg));
-        assert_eq!(
-            Backend::harness_image(&plain, &cfg, "claude"),
-            cfg.runtime.kubernetes.harness_image
-        );
-        assert_eq!(plain.converge_images().await, Ok(false));
-
-        cfg.runtime.kubernetes.sandbox_protocol = true;
         let protocol = KubeBackend::new(&cfg);
         assert!(protocol.converges());
         assert!(protocol
@@ -966,7 +794,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut cfg = Config::default();
         cfg.runtime.kind = crate::config::RuntimeKind::Kubernetes;
-        cfg.runtime.kubernetes.sandbox_protocol = true;
         cfg.runtime.kubernetes.state_mount = tmp.path().to_path_buf();
         cfg.runtime.kubernetes.builder = Some(crate::config::KubeBuilder {
             registry: "registry.digitalocean.com/acme".into(),
@@ -1009,7 +836,7 @@ mod tests {
     /// says so. A table that cannot be a builder, and a builder whose daemon
     /// does not answer, are warnings in the check, and a build attempted
     /// anyway fails with the check's own reason. Builds stage on the state
-    /// volume. Layered images copy the harness from the release's images.
+    /// volume.
     #[cfg(unix)]
     #[tokio::test]
     async fn the_builder_is_handed_out_only_when_configured() {
@@ -1020,14 +847,6 @@ mod tests {
             .builder_status()
             .await
             .contains("builder: not configured"));
-        let cfg = Config::default();
-        assert_eq!(
-            Backend::harness_image(&unconfigured, &cfg, "claude"),
-            format!(
-                "ghcr.io/cosmicspork/tracon-harness-claude:{}",
-                env!("CARGO_PKG_VERSION")
-            )
-        );
 
         let mut cfg = Config::default();
         cfg.runtime.kind = crate::config::RuntimeKind::Kubernetes;
@@ -1082,11 +901,6 @@ mod tests {
             configured.image_builder().unwrap().scratch_dir(),
             Some(tmp.path().join("state/tmp"))
         );
-        // A session runs in its repository's image once a builder can make
-        // one, and in its harness's own without one.
-        assert!(Backend::runs_sessions_in_repository_images(&configured));
-        assert!(Backend::runs_sessions_in_repository_images(&invalid));
-        assert!(!Backend::runs_sessions_in_repository_images(&unconfigured));
         let said = configured.builder_status().await;
         assert!(
             said.contains("tcp://buildkitd.tracon-build.svc:1234 refused")

@@ -1,10 +1,9 @@
-# The boundary of a sandbox pod (`[runtime.kubernetes] sandbox_protocol`):
-# it accepts nothing, and may reach only the node's pod, on the sandbox port,
+# The boundary of a sandbox pod: it accepts nothing, and may reach only the node's pod, on the sandbox port,
 # where it presents its run's one-time token over TLS pinned to the node. No
 # DNS, no API server, no internet, and none of the node pod's other ports:
 # the MCP and model gateway and both proxies are tunnels over that one
 # connection. The node verifies this policy's shape before it runs a
-# sandbox. Selects nothing until the node runs sandboxes.
+# sandbox.
 #
 # Per node: `<prefix>-sandbox` selects that node's sandboxes and lets them
 # reach that node's pod alone, both by `tracon.dev/node: <prefix>`. A second

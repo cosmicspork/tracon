@@ -234,18 +234,13 @@ pub const KEYS: &[KeySpec] = &[
     restart("runtime.apple.memory"),
     restart("runtime.apple.build_timeout_secs"),
     restart("runtime.kubernetes.namespace"),
-    restart("runtime.kubernetes.harness_image").host_only(),
-    restart("runtime.kubernetes.state_claim"),
     restart("runtime.kubernetes.state_mount")
         .path(PathKind::Mount)
         .host_only(),
-    restart("runtime.kubernetes.harness_home"),
-    restart("runtime.kubernetes.uid"),
     restart("runtime.kubernetes.gateway_host"),
     restart("runtime.kubernetes.start_timeout_secs"),
     restart("runtime.kubernetes.image_pull_secrets"),
     restart("runtime.kubernetes.internal_cidrs"),
-    restart("runtime.kubernetes.sandbox_protocol"),
     restart("runtime.kubernetes.sandbox_port"),
     // [runtime.kubernetes.builder]
     restart("runtime.kubernetes.builder.addr"),
@@ -1028,7 +1023,6 @@ mod tests {
                 "digitalocean.api_url",
                 "digitalocean.registry",
                 "gateway.harness_listen",
-                "runtime.kubernetes.harness_image",
                 "runtime.kubernetes.state_mount",
                 "sandbox.base_image",
                 "sandbox.bundle",

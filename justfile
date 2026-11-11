@@ -36,16 +36,6 @@ check:
     if cargo nextest --version >/dev/null 2>&1; then cargo nextest run --no-fail-fast && cargo test --doc; else cargo test; fi
     cd spa && bun run check && bun test
 
-# The Claude Code layer a pod-hosted node puts on a repository's image, built
-# and probed for real with Podman, which `check` skips; `bundle` is a harness
-# bundle's `<version>/<arch>` with `bin/tracon-sandbox` from this tree. It uses
-# images and names of its own, never the node's, though it shares its Podman
-# store. The other suites that run real containers say how to run them at the
-# top of each `node/tests/*.rs` that reads `TRACON_PODMAN_TESTS`.
-check-podman bundle:
-    podman build -t localhost/tracon-harness-claude-test containers/harness-claude
-    TRACON_PODMAN_TESTS=1 TRACON_CLAUDE_IMAGE=localhost/tracon-harness-claude-test TRACON_SANDBOX_BUNDLE={{bundle}} cargo test -p tracon --test claude_layer
-
 fmt:
     cargo fmt --all
 
