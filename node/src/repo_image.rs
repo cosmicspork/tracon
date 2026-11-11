@@ -843,8 +843,11 @@ fn first_from(dockerfile: &str) -> Option<String> {
     None
 }
 
-/// The image one session's harness runs in.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// The image one session's harness runs in. Kept with a sandbox the node
+/// leaves running (`runner::reattach`), so the session carried on in it says
+/// what it runs in rather than what would be chosen now.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct SessionImage {
     /// `None` is the harness's own image.
     pub image: Option<String>,

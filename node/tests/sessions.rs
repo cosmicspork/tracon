@@ -6799,9 +6799,10 @@ async fn a_suspended_session_is_asked_again_rather_than_continued() {
 }
 
 /// At start, a session the node stopped under whose sandbox it left running
-/// is carried on: the same row reopened on its own conversation, and told to
-/// carry on when it was in a turn. A kept sandbox no session stopped with
-/// the node ran in is removed, and its record forgotten.
+/// is carried on: the same row reopened on its own conversation, in the
+/// image its record kept rather than one chosen again, and told to carry on
+/// when it was in a turn. A kept sandbox no session stopped with the node ran
+/// in is removed, and its record forgotten.
 #[tokio::test]
 async fn at_start_a_session_left_in_its_sandbox_is_carried_on_and_any_other_removed() {
     use tracon::runner::reattach::{self, Record};
@@ -6815,16 +6816,30 @@ async fn at_start_a_session_left_in_its_sandbox_is_carried_on_and_any_other_remo
     .await;
     assert_eq!(stopped.end_reason.as_deref(), Some("node_restart"));
     let container = stopped.container_name.clone().unwrap();
-    let kept = |name: &str, in_turn: bool| Record {
-        name: name.into(),
-        run: format!("{name}:run"),
-        handle: name.into(),
-        digest: "ab".repeat(32),
-        harness: Some(1),
-        in_turn,
+    let first = events_of(&o.store, &id, "session_started");
+    assert_eq!(first.len(), 1, "{first:?}");
+    let snapshot = tracon::repo_image::SessionImage {
+        image: Some("localhost/tracon-snapshot-carry@sha256:5bd1b3b7".into()),
+        toolchain_image: Some("localhost/tracon-repo-carry@sha256:0486154a".into()),
+        note: None,
     };
-    reattach::keep(&kept(&container, true)).unwrap();
-    reattach::keep(&kept("tracon-h-nobody", false)).unwrap();
+    assert_ne!(
+        first[0]["image"].as_str(),
+        snapshot.image.as_deref(),
+        "the image a start would choose now is another"
+    );
+    let kept =
+        |name: &str, in_turn: bool, image: Option<tracon::repo_image::SessionImage>| Record {
+            name: name.into(),
+            run: format!("{name}:run"),
+            handle: name.into(),
+            digest: "ab".repeat(32),
+            harness: Some(1),
+            in_turn,
+            image,
+        };
+    reattach::keep(&kept(&container, true, Some(snapshot.clone()))).unwrap();
+    reattach::keep(&kept("tracon-h-nobody", false, None)).unwrap();
 
     o.manager.carry_on_after_restart().await;
 
@@ -6838,6 +6853,14 @@ async fn at_start_a_session_left_in_its_sandbox_is_carried_on_and_any_other_remo
     })
     .await;
     assert_eq!(carried.continued_from, None, "the same session");
+    let started = events_of(&o.store, &id, "session_started");
+    assert_eq!(started.len(), 2, "{started:?}");
+    assert_eq!(started[1]["image"].as_str(), snapshot.image.as_deref());
+    assert_eq!(started[1]["image_source"], snapshot.source(&o.cfg));
+    assert_eq!(
+        started[1]["toolchain_image"].as_str(),
+        snapshot.toolchain_image.as_deref()
+    );
     assert_eq!(
         adapter
             .resumed

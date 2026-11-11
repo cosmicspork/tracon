@@ -2907,7 +2907,19 @@ impl Manager {
         let placed = self
             .place(id, &spec.channel, origin.as_deref(), started)
             .await?;
+        // Carried on in the sandbox the node's previous process left running
+        // (`runner::reattach`): the session runs in what that sandbox runs,
+        // as its start chose it then. Chosen again it could be another image
+        // (a snapshot not found before the base is pinned), which the session
+        // would report and its probes would run in.
+        let kept = match placed.is_elsewhere() {
+            false => crate::runner::reattach::kept_image(&crate::config::resource_name(&format!(
+                "h-{slug}"
+            ))),
+            true => None,
+        };
         let image = match origin.clone() {
+            _ if kept.is_some() => kept.unwrap_or_default(),
             // The repository's image is this node's runtime's; elsewhere the
             // session runs in the provider's own.
             Some(_) if placed.is_elsewhere() => crate::repo_image::SessionImage {
@@ -3324,13 +3336,17 @@ impl Manager {
                     Vec::new(),
                 )
             }
-            placing::Placed::Local => session_runner(
-                self.backend.as_ref(),
-                adapter.id(),
-                image.image.as_deref(),
-                session_cache,
-                mounts,
-            ),
+            placing::Placed::Local => {
+                // Kept with the sandbox if the node stops while it runs.
+                crate::runner::reattach::note_image(&container, &image);
+                session_runner(
+                    self.backend.as_ref(),
+                    adapter.id(),
+                    image.image.as_deref(),
+                    session_cache,
+                    mounts,
+                )
+            }
         };
 
         // Record the container name before it exists: it is deterministic, and a
@@ -3529,9 +3545,12 @@ impl Manager {
         let tokens = self.tokens.clone();
         let waits = self.waits();
         let sid = id.to_string();
+        let noted = container.clone();
         let manager = self.clone();
         tokio::spawn(async move {
             sup.run(events, cmd_rx).await;
+            // Any record of its sandbox was written as the node stopped.
+            crate::runner::reattach::unnote_image(&noted);
             live.lock().await.remove(&sid);
             // A close sent while it was suspending was never read.
             manager.end_if_item_closed(&sid);
