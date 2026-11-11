@@ -499,6 +499,7 @@ impl SandboxServer {
             arch: String::new(),
             pid: 0,
             init: false,
+            uid: None,
         };
         let inner = self.register(run, info, true);
         inner.await_return(0);

@@ -3285,7 +3285,8 @@ impl Manager {
             .map_err(anyhow::Error::msg)?;
         let container = crate::config::resource_name(&format!("h-{slug}"));
         let mut mounts = scratch.mounts;
-        if crate::boundary::podman::uses_sandbox_files(&self.cfg)
+        if placed.is_elsewhere()
+            || crate::boundary::podman::uses_sandbox_files(&self.cfg)
             || crate::boundary::kubernetes::uses_sandbox_protocol(&self.cfg)
             || self.cfg.runtime.kind == crate::config::RuntimeKind::Apple
         {

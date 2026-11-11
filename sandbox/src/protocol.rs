@@ -55,6 +55,13 @@ pub struct Hello {
     /// run ends with its first connection, as before.
     #[serde(default)]
     pub resumable: bool,
+    /// The effective uid it runs as, and so everything it starts. An older
+    /// binary leaves it out. A claim like the rest: a node may refuse a
+    /// sandbox on it (one that says, or does not say, it is not the user
+    /// asked for), which a sandbox gains nothing by provoking, but never
+    /// trusts it for more.
+    #[serde(default)]
+    pub uid: Option<u32>,
 }
 
 impl std::fmt::Display for Hello {
@@ -77,6 +84,8 @@ pub struct SandboxInfo {
     pub arch: String,
     pub pid: u32,
     pub init: bool,
+    #[serde(default)]
+    pub uid: Option<u32>,
 }
 
 impl From<&Hello> for SandboxInfo {
@@ -86,6 +95,7 @@ impl From<&Hello> for SandboxInfo {
             arch: hello.arch.clone(),
             pid: hello.pid,
             init: hello.init,
+            uid: hello.uid,
         }
     }
 }

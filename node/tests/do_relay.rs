@@ -239,6 +239,9 @@ async fn a_digitalocean_sandbox_reaches_the_node_over_the_hubs_url() {
     )
     .unwrap();
     let provider = runtime.provider().clone();
+    // The stand-in's supervisor is this test's own loop, as its user.
+    let me = tracon_sandbox::inside::user::current().uid;
+    provider.expect_uid(Some(me));
     assert_eq!(provider.capabilities().route, Route::Unverified);
     // This hub serves the relay's WebSocket, so nothing is held against it.
     runtime.clone().check_hub(hub_url.clone()).await;
@@ -380,6 +383,41 @@ async fn a_digitalocean_sandbox_reaches_the_node_over_the_hubs_url() {
     assert!(
         why.contains(tracon::provider::digitalocean::HUB_WITH_CONNECT),
         "{why}"
+    );
+    // Settings shows the hub's URL as the way in, the route as unverified,
+    // and why no session goes there now.
+    let report = serde_json::to_value(runtime.report(&cfg).await).unwrap();
+    assert_eq!(report["verified"], false);
+    let route = report["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["capability"] == "route")
+        .unwrap()
+        .clone();
+    assert_eq!(route["value"], "unverified");
+    assert!(
+        route["detail"].as_str().unwrap().contains("localhost"),
+        "{route}"
+    );
+    let elsewhere = &report["elsewhere"];
+    assert_eq!(elsewhere["reach"], "hub url");
+    assert_eq!(
+        elsewhere["dial"],
+        format!(
+            "ws://localhost:{}{}",
+            hub.port(),
+            proto::relay::CONNECT_PATH
+        )
+    );
+    assert_eq!(elsewhere["egress"], serde_json::json!(["localhost"]));
+    assert_eq!(elsewhere["healthy"], false);
+    assert!(
+        elsewhere["why"]
+            .as_str()
+            .unwrap()
+            .contains(tracon::provider::digitalocean::HUB_WITH_CONNECT),
+        "{elsewhere}"
     );
 
     let ended = std::mem::take(&mut *threads.lock().unwrap());

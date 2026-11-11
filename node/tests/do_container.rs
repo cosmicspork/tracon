@@ -1,11 +1,14 @@
 //! The DigitalOcean template's image as the node builds it
 //! (`provider::digitalocean::images`), run in a real container standing in
 //! for a DigitalOcean sandbox: the container starts the template's
-//! `tracon-sandbox` service as the runtime's init would, the stand-in API's
-//! `exec` runs the node's bootstrap delivery in it with `podman exec`, and
-//! the supervisor dials the node's TCP listener with TLS and the run's
-//! token. A command then runs in it over the protocol, reaching a fake model
-//! through the gateway tunnel by the gateway's name.
+//! `tracon-sandbox` service as root, as the runtime's init would, the
+//! stand-in API's `exec` runs the node's bootstrap delivery in it with
+//! `podman exec` (as root, as the runtime's exec does), and the supervisor
+//! dials the node's TCP listener with TLS and the run's token, having become
+//! the sandbox's user. A command then runs in it over the protocol as that
+//! user, reaching a fake model through the gateway tunnel by the gateway's
+//! name, and a service baked into the template runs beside it under the
+//! supervisor, as that user too.
 //!
 //! Opt-in: `TRACON_PODMAN_TESTS=1 TRACON_SANDBOX_BUNDLE=<dir holding
 //! bin/tracon-sandbox>`, optionally `TRACON_DO_TEST_BASE` (default
@@ -82,8 +85,31 @@ async fn the_template_image_runs_a_session_as_a_digitalocean_sandbox_would() {
     support::state::isolate();
     let _ = podman(&["rm", "-f", CONTAINER]);
 
-    // The node's own build of the template source.
-    images::build(&base, &bundle, TAG).await.unwrap();
+    // The node's own build of the template source, with one service bundle:
+    // a TCP listener in Perl, which even a bare Ubuntu has.
+    let services_dir = tempfile::tempdir().unwrap();
+    let echo = services_dir.path().join("echo");
+    std::fs::create_dir_all(&echo).unwrap();
+    std::fs::write(
+        echo.join("run"),
+        "#!/bin/sh\nid -u > /tmp/echo-uid\nexec perl -MIO::Socket::INET -e '$s = IO::Socket::INET->new(LocalAddr => \"127.0.0.1\", LocalPort => $ENV{ECHO_PORT}, Listen => 5, ReuseAddr => 1) or die $!; while ($c = $s->accept) { print $c \"ok\\n\"; close $c }'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        echo.join("run"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    images::build(
+        &base,
+        &images::Contents {
+            bundle: &bundle,
+            services: &[(echo, "/opt/tracon-services/echo".into())],
+        },
+        TAG,
+    )
+    .await
+    .unwrap();
     let inspect = podman(&["image", "inspect", TAG, "--format", "{{.Digest}}"]);
     let digest = String::from_utf8_lossy(&inspect.stdout).trim().to_string();
     let image = format!("localhost/spike-p8-do-sandbox@{digest}");
@@ -176,16 +202,19 @@ async fn the_template_image_runs_a_session_as_a_digitalocean_sandbox_would() {
         store.clone(),
     );
     let port = cfg.gateway.forward_port;
+    let echo_port = free_port();
+    // The harness waits for a line, so the service can start beside it.
     let script = format!(
-        "cat README; grep -c '^127.0.0.1 tracon-gw$' /etc/hosts; \
-         test -e /run/tracon/token && echo token-kept || echo token-gone; \
-         test -e /run/tracon/bootstrap && echo bootstrap-kept || echo bootstrap-gone; \
+        "read go; cat README; grep -c '^127.0.0.1 tracon-gw$' /etc/hosts; \
+         echo \"$(id -u):$(id -g) $HOME $PWD $(stat -c %u /work)\"; \
+         test -r /run/tracon && echo bootstrap-readable || echo bootstrap-closed; \
+         cat /tmp/echo-uid; exec 4<>/dev/tcp/127.0.0.1/{echo_port}; head -n 1 <&4; \
          exec 3<>/dev/tcp/tracon-gw/{port}; \
          printf 'POST /v1/messages HTTP/1.0\\r\\nContent-Length: 5\\r\\n\\r\\nhello' >&3; \
          tail -n 1 <&3; echo; echo written > out.txt"
     );
-    let out = runner
-        .run_capture(RunnerCommand {
+    let session = runner
+        .spawn(RunnerCommand {
             argv: vec!["bash".into(), "-c".into(), script],
             name: "spike-p8-h-1".into(),
             workdir: Some("/work".into()),
@@ -193,19 +222,50 @@ async fn the_template_image_runs_a_session_as_a_digitalocean_sandbox_would() {
         })
         .await
         .unwrap();
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(
-        out.status.success(),
-        "{stdout} {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let echo = tracon::runner::Sidecar {
+        name: tracon::runner::sidecar_name("spike-p8-h-1", "echo"),
+        session_container: "spike-p8-h-1".into(),
+        image: String::new(),
+        command: Vec::new(),
+        port: echo_port,
+        ready: None,
+        in_sandbox: Some(tracon::runner::InSandbox {
+            service: "echo".into(),
+            argv: vec!["/opt/tracon-services/echo/run".into()],
+            env: [("ECHO_PORT".to_string(), echo_port.to_string())].into(),
+            restart: tracon::config::ServiceRestart::Never,
+            ready_within: Duration::from_secs(20),
+        }),
+    };
+    runner.start_sidecar(&echo).await.unwrap();
+    let mut ready = false;
+    for _ in 0..200 {
+        if runner.probe_sidecar(&echo).await.unwrap() {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(ready, "the baked service never answered");
+    let mut stdin = session.stdin;
+    tokio::io::AsyncWriteExt::write_all(&mut stdin, b"go\n")
+        .await
+        .unwrap();
+    drop(stdin);
+    let mut stdout = String::new();
+    tokio::io::AsyncReadExt::read_to_string(&mut { session.stdout }, &mut stdout)
+        .await
+        .unwrap();
+    assert_eq!(session.done.await.unwrap(), 0, "{stdout}");
     assert_eq!(
         stdout.lines().collect::<Vec<_>>(),
         [
             "from the node",
             "1",
-            "token-gone",
-            "bootstrap-gone",
+            "65532:65532 /home/harness /work 65532",
+            "bootstrap-closed",
+            "65532",
+            "ok",
             "pong: hello"
         ],
         "{stdout}"

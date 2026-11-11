@@ -25,6 +25,10 @@ use crate::provider::{
 };
 use crate::telemetry::{run_kind, telemetry};
 
+/// Why a catalogue service (by name) cannot run in the sandbox `handle`
+/// (`None`: not known to this process), if it cannot.
+pub type ServiceRefusal = Arc<dyn Fn(Option<&Handle>, &str) -> Option<String> + Send + Sync>;
+
 /// How long a sandbox has to start and connect.
 pub const CONNECT_WITHIN: Duration = Duration::from_secs(60);
 
@@ -247,10 +251,13 @@ pub struct ProtocolRunner {
     /// How long a run's token may wait to be redeemed; `None` for as long
     /// as the run lasts.
     token_window: Option<Duration>,
-    /// Every process this runner starts gets this environment, under what
-    /// each command sets itself: for a provider that does not set it on the
-    /// sandbox, whose supervisor's own environment is the provider's.
+    /// Every process and service this runner starts gets this environment,
+    /// under what each sets itself: for a provider that does not set it on
+    /// the sandbox, whose supervisor's own environment is the provider's.
     env: Vec<(String, String)>,
+    /// Why a catalogue service cannot run in one of this runner's
+    /// sandboxes, said before anything reaches it.
+    service_refusal: Option<ServiceRefusal>,
 }
 
 impl ProtocolRunner {
@@ -270,14 +277,58 @@ impl ProtocolRunner {
             requirements: None,
             token_window: None,
             env: Vec::new(),
+            service_refusal: None,
         }
     }
 
-    /// Give every process this runner starts `env`, under what each command
-    /// sets itself.
+    /// Give every process and service this runner starts `env`, under what
+    /// each sets itself.
     pub fn with_env(mut self, env: Vec<(String, String)>) -> Self {
         self.env = env;
         self
+    }
+
+    /// Refuse a catalogue service at `service_start` when `refusal` says
+    /// why, rather than letting it fail inside the sandbox.
+    pub fn with_service_refusal(mut self, refusal: ServiceRefusal) -> Self {
+        self.service_refusal = Some(refusal);
+        self
+    }
+
+    /// Why `sidecar` cannot run with this runner, before anything reaches
+    /// its sandbox: the provider refuses it, it would run as a container
+    /// beside a sandbox that has none, or it would listen where one of the
+    /// sandbox's tunnels does.
+    fn service_refusal(&self, sidecar: &Sidecar) -> Option<String> {
+        let service = sidecar
+            .name
+            .strip_prefix(&format!("{}-svc-", sidecar.session_container))
+            .unwrap_or(&sidecar.name);
+        if let Some(refusal) = &self.service_refusal {
+            let handle = running()
+                .lock()
+                .unwrap()
+                .get(&sidecar.session_container)
+                .map(|(handle, _)| handle.clone());
+            if let Some(why) = refusal(handle.as_ref(), service) {
+                return Some(why);
+            }
+        }
+        // A tunnel's port matters only to a service inside the sandbox.
+        self.in_sandbox(sidecar)?;
+        self.tunnels
+            .iter()
+            .find(|tunnel| {
+                matches!(&tunnel.listen, tracon_sandbox::protocol::ListenAddr::Tcp(addr)
+                    if addr.rsplit_once(':').is_some_and(|(_, port)| port == sidecar.port.to_string()))
+            })
+            .map(|tunnel| {
+                format!(
+                    "service {service} listens on 127.0.0.1:{}, where the sandbox's {} tunnel \
+                     already does; give it another port",
+                    sidecar.port, tunnel.name
+                )
+            })
     }
 
     /// Hold every sandbox to `requirements`, as its provider reads its
@@ -899,8 +950,21 @@ impl Runner for ProtocolRunner {
     }
 
     async fn start_sidecar(&self, sidecar: &Sidecar) -> Result<(), RunnerError> {
+        if let Some(why) = self.service_refusal(sidecar) {
+            return Err(RunnerError::Other(why));
+        }
         if let Some(spec) = self.in_sandbox(sidecar) {
-            return super::services::start(sidecar, spec).await;
+            if self.env.is_empty() {
+                return super::services::start(sidecar, spec).await;
+            }
+            let mut spec = spec.clone();
+            spec.env = self
+                .env
+                .iter()
+                .cloned()
+                .chain(std::mem::take(&mut spec.env))
+                .collect();
+            return super::services::start(sidecar, &spec).await;
         }
         match &self.delegate {
             Some(delegate) => delegate.start_sidecar(sidecar).await,

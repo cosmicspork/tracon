@@ -16,6 +16,7 @@ mod server;
 mod services;
 pub mod spawner;
 mod tunnels;
+pub mod user;
 
 use std::io;
 use std::sync::Arc;
@@ -237,6 +238,7 @@ async fn handshake(
         pid: std::process::id(),
         init: is_init(),
         resumable: true,
+        uid: Some(user::current().uid),
     };
     write_frame(&mut tls, &hello)
         .await

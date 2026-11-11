@@ -51,7 +51,7 @@
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
   import { remedy } from '../lib/refusal'
-  import { capabilityName, capabilityTone } from '../lib/capabilities'
+  import { capabilityName, capabilityTone, elsewhereLines } from '../lib/capabilities'
   import { nodeHarnesses } from '../lib/nodes'
   import { versionLabel } from '../lib/version'
   import type { HarnessState } from '../lib/types'
@@ -1187,8 +1187,17 @@
       {/if}
       {#if checks}<ul class="checks">{#each checks as c (c.id)}<li><span class="chip" class:bad={!c.ok}>{c.ok ? 'ok' : 'fail'}</span> {c.id} · <small>{c.detail}</small></li>{/each}</ul>{/if}
       {#each sandboxes as p (p.provider)}
-        <p class="dim">Capabilities · {p.provider}{p.verified ? '' : ' · not verified'} <Help label="About capabilities">What this runtime's checks show it can promise a session, by the check each rests on. Reported only: sessions are not placed by them yet.</Help></p>
+        {#if p.elsewhere}
+          <p class="dim">Capabilities · {p.provider}{p.verified ? '' : ' · unavailable'} <Help label="About {p.provider}">What this provider promises of every sandbox it makes, and how each is reached. Placement holds sessions to these: each sandbox's isolation is read back from {p.provider} and checked against what its work requires before anything is sent in.</Help></p>
+        {:else}
+          <p class="dim">Capabilities · {p.provider}{p.verified ? '' : ' · not verified'} <Help label="About capabilities">What this runtime's checks show it can promise a session, by the check each rests on. Reported only: sessions are not placed by them yet.</Help></p>
+        {/if}
         <ul class="checks">
+          {#if p.elsewhere}
+            {#each elsewhereLines(p.elsewhere) as e (e.label)}
+              <li><span class="chip" class:off={e.tone === 'off'} class:warn={e.tone === 'warn'} class:bad={e.tone === 'bad'}>{e.label}</span> {e.text}{#if e.detail} · <small>{e.detail}</small>{/if}</li>
+            {/each}
+          {/if}
           {#each p.lines as l (l.capability)}
             <li><span class="chip" class:off={capabilityTone(l) === 'off'} class:warn={capabilityTone(l) === 'warn'}>{capabilityName(l.capability)}</span> {l.value ?? 'not established'} · <small>{l.detail}</small></li>
           {/each}

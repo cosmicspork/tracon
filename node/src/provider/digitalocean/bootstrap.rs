@@ -11,6 +11,17 @@
 //! service ([`RUN_SCRIPT`]), which waits for the bootstrap, reads it, and
 //! runs the supervisor as its child under DigitalOcean's own init.
 //!
+//! That init starts the service as root, and the runtime's `exec` runs as
+//! root too. The sandbox's user is the stock base's, uid 65532, as on Podman
+//! and Apple ([`RunAs`]): the delivery makes the workspace, the cache and
+//! the user's home that user's (each is already, in an image the node
+//! built, so this costs one `stat` apiece), and the bootstrap names the
+//! user, which the supervisor becomes once it has read its token, before it
+//! starts anything. The harness, its services and every file it writes are
+//! then that user's. The delivery also copies the `PATH` the runtime gives
+//! its exec, which is the image's, since a service an init starts may be
+//! given its own.
+//!
 //! The token still travels in that exec's arguments, which DigitalOcean may
 //! log. Such a copy is worth nothing: the token is redeemed by the
 //! sandbox's first connection (seconds after the exec), it is refused once
@@ -41,9 +52,13 @@ pub const SERVICE_DIR: &str = "/etc/services.d/tracon-sandbox";
 
 /// The exec that delivers a run's bootstrap. Positional arguments: the
 /// variable the dial goes in (`ADDR` or `RELAY_URL`), the dial, the
-/// certificate pin, the server name, the token, the gateway's name and the
-/// run script. The token is written before the bootstrap that names it, so
-/// the service never starts without one.
+/// certificate pin, the server name, the token, the gateway's name, the run
+/// script, then the user the supervisor becomes (`uid:gid`, empty to stay
+/// root), its working directory, and the directories made that user's
+/// (`:`-separated). The token is written before the bootstrap that names it,
+/// so the service never starts without one. Everything under `/run/tracon`
+/// is root's alone (`umask 077`); the user's directories, and any parent
+/// they need (`/home` in an image without one), are made traversable.
 ///
 /// The runtime's proxy settings are in this exec's environment but need not
 /// be in the service's, so a WebSocket dial gets a copy under the
@@ -73,6 +88,20 @@ if [ "$1" = RELAY_URL ]; then
     ?*) printf "TRACON_SANDBOX_NO_PROXY='%s'\n" "$no_proxy_list" >> /run/tracon/bootstrap.new ;;
   esac
 fi
+if [ -n "$8" ]; then
+  old_ifs=$IFS
+  IFS=:
+  for dir in ${10}; do
+    (umask 022 && mkdir -p "$dir")
+    [ "$(stat -c %u:%g "$dir")" = "$8" ] || chown -R -h "$8" "$dir"
+  done
+  IFS=$old_ifs
+  printf "TRACON_SANDBOX_USER='%s'\nTRACON_SANDBOX_WORKDIR='%s'\n" "$8" "$9" >> /run/tracon/bootstrap.new
+fi
+case "${PATH:-}" in
+  *[!A-Za-z0-9._/:-]*) ;;
+  ?*) printf "PATH='%s'\n" "$PATH" >> /run/tracon/bootstrap.new ;;
+esac
 mv -f /run/tracon/bootstrap.new /run/tracon/bootstrap
 if [ ! -x /etc/services.d/tracon-sandbox/run ]; then
   printf '%s' "$7" > /run/tracon/run
@@ -107,6 +136,27 @@ impl<'a> Dial<'a> {
     }
 }
 
+/// Who a sandbox's supervisor, and so everything it starts, runs as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunAs<'a> {
+    /// `uid:gid`.
+    pub user: &'a str,
+    /// Where it works.
+    pub workdir: &'a str,
+    /// What is made that user's before it starts, `:`-separated.
+    pub dirs: &'a str,
+}
+
+impl RunAs<'static> {
+    /// The stock base's user, as on Podman and Apple: its workspace, its
+    /// cache and its home.
+    pub const SANDBOX: RunAs<'static> = RunAs {
+        user: crate::sandbox_images::USER,
+        workdir: "/work",
+        dirs: "/work:/cache:/home/harness",
+    };
+}
+
 /// What one run's sandbox is told.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Delivery<'a> {
@@ -119,6 +169,7 @@ pub struct Delivery<'a> {
     /// The name the harness's configuration reaches the gateway by, which
     /// the tunnels serve on loopback.
     pub gateway_host: &'a str,
+    pub run_as: RunAs<'a>,
 }
 
 impl std::fmt::Debug for Delivery<'_> {
@@ -129,6 +180,7 @@ impl std::fmt::Debug for Delivery<'_> {
             .field("server_name", &self.server_name)
             .field("token", &"<redacted>")
             .field("gateway_host", &self.gateway_host)
+            .field("run_as", &self.run_as)
             .finish()
     }
 }
@@ -163,6 +215,24 @@ impl Delivery<'_> {
         plain("the server name", self.server_name, &['.', '-'])?;
         plain("the token", self.token, &['-', '_'])?;
         plain("the gateway name", self.gateway_host, &['.', '-', '_'])?;
+        let RunAs {
+            user,
+            workdir,
+            dirs,
+        } = self.run_as;
+        if !user.is_empty() {
+            user.parse::<tracon_sandbox::inside::user::User>()
+                .map_err(|e| format!("the sandbox user {e}"))?;
+            for (what, path) in std::iter::once(("the working directory", workdir)).chain(
+                dirs.split(':')
+                    .map(|dir| ("a directory of the user's", dir)),
+            ) {
+                plain(what, path, &['/', '.', '-', '_'])?;
+                if !path.starts_with('/') || path.split('/').any(|part| part == "..") {
+                    return Err(format!("{what} {path:?} is not an absolute path"));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -181,6 +251,9 @@ impl Delivery<'_> {
             self.token.into(),
             self.gateway_host.into(),
             RUN_SCRIPT.into(),
+            self.run_as.user.into(),
+            self.run_as.workdir.into(),
+            self.run_as.dirs.into(),
         ])
     }
 
@@ -188,7 +261,7 @@ impl Delivery<'_> {
     /// template's service, and for tests.
     pub fn parse(argv: &[String]) -> Option<Delivery<'_>> {
         match argv {
-            [sh, c, script, _, variable, dial, pin, server_name, token, gateway_host, _run]
+            [sh, c, script, _, variable, dial, pin, server_name, token, gateway_host, _run, user, workdir, dirs]
                 if sh == "/bin/sh" && c == "-c" && script == DELIVER =>
             {
                 let dial = match variable.as_str() {
@@ -202,6 +275,11 @@ impl Delivery<'_> {
                     server_name,
                     token,
                     gateway_host,
+                    run_as: RunAs {
+                        user,
+                        workdir,
+                        dirs,
+                    },
                 })
             }
             _ => None,
@@ -220,6 +298,20 @@ mod tests {
             server_name: "0123abcd.relay.example.net",
             token: "AbC-_9",
             gateway_host: "tracon-gw",
+            run_as: RunAs::SANDBOX,
+        }
+    }
+
+    /// As a delivery that leaves the supervisor root: what a test that is
+    /// not root can run.
+    fn staying_root(d: Delivery<'static>) -> Delivery<'static> {
+        Delivery {
+            run_as: RunAs {
+                user: "",
+                workdir: "",
+                dirs: "",
+            },
+            ..d
         }
     }
 
@@ -269,6 +361,41 @@ mod tests {
                 token: "",
                 ..delivery()
             },
+            Delivery {
+                run_as: RunAs {
+                    user: "harness",
+                    ..RunAs::SANDBOX
+                },
+                ..delivery()
+            },
+            Delivery {
+                run_as: RunAs {
+                    workdir: "work",
+                    ..RunAs::SANDBOX
+                },
+                ..delivery()
+            },
+            Delivery {
+                run_as: RunAs {
+                    dirs: "/work:/home/x y",
+                    ..RunAs::SANDBOX
+                },
+                ..delivery()
+            },
+            Delivery {
+                run_as: RunAs {
+                    dirs: "/work:/../etc",
+                    ..RunAs::SANDBOX
+                },
+                ..delivery()
+            },
+            Delivery {
+                run_as: RunAs {
+                    dirs: "/work::/cache",
+                    ..RunAs::SANDBOX
+                },
+                ..delivery()
+            },
         ] {
             assert!(bad.argv().is_err(), "{bad:?}");
         }
@@ -306,6 +433,13 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(run.join("token")).unwrap(), d.token);
         assert_eq!(
+            std::os::unix::fs::PermissionsExt::mode(
+                &std::fs::metadata(&run).unwrap().permissions()
+            ) & 0o777,
+            0o700,
+            "the bootstrap's directory stays root's alone"
+        );
+        assert_eq!(
             std::fs::read_to_string(&hosts).unwrap(),
             format!("127.0.0.1 {}\n", d.gateway_host)
         );
@@ -322,21 +456,22 @@ mod tests {
             ),
         ];
         assert_eq!(
-            delivered(&delivery(), &on_do),
+            delivered(&staying_root(delivery()), &on_do),
             "TRACON_SANDBOX_ADDR='203.0.113.7:443'\nTRACON_SANDBOX_PIN='sha256:00aa'\n\
-             TRACON_SANDBOX_SERVER_NAME='0123abcd.relay.example.net'\n"
+             TRACON_SANDBOX_SERVER_NAME='0123abcd.relay.example.net'\nPATH='/usr/bin:/bin'\n"
         );
-        let ws = Delivery {
+        let ws = staying_root(Delivery {
             dial: Dial::RelayUrl("wss://hub.example.net/v0/relay/connect"),
             ..delivery()
-        };
+        });
         assert_eq!(
             delivered(&ws, &on_do),
             "TRACON_SANDBOX_RELAY_URL='wss://hub.example.net/v0/relay/connect'\n\
              TRACON_SANDBOX_PIN='sha256:00aa'\n\
              TRACON_SANDBOX_SERVER_NAME='0123abcd.relay.example.net'\n\
              TRACON_SANDBOX_PROXY='http://169.254.169.254:3128'\n\
-             TRACON_SANDBOX_NO_PROXY='169.254.169.254,localhost,127.0.0.1,.vpc-endpoint.internal.digitalocean.com'\n"
+             TRACON_SANDBOX_NO_PROXY='169.254.169.254,localhost,127.0.0.1,.vpc-endpoint.internal.digitalocean.com'\n\
+             PATH='/usr/bin:/bin'\n"
         );
         // Nothing to copy; and a value that could leave its quotes is not.
         let bare = delivered(&ws, &[]);
@@ -350,6 +485,62 @@ mod tests {
         assert!(
             lower.contains("TRACON_SANDBOX_PROXY='http://p:3128'\n"),
             "{lower}"
+        );
+    }
+
+    /// The user's directories are made its own, a tree whose top is not is
+    /// made its own throughout, and the bootstrap names the user and where
+    /// it works. Run as the test's own user, the one it can hand them to.
+    /// Linux only, as the script is: it runs inside a Linux sandbox, with
+    /// GNU `stat` and `chown`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_delivery_hands_the_sandbox_to_its_user() {
+        let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+        let user = format!("{uid}:{gid}");
+        let tmp = tempfile::tempdir().unwrap();
+        let at = |p: &str| tmp.path().join(p).to_string_lossy().into_owned();
+        let (work, cache, home) = (at("work"), at("cache"), at("home/harness"));
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(tmp.path().join("work/kept"), "x").unwrap();
+        let dirs = format!("{work}:{cache}:{home}");
+        let d = Delivery {
+            run_as: RunAs {
+                user: &user,
+                workdir: &work,
+                dirs: &dirs,
+            },
+            ..delivery()
+        };
+        let bootstrap = delivered(&d, &[]);
+        assert!(
+            bootstrap.ends_with(&format!(
+                "TRACON_SANDBOX_USER='{user}'\nTRACON_SANDBOX_WORKDIR='{work}'\nPATH='/usr/bin:/bin'\n"
+            )),
+            "{bootstrap}"
+        );
+        for dir in [&work, &cache, &home] {
+            let meta = std::fs::metadata(dir).unwrap();
+            assert!(meta.is_dir(), "{dir}");
+            assert_eq!(
+                (
+                    std::os::unix::fs::MetadataExt::uid(&meta),
+                    std::os::unix::fs::MetadataExt::gid(&meta)
+                ),
+                (uid, gid)
+            );
+        }
+        assert!(tmp.path().join("work/kept").is_file());
+        // A parent the image lacked is made for the user to pass through.
+        let parent = std::fs::metadata(tmp.path().join("home")).unwrap();
+        assert_eq!(
+            std::os::unix::fs::PermissionsExt::mode(&parent.permissions()) & 0o777,
+            0o755
+        );
+        // The variables it names are the ones the supervisor reads.
+        let main = include_str!("../../../../sandbox/src/main.rs");
+        assert!(
+            main.contains("\"TRACON_SANDBOX_USER\"") && main.contains("\"TRACON_SANDBOX_WORKDIR\"")
         );
     }
 

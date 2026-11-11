@@ -100,6 +100,143 @@ fn s(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
 
+const CLAUDE: &str = tracon::adapter::claude::ClaudeAdapter::ID;
+
+/// The catalogue on a DigitalOcean sandbox: a service with a bundle runs
+/// inside under the supervisor, with the sandbox's own environment (home,
+/// and the node's allowlist proxy through the tunnel rather than the
+/// runtime's); one with only an image, and one listening where a tunnel
+/// does, are refused at once with why. The harness gets the same
+/// environment.
+async fn services_run_inside_with_the_sandboxs_own_egress(
+    runtime: &Arc<DoRuntime>,
+    cfg: &Config,
+    store: &FilesStore,
+    tmp: &tempfile::TempDir,
+) {
+    let mut cfg = cfg.clone();
+    let port = free_port();
+    let seen = tmp.path().join("service-env");
+    let service = |name: &str, port: u16, bundle: bool| tracon::config::Service {
+        name: name.into(),
+        image: if bundle {
+            String::new()
+        } else {
+            "pg@sha256:1".into()
+        },
+        bundle: bundle.then(|| "/srv/bundles/x".into()),
+        port,
+        ..Default::default()
+    };
+    cfg.service = vec![
+        service("web", port, true),
+        service("pg", free_port(), false),
+        service("clash", cfg.gateway.forward_port, true),
+    ];
+    let support = runtime.service_support(&cfg);
+    assert!(support[0].1.is_ok(), "{support:?}");
+    assert!(support[1]
+        .1
+        .as_ref()
+        .unwrap_err()
+        .contains("DigitalOcean runs nothing beside"));
+
+    let runner = runtime.runner_with(
+        &cfg,
+        Requirements::default(),
+        Vec::new(),
+        IMAGE.into(),
+        CLAUDE,
+        store.clone(),
+    );
+    // The session: its harness waits for the test to finish with it.
+    let session = runner
+        .spawn(RunnerCommand {
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                r#"echo "$HOME|$HTTPS_PROXY|$https_proxy|$NO_PROXY|$CLAUDE_CONFIG_DIR|$DISABLE_AUTOUPDATER"; read done"#.into(),
+            ],
+            name: "tracon-h-do3".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let mut lines = BufReader::new(session.stdout).lines();
+    let proxy = format!("http://tracon-gw:{}", cfg.gateway.proxy_port);
+    assert_eq!(
+        lines.next_line().await.unwrap().unwrap(),
+        format!(
+            "/home/harness|{proxy}|{proxy}|tracon-gw,localhost,127.0.0.1,::1|/home/harness/.claude|1"
+        )
+    );
+
+    let sidecar = |name: &str, port: u16, argv: Option<Vec<String>>| tracon::runner::Sidecar {
+        name: tracon::runner::sidecar_name("tracon-h-do3", name),
+        session_container: "tracon-h-do3".into(),
+        image: String::new(),
+        command: Vec::new(),
+        port,
+        ready: None,
+        in_sandbox: argv.map(|argv| tracon::runner::InSandbox {
+            service: name.into(),
+            argv,
+            env: [("ONLY_MINE".to_string(), "yes".to_string())].into(),
+            restart: tracon::config::ServiceRestart::Never,
+            ready_within: Duration::from_secs(20),
+        }),
+    };
+    let web = sidecar(
+        "web",
+        port,
+        Some(vec![
+            "sh".into(),
+            "-c".into(),
+            format!(
+                r#"echo "$HOME|$HTTPS_PROXY|$ONLY_MINE" > {}; exec python3 -m http.server {port} --bind 127.0.0.1"#,
+                s(&seen)
+            ),
+        ]),
+    );
+    runner.start_sidecar(&web).await.unwrap();
+    let mut ready = false;
+    for _ in 0..200 {
+        if runner.probe_sidecar(&web).await.unwrap() {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(ready, "the service never answered");
+    assert_eq!(
+        std::fs::read_to_string(&seen).unwrap(),
+        format!("/home/harness|{proxy}|yes\n")
+    );
+
+    let pg = runner
+        .start_sidecar(&sidecar("pg", free_port(), None))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(pg.contains("give it a bundle"), "{pg}");
+    let clash = runner
+        .start_sidecar(&sidecar(
+            "clash",
+            cfg.gateway.forward_port,
+            Some(vec!["true".into()]),
+        ))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(clash.contains("gateway tunnel already does"), "{clash}");
+
+    runner.kill(&web.name).await.unwrap();
+    let mut stdin = session.stdin;
+    stdin.write_all(b"done\n").await.unwrap();
+    drop(stdin);
+    assert_eq!(session.done.await.unwrap(), 0);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_session_runs_on_digitalocean_minus_digitalocean() {
     support::state::isolate();
@@ -145,6 +282,9 @@ async fn a_session_runs_on_digitalocean_minus_digitalocean() {
     )
     .unwrap();
     let provider = runtime.provider().clone();
+    // The stand-in's supervisor is this test's own loop, as its user.
+    let me = tracon_sandbox::inside::user::current().uid;
+    provider.expect_uid(Some(me));
 
     // Each exec plays the template's service: read the bootstrap the node
     // delivered and dial as a sandbox there would.
@@ -193,6 +333,36 @@ async fn a_session_runs_on_digitalocean_minus_digitalocean() {
     ));
     runtime.health(&cfg).unwrap();
     assert_eq!(fake.api.lock().unwrap().templates.len(), 1);
+
+    // What Settings shows of it: the promises, by what makes them so, and
+    // how its sandboxes reach the node.
+    let report = serde_json::to_value(runtime.report(&cfg).await).unwrap();
+    assert_eq!(report["provider"], "digitalocean");
+    assert_eq!(report["verified"], true);
+    assert_eq!(report["enforced"], true);
+    let value = |capability: &str| {
+        report["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["capability"] == capability)
+            .map(|l| l["value"].clone())
+            .unwrap()
+    };
+    assert_eq!(value("tier"), "microvm");
+    assert_eq!(value("route"), "node-only");
+    assert_eq!(value("dns"), "provider-open");
+    assert_eq!(value("privilege"), "root-in-vm");
+    // No sandbox has said who it runs as yet.
+    assert!(report["elsewhere"]["reported"].is_null(), "{report}");
+    assert_eq!(value("image_identity"), "derived");
+    let elsewhere = &report["elsewhere"];
+    assert_eq!(elsewhere["reach"], "address");
+    assert_eq!(elsewhere["dial"], node.to_string());
+    assert_eq!(elsewhere["egress"], serde_json::json!(["127.0.0.1"]));
+    assert_eq!(elsewhere["healthy"], true);
+    assert!(elsewhere.get("why").is_none(), "{elsewhere}");
+    assert_eq!(elsewhere["capacity"]["limit"], 2);
     let template = provider.templates().name_for(IMAGE).unwrap();
     assert_eq!(template, "tracon-tabcd1234-1111111111111111");
 
@@ -214,7 +384,7 @@ async fn a_session_runs_on_digitalocean_minus_digitalocean() {
         },
         mounts.clone(),
         IMAGE.into(),
-        tracon::adapter::claude::ClaudeAdapter::ID,
+        CLAUDE,
         store.clone(),
     );
 
@@ -288,6 +458,38 @@ async fn a_session_runs_on_digitalocean_minus_digitalocean() {
         join(thread).await.unwrap();
     }
 
+    services_run_inside_with_the_sandboxs_own_egress(&runtime, &cfg, &store, &tmp).await;
+    let ended = std::mem::take(&mut *threads.lock().unwrap());
+    for thread in ended {
+        join(thread).await.unwrap();
+    }
+    // Settings says who the harness ran as, from the supervisor's hello.
+    let report = serde_json::to_value(runtime.report(&cfg).await).unwrap();
+    assert_eq!(report["elsewhere"]["reported"]["uid"], me);
+    assert_eq!(report["elsewhere"]["expected_uid"], me);
+
+    // A supervisor that is not the sandbox's user (an older one that never
+    // dropped root, say) is refused before anything is sent into it.
+    provider.expect_uid(Some(me + 1));
+    let refused = runner
+        .run_capture(RunnerCommand {
+            argv: vec!["true".into()],
+            name: "tracon-h-do4".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains(&format!("not uid {}", me + 1)),
+        "{refused}"
+    );
+    provider.expect_uid(Some(me));
+    let ended = std::mem::take(&mut *threads.lock().unwrap());
+    for thread in ended {
+        let _ = join(thread).await;
+    }
+
     // A spent token is refused: a second sandbox presenting it gets nowhere.
     let refused_before = listener.refused();
     let mut replay = inside::Config::new(
@@ -342,7 +544,7 @@ async fn a_session_runs_on_digitalocean_minus_digitalocean() {
     {
         let api = fake.api.lock().unwrap();
         assert!(api.sessions.is_empty(), "{:?}", api.sessions);
-        assert_eq!(api.deleted_configs.len(), 2);
+        assert_eq!(api.deleted_configs.len(), 4);
     }
 
     // Read back: paused is not lost, gone is lost, and only this node's

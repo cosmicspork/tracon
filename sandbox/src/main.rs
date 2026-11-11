@@ -18,6 +18,8 @@
 //! | `TRACON_SANDBOX_KEEPALIVE_MS` | HTTP/2 ping interval (default 20000) |
 //! | `TRACON_SANDBOX_CONNECT_TIMEOUT_MS` | how long to keep dialling, or to wait for the node (default 30000) |
 //! | `TRACON_SANDBOX_LOG` | log filter (default `info`), to stderr |
+//! | `TRACON_SANDBOX_USER` | `uid:gid` to run as, for a provider that starts it as root: it becomes that user once its token is read, before anything starts |
+//! | `TRACON_SANDBOX_WORKDIR` | the directory to work in once it is that user |
 //!
 //! As PID 1 it is the namespace's init: it reaps every orphan and turns
 //! SIGTERM, SIGINT and SIGQUIT into an orderly teardown. Under another init
@@ -28,6 +30,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use tracon_sandbox::carrier::{Dial, RelayUrl};
+use tracon_sandbox::inside::user::User;
 use tracon_sandbox::inside::{self, Config, Ending};
 use tracon_sandbox::tls::CertPin;
 
@@ -100,13 +103,57 @@ fn config_from_env() -> Result<Config, String> {
     Ok(config)
 }
 
+/// Who to become and where to work, read before the environment is
+/// scrubbed.
+struct Identity {
+    user: Option<User>,
+    workdir: Option<std::path::PathBuf>,
+}
+
+fn identity_from_env() -> Result<Identity, String> {
+    let user = var("TRACON_SANDBOX_USER")
+        .map(|text| {
+            text.parse::<User>()
+                .map_err(|e| format!("TRACON_SANDBOX_USER: {e}"))
+        })
+        .transpose()?;
+    Ok(Identity {
+        user,
+        workdir: var("TRACON_SANDBOX_WORKDIR").map(Into::into),
+    })
+}
+
+/// Become the bootstrap's user, once what only root may read is read, and
+/// move to its working directory. Whatever the user, nothing it starts may
+/// gain privileges by an exec (a setuid binary, a file capability): set on
+/// every provider, under Podman's `no-new-privileges` or an init that sets
+/// nothing (DigitalOcean's s6) alike.
+fn assume(identity: &Identity) -> Result<(), String> {
+    if let Some(user) = identity.user {
+        inside::user::become_user(user).map_err(|e| format!("TRACON_SANDBOX_USER {user}: {e}"))?;
+    }
+    if let Some(dir) = &identity.workdir {
+        std::env::set_current_dir(dir)
+            .map_err(|e| format!("TRACON_SANDBOX_WORKDIR {}: {e}", dir.display()))?;
+    }
+    inside::user::no_new_privileges().map_err(|e| e.to_string())
+}
+
 fn main() -> ExitCode {
     if std::env::args().nth(1).as_deref() == Some("--version") {
         println!("tracon-sandbox {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
     }
     let filter = var("TRACON_SANDBOX_LOG").unwrap_or_else(|| "info".into());
+    let identity = identity_from_env();
+    // The token first, while the process may still read a file only root
+    // can; then root is given up, before any thread or child exists.
     let config = config_from_env();
+    let assumed = match (&identity, &config) {
+        (Ok(identity), Ok(_)) => assume(identity),
+        (Err(error), _) => Err(error.clone()),
+        (_, Err(_)) => Ok(()),
+    };
     // Before the runtime starts any thread: nothing started from here on
     // may inherit the token.
     inside::spawner::scrub_environment();
@@ -115,7 +162,7 @@ fn main() -> ExitCode {
         .with_writer(std::io::stderr)
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .init();
-    let config = match config {
+    let config = match config.and_then(|config| assumed.map(|()| config)) {
         Ok(config) => config,
         Err(error) => {
             eprintln!("tracon-sandbox: {error}");
