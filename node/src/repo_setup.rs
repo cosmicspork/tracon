@@ -742,7 +742,7 @@ pub async fn build_needed(
         return None;
     }
     let builder = backend.image_builder()?;
-    let recipe = crate::repo_image::recipe(repo, entry, &crate::repo_image::RunAs::of(cfg))
+    let recipe = crate::repo_image::recipe(repo, entry, &crate::repo_image::RunAs::sandbox())
         .await
         .ok()?;
     if held_recipe(cfg, repo).await.as_deref() == Some(&recipe.hash) {
@@ -758,7 +758,7 @@ pub async fn build_needed(
 /// names one: what the node builds for it without asking.
 async fn held_recipe(cfg: &Config, repo: &Path) -> Option<String> {
     let held = crate::repo_image::building_entry(cfg, repo)?;
-    crate::repo_image::recipe(repo, &held, &crate::repo_image::RunAs::of(cfg))
+    crate::repo_image::recipe(repo, &held, &crate::repo_image::RunAs::sandbox())
         .await
         .ok()
         .map(|recipe| recipe.hash)
@@ -1084,7 +1084,8 @@ async fn dockerfile_image(
             backend.kind()
         )
     })?;
-    let recipe = crate::repo_image::recipe(repo, entry, &crate::repo_image::RunAs::of(cfg)).await?;
+    let recipe =
+        crate::repo_image::recipe(repo, entry, &crate::repo_image::RunAs::sandbox()).await?;
     if let Some(image) = crate::repo_image::already_built(builder, store, repo, &recipe.hash).await
     {
         return Ok(Some(image));

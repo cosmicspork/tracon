@@ -192,8 +192,8 @@ the schema marks `host_only`. The state mount is changed in the file on the host
 never by an edit, since it decides where agents can write. The gateway's harness socket
 path (`gateway.harness_listen`, whose directory the node creates) and the images and
 bundles the node runs with its own sockets and credentials (`sandbox.base_image`,
-`sandbox.bundle`, `sandbox.release_url`, a service's `bundle`,
-`runtime.kubernetes.harness_image`) are outside the path guard's rules, so they are
+`sandbox.bundle`, `sandbox.release_url`, a service's `bundle`) are outside the path
+guard's rules, so they are
 changed at the node, by hand or by an edit made there, and refused from elsewhere.
 
 `GET /api/config` returns the file as written (`document`), as it loads with every
@@ -456,7 +456,7 @@ session checkpoint's and the skill reader's `git` go through the guard);
 configuration files a trusted program reads from the home the node gives it, which on
 Kubernetes is on the state volume (the publish path's `git` is told to ignore them);
 Podman storage moved elsewhere by `storage.conf`; and image keys (`sandbox.base_image`,
-`runtime.kubernetes.harness_image`, `[[repo]] image`, `[[service]] image`), which choose what runs inside the boundary, not on the host, and
+`[[repo]] image`, `[[service]] image`), which choose what runs inside the boundary, not on the host, and
 are held by digest pinning instead. The guard is a backstop behind the passkey every
 admin save needs, the audit row and the push.
 
@@ -1014,7 +1014,7 @@ it, like every other live session. Sandboxes run on the stock base on every runt
 an entry gives root `build` steps: the node layers them on the pinned
 `tracon-sandbox-base` as the repository's one image, every harness runs in it from the
 mounted bundle with no layer of the node's, and an `image` or a Dockerfile not
-`FROM ${TRACON_SANDBOX_BASE}` is refused (`repo_image::stock_base_only`). A Dockerfile
+`FROM ${TRACON_SANDBOX_BASE}` is refused (`repo_image::refusal`). A Dockerfile
 that is on the base is built (`crate::repo_image`) from the **default branch**, read
 through Git's object store and never from a working tree, and the node records the
 digest it built in its own state — the recipe is configuration, the digest is not,

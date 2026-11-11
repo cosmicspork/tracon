@@ -29,12 +29,11 @@
 #
 # Sources:
 # - tracon-agent: a static build (--agent), or a release's asset checked
-#   against that release's own .sha256 (--agent-release), as the native
-#   harness image does.
+#   against that release's own .sha256 (--agent-release).
 # - claude: the official Claude Code release archive at the version and
-#   digests pinned in containers/harness-claude/Containerfile, so the bundle
-#   and the image cannot drift apart. --claude-archive supplies the archive
-#   from disk; it is held to the same digest.
+#   digests pinned in scripts/claude-code.env, which the node's own pin is
+#   held to. --claude-archive supplies the archive from disk; it is held to
+#   the same digest.
 # - tracon-sandbox: the in-sandbox supervisor, a static build (--sandbox) or
 #   a release's asset checked the same way as tracon-agent's
 #   (--sandbox-release). Optional, because releases before it shipped have no
@@ -89,15 +88,15 @@ agent_version=${agent_release:-$version}
 sandbox_version=${sandbox_release:-$version}
 [[ "$sandbox_version" =~ $semver ]] || die "tracon-sandbox version '$sandbox_version' is not a version"
 
-containerfile="$root/containers/harness-claude/Containerfile"
-pinned() { sed -n "s/^ARG $1=\(.*\)$/\1/p" "$containerfile"; }
+pins="$root/scripts/claude-code.env"
+pinned() { sed -n "s/^$1=\(.*\)$/\1/p" "$pins"; }
 claude_version=$(pinned CLAUDE_VERSION)
 case "$arch" in
   amd64) claude_digest=$(pinned CLAUDE_LINUX_X64_SHA256) ;;
   arm64) claude_digest=$(pinned CLAUDE_LINUX_ARM64_SHA256) ;;
 esac
-[[ "$claude_version" =~ $semver ]] || die "no CLAUDE_VERSION in $containerfile"
-[[ "$claude_digest" =~ ^[0-9a-f]{64}$ ]] || die "no Claude Code digest for $arch in $containerfile"
+[[ "$claude_version" =~ $semver ]] || die "no CLAUDE_VERSION in $pins"
+[[ "$claude_digest" =~ ^[0-9a-f]{64}$ ]] || die "no Claude Code digest for $arch in $pins"
 
 if command -v sha256sum >/dev/null 2>&1; then
   sha256() { sha256sum "$1" | cut -d' ' -f1; }

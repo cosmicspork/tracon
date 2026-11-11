@@ -149,7 +149,9 @@ export function buildLine(build: RepoImageBuild): string {
       ? 'image'
       : build.kind === 'trial'
         ? 'image tried by a session'
-        : `session image (${build.kind.replace('session:', '')})`
+        : build.kind === 'snapshot'
+          ? 'prepared snapshot'
+          : build.kind
   const from = build.source_ref ? ` from ${build.source_ref} ${build.source_commit.slice(0, 12)}` : ''
   if (build.status === 'building') return `${what}${from} · building…`
   if (build.status === 'failed') return `${what}${from} · failed: ${build.error}`

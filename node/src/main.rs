@@ -111,8 +111,9 @@ enum Command {
         /// Include dependency caches, which are rebuilt when next needed.
         #[arg(long)]
         caches: bool,
-        /// Include the images sandbox images retired: harness images, and
-        /// layered (`-claude`, `-native`) and `-src` repository images.
+        /// Include the images older nodes made that nothing runs any more:
+        /// harness images, and layered (`-claude`, `-native`) and superseded
+        /// `-src` repository images.
         #[arg(long)]
         legacy: bool,
         /// Take images named as this node's that carry no owner label (made
@@ -1705,8 +1706,8 @@ fn build_line(build: &serde_json::Value) -> String {
         "failed" => text("error").to_string(),
         _ => String::new(),
     };
-    // `base` is the image checks run in; `session:<harness>` the same image
-    // with that harness layered on.
+    // `base` is the image checks run in, `trial` one a draft was tried in,
+    // and `snapshot` a prepared snapshot of `base` or the stock base.
     format!(
         "{:<8} {:<14} {}  {detail}",
         text("status"),

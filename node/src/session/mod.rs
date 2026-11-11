@@ -2890,7 +2890,7 @@ impl Manager {
                 },
             )
         };
-        // The repository's own image, with the harness layered on, so the
+        // The repository's own image (or its prepared snapshot), so the
         // session has the tools its checks will run with. Resolved from the
         // repository the work came from, which a resumed session's
         // `workspace://` path only leads back to.
@@ -2936,7 +2936,6 @@ impl Manager {
                     &self.cfg,
                     &self.store,
                     &origin,
-                    (adapter.id(), adapter.pinned_version()),
                     &announce,
                 )
                 .await
@@ -2971,10 +2970,8 @@ impl Manager {
         let mut environment = crate::environment::session_environment(&self.cfg, &self.store, id);
         // Its workspace is prepared where the session runs: on the stock
         // base, the repository's prepared snapshot.
-        if crate::sandbox_images::bundled(&self.cfg) {
-            if let Some(image) = &image.image {
-                environment.image = image.clone();
-            }
+        if let Some(image) = &image.image {
+            environment.image = image.clone();
         }
         let upstreams = self
             .tools
@@ -3463,7 +3460,7 @@ impl Manager {
                 "harness_version": compat.version,
                 "harness_expected": adapter.pinned_version(),
                 "harness_protocol": compat.protocol,
-                "image": started_elsewhere.clone().or_else(|| image.reported(&self.cfg)),
+                "image": started_elsewhere.clone().unwrap_or_else(|| image.reported(&self.cfg)),
                 "image_source": match &started_elsewhere {
                     Some(started_in) => crate::repo_image::source_elsewhere(
                         started_in,
@@ -5020,8 +5017,8 @@ fn write_external_stop(
 /// adds. A session in its repository's image runs there, on any runtime, with
 /// its cache at `/cache` and the variables that send package managers and
 /// builds into it: the agent installs and builds into the session cache too,
-/// so the next session on the repository finds what this one compiled. One in
-/// its harness's own image has no cache and gets neither.
+/// so the next session on the repository finds what this one compiled. One on
+/// the stock base has no cache and gets neither.
 pub fn session_runner(
     backend: &dyn crate::boundary::Backend,
     harness_id: &str,

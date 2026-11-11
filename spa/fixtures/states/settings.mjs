@@ -539,7 +539,7 @@ const REPO_ENV = {
   entries: [
     {
       entry: { path: 'github.com/op/orbit', dockerfile: '.devcontainer/Dockerfile', checks: ['cargo nextest run --workspace', 'bun run --cwd spa check'], timeout_secs: 1800, prepare: ['cargo fetch --locked', 'bun install --frozen-lockfile --cwd spa'], egress: ['crates', 'npm'], session_egress: true, commits: 'keep', style: { conventional: true, max_subject: 72 } },
-      builds: [build({}), build({ id: 'b-2', kind: 'session:claude', image: 'localhost/tracon-repo-orbit-claude@sha256:9a0f…' })],
+      builds: [build({}), build({ id: 'b-2', kind: 'snapshot', image: 'localhost/tracon-snapshot-orbit-1a2b3c4d5e@sha256:9a0f…' })],
     },
     {
       entry: { path: '/home/op/src/consulta', image: 'ghcr.io/op/python-toolchain@sha256:4f1a9c2e7b6d5e8a3c0f9b2d1e4a7c6b5d8e0f3a2c1b4d7e6f9a8c5b2e1d0f3a', prepare: ['uv sync --frozen'], egress: ['pypi'] },

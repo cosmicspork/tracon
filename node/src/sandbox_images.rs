@@ -1,6 +1,5 @@
-//! Sandboxes without harness images, as every Podman and Apple node runs
-//! them (and a pod over the sandbox protocol). Nothing is built or layered
-//! for a harness:
+//! Sandboxes without harness images, as every node runs them. Nothing is
+//! built or layered for a harness:
 //!
 //! - **Images.** A session, check or preparation runs the stock base image
 //!   (`[sandbox] base_image`, pulled for the host's architecture alone and
@@ -8,9 +7,10 @@
 //!   converges) or its repository's image. A repository's Dockerfile may
 //!   stand on the base: `FROM ${TRACON_SANDBOX_BASE}` names the pinned base
 //!   (`repo_image::build_base`), and a new base rebuilds it; one that does
-//!   not, or an `image` of its own, is refused (`repo_image::refusal`). The
-//!   `tracon-harness-*` images and the layered `-claude`/`-native` repository
-//!   images are neither built nor used.
+//!   not, or an `image` of its own, is refused (`repo_image::refusal`).
+//!   Older nodes' `tracon-harness-*` images and layered `-claude`/`-native`
+//!   repository images are neither built nor used; `tracon gc --legacy`
+//!   removes them.
 //! - **Harnesses.** Claude Code and tracon-agent run from the harness bundle
 //!   mounted at `/opt/tracon` (`crate::bundle`), which the node fetches for
 //!   its own release. The protocol runner starts the bundle's copy of a
@@ -118,16 +118,6 @@ pub const BASE_ARG: &str = "TRACON_SANDBOX_BASE";
 /// bundle: a Podman node's, whose every sandbox runs on them.
 pub fn enabled(cfg: &Config) -> bool {
     cfg.runtime.kind == crate::config::RuntimeKind::Podman
-}
-
-/// Whether this node's sandboxes run harnesses from the bundle on the stock
-/// base or a repository's image, with no harness images: every runtime's
-/// do. A repository with a `prepare` starts from its prepared snapshot on
-/// any of them (on Kubernetes, once `[runtime.kubernetes.builder]` can
-/// build one).
-pub fn bundled(cfg: &Config) -> bool {
-    let _ = cfg;
-    true
 }
 
 /// The base image as configured, and as this process pinned it.
@@ -335,8 +325,8 @@ pub async fn snapshot_images() -> Vec<(String, String)> {
         .collect()
 }
 
-/// The bundle's copy of a harness an adapter names by the path its image
-/// had it at.
+/// The bundle's copy of a harness an adapter names by its path
+/// (`ClaudeAdapter::BINARY`, `NativeAdapter::BINARY`).
 pub fn bundled_argv0(argv0: &str) -> Option<String> {
     [
         crate::adapter::claude::ClaudeAdapter::BINARY,
@@ -349,8 +339,8 @@ pub fn bundled_argv0(argv0: &str) -> Option<String> {
     })
 }
 
-/// The environment a harness image set and a sandbox from the stock base
-/// does not: Claude Code told not to update or report itself.
+/// The environment every harness runs with that the stock base does not
+/// set: Claude Code told not to update or report itself.
 pub fn sandbox_env() -> Vec<(String, String)> {
     [("DISABLE_AUTOUPDATER", "1"), ("DISABLE_TELEMETRY", "1")]
         .into_iter()
@@ -582,7 +572,7 @@ pub async fn snapshot_for(
     environment: &RepoEnvironment,
     prepare: bool,
 ) -> Option<String> {
-    if !bundled(cfg) || environment.prepare.is_empty() {
+    if environment.prepare.is_empty() {
         return None;
     }
     let inputs = match inputs(backend, cfg, repo, environment).await {
@@ -1544,14 +1534,14 @@ mod tests {
     #[test]
     fn every_podman_node_runs_the_sandbox_images() {
         let mut cfg = Config::default();
-        assert!(enabled(&cfg) && bundled(&cfg));
+        assert!(enabled(&cfg));
         assert!(definitions(&cfg).starts_with("sandbox-images"));
         crate::config::validate_sandbox(&cfg).unwrap();
         cfg.sandbox.release_url = Some("ftp://example".into());
         assert!(crate::config::validate_sandbox(&cfg).is_err());
         let mut kube = Config::default();
         kube.runtime.kind = crate::config::RuntimeKind::Kubernetes;
-        assert!(!enabled(&kube) && bundled(&kube));
+        assert!(!enabled(&kube));
         assert_eq!(definitions(&kube), "");
     }
 

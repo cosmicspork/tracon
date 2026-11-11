@@ -295,15 +295,12 @@ async fn a_sweep_removes_exactly_this_node_s_unused_images() {
             Kept {
                 reference: cur.clone(),
                 why: "the current base build of app".into(),
-                legacy: false,
             },
             Kept {
                 reference: format!("{SNAP}@{}", digest_of(&format!("{SNAP}:cur"))),
                 why: "a repository's current prepared snapshot".into(),
-                legacy: false,
             },
         ],
-        bundled: true,
         legacy_repositories: vec![HARNESS.into()],
         now_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

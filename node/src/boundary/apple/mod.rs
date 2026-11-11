@@ -690,10 +690,6 @@ impl Backend for AppleBackend {
         self.runner_with(harness_id, image.to_string(), extra_mounts)
     }
 
-    fn runs_sessions_in_repository_images(&self) -> bool {
-        true
-    }
-
     /// One image for every harness: the base, which the bundle completes.
     async fn harness_images(&self, cfg: &Config) -> Vec<crate::boundary::HarnessImage> {
         let image = crate::sandbox_images::base_image(cfg);
@@ -741,10 +737,6 @@ impl Backend for AppleBackend {
             files: Some(self.files_store()),
             tunnels: crate::runner::tunnels::gateway_tunnels(&self.cfg),
         })
-    }
-
-    fn harness_image(&self, cfg: &Config, _harness_id: &str) -> String {
-        crate::sandbox_images::base_image(cfg)
     }
 
     async fn import_volume(&self, volume: &str, source: &Path) -> Result<(), BoundaryError> {

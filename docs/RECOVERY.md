@@ -133,7 +133,7 @@ under the service, `tracon setup`, or any other command — and logs a warning
 naming what it changed:
 
 - `[harness] id` becomes `"claude"`, and a pinned `version` is cleared (empty is
-  the version this node's Claude Code image installs);
+  the version this node's harness bundle carries);
 - `[boundary] harness_image` and `[runtime.kubernetes] harness_image` are
   removed only when they are a retired harness's own defaults
   (`localhost/tracon-harness`, `localhost/tracon-harness-opencode`, and their

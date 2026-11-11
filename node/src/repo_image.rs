@@ -162,27 +162,6 @@ fn warm_lock(repo: &Path) -> Arc<AsyncMutex<()>> {
         .clone()
 }
 
-/// The image each repository's base cache was last warmed in by this
-/// process, and the default-branch commit it was warmed from.
-type Warmed = HashMap<PathBuf, (String, String)>;
-
-fn warmed_images() -> &'static StdMutex<Warmed> {
-    static WARMED: std::sync::LazyLock<StdMutex<Warmed>> =
-        std::sync::LazyLock::new(Default::default);
-    &WARMED
-}
-
-fn warmed_in(repo: &Path) -> Option<(String, String)> {
-    warmed_images().lock().unwrap().get(repo).cloned()
-}
-
-/// Forget that `repo`'s base cache was warmed, so the next warm-up runs even
-/// in the same image from the same commit: what it is lent changed, and the
-/// cache filled without that may be missing what needs it.
-pub(crate) fn forget_warmed(repo: &Path) {
-    warmed_images().lock().unwrap().remove(repo);
-}
-
 /// When the build of `recipe_hash` now running for `repo` started, if one
 /// is, its warm-up included: a forced build asked for meanwhile joins it
 /// rather than starting another, and whoever asked follows that one.
@@ -276,17 +255,6 @@ fn cool(repo: &Path, key: &str, error: &str) -> String {
         (until, error.to_string()),
     );
     retry_note(error, until)
-}
-
-/// What `tracon repo build` clears besides the repository's own recipe:
-/// every session layer that failed, and every builder outage still cooling
-/// for the repository, so its next session tries again at once.
-fn forget_session_failures(store: &Store, repo: &Path) {
-    let _ = store.forget_failed_session_layers(&repo.to_string_lossy());
-    cooldowns()
-        .lock()
-        .unwrap()
-        .retain(|(cooling, _), _| cooling != repo);
 }
 
 fn warm(repo: &Path, key: &str) {
@@ -449,7 +417,7 @@ fn build_labels(recipe_hash: &str) -> Vec<(String, String)> {
 
 /// Who a run in a repository's image is, which decides what the node's layer
 /// over it does: this uid and group, never root, with this home. Part of
-/// every key built from it, so an image made for one runtime is never taken
+/// every key built from it, so an image made for one profile is never taken
 /// for another's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunAs {
@@ -460,8 +428,7 @@ pub struct RunAs {
 impl RunAs {
     /// The profile every runtime runs repository images with: the stock
     /// base's own user, which every sandbox runs as.
-    pub fn of(cfg: &Config) -> Self {
-        let _ = cfg;
+    pub fn sandbox() -> Self {
         RunAs {
             uid: 65532,
             home: crate::sandbox_images::HOME.into(),
@@ -471,10 +438,6 @@ impl RunAs {
     /// What a key adds for this profile.
     fn key(&self) -> String {
         format!("pod:{}:{}", self.uid, self.home)
-    }
-
-    fn home(&self) -> &str {
-        &self.home
     }
 }
 
@@ -513,256 +476,13 @@ fn normalised(source: &str, run_as: &RunAs) -> String {
     )
 }
 
-/// How a harness goes onto a repository's image: what is copied out of the
-/// harness's own image, the environment that image sets, and the command that
-/// proves the result runs.
-struct HarnessLayer {
-    lines: String,
-    probe: String,
-}
-
-fn harness_layer(harness_id: &str, run_as: &RunAs) -> Option<HarnessLayer> {
-    match harness_id {
-        crate::adapter::claude::ClaudeAdapter::ID => Some(claude_layer(run_as)),
-        crate::adapter::native::NativeAdapter::ID => Some(native_layer(run_as)),
-        _ => None,
-    }
-}
-
-/// Claude Code over a repository's image: the one binary, and the
-/// environment the harness image sets.
-///
-/// Like the native harness's, it first refuses an image that would configure the
-/// harness, or change what it loads, underneath the node, and removes what
-/// such an image could have put where Claude Code looks (`layer_guard`):
-///
-/// - `/etc/claude-code`, the managed-settings directory Claude Code reads on
-///   Linux whatever its environment says (`managed-settings.json`, the
-///   `managed-settings.d` drop-ins, `managed-mcp.json`, and the managed
-///   `CLAUDE.md`), whose policy outranks every setting the node passes;
-/// - a `.claude` directory or `.claude.json` in the harness's home. The
-///   session reads its configuration from `CLAUDE_CONFIG_DIR`, which is the
-///   node's mount, so these are never meant to be read; removed so they
-///   cannot be;
-/// - anything at the binary's path or at the init's;
-/// - an environment that sets a `CLAUDE_*` or `ANTHROPIC_*` variable, other
-///   than the three the session always sets for itself (`CLAUDE_CONFIG_DIR`
-///   from this layer, `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` from the
-///   gateway wiring), or `NODE_OPTIONS`, a `BUN_*` variable, `LD_PRELOAD`
-///   or `LD_AUDIT`. Claude Code's binary is Bun, and
-///   `BUN_OPTIONS=--preload` runs a script inside it (observed against the
-///   pinned release).
-fn claude_layer(run_as: &RunAs) -> HarnessLayer {
-    // By path, as the session launches it: a `claude` the repository's image
-    // put earlier on `PATH` proves nothing.
-    let binary = crate::adapter::claude::ClaudeAdapter::BINARY;
-    let home = run_as.home();
-    let guard = layer_guard(
-        run_as,
-        &LINKLESS_DIRS,
-        &[
-            "/etc/claude-code",
-            binary,
-            &format!("{home}/.claude"),
-            &format!("{home}/.claude.json"),
-            POD_INIT_DIR,
-        ],
-        &[
-            "CLAUDE_[A-Za-z0-9_]*",
-            "ANTHROPIC_[A-Za-z0-9_]*",
-            "NODE_OPTIONS",
-            "BUN_[A-Za-z0-9_]*",
-            "LD_PRELOAD",
-            "LD_AUDIT",
-        ],
-        &[
-            "CLAUDE_CONFIG_DIR",
-            "ANTHROPIC_BASE_URL",
-            "ANTHROPIC_API_KEY",
-        ],
-    );
-    let probe = format!(
-        "{} && {binary} --version && git --version",
-        resolve_to_themselves(&[binary])
-    );
-    HarnessLayer {
-        lines: format!(
-            "{guard}\
-             COPY --from=harness {binary} {binary}\n\
-             ENV CLAUDE_CONFIG_DIR={home}/.claude DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1\n"
-        ),
-        probe: format!("{probe} && {POD_INIT} --version"),
-    }
-}
-
-/// `tracon-agent` over a repository's image: one static binary, which needs
-/// nothing from the image but `sh` and whatever the agent's commands run.
-///
-/// `layer_guard` refuses an image that sets a `TRACON_AGENT_*` variable (the
-/// agent reads its endpoint and key file from those when it is not given a
-/// providers file, which a session always is) or `LD_PRELOAD` or `LD_AUDIT`,
-/// and removes anything at the binary's path or the init's.
-fn native_layer(run_as: &RunAs) -> HarnessLayer {
-    let binary = crate::adapter::native::NativeAdapter::BINARY;
-    let guard = layer_guard(
-        run_as,
-        &LINKLESS_DIRS,
-        &[binary, POD_INIT_DIR],
-        &["TRACON_AGENT_[A-Za-z0-9_]*", "LD_PRELOAD", "LD_AUDIT"],
-        &[],
-    );
-    let probe = format!(
-        "{} && {binary} --version && git --version",
-        resolve_to_themselves(&[binary])
-    );
-    HarnessLayer {
-        lines: format!("{guard}COPY --from=harness {binary} {binary}\n"),
-        probe: format!("{probe} && {POD_INIT} --version"),
-    }
-}
-
-/// The directory a pod's layer copies its init into: the node's own, under a
-/// path a repository's image has no business providing.
-const POD_INIT_DIR: &str = "/usr/libexec/tracon";
-
-/// The root of every layer that puts a harness onto a repository's image:
-/// refuse what would change the harness underneath the node, by name, and
-/// remove what the harness would otherwise read (`removed`; the first must be
-/// gone afterwards, which `rm -f` alone does not prove where the image made
-/// it immutable). What it refuses:
-///
-/// - a symbolic link at one of `dirs`, the directories the layer copies into
-///   or under, which would send the harness somewhere the image chose, such
-///   as the workspace;
-/// - a non-empty `/etc/ld.so.preload`;
-/// - a variable in the image's environment matching one of `variables` and
-///   not named in `allowed`: those the session always sets for itself.
-///
-/// The repository's image is the operator's, trusted as their Dockerfile is:
-/// it builds with the network and supplies every command the agent runs. So
-/// none of this is a boundary against a hostile image. It catches an image
-/// that would change the harness by accident, and says what to change. A
-/// pod's layer does this as root and ends as the harness uid again.
-fn layer_guard(
-    run_as: &RunAs,
-    dirs: &[&str],
-    removed: &[&str],
-    variables: &[&str],
-    allowed: &[&str],
-) -> String {
-    let dirs = dirs.join(" ");
-    let removed_list = removed.join(" ");
-    let first = removed[0];
-    let patterns = variables
-        .iter()
-        .map(|pattern| format!("-e 's/^\\({pattern}\\)=.*/\\1/p'"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let unless = match allowed.is_empty() {
-        true => String::new(),
-        false => format!(
-            " | grep -v -x {}",
-            allowed
-                .iter()
-                .map(|name| format!("-e {name}"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        ),
-    };
-    let guard = format!(
-        "RUN for d in {dirs}; do if [ -L \"$d\" ]; then \
-         echo \"{LAYER_REFUSAL}makes $d a symbolic link, which would let it choose what the harness \
-         runs\" >&2; exit 1; fi; done \
-         && rm -rf {removed_list} && test ! -e {first} \
-         && if [ -s /etc/ld.so.preload ]; then echo \"{LAYER_REFUSAL}preloads libraries through \
-         /etc/ld.so.preload, which would load them into the harness\" >&2; exit 1; fi \
-         && found=$(env | sed -n {patterns}{unless} | tr '\\n' ' ') \
-         && if [ -n \"$found\" ]; then echo \"{LAYER_REFUSAL}sets ${{found% }}, which would reach \
-         the harness and change how it is configured or what it loads\" >&2; exit 1; fi\n"
-    );
-    let uid = run_as.uid;
-    format!("USER 0:0\n{guard}USER {uid}:{uid}\n")
-}
-
-/// The directories every layer copies into, or under (the binary's, and a
-/// pod's init's), none of which may be a symbolic link.
-const LINKLESS_DIRS: [&str; 5] = [
-    "/usr",
-    "/usr/local",
-    "/usr/local/bin",
-    "/usr/libexec",
-    POD_INIT_DIR,
-];
-
-/// A probe's first step: each of `paths`, and a pod's init, is the file the
-/// layer put there and not a link to somewhere else.
-fn resolve_to_themselves(paths: &[&str]) -> String {
-    let mut all = paths.to_vec();
-    all.push(POD_INIT);
-    format!(
-        "for p in {}; do if [ \"$(readlink -f \"$p\")\" != \"$p\" ]; then echo \"$p is not the \
-         file the layer put there\"; exit 1; fi; done",
-        all.join(" ")
-    )
-}
-
-/// How a refusal the node's own layer prints begins, so a failed build says
-/// that and not only that the build exited.
-const LAYER_REFUSAL: &str = "tracon: the repository's image ";
-
-/// The node's own reason in a failed layer build's log, where its layer
-/// refused the image: the line that carries it, from the repository's image
-/// on, whatever the builder put in front of it (BuildKit's step and time
-/// prefixes, Podman's nothing). Builders also echo the failing `RUN` line,
-/// which holds the same words around the unexpanded `${found% }`; that echo
-/// is not the reason, and it is the only line with a `$` in it.
-fn layer_refusal(log: &str) -> Option<String> {
-    log.lines().rev().find_map(|line| {
-        let at = line.find(LAYER_REFUSAL)?;
-        let why = line[at + "tracon: ".len()..].trim();
-        (!why.contains('$')).then(|| why.to_string())
-    })
-}
-
-/// Where a pod's session image keeps its init. Copied from the harness
-/// image's statically linked `tini`, so it runs on any base, and kept out of
-/// the paths a repository's own image installs to.
-const POD_INIT: &str = "/usr/libexec/tracon/tini";
-
-/// Bumped when the session layer itself changes.
-const SESSION_LAYER: &str = "1";
-
-/// The harness over a repository's image, for a pod-hosted node that runs
-/// harness images (Kubernetes without the sandbox protocol). The node's own
-/// layer is applied again because the image may be one the operator pinned
-/// by hand, which never had it. A pod also gets an init: a pod's first
-/// process is PID 1, which no signal it does not handle reaches and which
-/// has to reap what the harness's tools leave behind.
-fn layered(base: &str, harness_image: &str, layer: &HarnessLayer, run_as: &RunAs) -> String {
-    let init = format!("COPY --from=harness /usr/bin/tini-static {POD_INIT}\n");
-    format!(
-        "FROM {harness_image} AS harness\n{}{}{init}",
-        normalised(base, run_as),
-        layer.lines
-    )
-}
-
-/// Whether this node runs every repository on its stock base, as every
-/// runtime does. A
-/// sandbox there runs as the base's own user, in the `/work`, `/cache` and
-/// home the base made that user's; an image of the repository's own has none
-/// of them, and no layer over an arbitrary image can be trusted to add them.
-pub fn stock_base_only(cfg: &Config) -> bool {
-    crate::sandbox_images::bundled(cfg)
-}
-
-/// Why `entry` is refused on this node, if it is: it names an `image`, or a
-/// Dockerfile (whose text is `dockerfile`, where it could be read) that does
-/// not begin on the stock base.
-pub fn off_the_stock_base(cfg: &Config, entry: &Repo, dockerfile: Option<&str>) -> Option<String> {
-    if !stock_base_only(cfg) {
-        return None;
-    }
+/// Why `entry` is refused, if it is: it names an `image`, or a Dockerfile
+/// (whose text is `dockerfile`, where it could be read) that does not begin
+/// on the stock base. Every sandbox runs as the base's own user, in the
+/// `/work`, `/cache` and home the base made that user's; an image of the
+/// repository's own has none of them, and no layer over an arbitrary image
+/// can be trusted to add them.
+pub fn off_the_stock_base(entry: &Repo, dockerfile: Option<&str>) -> Option<String> {
     let path = entry.path.display();
     let migrate = "this node's sandboxes run every repository on the stock base; install what \
         it needs with root `build` steps in its [[repo]] entry, and fetch its dependencies with \
@@ -788,10 +508,7 @@ pub fn off_the_stock_base(cfg: &Config, entry: &Repo, dockerfile: Option<&str>) 
 /// [`off_the_stock_base`] for `repo`, reading its Dockerfile from the default
 /// branch as a build would. One that cannot be read is left to the build to
 /// report.
-pub async fn refusal(cfg: &Config, repo: &Path, entry: &Repo) -> Option<String> {
-    if !stock_base_only(cfg) {
-        return None;
-    }
+pub async fn refusal(repo: &Path, entry: &Repo) -> Option<String> {
     let dockerfile = match &entry.dockerfile {
         Some(path) if entry.image.is_none() => {
             let (_, commit) = default_commit(repo).await.ok()?;
@@ -803,7 +520,7 @@ pub async fn refusal(cfg: &Config, repo: &Path, entry: &Repo) -> Option<String> 
         }
         _ => None,
     };
-    off_the_stock_base(cfg, entry, dockerfile.as_deref())
+    off_the_stock_base(entry, dockerfile.as_deref())
 }
 
 /// What a Dockerfile's first `FROM` stands on, its flags and stage name
@@ -842,7 +559,7 @@ fn first_from(dockerfile: &str) -> Option<String> {
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct SessionImage {
-    /// `None` is the harness's own image.
+    /// `None` is the stock base.
     pub image: Option<String>,
     /// The repository image under it: what its checks run in.
     pub toolchain_image: Option<String>,
@@ -876,12 +593,6 @@ impl SessionImage {
     /// runs on the stock base, and one in an image other than its toolchain
     /// runs from the snapshot prepared in that toolchain.
     pub fn source(&self, cfg: &Config) -> &'static str {
-        if !crate::sandbox_images::bundled(cfg) {
-            return match self.image {
-                Some(_) => "repository image",
-                None => "harness image",
-            };
-        }
         match (&self.image, &self.toolchain_image) {
             (None, _) => STOCK_BASE,
             (Some(image), Some(toolchain)) if image != toolchain => {
@@ -898,12 +609,10 @@ impl SessionImage {
 
     /// The image a session reports it runs in: the stock base, where a
     /// session from the bundle has none of its own.
-    pub fn reported(&self, cfg: &Config) -> Option<String> {
-        match (&self.image, crate::sandbox_images::bundled(cfg)) {
-            (Some(image), _) => Some(image.clone()),
-            (None, true) => Some(crate::sandbox_images::base_image(cfg)),
-            (None, false) => None,
-        }
+    pub fn reported(&self, cfg: &Config) -> String {
+        self.image
+            .clone()
+            .unwrap_or_else(|| crate::sandbox_images::base_image(cfg))
     }
 
     fn aside(note: impl Into<String>) -> Self {
@@ -914,15 +623,17 @@ impl SessionImage {
     }
 }
 
-/// The image a session on `repo` runs in: the repository's, with the harness
-/// layered on, where its entry names one.
+/// The image a session on `repo` runs in. Nothing is layered over it: the
+/// harness comes from the bundle. The repository's prepared snapshot where
+/// its entry prepares anything (made now, once, if there is none for what
+/// the default branch needs), else its own image, else the stock base.
 ///
 /// A repository with no image yet builds one here, and `building` is called
 /// first because that takes minutes. One whose Dockerfile has since moved
 /// starts on the image it has and is rebuilt behind the session, so a
 /// Dockerfile change costs the next session nothing and this one no wait.
-/// Anything that stops the session having its repository's image leaves it in
-/// the harness's own, with the reason: a session that cannot build is still
+/// Anything that stops the session having its repository's image leaves it
+/// on the stock base, with the reason: a session that cannot build is still
 /// the one that can fix what broke. `Err` is a repository this node refuses
 /// ([`refusal`]), whose session does not start.
 pub async fn session_image(
@@ -930,59 +641,52 @@ pub async fn session_image(
     cfg: &Arc<Config>,
     store: &Arc<Store>,
     repo: &Path,
-    (harness_id, harness_version): (&str, &str),
     building: &(dyn Fn() + Send + Sync),
 ) -> Result<SessionImage, String> {
     let repos = cfg.repos();
-    if let Some(entry) = repos.iter().find(|entry| entry.matches(repo)) {
-        if let Some(refused) = refusal(cfg, repo, entry).await {
-            return Err(refused);
-        }
-    }
-    if crate::sandbox_images::bundled(cfg) {
-        let Some(entry) = repos.iter().find(|entry| entry.matches(repo)) else {
-            return Ok(SessionImage::default());
-        };
-        return Ok(sandbox_session_image(backend, cfg, store, repo, entry, building).await);
-    }
-    let Some(entry) = repos
-        .iter()
-        .find(|entry| entry.matches(repo))
-        .filter(|entry| entry.image.is_some() || entry.dockerfile.is_some())
-    else {
+    let Some(entry) = repos.iter().find(|entry| entry.matches(repo)) else {
         return Ok(SessionImage::default());
     };
-    let run_as = RunAs::of(cfg);
-    let Some(layer) = harness_layer(harness_id, &run_as) else {
-        return Ok(SessionImage::aside(format!(
-            "the {harness_id} harness runs in its own image; it is not layered onto a repository's"
-        )));
-    };
-    let Some(builder) = backend.image_builder() else {
-        return Ok(SessionImage::aside(format!(
-            "the {} runtime cannot build images",
-            backend.kind()
-        )));
-    };
-    if !backend.runs_sessions_in_repository_images() {
-        return Ok(SessionImage::aside(format!(
-            "the {} runtime runs a session in its harness's own image",
-            backend.kind()
-        )));
+    if let Some(refused) = refusal(repo, entry).await {
+        return Err(refused);
     }
-    let base = match repository_base(backend, cfg, store, repo, entry, builder, building).await {
-        Ok(base) => base,
-        Err(aside) => return Ok(aside),
+    let toolchain = match (&entry.image, &entry.dockerfile, backend.image_builder()) {
+        (None, None, _) if entry.build.is_empty() => crate::environment::harness_image(cfg),
+        (_, _, Some(builder)) => {
+            match repository_base(backend, cfg, store, repo, entry, builder, building).await {
+                Ok(base) => base,
+                Err(aside) => return Ok(aside),
+            }
+        }
+        (_, _, None) => {
+            return Ok(SessionImage::aside(format!(
+                "the {} runtime cannot build images",
+                backend.kind()
+            )))
+        }
     };
-    let runner = backend.runner_for(harness_id, Vec::new());
-    let harness = SessionHarness {
-        id: harness_id,
-        version: harness_version,
-        image: backend.harness_image(cfg, harness_id),
-        layer,
-        run_as,
+    let environment = crate::environment::environment_for(cfg, store, Some(repo));
+    let snapshot = match environment.image == toolchain {
+        true => {
+            crate::sandbox_images::snapshot_for(
+                backend.as_ref(),
+                cfg,
+                store,
+                repo,
+                &environment,
+                true,
+            )
+            .await
+        }
+        // A standing image is what this session runs; the one its checks
+        // will run is still being built.
+        false => None,
     };
-    Ok(ensure_session_with(builder, runner.as_ref(), store, repo, &base, &harness).await)
+    Ok(SessionImage {
+        image: Some(snapshot.unwrap_or_else(|| toolchain.clone())),
+        toolchain_image: Some(toolchain),
+        note: None,
+    })
 }
 
 /// The repository's own image a session on `repo` stands on: the one its
@@ -998,7 +702,6 @@ async fn repository_base(
     builder: &dyn ImageBuilder,
     building: &(dyn Fn() + Send + Sync),
 ) -> Result<String, SessionImage> {
-    let run_as = RunAs::of(cfg);
     Ok(match &entry.image {
         Some(image) => image.clone(),
         None => {
@@ -1010,7 +713,7 @@ async fn repository_base(
             };
             match standing {
                 Some(row) => {
-                    let moved = recipe(repo, entry, &run_as)
+                    let moved = recipe(repo, entry, &RunAs::sandbox())
                         .await
                         .is_ok_and(|recipe| recipe.hash != row.recipe_hash);
                     if moved {
@@ -1037,188 +740,6 @@ async fn repository_base(
     })
 }
 
-/// A session's image where sandboxes run on the stock base: nothing is
-/// layered, since the harness comes from the bundle. The repository's
-/// prepared snapshot where its entry prepares anything (made now, once, if
-/// there is none for what the default branch needs), else its own image,
-/// else the stock base.
-async fn sandbox_session_image(
-    backend: &Arc<dyn Backend>,
-    cfg: &Arc<Config>,
-    store: &Arc<Store>,
-    repo: &Path,
-    entry: &Repo,
-    building: &(dyn Fn() + Send + Sync),
-) -> SessionImage {
-    let toolchain = match (&entry.image, &entry.dockerfile, backend.image_builder()) {
-        (None, None, _) if entry.build.is_empty() => crate::environment::harness_image(cfg),
-        (_, _, Some(builder)) => {
-            match repository_base(backend, cfg, store, repo, entry, builder, building).await {
-                Ok(base) => base,
-                Err(aside) => return aside,
-            }
-        }
-        (_, _, None) => {
-            return SessionImage::aside(format!(
-                "the {} runtime cannot build images",
-                backend.kind()
-            ))
-        }
-    };
-    let environment = crate::environment::environment_for(cfg, store, Some(repo));
-    let snapshot = match environment.image == toolchain {
-        true => {
-            crate::sandbox_images::snapshot_for(
-                backend.as_ref(),
-                cfg,
-                store,
-                repo,
-                &environment,
-                true,
-            )
-            .await
-        }
-        // A standing image is what this session runs; the one its checks
-        // will run is still being built.
-        false => None,
-    };
-    SessionImage {
-        image: Some(snapshot.unwrap_or_else(|| toolchain.clone())),
-        toolchain_image: Some(toolchain),
-        note: None,
-    }
-}
-
-struct SessionHarness<'a> {
-    id: &'a str,
-    version: &'a str,
-    image: String,
-    layer: HarnessLayer,
-    run_as: RunAs,
-}
-
-async fn ensure_session_with(
-    builder: &dyn ImageBuilder,
-    runner: &dyn Runner,
-    store: &Store,
-    repo: &Path,
-    base: &str,
-    harness: &SessionHarness<'_>,
-) -> SessionImage {
-    let unlayered = |note: String| SessionImage {
-        toolchain_image: Some(base.to_string()),
-        note: Some(note),
-        image: None,
-    };
-    let lock = build_lock(repo);
-    let _building = lock.lock().await;
-    // Keyed on what the harness's tag names now: a harness upgrade rebuilds
-    // this layer and leaves the repository's image, and its evidence, alone.
-    let Some(harness_image) = builder.identity(&harness.image).await else {
-        // A builder that cannot reach its registry cannot find anything, and
-        // says why; a harness image a pod pulls is the release's, which no
-        // `tracon setup` makes.
-        if let Some(why) = builder.unavailable().await {
-            return unlayered(why);
-        }
-        return unlayered(format!(
-            "the harness image {} could not be found in its registry",
-            harness.image
-        ));
-    };
-    let mut hash = Sha256::new();
-    for part in [SESSION_LAYER, base, &harness_image, &harness.layer.lines] {
-        hash.update(part.as_bytes());
-        hash.update([0]);
-    }
-    hash.update(harness.run_as.key().as_bytes());
-    hash.update([0]);
-    let key = hex::encode(hash.finalize());
-    let kind = format!("session:{}", harness.id);
-    let repo_path = repo.to_string_lossy();
-    let ready = store.ready_repo_image(&repo_path, &kind).ok().flatten();
-    if let Some(row) = ready.as_ref().filter(|row| row.recipe_hash == key) {
-        if builder.presence(&row.image).await != Presence::Absent {
-            return SessionImage {
-                image: Some(row.image.clone()),
-                toolchain_image: Some(base.to_string()),
-                note: None,
-            };
-        }
-    }
-    let latest = store.latest_repo_image(&repo_path, &kind).ok().flatten();
-    if let Some(failed) = latest.filter(|row| row.status == "failed" && row.recipe_hash == key) {
-        return unlayered(failed.error);
-    }
-    if let Some(why) = cooling(repo, &key) {
-        return unlayered(why);
-    }
-    if let Some(why) = builder.unavailable().await {
-        return unlayered(cool(repo, &key, &why));
-    }
-    let started = RepoImageStart {
-        repo_path: &repo_path,
-        kind: &kind,
-        recipe_hash: &key,
-        source_ref: "",
-        source_commit: "",
-        parent_image: base,
-    };
-    let id = match store.start_repo_image(&started) {
-        Ok(id) => id,
-        Err(error) => return unlayered(error.to_string()),
-    };
-    let built = build_session(
-        builder,
-        runner,
-        repo,
-        base,
-        &harness_image,
-        (&key, &id),
-        harness,
-    )
-    .await;
-    match built {
-        Ok(built) => {
-            let _ = store.finish_repo_image(&id, Ok(&built.image), &built.log_tail, &[]);
-            warm(repo, &key);
-            supersede(builder, store, repo, &kind).await;
-            SessionImage {
-                image: Some(built.image),
-                toolchain_image: Some(base.to_string()),
-                note: None,
-            }
-        }
-        Err(failure) => {
-            tracing::warn!(repo = %repo.display(), error = %failure.error, "session image build failed");
-            settle_failure(store, &id, &failure);
-            match failure.transient {
-                true => unlayered(cool(repo, &key, &failure.error)),
-                false => unlayered(failure.error),
-            }
-        }
-    }
-}
-
-/// Build the layer and prove the harness runs in it before anything is told
-/// to launch there: a base image with a different libc, or without Git, is
-/// found here and not as a session that dies at start.
-async fn build_session(
-    builder: &dyn ImageBuilder,
-    runner: &dyn Runner,
-    repo: &Path,
-    base: &str,
-    harness_image: &str,
-    build: (&str, &str),
-    harness: &SessionHarness<'_>,
-) -> Result<BuiltImage, BuildFailure> {
-    let begun = std::time::Instant::now();
-    let built =
-        build_session_layer(builder, runner, repo, base, harness_image, build, harness).await;
-    count_build("session", repo, built.as_ref().err(), begun);
-    built
-}
-
 /// What a build is counted as in `tracon_image_builds_total`.
 fn count_build(
     image: &str,
@@ -1241,85 +762,6 @@ fn count_build(
     );
 }
 
-/// `build` is the layer's key and the row its build is recorded as.
-async fn build_session_layer(
-    builder: &dyn ImageBuilder,
-    runner: &dyn Runner,
-    repo: &Path,
-    base: &str,
-    harness_image: &str,
-    (key, id): (&str, &str),
-    harness: &SessionHarness<'_>,
-) -> Result<BuiltImage, BuildFailure> {
-    let staged = |error: String| BuildFailure {
-        error,
-        log_tail: String::new(),
-        ..Default::default()
-    };
-    let stage = stage_dir(builder).map_err(|e| staged(e.to_string()))?;
-    let containerfile = stage.path().join("Session.Containerfile");
-    std::fs::write(
-        &containerfile,
-        layered(base, harness_image, &harness.layer, &harness.run_as),
-    )
-    .map_err(|e| staged(e.to_string()))?;
-    let empty = stage.path().join("empty");
-    std::fs::create_dir_all(&empty).map_err(|e| staged(e.to_string()))?;
-    let built = builder
-        .build(ImageBuild {
-            tag: &build_tag(&format!("{}-{}", image_name(repo), harness.id), key, id),
-            containerfile: &containerfile,
-            context: &empty,
-            labels: &build_labels(key),
-            timeout: BUILD_TIMEOUT,
-        })
-        .await
-        .map_err(|mut failure| {
-            if let Some(why) = layer_refusal(&failure.log_tail) {
-                failure.error = why;
-            }
-            failure
-        })?;
-    let probe = runner
-        .run_probe(RunnerCommand {
-            argv: ["sh", "-c", &harness.layer.probe]
-                .map(String::from)
-                .to_vec(),
-            image: Some(built.image.clone()),
-            name: crate::config::resource_name(&format!("probe-{}", uuid::Uuid::now_v7().simple())),
-            labels: crate::runner::RunLabels {
-                harness: Some(harness.id.to_string()),
-                ..crate::runner::RunLabels::of(crate::runner::RunKind::Probe)
-            }
-            .repo_dir(Some(repo)),
-            ..Default::default()
-        })
-        .await;
-    let said = match &probe {
-        Ok(out) => String::from_utf8_lossy(&[out.stdout.clone(), out.stderr.clone()].concat())
-            .trim()
-            .to_string(),
-        Err(error) => error.to_string(),
-    };
-    // A probe the runtime could not run says nothing about the image.
-    let unrun = probe.is_err();
-    if probe.is_ok_and(|out| out.status.success()) && said.contains(harness.version) {
-        return Ok(built);
-    }
-    builder.remove(&built.image).await;
-    Err(BuildFailure {
-        error: match unrun {
-            true => format!("the harness probe could not run: {said}"),
-            false => format!(
-                "{} {} does not run in the repository's image",
-                harness.id, harness.version
-            ),
-        },
-        log_tail: said,
-        transient: unrun,
-    })
-}
-
 /// Make sure the image for `repo`'s current recipe exists, building it if it
 /// does not. `force` rebuilds even an image that is current, and retries a
 /// recipe that already failed.
@@ -1334,13 +776,10 @@ pub async fn ensure_base(
     repo: &Path,
     force: bool,
 ) -> Ensured {
-    if force {
-        forget_session_failures(store, repo);
-    }
     let Some(entry) = building_entry(cfg, repo) else {
         return Ensured::Unconfigured;
     };
-    if let Some(reason) = refusal(cfg, repo, &entry).await {
+    if let Some(reason) = refusal(repo, &entry).await {
         return Ensured::Unavailable { reason };
     }
     // An entry that keeps lending credentials to a preparation a peer's
@@ -1388,13 +827,13 @@ pub async fn ensure_base(
     .await
 }
 
-/// Fill the repository's base dependency cache by preparing its default
-/// branch in the image just built. This is the only thing that ever writes
-/// that cache: what is in it came from source the operator already merged,
-/// through the entry's own `prepare` and `egress`, so every candidate and
-/// every session can start from a copy of it without inheriting anything
-/// another candidate installed. A warm-up that fails leaves a cache that is
-/// merely colder.
+/// Prepare the repository's default branch in its image and snapshot the
+/// result, which its runs start from (`sandbox_images::warm_after`). This is
+/// the only thing that ever makes that snapshot: what is in it came from
+/// source the operator already merged, through the entry's own `prepare` and
+/// `egress`, so every candidate and every session can start from it without
+/// inheriting anything another candidate installed. A warm-up that fails
+/// leaves runs to prepare from colder.
 ///
 /// It is also the one preparation lent the entry's `prepare_credentials`: it
 /// runs source the operator merged, not a candidate's, and what it fetches
@@ -1405,10 +844,10 @@ pub async fn ensure_base(
 /// into the container at all: the node attaches each to the requests for its
 /// declared host instead.
 ///
-/// One warm-up at a time per repository, in the image the node pins when it
-/// starts: one asked for while another runs waits, and warms nothing if that
-/// one already warmed the same image from the same commit. Run again, without
-/// a rebuild, once the operator saves a host a warm-up was refused.
+/// One warm-up at a time per repository: one asked for while another runs
+/// waits, and makes nothing if that one already made the snapshot it would,
+/// or failed to. Run again, without a rebuild, once the operator saves a
+/// host a warm-up was refused.
 pub(crate) async fn warm_base_cache(
     backend: &dyn Backend,
     cfg: &Config,
@@ -1422,20 +861,17 @@ pub(crate) async fn warm_base_cache(
     if environment.prepare.is_empty() {
         return;
     }
-    // With `sandbox_images` or on Apple, a repository prepared in the stock
-    // base has a snapshot too, so any entry with a `prepare` is warmed.
-    let entry = match crate::sandbox_images::bundled(cfg) {
-        true => cfg
-            .repos()
-            .iter()
-            .find(|entry| entry.matches(repo))
-            .cloned(),
-        false => building_entry(cfg, repo),
-    };
-    let Some(entry) = entry else {
+    // A repository prepared on the stock base has a snapshot too, so any
+    // entry with a `prepare` is warmed.
+    let Some(entry) = cfg
+        .repos()
+        .iter()
+        .find(|entry| entry.matches(repo))
+        .cloned()
+    else {
         return;
     };
-    if let Some(refused) = refusal(cfg, repo, &entry).await {
+    if let Some(refused) = refusal(repo, &entry).await {
         tracing::warn!(repo = %repo.display(), %refused, "base cache not warmed");
         return;
     }
@@ -1445,84 +881,17 @@ pub(crate) async fn warm_base_cache(
         tracing::warn!(repo = %repo.display(), "base cache not warmed: the entry is held");
         return;
     }
-    let commit = match default_commit(repo).await {
-        Ok((_, commit)) => commit,
+    let secrets = match lend(cfg, repo, &entry) {
+        Ok(secrets) => secrets,
         Err(error) => {
-            tracing::warn!(repo = %repo.display(), %error, "base dependency cache not warmed");
+            tracing::warn!(repo = %repo.display(), %error, "no snapshot made");
             return;
         }
     };
-    let warming = (environment.image.clone(), commit.clone());
-    if crate::sandbox_images::bundled(cfg) {
-        let secrets = match lend(cfg, repo, &entry) {
-            Ok(secrets) => secrets,
-            Err(error) => {
-                tracing::warn!(repo = %repo.display(), %error, "no snapshot made");
-                return;
-            }
-        };
-        let warmed = crate::sandbox_images::warm_after(
-            backend,
-            cfg,
-            store,
-            repo,
-            &environment,
-            &secrets,
-            seen,
-        );
-        if let Err(error) = warmed.await {
-            tracing::warn!(repo = %repo.display(), %error, "no snapshot made");
-        }
-        return;
-    }
-    if warmed_in(repo).as_ref() == Some(&warming) {
-        tracing::info!(repo = %repo.display(), image = %environment.image, "base cache already warmed in this image");
-        return;
-    }
-    let warmed = async {
-        let secrets = lend(cfg, repo, &entry)?;
-        let tree = crate::review::snapshot_candidate(
-            &repo.to_string_lossy(),
-            &commit,
-            cfg.live().supervision.max_snapshot_bytes,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        let id = uuid::Uuid::now_v7().simple().to_string();
-        let work = crate::config::resource_name(&format!("warm-{id}"));
-        backend
-            .import_writable(&work, &tree.root)
-            .await
-            .map_err(|error| error.to_string())?;
-        let runner = backend.runner(Vec::new());
-        let prepared = crate::review::checks::run_preparation_with(
-            backend,
-            runner.as_ref(),
-            &environment,
-            (&work, &environment.cache_volume),
-            &crate::config::resource_name(&format!("w-{}", &id[..12])),
-            tokio::time::Instant::now() + Duration::from_secs(environment.timeout_secs),
-            &crate::review::checks::RunToCompletion,
-            "the base cache stays as it was",
-            &secrets,
-            Some(repo),
-            crate::telemetry::Purpose::Warm,
-        )
-        .await;
-        let _ = backend.remove_volume(&work).await;
-        prepared.map_err(|stopped| stopped.to_string())
-    };
-    match warmed.await {
-        Ok(()) => {
-            tracing::info!(repo = %repo.display(), image = %environment.image, "base dependency cache warmed");
-            warmed_images()
-                .lock()
-                .unwrap()
-                .insert(repo.to_path_buf(), warming);
-        }
-        Err(error) => {
-            tracing::warn!(repo = %repo.display(), %error, "base dependency cache not warmed")
-        }
+    let warmed =
+        crate::sandbox_images::warm_after(backend, cfg, store, repo, &environment, &secrets, seen);
+    if let Err(error) = warmed.await {
+        tracing::warn!(repo = %repo.display(), %error, "no snapshot made");
     }
 }
 
@@ -1561,7 +930,7 @@ pub async fn environment(
     if let Some(repo) = repo {
         let repos = cfg.repos();
         if let Some(entry) = repos.iter().find(|entry| entry.matches(repo)) {
-            if let Some(refused) = refusal(cfg, repo, entry).await {
+            if let Some(refused) = refusal(repo, entry).await {
                 return Err(refused);
             }
         }
@@ -1623,7 +992,7 @@ async fn ensure_with(
         },
         None => Ensured::Unavailable { reason: error },
     };
-    let recipe = match recipe(repo, entry, &RunAs::of(cfg)).await {
+    let recipe = match recipe(repo, entry, &RunAs::sandbox()).await {
         Ok(recipe) => recipe,
         Err(error) => return fallback(error),
     };
@@ -1739,9 +1108,9 @@ fn settle_failure(store: &Store, id: &str, failure: &BuildFailure) {
 /// or, for a builder that keeps a previous generation (a registry a pod may
 /// still be about to pull from), the build before that. Nothing a kept build
 /// of any kind still names is removed, as its image or as the image it
-/// stands on, and nothing this node did not build: a session layer's base is
+/// stands on, and nothing this node did not build: a snapshot's image is
 /// removed with it only when it is a repository image of this node's, never
-/// an image an entry pinned.
+/// the stock base.
 pub(crate) async fn supersede(builder: &dyn ImageBuilder, store: &Store, repo: &Path, kind: &str) {
     let depth = match builder.retains_previous() {
         true => 2,
@@ -2019,7 +1388,7 @@ async fn build_base(
         .await?;
 
     let layer = stage.path().join("Normalised.Containerfile");
-    std::fs::write(&layer, normalised(&source.image, &RunAs::of(cfg)))
+    std::fs::write(&layer, normalised(&source.image, &RunAs::sandbox()))
         .map_err(|e| staged(e.to_string()))?;
     let empty = stage.path().join("empty");
     std::fs::create_dir_all(&empty).map_err(|e| staged(e.to_string()))?;
@@ -3067,10 +2436,6 @@ mod tests {
     const BASE_IMAGE: &str =
         "localhost/tracon-repo-app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-    fn claude(image: &str) -> SessionHarness<'static> {
-        claude_as(image, pod())
-    }
-
     /// What `session_started` says a session runs in, on each kind of node.
     #[test]
     fn a_session_reports_the_image_it_runs_in_and_where_that_came_from() {
@@ -3094,7 +2459,7 @@ mod tests {
             let base = crate::sandbox_images::base_image(cfg);
             let none = SessionImage::default();
             assert_eq!(none.source(cfg), STOCK_BASE);
-            assert_eq!(none.reported(cfg), Some(base.clone()));
+            assert_eq!(none.reported(cfg), base);
             assert_eq!(image(&base, &base).source(cfg), STOCK_BASE);
             assert_eq!(
                 image(BASE_IMAGE, BASE_IMAGE).source(cfg),
@@ -3102,85 +2467,16 @@ mod tests {
             );
             let prepared = image(snapshot, BASE_IMAGE);
             assert_eq!(prepared.source(cfg), "prepared snapshot");
-            assert_eq!(prepared.reported(cfg).as_deref(), Some(snapshot));
+            assert_eq!(prepared.reported(cfg), snapshot);
             assert_eq!(image(snapshot, &base).source(cfg), "prepared snapshot");
         }
     }
 
-    fn claude_as(image: &str, run_as: RunAs) -> SessionHarness<'static> {
-        SessionHarness {
-            id: "claude",
-            version: "2.1.295",
-            image: image.to_string(),
-            layer: harness_layer("claude", &run_as).unwrap(),
-            run_as,
-        }
-    }
-
     fn pod() -> RunAs {
-        RunAs::of(&kubernetes())
+        RunAs::sandbox()
     }
 
-    fn kubernetes() -> Config {
-        Config::pod_hosted()
-    }
-
-    /// A session layer over an image an entry pinned is replaced without
-    /// that image going with it: the node removes only what it built.
-    #[tokio::test]
-    async fn a_pinned_base_is_never_removed_with_its_session_layer() {
-        let repo = Path::new("/src/pinned");
-        let store = Store::open_in_memory().unwrap();
-        let builder = FakeBuilder::default();
-        let runner = ProbeRunner::saying("2.1.295 (Claude Code)", 0);
-        let harness = claude("localhost/tracon-harness-claude");
-        let other = BASE_IMAGE.replace("aaaa", "bbbb");
-        let first =
-            ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
-        let second = ensure_session_with(&builder, &runner, &store, repo, &other, &harness).await;
-        assert_ne!(first.image, second.image);
-        let removed = builder.removed.lock().unwrap().clone();
-        assert_eq!(removed, vec![first.image.unwrap()]);
-    }
-
-    /// A harness that does not run in the repository's image is found when the
-    /// layer is built. The session keeps the harness's own image and is told
-    /// why, and the build is not repeated at every start.
-    #[tokio::test]
-    async fn a_harness_that_does_not_run_in_the_image_leaves_the_session_in_its_own() {
-        let repo = Path::new("/src/musl-app");
-        let store = Store::open_in_memory().unwrap();
-        let builder = FakeBuilder::default();
-        let harness = claude("localhost/tracon-harness-claude");
-        for (says, exit) in [("sh: claude: not found", 127), ("9.9.9 (Claude Code)", 0)] {
-            let store = Store::open_in_memory().unwrap();
-            let runner = ProbeRunner::saying(says, exit);
-            let got =
-                ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
-            assert_eq!(got.image, None, "{says}");
-            assert!(got.note.unwrap().contains("does not run"), "{says}");
-            let row = store
-                .latest_repo_image("/src/musl-app", "session:claude")
-                .unwrap()
-                .unwrap();
-            assert_eq!(
-                (row.status.as_str(), row.log_tail.as_str()),
-                ("failed", says)
-            );
-        }
-        assert_eq!(builder.removed.lock().unwrap().len(), 2);
-
-        let runner = ProbeRunner::saying("nope", 1);
-        ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
-        let builds = builder.builds.lock().unwrap().len();
-        let again =
-            ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
-        assert!(again.note.is_some());
-        assert_eq!(builder.builds.lock().unwrap().len(), builds);
-    }
-
-    /// A runtime that pulls its harness images from a registry and builds
-    /// with `builder`.
+    /// A runtime that builds with `builder`.
     struct Pulling {
         builder: FakeBuilder,
     }
@@ -3207,12 +2503,6 @@ mod tests {
         }
         fn image_builder(&self) -> Option<&dyn ImageBuilder> {
             Some(&self.builder)
-        }
-        fn harness_image(&self, _cfg: &Config, harness_id: &str) -> String {
-            format!("ghcr.io/cosmicspork/tracon-harness-{harness_id}:9")
-        }
-        fn runs_sessions_in_repository_images(&self) -> bool {
-            true
         }
         async fn import_volume(
             &self,
@@ -3241,132 +2531,6 @@ mod tests {
         async fn reconcile(&self, _names: &[String]) {}
     }
 
-    /// The layer copies the harness out of its image and has to set what that
-    /// image sets; the image's own definition is the authority for both.
-    #[test]
-    fn the_claude_layer_carries_what_the_harness_image_sets() {
-        let image = include_str!("../../containers/harness-claude/Containerfile");
-        let layer = harness_layer("claude", &pod()).unwrap().lines;
-        assert!(image.contains("/usr/local/bin/claude"));
-        // The image's own home is root's; the layer's is the profile's.
-        assert!(image.contains("CLAUDE_CONFIG_DIR=/root/.claude"));
-        assert!(layer.contains("CLAUDE_CONFIG_DIR=/home/harness/.claude"));
-        for variable in ["DISABLE_AUTOUPDATER=1", "DISABLE_TELEMETRY=1"] {
-            assert!(
-                image.contains(variable),
-                "{variable} left the harness image"
-            );
-            assert!(layer.contains(variable), "{variable} is not in the layer");
-        }
-        let exported: usize = image
-            .lines()
-            .skip_while(|line| !line.starts_with("ENV "))
-            .take_while(|line| line.starts_with("ENV ") || line.starts_with("    "))
-            .count();
-        assert_eq!(
-            exported, 3,
-            "the harness image sets something the layer does not"
-        );
-        assert!(harness_layer("pi", &pod()).is_none());
-    }
-
-    /// The native harness needs one static binary and sets no environment;
-    /// a repository image that would steer its endpoint is refused.
-    #[test]
-    fn the_native_layer_copies_one_binary_and_guards_its_variables() {
-        let image = include_str!("../../containers/harness-native/Containerfile");
-        assert!(image.contains("/usr/local/bin/tracon-agent"));
-        assert!(
-            !image.lines().any(|line| line.starts_with("ENV ")),
-            "the harness image sets something the layer does not"
-        );
-        let layer = harness_layer("native", &pod()).unwrap();
-        assert!(layer.lines.contains(
-            "COPY --from=harness /usr/local/bin/tracon-agent /usr/local/bin/tracon-agent\n"
-        ));
-        assert!(layer.lines.contains("TRACON_AGENT_[A-Za-z0-9_]*"));
-        assert!(!layer.lines.contains("LD_LIBRARY_PATH"));
-        assert!(layer
-            .lines
-            .contains("rm -rf /usr/local/bin/tracon-agent /usr/libexec/tracon"));
-        assert!(layer
-            .probe
-            .contains("/usr/local/bin/tracon-agent --version && git --version"));
-    }
-
-    /// Claude Code's guard, for a harness whose home is `home`.
-    fn claude_guard(home: &str) -> String {
-        r#"RUN for d in /usr /usr/local /usr/local/bin /usr/libexec /usr/libexec/tracon; do if [ -L "$d" ]; then echo "tracon: the repository's image makes $d a symbolic link, which would let it choose what the harness runs" >&2; exit 1; fi; done && rm -rf /etc/claude-code /usr/local/bin/claude HOME/.claude HOME/.claude.json /usr/libexec/tracon && test ! -e /etc/claude-code && if [ -s /etc/ld.so.preload ]; then echo "tracon: the repository's image preloads libraries through /etc/ld.so.preload, which would load them into the harness" >&2; exit 1; fi && found=$(env | sed -n -e 's/^\(CLAUDE_[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(ANTHROPIC_[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(NODE_OPTIONS\)=.*/\1/p' -e 's/^\(BUN_[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(LD_PRELOAD\)=.*/\1/p' -e 's/^\(LD_AUDIT\)=.*/\1/p' | grep -v -x -e CLAUDE_CONFIG_DIR -e ANTHROPIC_BASE_URL -e ANTHROPIC_API_KEY | tr '\n' ' ') && if [ -n "$found" ]; then echo "tracon: the repository's image sets ${found% }, which would reach the harness and change how it is configured or what it loads" >&2; exit 1; fi
-"#
-        .replace("HOME", home)
-    }
-
-    /// An image a harness layer refuses says why in the session's note, not
-    /// only that the build failed, from either builder's log; the reason is
-    /// what the next session on the same images is told too.
-    #[tokio::test]
-    async fn a_refused_layer_names_the_variable_in_the_note() {
-        let says = "tracon: the repository's image sets TRACON_AGENT_BASE_URL, which would \
-                    reach the harness and change how it is configured or what it loads";
-        assert_eq!(
-            layer_refusal(&format!("STEP 9/12: RUN rm -rf ...\n{says}\nError: exit 1")).as_deref(),
-            Some(&says["tracon: ".len()..])
-        );
-        assert_eq!(
-            layer_refusal(&format!(
-                "#9 0.214 {says}\n#9 ERROR: process did not complete"
-            )),
-            layer_refusal(says)
-        );
-        assert_eq!(layer_refusal("Error: no such package"), None);
-        // Podman's error line echoes the step after the output it printed.
-        let echoed = format!(
-            "{says}\nError: building at STEP \"RUN for d in /opt ... echo \"tracon: the \
-             repository's image makes $d a symbolic link ... echo \"tracon: the repository's image \
-             sets ${{found% }}, which would reach the harness and change how it is configured or \
-             what it loads\" >&2; exit 1; fi\": while running runtime: exit status 1"
-        );
-        assert_eq!(layer_refusal(&echoed), layer_refusal(says));
-        assert_eq!(layer_refusal(echoed.lines().last().unwrap()), None);
-
-        let repo = Path::new("/src/app");
-        let store = Store::open_in_memory().unwrap();
-        let builder = FakeBuilder::default();
-        *builder.fail.lock().unwrap() = true;
-        *builder.fail_log.lock().unwrap() =
-            Some(format!("STEP 9/12: RUN ...\n{says}\nError: exit 1"));
-        let runner = ProbeRunner::saying("unused", 0);
-        let harness = SessionHarness {
-            id: "native",
-            version: crate::adapter::native::NativeAdapter::PINNED_VERSION,
-            image: "localhost/tracon-harness-native".into(),
-            layer: harness_layer("native", &pod()).unwrap(),
-            run_as: pod(),
-        };
-        for _ in 0..2 {
-            let got =
-                ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
-            assert_eq!(got.image, None);
-            assert_eq!(got.note.as_deref(), Some(&says["tracon: ".len()..]));
-        }
-        // The second session was told from the recorded failure.
-        let row = store
-            .latest_repo_image("/src/app", "session:native")
-            .unwrap()
-            .unwrap();
-        assert!(row.log_tail.contains(says));
-
-        // Claude Code's layer refuses through the same path.
-        let says = "tracon: the repository's image sets CLAUDE_CODE_USE_BEDROCK, which would \
-                    reach the harness and change how it is configured or what it loads";
-        *builder.fail_log.lock().unwrap() = Some(format!("#7 0.31 {says}\n#7 ERROR: exit 1"));
-        let store = Store::open_in_memory().unwrap();
-        let claude = claude("localhost/tracon-harness-claude");
-        let got = ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &claude).await;
-        assert_eq!(got.image, None);
-        assert_eq!(got.note.as_deref(), Some(&says["tracon: ".len()..]));
-    }
-
     #[test]
     fn image_names_are_readable_and_distinct() {
         let a = image_name(Path::new("/src/My App"));
@@ -3379,16 +2543,10 @@ mod tests {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'));
     }
 
-    /// The sandbox providers run every repository on the stock base: an
-    /// `image`, or a Dockerfile that does not begin on the base, is refused
-    /// with what to do instead.
+    /// Every repository runs on the stock base: an `image`, or a Dockerfile
+    /// that does not begin on the base, is refused with what to do instead.
     #[test]
-    fn the_sandbox_providers_refuse_a_repository_off_the_stock_base() {
-        let podman = Config::default();
-        let mut apple = Config::default();
-        apple.runtime.kind = crate::config::RuntimeKind::Apple;
-        let kube = kubernetes();
-
+    fn a_repository_off_the_stock_base_is_refused() {
         let image = Repo {
             path: "github.com/o/mesa".into(),
             image: Some("ghcr.io/astral-sh/uv@sha256:35b0".into()),
@@ -3405,26 +2563,20 @@ mod tests {
             "# comment\nfrom $TRACON_SANDBOX_BASE as tools\nFROM rust AS other\n",
         ];
 
-        for (cfg, refuses) in [(&podman, true), (&apple, true), (&kube, true)] {
-            assert_eq!(stock_base_only(cfg), refuses, "{:?}", cfg.runtime.kind);
-            let refused = off_the_stock_base(cfg, &image, None);
-            assert_eq!(refused.is_some(), refuses, "{refused:?}");
-            let refused = off_the_stock_base(cfg, &dockerfile, Some(fedora));
-            assert_eq!(refused.is_some(), refuses, "{refused:?}");
-            for text in on_base {
-                assert_eq!(off_the_stock_base(cfg, &dockerfile, Some(text)), None);
-            }
-            // A Dockerfile that cannot be read is the build's to report.
-            assert_eq!(off_the_stock_base(cfg, &dockerfile, None), None);
-            let stock = Repo {
-                path: "github.com/o/plain".into(),
-                prepare: vec!["uv sync".into()],
-                ..Default::default()
-            };
-            assert_eq!(off_the_stock_base(cfg, &stock, None), None);
+        assert!(off_the_stock_base(&dockerfile, Some(fedora)).is_some());
+        for text in on_base {
+            assert_eq!(off_the_stock_base(&dockerfile, Some(text)), None);
         }
+        // A Dockerfile that cannot be read is the build's to report.
+        assert_eq!(off_the_stock_base(&dockerfile, None), None);
+        let stock = Repo {
+            path: "github.com/o/plain".into(),
+            prepare: vec!["uv sync".into()],
+            ..Default::default()
+        };
+        assert_eq!(off_the_stock_base(&stock, None), None);
 
-        let said = off_the_stock_base(&apple, &image, None).unwrap();
+        let said = off_the_stock_base(&image, None).unwrap();
         for part in [
             "github.com/o/mesa",
             "`image = ",
@@ -3434,7 +2586,7 @@ mod tests {
         ] {
             assert!(said.contains(part), "{part}: {said}");
         }
-        let said = off_the_stock_base(&apple, &dockerfile, Some(fedora)).unwrap();
+        let said = off_the_stock_base(&dockerfile, Some(fedora)).unwrap();
         for part in [
             "`dockerfile = \".devcontainer/Containerfile\"`",
             "FROM fedora:$V",
@@ -3464,13 +2616,13 @@ mod tests {
             builder: FakeBuilder::default(),
         });
         let backend: Arc<dyn Backend> = pulling.clone();
-        let refused = refusal(&cfg, tmp.path(), &cfg.repos()[0]).await.unwrap();
+        let refused = refusal(tmp.path(), &cfg.repos()[0]).await.unwrap();
         assert!(refused.contains("FROM scratch"), "{refused}");
         assert!(matches!(
             ensure_base(backend.as_ref(), &cfg, &store, tmp.path(), true).await,
             Ensured::Unavailable { reason } if reason == refused
         ));
-        let session = session_image(&backend, &cfg, &store, tmp.path(), ("claude", "1"), &|| {
+        let session = session_image(&backend, &cfg, &store, tmp.path(), &|| {
             panic!("nothing is built")
         })
         .await;
@@ -3480,11 +2632,11 @@ mod tests {
         assert!(pulling.builder.builds.lock().unwrap().is_empty());
     }
 
-    /// A pod is never root: its layer gives the harness uid the workspace,
-    /// the cache and its home, ends as that uid, and the session layer adds a
-    /// static init the probe proves runs. Its keys are its own.
+    /// A sandbox is never root: the node's layer gives the base's user the
+    /// workspace, the cache and its home, and ends as that user. Its keys are
+    /// its own.
     #[tokio::test]
-    async fn a_pod_layer_runs_as_the_harness_uid_with_an_init() {
+    async fn the_layer_runs_as_the_sandbox_user() {
         let source = "localhost/tracon-repo-app-src@sha256:abc";
         assert_eq!(
             normalised(source, &pod()),
@@ -3497,41 +2649,6 @@ USER 65532:65532
 ENTRYPOINT []
 "#
         );
-        let layer = harness_layer("claude", &pod()).unwrap();
-        assert!(layer
-            .lines
-            .contains("ENV CLAUDE_CONFIG_DIR=/home/harness/.claude "));
-        assert_eq!(
-            layer.lines,
-            format!(
-                "USER 0:0\n{}USER 65532:65532\n\
-                 COPY --from=harness /usr/local/bin/claude /usr/local/bin/claude\n\
-                 ENV CLAUDE_CONFIG_DIR=/home/harness/.claude DISABLE_AUTOUPDATER=1 \
-                 DISABLE_TELEMETRY=1\n",
-                claude_guard("/home/harness")
-            )
-        );
-        assert_eq!(
-            layer.probe,
-            "for p in /usr/local/bin/claude /usr/libexec/tracon/tini; do if [ \"$(readlink -f \"$p\")\" \
-             != \"$p\" ]; then echo \"$p is not the file the layer put there\"; exit 1; fi; done && \
-             /usr/local/bin/claude --version && git --version && /usr/libexec/tracon/tini --version"
-        );
-        assert_eq!(
-            format!("{POD_INIT_DIR}/tini"),
-            POD_INIT,
-            "the init's directory is the one the guard keeps clear"
-        );
-        let text = layered(source, "ghcr.io/h@sha256:def", &layer, &pod());
-        assert!(text.starts_with("FROM ghcr.io/h@sha256:def AS harness\n"));
-        assert!(
-            text.ends_with("COPY --from=harness /usr/bin/tini-static /usr/libexec/tracon/tini\n")
-        );
-        assert!(!text.contains("/root"), "{text}");
-        // Nothing after the last `USER` makes the harness root again.
-        let last_user = text.rfind("\nUSER ").unwrap();
-        assert!(text[last_user..].starts_with("\nUSER 65532:65532\n"));
-        assert!(!text[last_user..].contains("RUN "), "{text}");
 
         // The uid and the home are the profile's.
         let agent = RunAs {
@@ -3543,99 +2660,15 @@ ENTRYPOINT []
         assert!(other.contains("'harness:x:1000:1000::/home/agent:/bin/sh'"));
         assert!(other.contains("ENV HOME=/home/agent\n") && other.contains("USER 1000:1000\n"));
 
-        // Every runtime runs the stock base's own user.
-        assert_eq!(RunAs::of(&Config::default()), pod());
-
         let tmp = checkout();
         let repo = tmp.path();
-        let kube = recipe(repo, &entry(repo), &pod()).await.unwrap();
+        let sandbox = recipe(repo, &entry(repo), &pod()).await.unwrap();
         let elsewhere = recipe(repo, &entry(repo), &agent).await.unwrap();
-        assert_ne!(kube.hash, elsewhere.hash);
+        assert_ne!(sandbox.hash, elsewhere.hash);
         assert_eq!(
-            (kube.context_tree, kube.source_commit),
+            (sandbox.context_tree, sandbox.source_commit),
             (elsewhere.context_tree, elsewhere.source_commit)
         );
-    }
-
-    /// A harness image the builder cannot find leaves the session in the
-    /// harness's own image, saying why in the runtime's terms: the builder's
-    /// own reason when it cannot reach anything, and on a pod never advice
-    /// to build what a release publishes.
-    #[tokio::test]
-    async fn a_harness_image_that_cannot_be_found_says_why() {
-        let repo = Path::new("/src/app");
-        let builder = FakeBuilder::default();
-        *builder.missing.lock().unwrap() = true;
-        let runner = ProbeRunner::saying("2.1.295 (Claude Code)", 0);
-        let store = Store::open_in_memory().unwrap();
-        let ask = |run_as: RunAs| {
-            let harness = claude_as("ghcr.io/cosmicspork/tracon-harness-claude:9", run_as);
-            let (builder, runner, store) = (&builder, &runner, &store);
-            async move {
-                ensure_session_with(builder, runner, store, repo, BASE_IMAGE, &harness)
-                    .await
-                    .note
-                    .unwrap()
-            }
-        };
-        let pod_note = ask(pod()).await;
-        assert!(
-            pod_note.contains("could not be found in its registry"),
-            "{pod_note}"
-        );
-        *builder.down.lock().unwrap() = Some("buildkitd refused the connection".into());
-        assert_eq!(ask(pod()).await, "buildkitd refused the connection");
-        assert!(builder.builds.lock().unwrap().is_empty());
-    }
-
-    /// A session layer that failed stands against its key, and a builder
-    /// that could not fetch what it starts from cools down without being
-    /// held against it; `tracon repo build` (a forced `ensure_base`) clears
-    /// both for the repository, so its next session tries again at once.
-    #[tokio::test]
-    async fn repo_build_lets_a_failed_session_layer_try_again() {
-        let repo = Path::new("/src/retry-app");
-        let store = Store::open_in_memory().unwrap();
-        let builder = FakeBuilder::default();
-        let harness = claude_as("ghcr.io/cosmicspork/tracon-harness-claude:9", pod());
-
-        // A registry that could not be reached: nothing recorded, cooling.
-        *builder.broken.lock().unwrap() = true;
-        let runner = ProbeRunner::saying("2.1.295 (Claude Code)", 0);
-        let got = ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
-        assert!(got.note.unwrap().contains("buildkitd did not answer"));
-        assert!(store
-            .latest_repo_image("/src/retry-app", "session:claude")
-            .unwrap()
-            .is_none());
-        *builder.broken.lock().unwrap() = false;
-        let cooling =
-            ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
-        assert!(cooling.note.unwrap().contains("tried again in"));
-
-        // A layer whose probe failed: recorded, and not retried unasked.
-        forget_session_failures(&store, repo);
-        let failing = ProbeRunner::saying("sh: claude: not found", 127);
-        let failed =
-            ensure_session_with(&builder, &failing, &store, repo, BASE_IMAGE, &harness).await;
-        assert!(failed.note.unwrap().contains("does not run"));
-        let builds = builder.builds.lock().unwrap().len();
-        let again =
-            ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
-        assert!(again.image.is_none());
-        assert_eq!(builder.builds.lock().unwrap().len(), builds);
-
-        // `tracon repo build` clears it, even for an entry with nothing of
-        // its own to build.
-        let backend = crate::runner::local::LocalBackend;
-        assert_eq!(
-            ensure_base(&backend, &Config::pod_hosted(), &store, repo, true).await,
-            Ensured::Unconfigured
-        );
-        let retried =
-            ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
-        assert!(retried.image.is_some(), "{retried:?}");
-        assert_eq!(builder.builds.lock().unwrap().len(), builds + 1);
     }
 
     /// An entry that keeps lending credentials to a preparation a peer's
@@ -3687,7 +2720,7 @@ ENTRYPOINT []
             "{}",
             checks.image_source
         );
-        let session = session_image(&backend, &cfg, &store, repo, ("claude", "1"), &|| {})
+        let session = session_image(&backend, &cfg, &store, repo, &|| {})
             .await
             .unwrap();
         assert!(session.image.is_none());
@@ -3797,23 +2830,17 @@ WORKDIR /work
     }
 
     /// What the stock-base refusal turns away, build steps are the way
-    /// round: an entry naming them passes it wherever it applies.
+    /// round: an entry naming them passes it.
     #[tokio::test]
     async fn build_steps_are_what_the_stock_base_refusal_points_at() {
         let dir = tempfile::tempdir().unwrap();
-        let mut apple = Config::pod_hosted();
-        apple.runtime.kind = crate::config::RuntimeKind::Apple;
-        let kube = kubernetes();
-        for cfg in [&apple, &kube] {
-            assert!(stock_base_only(cfg));
-            assert_eq!(refusal(cfg, dir.path(), &stepped(dir.path())).await, None);
-        }
+        assert_eq!(refusal(dir.path(), &stepped(dir.path())).await, None);
         let image = Repo {
             image: Some("ghcr.io/astral-sh/uv@sha256:35b0".into()),
             build: Vec::new(),
             ..stepped(dir.path())
         };
-        let refused = off_the_stock_base(&apple, &image, None).unwrap();
+        let refused = off_the_stock_base(&image, None).unwrap();
         assert!(refused.contains("root `build` steps"), "{refused}");
     }
 

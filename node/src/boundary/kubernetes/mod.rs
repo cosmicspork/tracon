@@ -748,14 +748,6 @@ mod tests {
             .definitions(&cfg)
             .is_some_and(|d| d.contains(&cfg.sandbox.base_image_ref())));
         assert!(protocol.workspace_over_image());
-        assert!(crate::sandbox_images::bundled(&cfg));
-        assert!(crate::repo_image::stock_base_only(&cfg));
-        for harness in ["claude", "native"] {
-            assert_eq!(
-                Backend::harness_image(&protocol, &cfg, harness),
-                crate::sandbox_images::base_image(&cfg)
-            );
-        }
         assert_eq!(
             crate::environment::harness_image(&cfg),
             crate::sandbox_images::base_image(&cfg)

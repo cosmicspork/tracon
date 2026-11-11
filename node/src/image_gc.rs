@@ -25,8 +25,9 @@
 //!   session uses.
 //! - **snapshot**: a prepared snapshot that is no repository's current one.
 //! - **dangling**: an image of this node's whose tag a later build took.
-//! - **legacy**: with sandbox images, the harness images and the layered and
-//!   `-src` repository images nothing runs any more; only when asked for.
+//! - **legacy**: the harness images and the layered (`-claude`, `-native`)
+//!   and superseded `-src` repository images older nodes made, which nothing
+//!   runs any more; only when asked for.
 //!
 //! Nothing a container uses (running or stopped, any node's) is removed, and
 //! nothing any remaining image is built on. An unnamed intermediate image (a
@@ -131,9 +132,6 @@ pub struct Kept {
     /// `name@sha256:…`, `name:tag`, or an image id.
     pub reference: String,
     pub why: String,
-    /// Named only by what runs without sandbox images (a session layer): with
-    /// them on, it keeps nothing.
-    pub legacy: bool,
 }
 
 /// What a sweep knows about this node.
@@ -151,10 +149,6 @@ pub struct Knowledge {
     /// own.
     pub bases_are_ours: bool,
     pub kept: Vec<Kept>,
-    /// Sessions run from the bundle on the base (Podman, Apple, Kubernetes
-    /// over the protocol), so harness images and layers over repository
-    /// images serve nothing.
-    pub bundled: bool,
     /// The harness images' repositories, and the old gateway's.
     pub legacy_repositories: Vec<String>,
     pub now_ms: i64,
@@ -329,9 +323,6 @@ pub fn classify(images: &[Image], k: &Knowledge) -> Vec<Verdict> {
         .collect();
     let mut kept: HashMap<usize, &str> = HashMap::new();
     for entry in &k.kept {
-        if entry.legacy && k.bundled {
-            continue;
-        }
         if let Some(at) = resolve_in(images, &entry.reference) {
             kept.entry(at).or_insert(&entry.why);
         }
@@ -444,8 +435,8 @@ fn judge(
         Shape::Base => Class::Base,
         Shape::Harness => Class::Legacy,
         Shape::Snapshot => Class::Snapshot,
-        Shape::Repository(true) if k.bundled => Class::Legacy,
-        Shape::Repository(_) => Class::Repository,
+        Shape::Repository(true) => Class::Legacy,
+        Shape::Repository(false) => Class::Repository,
         Shape::Dangling => Class::Dangling,
     };
     let keep = |class: Class, why: &str| (class, false, why.to_string());
@@ -495,10 +486,6 @@ fn judge(
         Class::Snapshot => remove("a superseded prepared snapshot; no repository starts from it"),
         Class::Repository => remove("no current build, snapshot or open session uses it"),
         Class::Dangling => remove("a later build of this node's took its tag"),
-        Class::Legacy if !k.bundled => keep(
-            class,
-            "harness images run sessions on a pod-hosted node off the sandbox protocol",
-        ),
         Class::Legacy if !k.legacy => keep(
             class,
             "unused now sessions run from the bundle; removed only with --legacy",
@@ -747,7 +734,6 @@ fn pass(images: &[Image], k: &Knowledge, failed: &HashMap<String, String>) -> Ve
         k.kept.push(Kept {
             reference: id.clone(),
             why: "could not be removed".into(),
-            legacy: false,
         });
     }
     classify(images, &k)
@@ -943,7 +929,6 @@ pub mod apple {
                 k.kept.push(Kept {
                     reference: image.id.clone(),
                     why: "holds the stock base this node pins".into(),
-                    legacy: false,
                 });
             }
         }
@@ -1021,7 +1006,6 @@ mod tests {
             pinned_base: Some("ghcr.io/cosmicspork/tracon-sandbox-base@sha256:b2".into()),
             bases_are_ours: true,
             kept: Vec::new(),
-            bundled: true,
             legacy_repositories: vec![
                 "localhost/tracon-harness-claude".into(),
                 "localhost/tracon-harness-native".into(),
@@ -1129,12 +1113,10 @@ mod tests {
             Kept {
                 reference: format!("{REPO}@sha256:r-cur"),
                 why: "the current build of app".into(),
-                legacy: false,
             },
             Kept {
                 reference: format!("{SNAP}@sha256:s-cur"),
                 why: "app's current snapshot".into(),
-                legacy: false,
             },
         ]
     }
@@ -1341,7 +1323,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_images_go_only_with_sandbox_images_and_when_asked() {
+    fn legacy_images_go_only_when_asked() {
         let mut images = store();
         images.push(image(
             "h",
@@ -1358,28 +1340,14 @@ mod tests {
         images.push(image("src", None, &[&format!("{REPO}-src:k")], ours()));
         let mut k = knowledge();
         k.kept = current();
-        k.kept.push(Kept {
-            reference: format!("{REPO}-claude@sha256:layer"),
-            why: "the current claude layer".into(),
-            legacy: true,
-        });
-        // Off: the harness image and the layer run sessions.
-        k.bundled = false;
-        let v = classify(&images, &k);
-        assert!(!verdict(&v, &images, "h").remove);
-        assert!(!verdict(&v, &images, "layer").remove);
-        let src = verdict(&v, &images, "src");
-        assert_eq!(src.class, Class::Repository, "a superseded -src");
-        assert!(src.remove);
-        // On, without --legacy: listed, kept.
-        k.bundled = true;
+        // Without --legacy: listed, kept.
         let v = classify(&images, &k);
         for id in ["h", "layer", "src"] {
             let it = verdict(&v, &images, id);
             assert_eq!(it.class, Class::Legacy, "{id}");
             assert!(!it.remove && it.reason.contains("--legacy"), "{it:?}");
         }
-        // On, with it.
+        // With it.
         k.legacy = true;
         let v = classify(&images, &k);
         for id in ["h", "layer", "src"] {
@@ -1627,12 +1595,10 @@ mod tests {
                 Kept {
                     reference: format!("{REPO}@sha256:rcur"),
                     why: "the current build of app".into(),
-                    legacy: false,
                 },
                 Kept {
                     reference: format!("{SNAP}@sha256:scur"),
                     why: "app's current snapshot".into(),
-                    legacy: false,
                 },
             ];
             k

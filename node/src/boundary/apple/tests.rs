@@ -623,9 +623,7 @@ async fn a_sweep_removes_only_this_nodes_superseded_images() {
         kept: vec![Kept {
             reference: current.clone(),
             why: "the current build".into(),
-            legacy: false,
         }],
-        bundled: true,
         // Past the grace an image just made has.
         now_ms: crate::store::now_ms() + 2 * crate::image_gc::GRACE_MS,
         ..Default::default()
