@@ -576,7 +576,10 @@ struct DispatchState {
 
 impl Dispatcher {
     /// The process's dispatcher on `listen`, bound and accepting on first
-    /// use.
+    /// use. Port 0 asks for any free port, so each such bind is a listener
+    /// of its own: one kept under it would be handed to callers on other
+    /// runtimes (tests sharing a process), whose listener dies with the
+    /// runtime that bound it.
     pub async fn bind(listen: SocketAddr) -> std::io::Result<Arc<Dispatcher>> {
         static BOUND: OnceLock<tokio::sync::Mutex<HashMap<SocketAddr, Arc<Dispatcher>>>> =
             OnceLock::new();
@@ -635,7 +638,9 @@ impl Dispatcher {
             }
         });
         *dispatcher.accepting.lock().unwrap() = Some(task);
-        bound.insert(listen, dispatcher.clone());
+        if listen.port() != 0 {
+            bound.insert(listen, dispatcher.clone());
+        }
         Ok(dispatcher)
     }
 
@@ -767,6 +772,9 @@ struct Pending {
 pub struct KubeSandboxProvider {
     client: kube::Client,
     options: KubeSandboxOptions,
+    /// The provider's own listener, where `listen` asks for any port: its
+    /// sandboxes dial the one their pods were told.
+    any_port: tokio::sync::OnceCell<Arc<Dispatcher>>,
     pending: Mutex<HashMap<String, Pending>>,
     /// How a sandbox is snapshotted, where the node can build images.
     snapshots: Option<Snapshots>,
@@ -821,6 +829,7 @@ impl KubeSandboxProvider {
         KubeSandboxProvider {
             client,
             options,
+            any_port: tokio::sync::OnceCell::new(),
             pending: Mutex::new(HashMap::new()),
             snapshots: None,
         }
@@ -851,12 +860,18 @@ impl KubeSandboxProvider {
 
     /// The listener every sandbox dials, bound on first use.
     pub async fn dispatcher(&self) -> Result<Arc<Dispatcher>, ProviderError> {
-        Dispatcher::bind(self.options.listen).await.map_err(|e| {
-            failed(format!(
-                "listen for sandboxes on {}: {e}",
-                self.options.listen
-            ))
-        })
+        let bind = || async {
+            Dispatcher::bind(self.options.listen).await.map_err(|e| {
+                failed(format!(
+                    "listen for sandboxes on {}: {e}",
+                    self.options.listen
+                ))
+            })
+        };
+        if self.options.listen.port() != 0 {
+            return bind().await;
+        }
+        self.any_port.get_or_try_init(bind).await.cloned()
     }
 
     /// The node's bundle, packed and served on the listener.
