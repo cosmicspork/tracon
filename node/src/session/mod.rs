@@ -3260,6 +3260,19 @@ impl Manager {
             &orientation,
             identity.as_ref(),
         )?;
+        // A session from before its state was its own (an upgraded node's)
+        // takes what its resume needs out of the runtime's volumes.
+        if let Some(reopened) = reopened
+            .as_ref()
+            .filter(|_| crate::boundary::podman::uses_sandbox_files(&self.cfg))
+        {
+            materialize::carry_from_runtime_volumes(
+                self.backend.as_ref(),
+                &scratch,
+                &reopened.resume.harness_session_id,
+            )
+            .await;
+        }
         self.backend
             .import_volume(&scratch.volume, &scratch.dir)
             .await

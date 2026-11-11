@@ -3270,8 +3270,11 @@ impl Config {
         })
     }
 
-    /// Strict load for `serve`: a file that exists but does not parse is an
-    /// error, so a typo cannot silently drop the whole configuration.
+    /// Strict load for `serve`, `setup` and `check-boundary`: a file that
+    /// exists but does not parse is an error, so a typo cannot silently drop
+    /// the whole configuration, or have the boundary set up on defaults that
+    /// differ from what the file says (`setup` on default tunnels retires a
+    /// gateway the file keeps).
     pub fn try_load() -> Result<Self, String> {
         let config = Self::try_load_from(&Self::config_path())?;
         config.claim_resource_prefix();
@@ -3294,7 +3297,10 @@ impl Config {
                 };
                 Self::from_toml(&text, path)
             }
-            Err(_) => Ok(Self::default()),
+            // No file is a node on its defaults; one that is there and
+            // cannot be read is as wrong as one that does not parse.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => Err(format!("{}: {error}", path.display())),
         }
     }
 
@@ -3799,6 +3805,29 @@ mod tests {
         );
         assert_eq!(retired_qa_section("[qa]\n"), None);
         assert_eq!(retired_qa_section("[review]\nmax_files = 1\n"), None);
+    }
+
+    /// A strict load takes a missing file as the defaults, and refuses one
+    /// that is there but does not parse or cannot be read, naming why.
+    #[test]
+    fn a_strict_load_refuses_a_file_it_cannot_parse_or_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("node.toml");
+        assert!(Config::try_load_from(&missing).is_ok());
+        std::fs::write(&missing, "[runtime.podman\nsandbox_tunnels = false\n").unwrap();
+        let error = Config::try_load_from(&missing).unwrap_err();
+        assert!(error.contains("node.toml"), "{error}");
+        assert!(error.contains("runtime.podman"), "{error}");
+        // The lenient load still falls back, for commands that touch nothing.
+        assert_eq!(
+            Config::load_from(&missing).runtime.podman.sandbox_tunnels,
+            cfg!(target_os = "linux")
+        );
+        let unreadable = Config::try_load_from(dir.path()).unwrap_err();
+        assert!(
+            unreadable.contains(&dir.path().display().to_string()),
+            "{unreadable}"
+        );
     }
 
     /// The Podman sandbox switches are on by default on Linux. Turning the

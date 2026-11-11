@@ -703,7 +703,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Setup { rebuild } => {
-            let cfg = config::Config::load();
+            let cfg = boundary_config()?;
             let backend = boundary::backend_for(&cfg).await;
             // Never beside the node's own setup of the same boundary.
             boundary::reconcile::exclusive(backend.setup(&cfg, rebuild)).await??;
@@ -913,7 +913,7 @@ async fn main() -> Result<()> {
         Command::Mesh(cmd) => mesh_command(cmd).await,
         Command::Channel(cmd) => channel_command(cmd).await,
         Command::CheckBoundary { deep } => {
-            let cfg = config::Config::load();
+            let cfg = boundary_config()?;
             let backend = boundary::backend_for(&cfg).await;
             let report = backend.check_all(&cfg, deep).await;
             for c in &report.checks {
@@ -1198,6 +1198,16 @@ async fn enroll_command(
     println!("enrolled as {name}; channels: {}", channels.join(", "));
     println!("next: tracon setup, then tracon serve");
     Ok(())
+}
+
+/// The configuration `setup` and `check-boundary` act on, loaded strictly:
+/// on the defaults a file that does not parse would fall back to, setup could
+/// retire a gateway or harness images the file keeps. A missing file is the
+/// defaults.
+fn boundary_config() -> Result<config::Config> {
+    config::Config::try_load().map_err(|error| {
+        anyhow::anyhow!("node.toml does not load, so the boundary is left as it is: {error}")
+    })
 }
 
 async fn invite_command(channels: Vec<String>, ttl: u64, yes: bool) -> Result<()> {
