@@ -200,6 +200,7 @@ pub fn detach_all() -> usize {
             digest: hex::encode(digest),
             harness: Some(kept.harness),
             in_turn: super::sandbox_files::in_turn(name),
+            image: super::reattach::noted_image(name),
         };
         match super::reattach::keep(&record) {
             Ok(()) => {
