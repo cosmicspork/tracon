@@ -324,6 +324,18 @@ pub fn validate(
     Ok(())
 }
 
+/// What is wrong with a stored manifest's `harness`, if anything. The runtime
+/// leaves the field out when it holds its default, which is no harness, so
+/// absent says the same as `"none"`; any other value is said as stored, so
+/// one the runtime fills in differently can be read off the node's log.
+fn manifest_harness_problem(manifest: &serde_json::Value) -> Option<String> {
+    match manifest.get("harness") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(h)) if h == "none" => None,
+        Some(other) => Some(format!("its manifest's harness is {other}, not \"none\"")),
+    }
+}
+
 /// What the runtime promises of every sandbox, as the trials found it: a
 /// VM of its own, egress limited to the node by the runtime's proxy, the
 /// runtime's open resolver, root in the VM, no container runtime socket,
@@ -1016,15 +1028,7 @@ impl SandboxProvider for DoProvider {
         if !matches!(session.agent_kind.as_str(), "AGENT_KIND_NONE" | "") {
             wrong.push(format!("runs a managed agent ({})", session.agent_kind));
         }
-        match stored.manifest.get("harness") {
-            Some(serde_json::Value::String(h)) if h == "none" => {}
-            // Said as stored, so a value the runtime fills in differently
-            // can be read off the node's log.
-            other => wrong.push(format!(
-                "its manifest's harness is {}, not \"none\"",
-                other.map_or("absent".to_string(), |v| v.to_string())
-            )),
-        }
+        wrong.extend(manifest_harness_problem(&stored.manifest));
         let (ips, hosts) = self.options.reach.egress();
         if egress.allow_ips != ips {
             wrong.push(format!(
@@ -1313,5 +1317,18 @@ mod tests {
         ] {
             assert!(relay_url(bad).is_err(), "{bad}");
         }
+    }
+    /// The runtime now leaves `harness` out of a stored manifest when it is
+    /// the default: that is no harness, as `"none"` is. Anything else is
+    /// named as stored.
+    #[test]
+    fn an_absent_manifest_harness_is_none() {
+        use serde_json::json;
+        assert_eq!(manifest_harness_problem(&json!({"name": "x"})), None);
+        assert_eq!(manifest_harness_problem(&json!({"harness": null})), None);
+        assert_eq!(manifest_harness_problem(&json!({"harness": "none"})), None);
+        let why = manifest_harness_problem(&json!({"harness": "claude-code"})).unwrap();
+        assert!(why.contains("\"claude-code\""), "{why}");
+        assert!(manifest_harness_problem(&json!({"harness": 3})).is_some());
     }
 }
