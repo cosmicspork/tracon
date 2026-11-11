@@ -1083,3 +1083,74 @@ async fn a_sandbox_nobody_connects_to_gives_up() {
         .unwrap();
     assert_eq!(status.code(), Some(1));
 }
+
+/// A provider that starts the supervisor as root names its user and working
+/// directory in the bootstrap; here, the user it already is, which is all a
+/// test that is not root can become.
+#[tokio::test]
+async fn it_becomes_its_bootstrap_user_and_works_where_it_is_told() {
+    let dir = support::scratch();
+    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    let workdir = dir.path().to_path_buf();
+    let sandbox = start_with(Carrier::Tcp, ServerOptions::default(), |command| {
+        command
+            .env("TRACON_SANDBOX_USER", format!("{uid}:{gid}"))
+            .env("TRACON_SANDBOX_WORKDIR", &workdir);
+    })
+    .await;
+    let output = sandbox
+        .conn
+        .spawn(sh(
+            r#"echo "$(id -u):$(id -g) $PWD"; env | grep -c ^TRACON_SANDBOX_ || true"#,
+        ))
+        .await
+        .unwrap()
+        .output()
+        .await
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!(
+            "{uid}:{gid} {}\n0\n",
+            dir.path().canonicalize().unwrap().display()
+        )
+    );
+    assert!(sandbox.finish().await.success());
+}
+
+/// Anyone but root cannot become another user: the supervisor stops before
+/// it dials, rather than run as someone the node did not ask for.
+#[tokio::test]
+async fn a_user_it_cannot_become_stops_it_before_it_dials() {
+    let uid = unsafe { libc::getuid() };
+    if uid == 0 {
+        return;
+    }
+    let node = support::Node::new(Carrier::Tcp, ServerOptions::default()).await;
+    let token = node.server.tokens().issue("run");
+    for (user, why) in [
+        (format!("{}:{}", uid + 1, uid + 1), "cannot become"),
+        ("harness".to_string(), "not uid:gid"),
+    ] {
+        let mut command = node.command(node.identity.pin(), &token);
+        command
+            .env("TRACON_SANDBOX_USER", &user)
+            .stderr(std::process::Stdio::piped());
+        let out = tokio::time::timeout(Duration::from_secs(5), command.output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(64), "{user}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(why), "{user}: {stderr}");
+    }
+    let workdir = node.dir.path().join("missing");
+    let mut command = node.command(node.identity.pin(), &token);
+    command
+        .env("TRACON_SANDBOX_WORKDIR", &workdir)
+        .stderr(std::process::Stdio::piped());
+    let out = command.output().await.unwrap();
+    assert_eq!(out.status.code(), Some(64));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("TRACON_SANDBOX_WORKDIR"));
+}

@@ -16,6 +16,7 @@ mod server;
 mod services;
 pub mod spawner;
 mod tunnels;
+pub mod user;
 
 use std::io;
 use std::sync::Arc;

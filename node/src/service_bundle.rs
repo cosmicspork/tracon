@@ -73,7 +73,8 @@ pub fn resolve(service: &Service) -> Option<PathBuf> {
 }
 
 /// Each catalogue service's bundle on this host and where a sandbox mounts
-/// it, for a runtime that runs services in its sandboxes.
+/// it (or a DigitalOcean template holds it), for a runtime that runs
+/// services in its sandboxes.
 pub fn mounts(cfg: &Config) -> Vec<(PathBuf, String)> {
     cfg.service
         .iter()
@@ -87,10 +88,18 @@ fn runs_in_sandboxes(cfg: &Config) -> bool {
         || cfg.runtime.kind == crate::config::RuntimeKind::Apple
 }
 
+/// Whether the node bakes `[[service]]` bundles into the DigitalOcean
+/// templates it builds (`[digitalocean] registry`), where nothing is
+/// mounted.
+fn bakes_for_digitalocean(cfg: &Config) -> bool {
+    crate::provider::digitalocean::runtime::enabled(cfg) && !cfg.digitalocean.registry.is_empty()
+}
+
 /// Whether the node fetches the release's browser bundle: it runs services
-/// in its sandboxes and one asks for it.
+/// in its sandboxes, or bakes them into DigitalOcean's templates, and one
+/// asks for it.
 pub fn wanted(cfg: &Config) -> bool {
-    runs_in_sandboxes(cfg) && cfg.service.iter().any(is_release)
+    (runs_in_sandboxes(cfg) || bakes_for_digitalocean(cfg)) && cfg.service.iter().any(is_release)
 }
 
 /// The first in-sandbox service bundle that is not here, in words for the
@@ -529,6 +538,26 @@ pub(crate) mod tests {
         assert!(wanted(&cfg));
         cfg.service = vec![service("browser", Some("/srv/browser"))];
         assert!(!wanted(&cfg), "an explicit bundle is not fetched");
+    }
+
+    /// A node that builds DigitalOcean's templates bakes the browser into
+    /// them, so it fetches the bundle though its own sandboxes run none; its
+    /// own checks do not ask for it.
+    #[test]
+    fn a_node_baking_digitalocean_templates_wants_it() {
+        let mut cfg = Config {
+            service: vec![service("browser", Some("release"))],
+            ..Config::default()
+        };
+        cfg.digitalocean.credential = "do".into();
+        cfg.digitalocean.registry = "registry.digitalocean.com/acme".into();
+        assert!(!wanted(&cfg), "placement is off");
+        cfg.placement.digitalocean = crate::provider::requirements::DoMode::Overflow;
+        assert!(wanted(&cfg));
+        assert_eq!(missing(&cfg, false), None);
+        cfg.digitalocean.registry = String::new();
+        cfg.digitalocean.image = format!("x@sha256:{}", "a".repeat(64));
+        assert!(!wanted(&cfg), "an image of the operator's holds its own");
     }
 
     #[test]

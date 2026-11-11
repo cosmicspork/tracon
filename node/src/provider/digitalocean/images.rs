@@ -1,11 +1,14 @@
 //! The image a DigitalOcean template is built from, made by the node: one of
 //! its own sandbox images (the pinned stock base, or a repository's prepared
 //! snapshot) with the harness bundle the node verified into `<state>/bundles`
-//! at `/opt/tracon`, and the `tracon-sandbox` service. Pushed to the
-//! operator's registry (`[digitalocean] registry`), which the runtime pulls
-//! from when it registers the template. One per local image digest: the
-//! template is named from that digest, so nothing is built or pushed again
-//! for an image that already has one.
+//! at `/opt/tracon`, each catalogue service bundle it holds at
+//! `/opt/tracon-services/<name>` (nothing is mounted on DigitalOcean, so they
+//! travel in the image, as the harness's binaries do), and the
+//! `tracon-sandbox` service. Pushed to the operator's registry
+//! (`[digitalocean] registry`), which the runtime pulls from when it
+//! registers the template. One per local image digest and what goes into it:
+//! the template is named from both (`super::templates`), so nothing is built
+//! or pushed again for an image that already has one.
 
 use std::path::{Path, PathBuf};
 
@@ -51,13 +54,35 @@ fn copy_bundle(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// What the node adds to an image of its own.
+#[derive(Debug, Clone, Copy)]
+pub struct Contents<'a> {
+    /// The harness bundle, for `/opt/tracon`.
+    pub bundle: &'a Path,
+    /// Each service bundle's directory here and where a sandbox has it
+    /// (`/opt/tracon-services/<name>`).
+    pub services: &'a [(PathBuf, String)],
+}
+
 /// Write the build context: the Containerfile, the service's `run`, and a
-/// copy of the bundle (a copy rather than a mount, which an SELinux host
+/// copy of each bundle (a copy rather than a mount, which an SELinux host
 /// would keep the build from reading).
-pub fn stage(context: &Path, bundle: &Path) -> std::io::Result<()> {
+pub fn stage(context: &Path, contents: &Contents<'_>) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::create_dir_all(context)?;
-    copy_bundle(bundle, &context.join("bundle"))?;
+    copy_bundle(contents.bundle, &context.join("bundle"))?;
+    // Present when empty, so the Containerfile's COPY always has a source.
+    let services = context.join("services");
+    std::fs::create_dir_all(&services)?;
+    for (dir, target) in contents.services {
+        let name = super::templates::service_name(target).ok_or_else(|| {
+            std::io::Error::other(format!(
+                "{target} is not under {}",
+                crate::config::SERVICE_BUNDLES_TARGET
+            ))
+        })?;
+        copy_bundle(dir, &services.join(name))?;
+    }
     std::fs::write(context.join("Containerfile"), CONTAINERFILE)?;
     let run = context.join("run");
     std::fs::write(&run, RUN_SCRIPT)?;
@@ -118,26 +143,26 @@ async fn podman(what: &str, argv: &[String], auth: Option<&Path>) -> Result<(), 
     }
 }
 
-/// Build `from` + the bundle + the service locally, as `tag`.
-pub async fn build(from: &str, bundle: &Path, tag: &str) -> Result<(), String> {
+/// Build `from` + the bundles + the service locally, as `tag`.
+pub async fn build(from: &str, contents: &Contents<'_>, tag: &str) -> Result<(), String> {
     let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
     let context: PathBuf = dir.path().join("context");
-    stage(&context, bundle).map_err(|e| format!("stage the template source: {e}"))?;
+    stage(&context, contents).map_err(|e| format!("stage the template source: {e}"))?;
     podman("build", &build_argv(&context, from, tag), None).await
 }
 
-/// Build `from` + the bundle + the service, push it, and return it by
+/// Build `from` + the bundles + the service, push it, and return it by
 /// digest, `tag@sha256:…`.
 pub async fn build_and_push(
     from: &str,
-    bundle: &Path,
+    contents: &Contents<'_>,
     registry: &str,
     prefix: &str,
     token: &str,
 ) -> Result<String, String> {
     use std::os::unix::fs::PermissionsExt as _;
     let tag = tag_for(registry, prefix, from)?;
-    build(from, bundle, &tag).await?;
+    build(from, contents, &tag).await?;
     let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
         .map_err(|e| e.to_string())?;
@@ -184,12 +209,46 @@ mod tests {
         let bundle = dir.path().join("b");
         std::fs::create_dir_all(bundle.join("bin")).unwrap();
         std::fs::write(bundle.join("bin/tracon-sandbox"), "x").unwrap();
+        let browser = dir.path().join("browser");
+        std::fs::create_dir_all(&browser).unwrap();
+        std::fs::write(browser.join("run"), "#!/bin/sh\n").unwrap();
         let context = dir.path().join("c");
-        stage(&context, &bundle).unwrap();
+        stage(
+            &context,
+            &Contents {
+                bundle: &bundle,
+                services: &[(browser, "/opt/tracon-services/browser".into())],
+            },
+        )
+        .unwrap();
         let file = std::fs::read_to_string(context.join("Containerfile")).unwrap();
         assert!(file.contains("FROM ${BASE}"));
         assert!(file.contains("COPY bundle/ /opt/tracon/"));
+        assert!(file.contains(&format!(
+            "COPY services/ {}/",
+            crate::config::SERVICE_BUNDLES_TARGET
+        )));
         assert!(context.join("bundle/bin/tracon-sandbox").is_file());
+        assert!(context.join("services/browser/run").is_file());
+        // None held: the directory is there for the COPY all the same.
+        let bare = dir.path().join("bare");
+        stage(
+            &bare,
+            &Contents {
+                bundle: &bundle,
+                services: &[],
+            },
+        )
+        .unwrap();
+        assert!(bare.join("services").is_dir());
+        assert!(stage(
+            &dir.path().join("bad"),
+            &Contents {
+                bundle: &bundle,
+                services: &[(dir.path().join("browser"), "/elsewhere/browser".into())],
+            },
+        )
+        .is_err());
         assert_eq!(
             std::fs::read_to_string(context.join("run")).unwrap(),
             RUN_SCRIPT

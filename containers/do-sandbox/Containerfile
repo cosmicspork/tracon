@@ -1,12 +1,15 @@
 # The source image of a node's DigitalOcean Harness Runtime template: one of
 # the node's sandbox images (the stock base, a prepared snapshot) with the
-# harness bundle at /opt/tracon and the `tracon-sandbox` s6 service, which
+# harness bundle at /opt/tracon, the catalogue's service bundles at
+# /opt/tracon-services/<name>, and the `tracon-sandbox` s6 service, which
 # waits for the bootstrap the node delivers by exec after each create and
 # then runs the supervisor as its child under the runtime's own init. With
 # `[digitalocean] registry` the node builds and pushes these itself, from
 # this file; by hand, for `[digitalocean] image`:
 #
 #   cp -a <bundle>/<version>/amd64 containers/do-sandbox/bundle
+#   mkdir -p containers/do-sandbox/services
+#   cp -a <browser bundle>/<chrome>/amd64 containers/do-sandbox/services/browser
 #   podman build --build-arg BASE=<sandbox image> \
 #     -t <registry>/tracon-do-sandbox containers/do-sandbox
 #   podman push <registry>/tracon-do-sandbox   # then name it by digest
@@ -15,9 +18,16 @@
 # the runtime's own build of this one.
 ARG BASE
 FROM ${BASE}
-# Root to install; the runtime's init starts the service as root either way.
+# Root to install; the runtime's init starts the service as root either way,
+# and the supervisor becomes the sandbox's user (uid 65532, as on Podman and
+# Apple) once the node's bootstrap names it.
 USER root
 COPY bundle/ /opt/tracon/
 RUN test -x /opt/tracon/bin/tracon-sandbox
+COPY services/ /opt/tracon-services/
 COPY run /etc/services.d/tracon-sandbox/run
 RUN chmod 0755 /etc/services.d/tracon-sandbox/run
+# The user's workspace, cache and home, its own as the stock base has them;
+# the bootstrap checks them again in the running sandbox.
+RUN mkdir -p /work /cache /home/harness \
+ && chown 65532:65532 /work /cache /home/harness

@@ -111,8 +111,45 @@ pub struct CapabilityReport {
     pub lines: Vec<CapabilityLine>,
     /// The whole set, when every line has a value.
     pub capabilities: Option<Capabilities>,
-    /// Shown, not acted on: no session is placed by these yet.
+    /// Whether placement holds sessions to these: a provider elsewhere's
+    /// are read back from each sandbox and held to what its work requires;
+    /// a local runtime's are shown beside its checks.
     pub enforced: bool,
+    /// For a provider elsewhere (DigitalOcean): how its sandboxes reach the
+    /// node, and whether it can take a session now.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elsewhere: Option<Elsewhere>,
+}
+
+/// A provider elsewhere as the node sees it now.
+#[derive(Debug, Clone, Serialize)]
+pub struct Elsewhere {
+    /// How its sandboxes reach the node: `address` (raw TLS to the node's
+    /// public address), `hub relay` (raw TLS to the hub relay's listener),
+    /// or `hub url` (the same TLS inside a WebSocket to the hub's own URL).
+    pub reach: &'static str,
+    /// What they dial.
+    pub dial: String,
+    /// The one destination each sandbox's egress admits, by address or name.
+    pub egress: Vec<String>,
+    /// When placement sends sessions there: `overflow` or `prefer`.
+    pub placement: super::requirements::DoMode,
+    /// Whether it can take a session now, and why not.
+    pub healthy: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+    pub capacity: super::Capacity,
+    /// Each catalogue service, and whether it runs in a sandbox there.
+    pub services: Vec<ServiceSupport>,
+}
+
+/// Whether one catalogue service runs on a provider, and why not.
+#[derive(Debug, Clone, Serialize)]
+pub struct ServiceSupport {
+    pub name: String,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
 }
 
 impl Tier {
@@ -282,6 +319,7 @@ pub fn from_checks(provider: ProviderKind, report: &BoundaryReport) -> Capabilit
         lines,
         capabilities,
         enforced: false,
+        elsewhere: None,
     }
 }
 

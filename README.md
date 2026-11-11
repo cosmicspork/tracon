@@ -1644,19 +1644,31 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node, or
                                     # egress admits one destination: node_addr, so its only route is
                                     # this node, or (relay with no node_addr) the hub's host, which is
                                     # not this node alone (see relay). DNS is the runtime's, open, so
-                                    # client work never goes. Needs
+                                    # client work never goes. The runtime's init starts the supervisor
+                                    # as root; it becomes the stock base's user (uid 65532, home
+                                    # /home/harness, working in /work) before it starts anything, as
+                                    # on Podman and Apple, and every process gets the node's allowlist
+                                    # proxy through the tunnel, not the runtime's. A [[service]] with a
+                                    # bundle runs inside, from the template's copy; one with only an
+                                    # image is refused there. Settings' capability view shows how it is
+                                    # reached and why it cannot take a session. Needs
                                     # [runtime.podman] sandbox_protocol, sandbox_files and
                                     # sandbox_tunnels: nothing is mounted there
 # credential = "do"                 # a broker credential holding DIGITALOCEAN_ACCESS_TOKEN
 # registry = "registry.digitalocean.com/acme"  # where the node pushes the template sources it
                                     # builds: its pinned base and each repository's prepared snapshot,
-                                    # with the bundle it verified and the tracon-sandbox service
-                                    # (containers/do-sandbox). Needs sandbox_images. Each is registered
-                                    # as a template once per image digest (about seven minutes), as
-                                    # part of preparing it, never per session; until a snapshot's is
-                                    # ready its sessions there run in the base's
+                                    # with the bundle it verified, each [[service]] bundle it holds
+                                    # (the release's browser is fetched for it) and the tracon-sandbox
+                                    # service (containers/do-sandbox). Needs sandbox_images. Each is
+                                    # registered as a template once per image digest and what goes
+                                    # into it (about seven minutes), as part of preparing it, never per
+                                    # session, so a release or a new browser bundle makes a new one and
+                                    # the old is swept; until a snapshot's is ready its sessions there
+                                    # run in the base's
 # image = "…@sha256:…"              # or one image of your own for every session there, built with
-                                    # containers/do-sandbox; name this or registry, not both
+                                    # containers/do-sandbox from this release's bundle (and any
+                                    # service bundles, which the node takes on trust); name this or
+                                    # registry, not both
 # base_template = "coding-base"     # the runtime's base the image is rebased onto (DigitalOcean
                                     # no longer accepts the old name "sandbox")
 # region = ""                       # the API host's region; empty for the default
@@ -1697,6 +1709,9 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node, or
                                     # mounted read-only at /opt/tracon-services/<name> in every
                                     # sandbox, whose supervisor runs it on the sandbox's loopback
                                     # instead of a container from `image`, which may then be left out.
+                                    # On DigitalOcean it is baked into the templates the node builds
+                                    # and runs the same way. A port one of the sandbox's tunnels
+                                    # listens on is refused at service_start.
                                     # "release", on `browser` only: the browser bundle of the node's
                                     # own release (tracon-browser-<chrome>-<arch>.tar.gz, <chrome> the
                                     # headless-shell containers/browser/Containerfile pins), which the

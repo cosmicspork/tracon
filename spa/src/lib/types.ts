@@ -1651,12 +1651,41 @@ export interface CapabilityLine {
   detail: string
 }
 
-/** What a sandbox provider can promise, read from its boundary checks. Reported, not enforced. */
+/** Whether one catalogue service runs in a provider's sandboxes, and why not. */
+export interface ServiceSupport {
+  name: string
+  ok: boolean
+  why?: string
+}
+
+/** A provider elsewhere (DigitalOcean) as the node sees it now. */
+export interface Elsewhere {
+  /** `address`, `hub relay` or `hub url`: how its sandboxes reach the node. */
+  reach: string
+  /** What they dial. */
+  dial: string
+  /** The one destination each sandbox's egress admits. */
+  egress: string[]
+  /** `off`, `overflow` or `prefer`. */
+  placement: string
+  healthy: boolean
+  why?: string
+  capacity: { running: number; limit: number | null }
+  services: ServiceSupport[]
+}
+
+/**
+ * What a sandbox provider can promise: the node's own runtime as its
+ * boundary checks show it (reported), or a provider elsewhere as placement
+ * holds sessions to it (`enforced`).
+ */
 export interface ProviderCapabilities {
   provider: string
   verified: boolean
   lines: CapabilityLine[]
   enforced: boolean
+  /** Absent for the node's own runtime, and from a node that predates it. */
+  elsewhere?: Elsewhere
 }
 
 export interface BoundaryResult {

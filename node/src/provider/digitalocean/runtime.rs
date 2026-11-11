@@ -112,6 +112,7 @@ impl DoRuntime {
                 prefix: crate::config::resource_prefix().to_string(),
                 bundle: crate::bundle::effective(cfg)
                     .ok_or("digitalocean.registry needs the harness bundle this node mounts")?,
+                services: crate::service_bundle::mounts(cfg),
             },
         };
         let runtime = Self::with(
@@ -424,6 +425,143 @@ impl DoRuntime {
         }
     }
 
+    /// The provider as the Settings capability view shows it: what it
+    /// promises of every sandbox, by what makes it so, how its sandboxes
+    /// reach the node, and whether it can take a session now and why not.
+    pub async fn report(&self, cfg: &Config) -> crate::provider::CapabilityReport {
+        use crate::provider::capabilities::{CapabilityLine, Elsewhere, Route, ServiceSupport};
+        let candidate = self.candidate(cfg).await;
+        let caps = candidate.capabilities;
+        let options = self.provider.options();
+        let (allow_ips, allow_hosts) = options.reach.egress();
+        let egress: Vec<String> = allow_ips.into_iter().chain(allow_hosts).collect();
+        let (reach, dial) = match &options.reach {
+            super::Reach::Addr(addr) if options.settings.relay => ("hub relay", addr.to_string()),
+            super::Reach::Addr(addr) => ("address", addr.to_string()),
+            super::Reach::HubUrl { url, .. } => ("hub url", url.clone()),
+        };
+        let line = |capability, value: &'static str, detail: String| CapabilityLine {
+            capability,
+            value: Some(value),
+            check: None,
+            detail,
+        };
+        let lines = vec![
+            line(
+                "tier",
+                caps.tier.as_str(),
+                "each sandbox is a microVM of DigitalOcean's".into(),
+            ),
+            line(
+                "route",
+                caps.route.as_str(),
+                match caps.route {
+                    Route::NodeOnly => format!(
+                        "each sandbox's egress admits {} alone, read back from DigitalOcean \
+                         before anything is sent in",
+                        egress.join(", ")
+                    ),
+                    Route::Unverified => format!(
+                        "each sandbox reaches {} by name through the runtime's proxy, which \
+                         admits it by the name it is asked for alone: the hub's other routes, \
+                         and any site sharing its front, are reachable too",
+                        egress.join(", ")
+                    ),
+                },
+            ),
+            line(
+                "dns",
+                caps.dns.as_str(),
+                "the runtime's resolver answers any name, so client work is never placed here"
+                    .into(),
+            ),
+            line(
+                "privilege",
+                caps.privilege.as_str(),
+                format!(
+                    "the harness and its services run as uid {}; root is the VM's own",
+                    crate::sandbox_images::USER
+                        .split(':')
+                        .next()
+                        .unwrap_or_default()
+                ),
+            ),
+            line(
+                "runtime_socket",
+                caps.runtime_socket.as_str(),
+                "a sandbox there has no container runtime".into(),
+            ),
+            line(
+                "image_identity",
+                caps.image_identity.as_str(),
+                "DigitalOcean rebuilds each image as a template, under a digest of its own".into(),
+            ),
+        ];
+        let services = self
+            .service_support(cfg)
+            .into_iter()
+            .map(|(name, support)| ServiceSupport {
+                name,
+                ok: support.is_ok(),
+                why: support.err(),
+            })
+            .collect();
+        crate::provider::CapabilityReport {
+            provider: crate::provider::ProviderKind::DigitalOcean,
+            verified: candidate.health.is_ok(),
+            lines,
+            capabilities: Some(caps),
+            enforced: true,
+            elsewhere: Some(Elsewhere {
+                reach,
+                dial,
+                egress,
+                placement: cfg.live().placement.digitalocean,
+                healthy: candidate.health.is_ok(),
+                why: candidate.health.err(),
+                capacity: candidate.capacity,
+                services,
+            }),
+        }
+    }
+
+    /// Whether each catalogue service can run in a sandbox here, and why
+    /// not. One with a bundle runs inside, under the sandbox's supervisor,
+    /// from the copy its template holds: nothing is mounted here and nothing
+    /// runs beside a sandbox, so a service with only an image cannot, and
+    /// nor can one whose bundle the node did not bake into the template.
+    /// Its traffic is the sandbox's own: the node's allowlist proxy through
+    /// the tunnel, never a wider egress for the sandbox.
+    pub fn service_support(&self, cfg: &Config) -> Vec<(String, Result<(), String>)> {
+        let held = self.provider.templates().held_services();
+        cfg.service
+            .iter()
+            .map(|service| {
+                let support = match (&service.bundle, &held) {
+                    (None, _) => Err(format!(
+                        "service {} runs as a container of its own beside a session, and \
+                         DigitalOcean runs nothing beside its sandboxes: give it a bundle \
+                         ([[service]] bundle) to run it inside one",
+                        service.name
+                    )),
+                    (Some(_), Some(held)) if !held.contains(&service.name) => Err(format!(
+                        "service {}'s bundle is not in DigitalOcean's template: {}",
+                        service.name,
+                        match crate::service_bundle::resolve(service) {
+                            Some(dir) => format!(
+                                "{} was not on this node when the template was built",
+                                dir.display()
+                            ),
+                            None => "this node has no copy of it".into(),
+                        }
+                    )),
+                    (Some(_), _) => Ok(()),
+                };
+                (service.name.clone(), support)
+            })
+            .collect()
+    }
+
     /// The runner a session placed here runs in: its trees over the files
     /// channel, its gateways through tunnels, its isolation read back and
     /// held to `requirements` before anything reaches it.
@@ -477,6 +615,11 @@ impl DoRuntime {
         files: crate::runner::sandbox_files::FilesStore,
     ) -> Arc<dyn Runner> {
         let provider: Arc<dyn crate::provider::SandboxProvider> = self.provider.clone();
+        let refused = self
+            .service_support(cfg)
+            .into_iter()
+            .filter_map(|(name, support)| support.err().map(|why| (name, why)))
+            .collect();
         Arc::new(
             crate::runner::protocol::ProtocolRunner::new(provider, image)
                 // The template's image holds the bundle at /opt/tracon.
@@ -486,6 +629,8 @@ impl DoRuntime {
                 .with_files(files)
                 .with_tunnels(crate::runner::tunnels::gateway_tunnels(cfg))
                 .with_env(self.sandbox_env(cfg, harness_id))
+                .with_sandbox_services(true)
+                .with_refused_services(refused)
                 .with_requirements(requirements)
                 .with_token_window(TOKEN_WINDOW),
         )

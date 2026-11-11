@@ -33,7 +33,12 @@
 //!
 //! Nothing on this provider is mounted from the node: a session's trees go
 //! over the files channel and its gateways through tunnels, as
-//! `[runtime.podman] sandbox_files` and `sandbox_tunnels` do locally.
+//! `[runtime.podman] sandbox_files` and `sandbox_tunnels` do locally. The
+//! sandbox is otherwise the same as a local one: the supervisor becomes the
+//! stock base's user before it starts anything ([`bootstrap::RunAs`]), every
+//! process gets the environment a local sandbox's image or container would
+//! give it (`runtime::DoRuntime::sandbox_env`), and the catalogue's service
+//! bundles, baked into the template, run under the supervisor.
 
 pub mod bootstrap;
 pub mod images;
@@ -79,15 +84,16 @@ pub struct Settings {
     /// The API's base URL, for a stand-in; empty for DigitalOcean's.
     pub api_url: String,
     /// An image of the operator's that every session there runs in, by
-    /// digest: one with the harness bundle at `/opt/tracon` and the
+    /// digest: one with the harness bundle at `/opt/tracon`, any service
+    /// bundles at `/opt/tracon-services/<name>` (taken on trust), and the
     /// `tracon-sandbox` service (`containers/do-sandbox`). Or leave it out
     /// and name `registry`.
     pub image: String,
     /// Where the node pushes the template sources it builds itself: each of
     /// its own sandbox images (the pinned base, a repository's prepared
-    /// snapshot) with the bundle it verified. DigitalOcean's container
-    /// registry takes the same token. Needs `[runtime.podman]
-    /// sandbox_images`.
+    /// snapshot) with the bundle it verified and the service bundles it
+    /// holds. DigitalOcean's container registry takes the same token. Needs
+    /// `[runtime.podman] sandbox_images`.
     pub registry: String,
     /// The runtime's base template the image is rebased onto.
     pub base_template: String,
@@ -609,6 +615,8 @@ impl DoProvider {
             server_name: &server_name,
             token: &bootstrap.token,
             gateway_host: &self.options.gateway_host,
+            // The stock base's user, as on Podman and Apple.
+            run_as: bootstrap::RunAs::SANDBOX,
         }
         .argv()
         .map_err(ProviderError::Failed)?;

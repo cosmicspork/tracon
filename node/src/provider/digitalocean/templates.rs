@@ -7,14 +7,21 @@
 //!
 //! The template's source is either an image the operator built and named
 //! (`[digitalocean] image`, used for every session), or one the node builds
-//! from its own image and the harness bundle it verified, and pushes to the
-//! operator's registry (`[digitalocean] registry`, see [`super::images`]).
+//! from its own image, the harness bundle it verified and the catalogue's
+//! service bundles it holds, and pushes to the operator's registry
+//! (`[digitalocean] registry`, see [`super::images`]). A built template is
+//! named for everything it was built from, not the image alone: a release
+//! moves the harness bundle, and a new browser bundle or a change to the
+//! template's own recipe moves what the sandbox runs, so each makes a new
+//! template rather than leaving sessions on the old one's binaries. The old
+//! one is then stale and swept.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use serde::Serialize;
+use sha2::{Digest as _, Sha256};
 
 use crate::do_harness::{Client, DoError, Template, TemplateStatus};
 
@@ -79,7 +86,35 @@ pub enum Source {
         registry: String,
         prefix: String,
         bundle: PathBuf,
+        /// The catalogue's service bundles: each one's directory on this
+        /// host and where a sandbox has it (`/opt/tracon-services/<name>`).
+        /// Those present when a template is built are baked into it.
+        services: Vec<(PathBuf, String)>,
     },
+}
+
+/// A bundle directory as a template's name takes it: its manifest where it
+/// has one (the release's do, and say what is in them), else its path.
+fn bundle_identity(dir: &Path) -> Vec<u8> {
+    std::fs::read(dir.join("manifest.json"))
+        .unwrap_or_else(|_| dir.to_string_lossy().into_owned().into_bytes())
+}
+
+/// The services of `services` whose bundle is on this host now, by name.
+pub fn present(services: &[(PathBuf, String)]) -> Vec<(PathBuf, String)> {
+    services
+        .iter()
+        .filter(|(dir, target)| dir.is_dir() && service_name(target).is_some())
+        .cloned()
+        .collect()
+}
+
+/// The catalogue name a bundle's sandbox path ends in.
+pub fn service_name(target: &str) -> Option<&str> {
+    target
+        .strip_prefix(crate::config::SERVICE_BUNDLES_TARGET)?
+        .strip_prefix('/')
+        .filter(|name| !name.is_empty() && !name.contains('/') && *name != "..")
 }
 
 pub struct Templates {
@@ -110,10 +145,52 @@ impl Templates {
         &self.source
     }
 
-    /// The template named for `image`.
+    /// The template named for `image`: the operator's by its digest alone;
+    /// one the node builds by its digest and what the node adds to it (the
+    /// template's recipe, the harness bundle, the service bundles present).
     pub fn name_for(&self, image: &str) -> Result<String, String> {
-        let hex = digest_of(image)?.trim_start_matches("sha256:");
+        let digest = digest_of(image)?;
+        let hex = match &self.source {
+            Source::Given(_) => digest.trim_start_matches("sha256:").to_string(),
+            Source::Built {
+                bundle, services, ..
+            } => {
+                let mut hash = Sha256::new();
+                for part in [
+                    b"tracon-do-template/1".as_slice(),
+                    digest.as_bytes(),
+                    super::images::CONTAINERFILE.as_bytes(),
+                    super::bootstrap::RUN_SCRIPT.as_bytes(),
+                    &bundle_identity(bundle),
+                ] {
+                    hash.update(part);
+                    hash.update([0]);
+                }
+                for (dir, target) in present(services) {
+                    hash.update(target.as_bytes());
+                    hash.update([0]);
+                    hash.update(bundle_identity(&dir));
+                    hash.update([0]);
+                }
+                hex::encode(hash.finalize())
+            }
+        };
         Ok(format!("{}{}", self.stem, &hex[..16]))
+    }
+
+    /// The catalogue services a sandbox here has the bundle of: those the
+    /// node bakes into the templates it builds, by name. `None` for an image
+    /// of the operator's, whose contents the node takes on trust.
+    pub fn held_services(&self) -> Option<Vec<String>> {
+        match &self.source {
+            Source::Given(_) => None,
+            Source::Built { services, .. } => Some(
+                present(services)
+                    .iter()
+                    .filter_map(|(_, target)| service_name(target).map(str::to_string))
+                    .collect(),
+            ),
+        }
     }
 
     /// The image a session runs in when it names none of its own: the
@@ -197,8 +274,19 @@ impl Templates {
                         registry,
                         prefix,
                         bundle,
+                        services,
                     } => {
-                        super::images::build_and_push(image, bundle, registry, prefix, token).await
+                        super::images::build_and_push(
+                            image,
+                            &super::images::Contents {
+                                bundle,
+                                services: &present(services),
+                            },
+                            registry,
+                            prefix,
+                            token,
+                        )
+                        .await
                     }
                 };
                 let source = match source {
@@ -257,7 +345,69 @@ mod tests {
             registry: "registry.digitalocean.com/acme".into(),
             prefix: "tracon".into(),
             bundle: "/state/bundles/0.45.0/amd64".into(),
+            services: Vec::new(),
         }
+    }
+
+    /// A release moves the harness bundle, and a browser bundle arriving or
+    /// moving changes what the sandbox holds: each is a template of its own,
+    /// so no session runs an older release's binaries, and the one it
+    /// supersedes is stale.
+    #[test]
+    fn a_built_template_is_named_for_what_goes_into_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = |version: &str| {
+            let dir = tmp.path().join("bundles").join(version);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("manifest.json"),
+                format!("{{\"version\":\"{version}\"}}"),
+            )
+            .unwrap();
+            dir
+        };
+        let browser = tmp.path().join("browser");
+        let source = |bundle: PathBuf| Source::Built {
+            registry: "r".into(),
+            prefix: "tracon".into(),
+            bundle,
+            services: vec![(browser.clone(), "/opt/tracon-services/browser".into())],
+        };
+        let old = Templates::new(source(bundle("0.48.1")), "sandbox", "tracon-tabcd1234").unwrap();
+        let new = Templates::new(source(bundle("0.49.0")), "sandbox", "tracon-tabcd1234").unwrap();
+        let before = new.name_for(SNAPSHOT).unwrap();
+        assert!(
+            before.starts_with("tracon-tabcd1234-")
+                && before.len() == "tracon-tabcd1234-".len() + 16
+        );
+        assert_ne!(old.name_for(SNAPSHOT).unwrap(), before);
+        assert_ne!(new.name_for(IMAGE).unwrap(), before);
+        assert_eq!(new.held_services(), Some(Vec::new()));
+
+        // The browser's bundle arrives: a template that holds it.
+        std::fs::create_dir_all(&browser).unwrap();
+        std::fs::write(browser.join("manifest.json"), "{\"version\":\"157\"}").unwrap();
+        let with_browser = new.name_for(SNAPSHOT).unwrap();
+        assert_ne!(with_browser, before);
+        assert_eq!(new.held_services(), Some(vec!["browser".to_string()]));
+        let wanted: HashSet<String> = [with_browser.clone()].into();
+        assert!(new.is_stale(&before, &wanted));
+        // And the same inputs, the same name.
+        assert_eq!(new.name_for(SNAPSHOT).unwrap(), with_browser);
+        // The operator's image is named for its digest alone.
+        let given = Templates::new(Source::Given(IMAGE.into()), "sandbox", "t").unwrap();
+        assert_eq!(given.held_services(), None);
+    }
+
+    #[test]
+    fn a_service_is_named_by_where_its_bundle_is() {
+        assert_eq!(
+            service_name("/opt/tracon-services/browser"),
+            Some("browser")
+        );
+        assert_eq!(service_name("/opt/tracon-services/"), None);
+        assert_eq!(service_name("/opt/tracon-services/a/b"), None);
+        assert_eq!(service_name("/elsewhere/browser"), None);
     }
 
     #[test]

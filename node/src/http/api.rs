@@ -7332,11 +7332,17 @@ pub async fn recheck_boundary(State(s): State<AppState>) -> ApiResult<Json<serde
     let row = reverify(&s)
         .await
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    // Shown beside the checks, acted on by nothing: no session is placed by
-    // a provider's capabilities yet.
-    let providers: Vec<_> = crate::provider::backend_report(backend.kind(), &report)
+    // The node's own runtime, shown beside its checks; then DigitalOcean,
+    // when sessions may go there, as it stands now.
+    let mut providers: Vec<_> = crate::provider::backend_report(backend.kind(), &report)
         .into_iter()
         .collect();
+    {
+        use crate::provider::digitalocean::runtime as do_runtime;
+        if let Some(runtime) = do_runtime::global().filter(|_| do_runtime::enabled(&s.cfg)) {
+            providers.push(runtime.report(&s.cfg).await);
+        }
+    }
     Ok(Json(
         json!({ "state": row.state, "checks": report, "providers": providers }),
     ))

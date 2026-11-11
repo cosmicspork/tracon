@@ -247,10 +247,13 @@ pub struct ProtocolRunner {
     /// How long a run's token may wait to be redeemed; `None` for as long
     /// as the run lasts.
     token_window: Option<Duration>,
-    /// Every process this runner starts gets this environment, under what
-    /// each command sets itself: for a provider that does not set it on the
-    /// sandbox, whose supervisor's own environment is the provider's.
+    /// Every process and service this runner starts gets this environment,
+    /// under what each sets itself: for a provider that does not set it on
+    /// the sandbox, whose supervisor's own environment is the provider's.
     env: Vec<(String, String)>,
+    /// Catalogue services refused in this runner's sandboxes, and why, said
+    /// before anything reaches a sandbox.
+    refused_services: BTreeMap<String, String>,
 }
 
 impl ProtocolRunner {
@@ -270,14 +273,51 @@ impl ProtocolRunner {
             requirements: None,
             token_window: None,
             env: Vec::new(),
+            refused_services: BTreeMap::new(),
         }
     }
 
-    /// Give every process this runner starts `env`, under what each command
-    /// sets itself.
+    /// Give every process and service this runner starts `env`, under what
+    /// each sets itself.
     pub fn with_env(mut self, env: Vec<(String, String)>) -> Self {
         self.env = env;
         self
+    }
+
+    /// Refuse each catalogue service named in `refused` with its reason, at
+    /// `service_start`, rather than letting it fail inside the sandbox.
+    pub fn with_refused_services(mut self, refused: BTreeMap<String, String>) -> Self {
+        self.refused_services = refused;
+        self
+    }
+
+    /// Why `sidecar` cannot run with this runner, before anything reaches
+    /// its sandbox: the provider refuses it, it would run as a container
+    /// beside a sandbox that has none, or it would listen where one of the
+    /// sandbox's tunnels does.
+    fn service_refusal(&self, sidecar: &Sidecar) -> Option<String> {
+        let service = sidecar
+            .name
+            .strip_prefix(&format!("{}-svc-", sidecar.session_container))
+            .unwrap_or(&sidecar.name);
+        if let Some(why) = self.refused_services.get(service) {
+            return Some(why.clone());
+        }
+        // A tunnel's port matters only to a service inside the sandbox.
+        self.in_sandbox(sidecar)?;
+        self.tunnels
+            .iter()
+            .find(|tunnel| {
+                matches!(&tunnel.listen, tracon_sandbox::protocol::ListenAddr::Tcp(addr)
+                    if addr.rsplit_once(':').is_some_and(|(_, port)| port == sidecar.port.to_string()))
+            })
+            .map(|tunnel| {
+                format!(
+                    "service {service} listens on 127.0.0.1:{}, where the sandbox's {} tunnel \
+                     already does; give it another port",
+                    sidecar.port, tunnel.name
+                )
+            })
     }
 
     /// Hold every sandbox to `requirements`, as its provider reads its
@@ -899,8 +939,21 @@ impl Runner for ProtocolRunner {
     }
 
     async fn start_sidecar(&self, sidecar: &Sidecar) -> Result<(), RunnerError> {
+        if let Some(why) = self.service_refusal(sidecar) {
+            return Err(RunnerError::Other(why));
+        }
         if let Some(spec) = self.in_sandbox(sidecar) {
-            return super::services::start(sidecar, spec).await;
+            if self.env.is_empty() {
+                return super::services::start(sidecar, spec).await;
+            }
+            let mut spec = spec.clone();
+            spec.env = self
+                .env
+                .iter()
+                .cloned()
+                .chain(std::mem::take(&mut spec.env))
+                .collect();
+            return super::services::start(sidecar, &spec).await;
         }
         match &self.delegate {
             Some(delegate) => delegate.start_sidecar(sidecar).await,

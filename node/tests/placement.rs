@@ -439,4 +439,35 @@ async fn placement_asks_overflows_and_keeps_client_work_home() {
             .contains("no sandbox provider can take this session"),
         "{row:?}"
     );
+
+    // Settings' capability view: the node's own runtime, then DigitalOcean
+    // as placement sees it now.
+    let res = node
+        .app
+        .clone()
+        .oneshot(
+            Request::post("/api/boundary/check")
+                .header("host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let checked: Value = serde_json::from_slice(&body).unwrap();
+    let providers = checked["providers"].as_array().unwrap();
+    assert_eq!(providers[0]["provider"], "podman", "{checked}");
+    let there = &providers[1];
+    assert_eq!(there["provider"], "digitalocean", "{checked}");
+    assert_eq!(there["elsewhere"]["placement"], "overflow");
+    assert_eq!(there["elsewhere"]["reach"], "address");
+    assert_eq!(there["elsewhere"]["healthy"], there["verified"]);
+    assert!(there["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|l| l["capability"] == "dns" && l["value"] == "provider-open"));
 }
