@@ -497,6 +497,13 @@ async fn a_session_runs_on_digitalocean_minus_digitalocean() {
     replay.connect_timeout = Duration::from_secs(2);
     let replayed = join(sandbox(replay)).await;
     assert!(replayed.is_err(), "a spent token was accepted");
+    // Counted after the refusal reaches the sandbox, so not yet, at times.
+    for _ in 0..50 {
+        if listener.refused() > refused_before {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert!(listener.refused() > refused_before);
 
     // A scanner gets a closed connection and no work.
