@@ -1300,6 +1300,19 @@ fn retired_podman_switches(text: &str) -> Vec<(&'static str, bool)> {
         .collect()
 }
 
+/// The retired switches `text` sets on a Podman node, which ask for what
+/// always happens there now: worth a line in the log. Another kind's node
+/// does not read `[runtime.podman]` at all.
+fn ignored_podman_switches(text: &str, kind: RuntimeKind) -> Vec<&'static str> {
+    match kind {
+        RuntimeKind::Podman => retired_podman_switches(text)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect(),
+        RuntimeKind::Kubernetes | RuntimeKind::Apple => Vec::new(),
+    }
+}
+
 /// Refuse a Podman node whose `text` turns a retired switch off: the path it
 /// kept is gone, and running the default instead would change what the
 /// operator asked for without saying so. One set `true` asks for what
@@ -1363,6 +1376,9 @@ fn retired_boundary_keys(text: &str) -> Vec<String> {
 pub struct RetiredNames {
     /// `[boundary] network`: the internal network the gateway served.
     pub network: String,
+    /// `[boundary] gateway_ip`: where the gateway answered on it, which a
+    /// sandbox must not reach.
+    pub gateway_ip: String,
     /// `[boundary] gateway_image`.
     pub gateway_image: String,
     /// `[boundary] harness_image`: the configured harness's image, which the
@@ -1372,6 +1388,7 @@ pub struct RetiredNames {
 
 /// The names an older node's gateway and harness images took by default.
 pub const DEFAULT_GATEWAY_NETWORK: &str = "tracon-int";
+pub const DEFAULT_GATEWAY_IP: &str = "10.89.0.2";
 pub const DEFAULT_GATEWAY_IMAGE: &str = "localhost/tracon-gateway";
 pub const DEFAULT_HARNESS_IMAGE: &str = "localhost/tracon-harness-claude";
 
@@ -1379,6 +1396,7 @@ impl Default for RetiredNames {
     fn default() -> Self {
         Self {
             network: DEFAULT_GATEWAY_NETWORK.into(),
+            gateway_ip: DEFAULT_GATEWAY_IP.into(),
             gateway_image: DEFAULT_GATEWAY_IMAGE.into(),
             harness_image: DEFAULT_HARNESS_IMAGE.into(),
         }
@@ -1400,6 +1418,7 @@ impl RetiredNames {
         let defaults = Self::default();
         Self {
             network: named("network").unwrap_or(defaults.network),
+            gateway_ip: named("gateway_ip").unwrap_or(defaults.gateway_ip),
             gateway_image: named("gateway_image").unwrap_or(defaults.gateway_image),
             harness_image: named("harness_image").unwrap_or(defaults.harness_image),
         }
@@ -3388,7 +3407,7 @@ impl Config {
         config.retired = RetiredNames::from_text(text);
         refuse_retired_podman_switches(text, config.runtime.kind)
             .map_err(|error| format!("{}: {error}", path.display()))?;
-        for (key, _) in retired_podman_switches(text) {
+        for key in ignored_podman_switches(text, config.runtime.kind) {
             tracing::warn!(
                 "{}: [runtime.podman] {key} is ignored; Podman always runs that way now, so \
                  the line can go",
@@ -3982,6 +4001,12 @@ mod tests {
             [("sandbox_protocol", true), ("sandbox_images", true)]
         );
         assert!(retired_podman_switches("[runtime.podman]\nsandbox_init = true\n").is_empty());
+        assert_eq!(
+            ignored_podman_switches(on, RuntimeKind::Podman),
+            ["sandbox_protocol", "sandbox_images"]
+        );
+        assert!(ignored_podman_switches(on, RuntimeKind::Kubernetes).is_empty());
+        assert!(ignored_podman_switches(on, RuntimeKind::Apple).is_empty());
     }
 
     /// The keys only the gateway container and harness images read still
@@ -4007,6 +4032,7 @@ mod tests {
             cfg.retired,
             RetiredNames {
                 network: "scratch-int".into(),
+                gateway_ip: DEFAULT_GATEWAY_IP.into(),
                 gateway_image: DEFAULT_GATEWAY_IMAGE.into(),
                 harness_image: "localhost/scratch-harness-claude".into(),
             }

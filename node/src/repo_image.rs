@@ -3434,20 +3434,18 @@ mod tests {
             !image.lines().any(|line| line.starts_with("ENV ")),
             "the harness image sets something the layer does not"
         );
-        for run_as in [pod(), pod()] {
-            let layer = harness_layer("native", &run_as).unwrap();
-            assert!(layer.lines.contains(
-                "COPY --from=harness /usr/local/bin/tracon-agent /usr/local/bin/tracon-agent\n"
-            ));
-            assert!(layer.lines.contains("TRACON_AGENT_[A-Za-z0-9_]*"));
-            assert!(!layer.lines.contains("LD_LIBRARY_PATH"));
-            assert!(layer
-                .lines
-                .contains("rm -rf /usr/local/bin/tracon-agent /usr/libexec/tracon"));
-            assert!(layer
-                .probe
-                .contains("/usr/local/bin/tracon-agent --version && git --version"));
-        }
+        let layer = harness_layer("native", &pod()).unwrap();
+        assert!(layer.lines.contains(
+            "COPY --from=harness /usr/local/bin/tracon-agent /usr/local/bin/tracon-agent\n"
+        ));
+        assert!(layer.lines.contains("TRACON_AGENT_[A-Za-z0-9_]*"));
+        assert!(!layer.lines.contains("LD_LIBRARY_PATH"));
+        assert!(layer
+            .lines
+            .contains("rm -rf /usr/local/bin/tracon-agent /usr/libexec/tracon"));
+        assert!(layer
+            .probe
+            .contains("/usr/local/bin/tracon-agent --version && git --version"));
     }
 
     /// Claude Code's guard, for a harness whose home is `home`.

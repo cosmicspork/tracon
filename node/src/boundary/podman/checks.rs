@@ -348,18 +348,15 @@ fn check_node_only(cfg: &Config, c: &serde_json::Value) -> CheckResult {
 
 const ANONYMOUS_GRANT: &str = "GRANT_ANONYMOUS_OK";
 
-/// Where an older node's gateway answered on its internal network, by
-/// default: a sandbox must not find anything there.
-const OLD_GATEWAY_IP: &str = "10.89.0.2";
-
 /// What only a sandbox with no network must also show from inside: no name
-/// resolves, and the old internal network's gateway address, where a
-/// harness container once found the allowlist proxy, is not there.
+/// resolves, and the old internal network's gateway address (as an older
+/// `node.toml` named it, else the default), where a harness container once
+/// found the allowlist proxy, is not there.
 fn node_only_script(cfg: &Config) -> String {
     format!(
         "getent hosts example.com >/dev/null 2>&1 && echo DIRECT_DNS_OK; \
-         curl -s -o /dev/null -m 5 --noproxy '*' http://{OLD_GATEWAY_IP}:{}/ && echo DIRECT_GATEWAY_OK; ",
-        cfg.gateway.proxy_port
+         curl -s -o /dev/null -m 5 --noproxy '*' http://{}:{}/ && echo DIRECT_GATEWAY_OK; ",
+        cfg.retired.gateway_ip, cfg.gateway.proxy_port
     )
 }
 
@@ -555,6 +552,7 @@ mod tests {
         assert!(!node_only_verdict("DIRECT_NAME_SECONDS=0\nDIRECT_ADDR_SECONDS=0").ok);
         let script = node_only_script(&Config::default());
         assert!(script.contains("getent hosts"), "{script}");
+        assert!(script.contains("http://10.89.0.2:8888/"), "{script}");
     }
 
     #[test]

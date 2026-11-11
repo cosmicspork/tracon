@@ -455,10 +455,8 @@ which rely on the node's own `PATH`, which no key sets (the review capture's, th
 session checkpoint's and the skill reader's `git` go through the guard);
 configuration files a trusted program reads from the home the node gives it, which on
 Kubernetes is on the state volume (the publish path's `git` is told to ignore them);
-Podman storage moved elsewhere by `storage.conf`; the gateway's systemd unit, which
-names the podman checked when setup or recovery wrote it, with the guard's `PATH`, and
-which systemd runs later without asking the node; and image keys (`boundary.harness_image`, `[[repo]] image`,
-`[[service]] image`), which choose what runs inside the boundary, not on the host, and
+Podman storage moved elsewhere by `storage.conf`; and image keys (`sandbox.base_image`,
+`runtime.kubernetes.harness_image`, `[[repo]] image`, `[[service]] image`), which choose what runs inside the boundary, not on the host, and
 are held by digest pinning instead. The guard is a backstop behind the passkey every
 admin save needs, the audit row and the push.
 

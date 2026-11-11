@@ -1385,7 +1385,8 @@ mod tests {
         for id in ["h", "layer", "src"] {
             assert!(verdict(&v, &images, id).remove, "{id}");
         }
-        // The gateway is never one unless the caller names it.
+        // The gateway's image is legacy only where the caller names it,
+        // as `gc::legacy_repositories` does; this knowledge names none.
         assert!(!k.legacy_repositories.iter().any(|r| r.contains("gateway")));
     }
 
