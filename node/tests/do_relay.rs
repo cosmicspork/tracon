@@ -7,6 +7,13 @@
 //! provider's listener. The egress DigitalOcean is asked for names the hub
 //! alone, and the route reads as unverified.
 //!
+//! The process stands in for the runtime's environment, as its init gives
+//! it to the supervisor: the runtime's proxy and a `NO_PROXY` that does not
+//! name the gateway. The harness must get the node's proxy at the gateway
+//! tunnel instead, while the supervisor still dials through the runtime's
+//! proxy, from the bootstrap's copy of it (here a stand-in that records each
+//! tunnel).
+//!
 //! The loop reaps every child of its process with `waitpid(-1)`, so this is
 //! one test function in a file of its own (see `protocol_runner.rs`).
 
@@ -97,9 +104,72 @@ async fn start_hub(node: &proto::keys::Identity) -> SocketAddr {
     addr
 }
 
+/// A forward proxy that answers `CONNECT host:port` and records each target.
+async fn connect_proxy() -> (SocketAddr, Arc<Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let record = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((mut client, _)) = listener.accept().await {
+            let record = record.clone();
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    if client.read_exact(&mut byte).await.is_err() {
+                        return;
+                    }
+                    head.push(byte[0]);
+                }
+                let head = String::from_utf8_lossy(&head).to_string();
+                let Some(target) = head
+                    .lines()
+                    .next()
+                    .and_then(|l| l.strip_prefix("CONNECT "))
+                    .and_then(|l| l.split(' ').next())
+                    .map(str::to_string)
+                else {
+                    return;
+                };
+                record.lock().unwrap().push(target.clone());
+                let Ok(mut upstream) = tokio::net::TcpStream::connect(&target).await else {
+                    return;
+                };
+                if client
+                    .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+            });
+        }
+    });
+    (addr, seen)
+}
+
+/// The runtime's proxy, as its init hands it to the supervisor.
+const DO_PROXY: &str = "http://169.254.169.254:3128";
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_digitalocean_sandbox_reaches_the_node_over_the_hubs_url() {
     support::state::isolate();
+    // The runtime's environment, which a sandbox's processes inherit unless
+    // the node gives them their own. Its NO_PROXY spares the node's own
+    // loopback calls here, as it spares the runtime's metadata address.
+    for name in ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"] {
+        std::env::set_var(name, DO_PROXY);
+    }
+    for name in ["NO_PROXY", "no_proxy"] {
+        std::env::set_var(
+            name,
+            "169.254.169.254,localhost,127.0.0.1,.vpc-endpoint.internal.digitalocean.com",
+        );
+    }
+    let (do_proxy, tunnelled) = connect_proxy().await;
     let fake = FakeDo::start().await;
 
     let server = tracon::runner::protocol::node_server().unwrap();
@@ -183,8 +253,16 @@ async fn a_digitalocean_sandbox_reaches_the_node_over_the_hubs_url() {
             let BootstrapDial::RelayUrl(url) = d.dial else {
                 return 3;
             };
+            // The supervisor's environment after the bootstrap: the
+            // runtime's proxy copied under its own names, ahead of the
+            // runtime's, which the hub (on loopback here) would bypass.
+            let env = |name: &str| match name {
+                "TRACON_SANDBOX_PROXY" => Some(format!("http://{do_proxy}")),
+                "TRACON_SANDBOX_NO_PROXY" => Some("169.254.169.254".to_string()),
+                other => std::env::var(other).ok(),
+            };
             let mut config = inside::Config::new(
-                Dial::WebSocket(RelayUrl::direct(url).unwrap()),
+                Dial::WebSocket(RelayUrl::from_env(url, env).unwrap()),
                 CertPin::parse(d.pin).unwrap(),
                 d.token,
             );
@@ -205,17 +283,41 @@ async fn a_digitalocean_sandbox_reaches_the_node_over_the_hubs_url() {
         Requirements::default(),
         Vec::new(),
         IMAGE.into(),
+        tracon::adapter::claude::ClaudeAdapter::ID,
         FilesStore::new(tmp.path().join("store")),
     );
     let out = runner
         .run_capture(RunnerCommand {
-            argv: vec!["sh".into(), "-c".into(), "echo over the hub".into()],
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                r#"echo over the hub; echo "$HTTPS_PROXY|$HTTP_PROXY|$https_proxy|$http_proxy"; echo "$NO_PROXY|$no_proxy"; echo "$HOME|$CLAUDE_CONFIG_DIR""#.into(),
+            ],
             name: "tracon-h-ws1".into(),
             ..Default::default()
         })
         .await
         .unwrap();
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "over the hub\n");
+    // The harness gets the node's proxy at the gateway tunnel, and reaches
+    // the gateway's name directly, not through the runtime's proxy.
+    let proxy = format!("http://tracon-gw:{}", cfg.gateway.proxy_port);
+    let direct = "tracon-gw,localhost,127.0.0.1,::1";
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!(
+            "over the hub\n{proxy}|{proxy}|{proxy}|{proxy}\n{direct}|{direct}\n\
+             /home/harness|/home/harness/.claude\n"
+        )
+    );
+    // While the supervisor dialled the hub through the runtime's proxy.
+    assert!(
+        tunnelled
+            .lock()
+            .unwrap()
+            .contains(&format!("localhost:{}", hub.port())),
+        "{:?}",
+        tunnelled.lock().unwrap()
+    );
 
     let (manifest, exec) = {
         let api = fake.api.lock().unwrap();
@@ -247,6 +349,7 @@ async fn a_digitalocean_sandbox_reaches_the_node_over_the_hubs_url() {
         },
         Vec::new(),
         IMAGE.into(),
+        tracon::adapter::claude::ClaudeAdapter::ID,
         FilesStore::new(tmp.path().join("store")),
     );
     let refused = strict

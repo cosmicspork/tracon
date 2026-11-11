@@ -214,6 +214,7 @@ async fn a_session_runs_on_digitalocean_minus_digitalocean() {
         },
         mounts.clone(),
         IMAGE.into(),
+        tracon::adapter::claude::ClaudeAdapter::ID,
         store.clone(),
     );
 

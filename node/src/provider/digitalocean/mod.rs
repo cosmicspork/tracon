@@ -942,8 +942,14 @@ impl SandboxProvider for DoProvider {
         if !matches!(session.agent_kind.as_str(), "AGENT_KIND_NONE" | "") {
             wrong.push(format!("runs a managed agent ({})", session.agent_kind));
         }
-        if stored.manifest.get("harness").and_then(|h| h.as_str()) != Some("none") {
-            wrong.push("its manifest's harness is not none".to_string());
+        match stored.manifest.get("harness") {
+            Some(serde_json::Value::String(h)) if h == "none" => {}
+            // Said as stored, so a value the runtime fills in differently
+            // can be read off the node's log.
+            other => wrong.push(format!(
+                "its manifest's harness is {}, not \"none\"",
+                other.map_or("absent".to_string(), |v| v.to_string())
+            )),
         }
         let (ips, hosts) = self.options.reach.egress();
         if egress.allow_ips != ips {

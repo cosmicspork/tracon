@@ -87,22 +87,7 @@ impl AppleBackend {
     /// Every sandbox's environment for `harness_id`: what a harness image
     /// would have set, its proxy at the tunnel, and where it keeps state.
     fn sandbox_env(&self, harness_id: &str) -> Vec<(String, String)> {
-        let home = crate::sandbox_images::HOME;
-        let proxy = format!("http://{GATEWAY_HOST}:{}", self.cfg.gateway.proxy_port);
-        let no_proxy = crate::runner::no_proxy(GATEWAY_HOST);
-        let mut env: Vec<(String, String)> = vec![
-            ("HOME".into(), home.into()),
-            ("HTTPS_PROXY".into(), proxy.clone()),
-            ("HTTP_PROXY".into(), proxy),
-            ("NO_PROXY".into(), no_proxy.clone()),
-            ("no_proxy".into(), no_proxy),
-        ];
-        let layout = crate::adapter::layout(harness_id);
-        if !layout.env.is_empty() {
-            env.push((layout.env.into(), format!("{home}/{}", layout.dir)));
-        }
-        env.extend(crate::sandbox_images::sandbox_env());
-        env
+        crate::sandbox_images::harness_env(GATEWAY_HOST, self.cfg.gateway.proxy_port, harness_id)
     }
 
     /// The provider a `harness_id` sandbox is made with.
