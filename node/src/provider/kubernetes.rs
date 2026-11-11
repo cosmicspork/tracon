@@ -11,6 +11,13 @@
 //! copy, but a cluster on containerd 1.7 cannot mount them, and a bundle image
 //! would be a second copy of what the node already holds and has checked.
 //!
+//! **Services.** A session's sandbox runs the catalogue's bundled services
+//! under its supervisor, as on Podman and Apple. Each `[[service]]` bundle
+//! is served the same way, at `/services/<name>.tar`, and fetched by an init
+//! container of its own into an emptyDir the sandbox mounts read-only at
+//! `/opt/tracon-services/<name>`, where Podman and Apple mount it. Only a
+//! session's pod fetches them: nothing else starts a service.
+//!
 //! **Files.** Nothing of the state claim is mounted. Every directory a run
 //! names is an emptyDir of the pod's own, filled and read back over the
 //! protocol's files channel (`runner::sandbox_files`), so a sandbox pod never
@@ -97,18 +104,29 @@ use crate::telemetry::{run_kind, telemetry};
 pub const SANDBOX_ROLE: &str = "sandbox";
 /// Where on the sandbox port the node serves its bundle.
 pub const BUNDLE_PATH: &str = "/bundle.tar";
-/// What the init container runs: the bundle fetched from the node, checked
+/// Where on the sandbox port the node serves the catalogue service `name`'s
+/// bundle.
+pub fn service_bundle_path(name: &str) -> String {
+    format!("/services/{name}.tar")
+}
+/// What each init container runs: a bundle fetched from the node, checked
 /// against the digest in its environment, unpacked where the sandbox mounts
 /// it. Any image with a shell, `curl` or `wget`, `sha256sum` and `tar`.
-const FETCH_BUNDLE: &str = "set -eu; f=/opt/tracon/.bundle.tar; \
+const FETCH_BUNDLE: &str = "set -eu; f=\"$TRACON_BUNDLE_DIR/.bundle.tar\"; \
 if command -v curl >/dev/null 2>&1; then curl -fsS --noproxy '*' -o \"$f\" \"$TRACON_BUNDLE_URL\"; \
 else wget -q -O \"$f\" \"$TRACON_BUNDLE_URL\"; fi; \
 echo \"$TRACON_BUNDLE_SHA256  $f\" | sha256sum -c - >/dev/null; \
-tar -xf \"$f\" -C /opt/tracon; rm -f \"$f\"";
+tar -xf \"$f\" -C \"$TRACON_BUNDLE_DIR\"; rm -f \"$f\"";
 pub const BUNDLE_VOLUME: &str = "bundle";
 pub const HOME_VOLUME: &str = "home";
 /// The init container that copies the bundle in.
 pub const BUNDLE_CONTAINER: &str = "bundle";
+/// The init container, and the volume, that a catalogue service's bundle is
+/// copied in by and into: `svc-<name>`. A service's name is 1-32 lowercase
+/// letters, digits or '-', so this is a DNS label.
+pub fn service_bundle_volume(name: &str) -> String {
+    format!("svc-{name}")
+}
 const SUPERVISOR: &str = "/opt/tracon/bin/tracon-sandbox";
 
 /// How often a pod on its way up is read.
@@ -315,6 +333,10 @@ pub struct KubeSandboxOptions {
     pub spec: KubeSpec,
     /// The bundle directory every sandbox gets, holding `bin/tracon-sandbox`.
     pub bundle: PathBuf,
+    /// Each catalogue service's bundle directory, by the service's name:
+    /// what every session's sandbox gets at
+    /// `<config::SERVICE_BUNDLES_TARGET>/<name>`.
+    pub service_bundles: Vec<(String, PathBuf)>,
     /// Where the node keeps the tar of it that it serves.
     pub served_dir: PathBuf,
     /// Where the node takes its sandboxes' connections.
@@ -334,6 +356,7 @@ impl KubeSandboxOptions {
                 .unwrap_or_else(|| spec.env.namespace.clone()),
             spec,
             bundle: crate::bundle::effective(cfg).unwrap_or_default(),
+            service_bundles: crate::service_bundle::named(cfg),
             served_dir: crate::config::Config::state_dir().join(crate::bundle::DIR),
             listen: SocketAddr::from(([0, 0, 0, 0], k.sandbox_port)),
             connect_timeout: crate::runner::protocol::CONNECT_WITHIN,
@@ -347,11 +370,12 @@ pub struct Dispatcher {
     local: SocketAddr,
     state: Mutex<DispatchState>,
     accepting: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    /// What an init container is handed for `GET /bundle.tar`.
-    bundle: Mutex<Option<Arc<ServedBundle>>>,
+    /// What an init container is handed for a `GET`, by its path:
+    /// [`BUNDLE_PATH`] and each [`service_bundle_path`].
+    served: Mutex<HashMap<String, Arc<ServedBundle>>>,
 }
 
-/// The node's bundle as the one tar its sandboxes' init containers fetch.
+/// A bundle as the one tar its sandboxes' init containers fetch.
 #[derive(Debug)]
 pub struct ServedBundle {
     pub path: PathBuf,
@@ -359,10 +383,56 @@ pub struct ServedBundle {
     pub len: u64,
 }
 
-/// The tar of the bundle at `dir`, made once per process under `served`:
-/// entries in name order, no times or owners, so the same bundle is the same
-/// bytes.
+/// The digests of the bundles a pod's init containers fetch: the node's
+/// own, and each catalogue service's by its name.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BundleDigests {
+    pub harness: String,
+    pub services: Vec<(String, String)>,
+}
+
+impl BundleDigests {
+    /// Only the node's own bundle, with digest `harness`.
+    pub fn harness(harness: impl Into<String>) -> Self {
+        BundleDigests {
+            harness: harness.into(),
+            services: Vec::new(),
+        }
+    }
+}
+
+/// The tar of the harness bundle at `dir`, made once per process under
+/// `served`: entries in name order, no times or owners, so the same bundle
+/// is the same bytes.
 pub async fn served_bundle(dir: &Path, served: &Path) -> Result<Arc<ServedBundle>, ProviderError> {
+    if !dir.join("bin/tracon-sandbox").is_file() {
+        return Err(failed(format!(
+            "{} has no bin/tracon-sandbox; set [sandbox] bundle to a harness bundle, or let \
+             the node fetch its release's",
+            dir.display()
+        )));
+    }
+    packed(dir, served).await
+}
+
+/// The tar of the catalogue service `name`'s bundle at `dir`, made as the
+/// harness bundle's is. What is in it was checked when the node fetched it
+/// (`service_bundle`), or is the operator's own directory.
+pub async fn served_service_bundle(
+    name: &str,
+    dir: &Path,
+    served: &Path,
+) -> Result<Arc<ServedBundle>, ProviderError> {
+    if !dir.is_dir() {
+        return Err(failed(format!(
+            "service {name}: its bundle {} is not a directory",
+            dir.display()
+        )));
+    }
+    packed(dir, served).await
+}
+
+async fn packed(dir: &Path, served: &Path) -> Result<Arc<ServedBundle>, ProviderError> {
     static MADE: OnceLock<tokio::sync::Mutex<HashMap<PathBuf, Arc<ServedBundle>>>> =
         OnceLock::new();
     let mut made = MADE.get_or_init(Default::default).lock().await;
@@ -370,13 +440,6 @@ pub async fn served_bundle(dir: &Path, served: &Path) -> Result<Arc<ServedBundle
         if bundle.path.is_file() {
             return Ok(bundle.clone());
         }
-    }
-    if !dir.join("bin/tracon-sandbox").is_file() {
-        return Err(failed(format!(
-            "{} has no bin/tracon-sandbox; set [sandbox] bundle to a harness bundle, or let \
-             the node fetch its release's",
-            dir.display()
-        )));
     }
     use sha2::Digest as _;
     let key = hex::encode(sha2::Sha256::digest(dir.as_os_str().as_encoded_bytes()));
@@ -453,12 +516,12 @@ fn write_tar(dir: &Path, to: &Path) -> std::io::Result<ServedBundle> {
 }
 
 /// The first byte of a TLS handshake record: a supervisor's hello. Anything
-/// else on the sandbox port is an init container asking for the bundle.
+/// else on the sandbox port is an init container asking for a bundle.
 const TLS_HANDSHAKE: u8 = 0x16;
 
-/// Answer one plain HTTP request on the sandbox port: the bundle for
-/// `GET /bundle.tar`, nothing else.
-async fn serve_bundle(mut stream: TcpStream, bundle: Option<Arc<ServedBundle>>) {
+/// Answer one plain HTTP request on the sandbox port: a bundle the node
+/// serves, for a `GET` of its path, and nothing else.
+async fn serve_bundle(mut stream: TcpStream, dispatcher: Arc<Dispatcher>) {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     let mut request = Vec::with_capacity(512);
     let mut buf = [0u8; 512];
@@ -479,8 +542,11 @@ async fn serve_bundle(mut stream: TcpStream, bundle: Option<Arc<ServedBundle>>) 
     let line = String::from_utf8_lossy(&request);
     let line = line.lines().next().unwrap_or_default();
     let mut parts = line.split(' ');
-    let wanted = parts.next() == Some("GET") && parts.next() == Some(BUNDLE_PATH);
-    let (Some(bundle), true) = (bundle, wanted) else {
+    let bundle = match (parts.next(), parts.next()) {
+        (Some("GET"), Some(path)) => dispatcher.served.lock().unwrap().get(path).cloned(),
+        _ => None,
+    };
+    let Some(bundle) = bundle else {
         let _ = stream
             .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             .await;
@@ -510,7 +576,10 @@ struct DispatchState {
 
 impl Dispatcher {
     /// The process's dispatcher on `listen`, bound and accepting on first
-    /// use.
+    /// use. Port 0 asks for any free port, so each such bind is a listener
+    /// of its own: one kept under it would be handed to callers on other
+    /// runtimes (tests sharing a process), whose listener dies with the
+    /// runtime that bound it.
     pub async fn bind(listen: SocketAddr) -> std::io::Result<Arc<Dispatcher>> {
         static BOUND: OnceLock<tokio::sync::Mutex<HashMap<SocketAddr, Arc<Dispatcher>>>> =
             OnceLock::new();
@@ -534,7 +603,7 @@ impl Dispatcher {
             local: listener.local_addr()?,
             state: Mutex::default(),
             accepting: Mutex::new(None),
-            bundle: Mutex::new(None),
+            served: Mutex::default(),
         });
         tracing::info!(listen = %dispatcher.local, "sandbox listener");
         let accepting = Arc::downgrade(&dispatcher);
@@ -556,10 +625,7 @@ impl Dispatcher {
                                 Ok(Ok(1)) if first[0] == TLS_HANDSHAKE => {
                                     dispatcher.arrive(peer.ip(), stream)
                                 }
-                                Ok(Ok(1)) => {
-                                    let bundle = dispatcher.bundle.lock().unwrap().clone();
-                                    serve_bundle(stream, bundle).await
-                                }
+                                Ok(Ok(1)) => serve_bundle(stream, dispatcher).await,
                                 _ => {}
                             }
                         });
@@ -572,7 +638,9 @@ impl Dispatcher {
             }
         });
         *dispatcher.accepting.lock().unwrap() = Some(task);
-        bound.insert(listen, dispatcher.clone());
+        if listen.port() != 0 {
+            bound.insert(listen, dispatcher.clone());
+        }
         Ok(dispatcher)
     }
 
@@ -580,9 +648,14 @@ impl Dispatcher {
         self.local
     }
 
-    /// Hand `bundle` to the init containers that ask.
+    /// Hand `bundle` to the init containers that ask for the harness's.
     pub fn serve(&self, bundle: Arc<ServedBundle>) {
-        *self.bundle.lock().unwrap() = Some(bundle);
+        self.serve_at(BUNDLE_PATH, bundle);
+    }
+
+    /// Hand `bundle` to the init containers that ask for `path`.
+    pub fn serve_at(&self, path: &str, bundle: Arc<ServedBundle>) {
+        self.served.lock().unwrap().insert(path.to_string(), bundle);
     }
 
     /// A connection from `peer`: to the run expected there, else held a
@@ -699,6 +772,9 @@ struct Pending {
 pub struct KubeSandboxProvider {
     client: kube::Client,
     options: KubeSandboxOptions,
+    /// The provider's own listener, where `listen` asks for any port: its
+    /// sandboxes dial the one their pods were told.
+    any_port: tokio::sync::OnceCell<Arc<Dispatcher>>,
     pending: Mutex<HashMap<String, Pending>>,
     /// How a sandbox is snapshotted, where the node can build images.
     snapshots: Option<Snapshots>,
@@ -753,6 +829,7 @@ impl KubeSandboxProvider {
         KubeSandboxProvider {
             client,
             options,
+            any_port: tokio::sync::OnceCell::new(),
             pending: Mutex::new(HashMap::new()),
             snapshots: None,
         }
@@ -783,12 +860,18 @@ impl KubeSandboxProvider {
 
     /// The listener every sandbox dials, bound on first use.
     pub async fn dispatcher(&self) -> Result<Arc<Dispatcher>, ProviderError> {
-        Dispatcher::bind(self.options.listen).await.map_err(|e| {
-            failed(format!(
-                "listen for sandboxes on {}: {e}",
-                self.options.listen
-            ))
-        })
+        let bind = || async {
+            Dispatcher::bind(self.options.listen).await.map_err(|e| {
+                failed(format!(
+                    "listen for sandboxes on {}: {e}",
+                    self.options.listen
+                ))
+            })
+        };
+        if self.options.listen.port() != 0 {
+            return bind().await;
+        }
+        self.any_port.get_or_try_init(bind).await.cloned()
     }
 
     /// The node's bundle, packed and served on the listener.
@@ -799,6 +882,26 @@ impl KubeSandboxProvider {
         let bundle = served_bundle(&self.options.bundle, &self.options.served_dir).await?;
         dispatcher.serve(bundle.clone());
         Ok(bundle)
+    }
+
+    /// What a pod of `shape` fetches, packed and served on the listener: the
+    /// node's bundle, and for a session each catalogue service's, since
+    /// only a session starts one.
+    pub async fn bundles(
+        &self,
+        dispatcher: &Dispatcher,
+        shape: Shape,
+    ) -> Result<BundleDigests, ProviderError> {
+        let mut digests = BundleDigests::harness(self.bundle(dispatcher).await?.sha256.clone());
+        if shape != Shape::Session {
+            return Ok(digests);
+        }
+        for (name, dir) in &self.options.service_bundles {
+            let bundle = served_service_bundle(name, dir, &self.options.served_dir).await?;
+            dispatcher.serve_at(&service_bundle_path(name), bundle.clone());
+            digests.services.push((name.clone(), bundle.sha256.clone()));
+        }
+        Ok(digests)
     }
 
     /// Where a sandbox dials: the node pod's address, the listener's port.
@@ -814,14 +917,14 @@ impl KubeSandboxProvider {
     /// The pod for one sandbox. `gated` adds a scheduling gate, so the pod is
     /// admitted (and mutated by whatever admission the cluster runs) but never
     /// scheduled: the boundary checks read it back and delete it. `dial` is
-    /// where the supervisor meets the node, and where the init container
-    /// fetches the bundle whose tar has digest `bundle_sha256`.
+    /// where the supervisor meets the node, and where the init containers
+    /// fetch the bundles whose tars have `bundles`' digests.
     pub fn render(
         &self,
         name: &str,
         spec: &CreateSpec<'_>,
         dial: &str,
-        bundle_sha256: &str,
+        bundles: &BundleDigests,
         gated: bool,
     ) -> Result<Pod, ProviderError> {
         let k = &self.options.spec;
@@ -887,6 +990,21 @@ impl KubeSandboxProvider {
             mount(BUNDLE_VOLUME, BUNDLE_TARGET, Some(true)),
             mount(HOME_VOLUME, &k.home, None),
         ];
+        // Each bundle an init container fetches: its volume (which names the
+        // container too), where it is mounted, where it is served, its digest.
+        let mut fetches = vec![(
+            BUNDLE_VOLUME.to_string(),
+            BUNDLE_TARGET.to_string(),
+            BUNDLE_PATH.to_string(),
+            bundles.harness.clone(),
+        )];
+        for (service, sha256) in &bundles.services {
+            let volume = service_bundle_volume(service);
+            let target = format!("{}/{service}", crate::config::SERVICE_BUNDLES_TARGET);
+            volumes.push(empty(&volume));
+            mounts.push(mount(&volume, &target, Some(true)));
+            fetches.push((volume, target, service_bundle_path(service), sha256.clone()));
+        }
         if spec.shape != Shape::Probe {
             volumes.push(Volume {
                 name: SHM_VOLUME.into(),
@@ -909,7 +1027,7 @@ impl KubeSandboxProvider {
                 || target.split('/').any(|part| part == "..")
                 || target == k.home
                 || target == SCRATCH_MOUNT
-                || target == BUNDLE_TARGET
+                || fetches.iter().any(|(_, bundle, _, _)| bundle == target)
                 || targets.contains(&target)
             {
                 continue;
@@ -996,31 +1114,40 @@ impl KubeSandboxProvider {
                 }),
                 volumes: Some(volumes),
                 image_pull_secrets: k.pull_secrets(),
-                init_containers: Some(vec![Container {
-                    name: BUNDLE_CONTAINER.into(),
-                    // The sandbox's own image: nothing else is pulled for it.
-                    image: Some(image.clone()),
-                    image_pull_policy: Some("IfNotPresent".into()),
-                    command: Some(vec!["sh".into(), "-c".into(), FETCH_BUNDLE.into()]),
-                    env: Some(vec![
-                        EnvVar {
-                            name: "TRACON_BUNDLE_URL".into(),
-                            value: Some(format!("http://{dial}{BUNDLE_PATH}")),
+                init_containers: Some(
+                    fetches
+                        .into_iter()
+                        .map(|(volume, target, path, sha256)| Container {
+                            name: volume.clone(),
+                            // The sandbox's own image: nothing else is
+                            // pulled for it.
+                            image: Some(image.clone()),
+                            image_pull_policy: Some("IfNotPresent".into()),
+                            command: Some(vec!["sh".into(), "-c".into(), FETCH_BUNDLE.into()]),
+                            env: Some(
+                                [
+                                    ("TRACON_BUNDLE_URL", format!("http://{dial}{path}")),
+                                    ("TRACON_BUNDLE_SHA256", sha256),
+                                    ("TRACON_BUNDLE_DIR", target.clone()),
+                                ]
+                                .into_iter()
+                                .map(|(name, value)| EnvVar {
+                                    name: name.into(),
+                                    value: Some(value),
+                                    ..Default::default()
+                                })
+                                .collect(),
+                            ),
+                            volume_mounts: Some(vec![mount(&volume, &target, None)]),
+                            // As much as the sandbox asks: a pod's request
+                            // is the larger of the two, so this adds nothing
+                            // to it.
+                            resources: Some(requirements.clone()),
+                            security_context: Some(gate.clone()),
                             ..Default::default()
-                        },
-                        EnvVar {
-                            name: "TRACON_BUNDLE_SHA256".into(),
-                            value: Some(bundle_sha256.into()),
-                            ..Default::default()
-                        },
-                    ]),
-                    volume_mounts: Some(vec![mount(BUNDLE_VOLUME, BUNDLE_TARGET, None)]),
-                    // As much as the sandbox asks: a pod's request is the
-                    // larger of the two, so this adds nothing to it.
-                    resources: Some(requirements.clone()),
-                    security_context: Some(gate.clone()),
-                    ..Default::default()
-                }]),
+                        })
+                        .collect(),
+                ),
                 containers: vec![Container {
                     name: HARNESS_CONTAINER.into(),
                     image: Some(image),
@@ -1118,20 +1245,24 @@ fn progress(name: &str, status: &PodStatus, sizing: Sizing, k: &KubeSpec) -> Pro
     {
         return Progress::Failed(counted, failed(format!("pod {name}: {reason}")));
     }
-    // The bundle's copy failing leaves the pod pending with its init
+    // A bundle's copy failing leaves the pod pending with its init
     // container terminated non-zero.
-    if let Some(code) = status
+    if let Some((container, code)) = status
         .init_container_statuses
         .iter()
         .flatten()
-        .filter_map(|c| c.state.as_ref()?.terminated.as_ref())
-        .map(|t| t.exit_code)
-        .find(|code| *code != 0)
+        .filter_map(|c| Some((c.name.as_str(), c.state.as_ref()?.terminated.as_ref()?)))
+        .map(|(container, t)| (container, t.exit_code))
+        .find(|(_, code)| *code != 0)
     {
+        let bundle = match container.strip_prefix(&service_bundle_volume("")) {
+            Some(service) => format!("service {service}'s bundle"),
+            None => "the harness bundle".to_string(),
+        };
         return Progress::Failed(
             "bundle",
             failed(format!(
-                "pod {name}: copying the harness bundle in failed ({code}); is \
+                "pod {name}: copying {bundle} in failed ({code}); is \
                  its image able to fetch it (sh, curl or wget, sha256sum and tar)?"
             )),
         );
@@ -1175,7 +1306,8 @@ async fn next(expected: &mut Option<Expected>) -> Option<TcpStream> {
 /// What the admitted pod shows of the boundary, as the checks read it: the
 /// gate on every container, no host namespace or API token, nothing mounted
 /// but the pod's own emptyDirs, no secret named, no resolver, the gateway's
-/// name on loopback, and the bundle from the bundle image.
+/// name on loopback, and every bundle fetched in the sandbox's own image and
+/// mounted read-only.
 pub fn breaches(pod: &Pod, gateway_host: &str) -> Vec<String> {
     let mut found = Vec::new();
     let Some(spec) = &pod.spec else {
@@ -1259,7 +1391,16 @@ pub fn breaches(pod: &Pod, gateway_host: &str) -> Vec<String> {
         Some(_) => found.push("the bundle is fetched in another image than the sandbox's".into()),
         None => found.push("no init container copies the bundle in".into()),
     }
-    match spec.containers.iter().find(|c| c.name == HARNESS_CONTAINER) {
+    let sandbox = spec.containers.iter().find(|c| c.name == HARNESS_CONTAINER);
+    for init in spec.init_containers.iter().flatten() {
+        if init.name != BUNDLE_CONTAINER && sandbox.is_none_or(|c| c.image != init.image) {
+            found.push(format!(
+                "init container {} runs another image than the sandbox's",
+                init.name
+            ));
+        }
+    }
+    match sandbox {
         Some(c) => {
             let bundle = c
                 .volume_mounts
@@ -1270,6 +1411,15 @@ pub fn breaches(pod: &Pod, gateway_host: &str) -> Vec<String> {
                 found.push(format!(
                     "the bundle is not mounted read-only at {BUNDLE_TARGET}"
                 ));
+            }
+            let services = format!("{}/", crate::config::SERVICE_BUNDLES_TARGET);
+            for m in c.volume_mounts.iter().flatten() {
+                if m.mount_path.starts_with(&services) && m.read_only != Some(true) {
+                    found.push(format!(
+                        "the service bundle at {} is not mounted read-only",
+                        m.mount_path
+                    ));
+                }
             }
         }
         None => found.push("the pod runs no sandbox".into()),
@@ -1320,14 +1470,8 @@ impl SandboxProvider for KubeSandboxProvider {
         let sizing = sizing(spec.shape);
         let kind = run_kind(spec.labels.kind, sizing.as_str());
         let dispatcher = self.dispatcher().await?;
-        let bundle = self.bundle(&dispatcher).await?;
-        let pod = self.render(
-            &name,
-            spec,
-            &self.advertise(&dispatcher),
-            &bundle.sha256,
-            false,
-        )?;
+        let bundles = self.bundles(&dispatcher, spec.shape).await?;
+        let pod = self.render(&name, spec, &self.advertise(&dispatcher), &bundles, false)?;
         let pods = self.pods();
         // Left by an earlier run of the same name.
         let _ = pods

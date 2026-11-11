@@ -154,8 +154,9 @@ impl KubeBackend {
     /// The bundle fetched or checked, and the stock base pinned by the manifest its registry holds for this
     /// machine's architecture, which is every sandbox's, since affinity keeps
     /// them on the node pod's machine. Nothing is pulled here; a pod's
-    /// kubelet pulls the pinned digest. With `[digitalocean] registry`, the
-    /// release's browser bundle too, which the templates it builds hold.
+    /// kubelet pulls the pinned digest. The release's browser bundle too,
+    /// where a `[[service]]` names it: a session's pod copies it in from the
+    /// node, and the DigitalOcean templates the node builds hold it.
     /// `Ok(true)` when a bundle was fetched or the pin moved.
     pub async fn converge_images(&self) -> Result<bool, String> {
         let fetched = match crate::bundle::ensure(&self.cfg).await {
@@ -166,8 +167,9 @@ impl KubeBackend {
             Ok(_) => false,
             Err(error) => return Err(format!("harness bundle: {error}")),
         };
-        // The DigitalOcean templates this node builds hold the browser, and a
-        // peer's request waits on it: fetched whether or not the pin succeeds.
+        // Sessions and the DigitalOcean templates this node builds want the
+        // browser, and a peer's request waits on it: fetched whether or not
+        // the pin succeeds.
         let browser = crate::service_bundle::converge(&self.cfg).await;
         let configured = self.cfg.sandbox.base_image_ref();
         // The builder's credential for a base kept in its registry; a base
@@ -304,8 +306,9 @@ impl KubeBackend {
     }
 
     /// A sandbox per command over the protocol, with its trees sent over the
-    /// files channel and its routes to the node as tunnels. A digest-pinned
-    /// image is its own identity, answered without running anything.
+    /// files channel, its routes to the node as tunnels, and bundled services
+    /// under its supervisor. A digest-pinned image is its own identity,
+    /// answered without running anything.
     fn protocol_runner(&self, client: kube::Client, mut spec: KubeSpec) -> Arc<dyn Runner> {
         let mounts = std::mem::take(&mut spec.extra_mounts);
         let image = spec.image.clone();
@@ -318,7 +321,8 @@ impl KubeBackend {
                 .with_delegate(Arc::new(DigestIdentity))
                 .with_files(self.files_store())
                 .with_tunnels(crate::runner::tunnels::kube_tunnels(&self.cfg))
-                .with_bundled_harness(true),
+                .with_bundled_harness(true)
+                .with_sandbox_services(true),
         )
     }
 

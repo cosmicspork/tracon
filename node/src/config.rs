@@ -303,10 +303,10 @@ pub struct Service {
     /// `<version>/<arch>` of `scripts/browser-bundle.sh`'s output, say), or
     /// `release` on `browser`: the browser bundle of the node's own release,
     /// which the node fetches and checks (`crate::service_bundle`).
-    /// On Podman and Apple (and Kubernetes over the protocol), it is mounted
-    /// read-only at `/opt/tracon-services/<name>` in every sandbox, and the
-    /// service runs there under the sandbox's supervisor instead of in
-    /// `image`.
+    /// It is at `/opt/tracon-services/<name>`, read-only, in every sandbox
+    /// (mounted on Podman and Apple, copied into every session's pod on
+    /// Kubernetes), and the service runs there under the sandbox's
+    /// supervisor instead of in `image`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bundle: Option<PathBuf>,
     /// With `bundle`: what the supervisor starts, inside the sandbox.

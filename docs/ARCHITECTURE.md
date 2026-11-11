@@ -1098,9 +1098,12 @@ directly) and the `browser` workflow refuses any build that listens beyond loopb
 upstream base bumps included. The service's `service` events on the session are how every path that removes
 the session's container (its end, a kill, a restart's reconciliation) finds and removes
 its services first. A session's pause stops neither the harness container nor its
-services today; both run until the session ends. A runtime that cannot share a
-namespace (the local and Kubernetes runners) reports that it cannot run one rather than
-starting it somewhere the session cannot reach. What a repository asks of
+services today; both run until the session ends. A service with a bundle runs inside
+the session's sandbox under its supervisor on every runtime: Podman and Apple mount the
+bundle, a Kubernetes session's pod copies it in from the node, and DigitalOcean's
+templates hold it. One with only an image is a container beside the sandbox on Podman;
+any other runtime reports that it cannot run one rather than starting it somewhere the
+session cannot reach. What a repository asks of
 preparation and does not get is said before launch: `GET /api/preparation` (shown under
 the repository in the composer) reads the managed clone and names the install it would run,
 the entry's `prepare` commands and the image, then every devcontainer field the node
