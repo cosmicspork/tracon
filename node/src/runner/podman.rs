@@ -714,8 +714,12 @@ fn image_repository(image: &str) -> &str {
 mod tests {
     use super::*;
 
+    /// The `podman run` line is the deprecated path's: a node with the
+    /// sandbox switches off.
     fn spec() -> RunSpec {
-        RunSpec::from_config(&Config::default(), false)
+        let mut cfg = Config::default();
+        cfg.runtime.podman = crate::config::PodmanRuntime::legacy();
+        RunSpec::from_config(&cfg, false)
     }
 
     #[test]

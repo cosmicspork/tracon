@@ -1479,8 +1479,10 @@ mod tests {
     }
 
     #[test]
-    fn off_by_default_and_only_over_the_protocol() {
+    fn on_by_default_and_only_over_the_protocol() {
+        assert_eq!(enabled(&Config::default()), cfg!(target_os = "linux"));
         let mut cfg = Config::default();
+        cfg.runtime.podman = crate::config::PodmanRuntime::legacy();
         assert!(!enabled(&cfg));
         assert_eq!(definitions(&cfg), "");
         cfg.runtime.podman.sandbox_images = true;

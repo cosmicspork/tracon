@@ -367,9 +367,12 @@ impl PodmanBackend {
 /// Whether this node runs its Podman commands over the sandbox protocol. Off
 /// a Linux host the supervisor's socket would be on the far side of the
 /// Podman machine's file sharing, which carries no sockets, so the setting
-/// is refused there.
+/// is refused there. Only a Podman node's: the switches are on by default,
+/// and another kind's sandboxes are its own.
 pub fn uses_sandbox_protocol(cfg: &Config) -> bool {
-    if !cfg.runtime.podman.sandbox_protocol {
+    if !cfg.runtime.podman.sandbox_protocol
+        || cfg.runtime.kind != crate::config::RuntimeKind::Podman
+    {
         return false;
     }
     if !cfg!(target_os = "linux") {
@@ -409,7 +412,8 @@ pub fn uses_sandbox_files(cfg: &Config) -> bool {
 /// protocol; asked for without it, the setting is ignored and the gateway
 /// container serves as before.
 pub fn uses_sandbox_tunnels(cfg: &Config) -> bool {
-    if !cfg.runtime.podman.sandbox_tunnels {
+    if !cfg.runtime.podman.sandbox_tunnels || cfg.runtime.kind != crate::config::RuntimeKind::Podman
+    {
         return false;
     }
     if !cfg.runtime.podman.sandbox_protocol {
@@ -1278,19 +1282,27 @@ mod tests {
         assert!(args.iter().all(|arg| !arg.contains('@')), "{args:?}");
     }
 
-    /// Off unless asked, so a node's sessions run as they always have.
+    /// On by default on a Linux host, the only one it runs on, and only for
+    /// a Podman node; off where the node says so.
     #[test]
-    fn the_sandbox_protocol_is_off_unless_asked_and_read_from_its_own_block() {
+    fn the_sandbox_protocol_is_on_by_default_and_read_from_its_own_block() {
+        let linux = cfg!(target_os = "linux");
         let default = crate::config::Config::default();
-        assert!(!super::uses_sandbox_protocol(&default));
+        assert_eq!(super::uses_sandbox_protocol(&default), linux);
         assert!(!default.runtime.podman.sandbox_init);
         assert!(default.sandbox.bundle.is_none());
+        let mut kube = default.clone();
+        kube.runtime.kind = crate::config::RuntimeKind::Kubernetes;
+        assert!(!super::uses_sandbox_protocol(&kube));
+        let mut off = default.clone();
+        off.runtime.podman.sandbox_protocol = false;
+        assert!(!super::uses_sandbox_protocol(&off));
         let on: crate::config::Config = toml::from_str(
             "[runtime.podman]\nsandbox_protocol = true\nsandbox_init = true\n\
              [sandbox]\nbundle = \"/opt/bundle\"\n",
         )
         .unwrap();
-        assert_eq!(super::uses_sandbox_protocol(&on), cfg!(target_os = "linux"));
+        assert_eq!(super::uses_sandbox_protocol(&on), linux);
         assert!(on.runtime.podman.sandbox_init);
         assert_eq!(on.sandbox.bundle.as_deref(), Some(Path::new("/opt/bundle")));
         // Beside the harness socket, so a node with its own keeps its own.
@@ -1300,19 +1312,22 @@ mod tests {
         assert_eq!(scratch.sandbox_socket_dir(), Path::new("/tmp/n1/sandbox"));
     }
 
-    /// Files over the protocol are off unless asked, and asked for without
-    /// the protocol they stay off: volumes are mounted as before.
+    /// Files over the protocol are on with it by default, and asked for
+    /// without the protocol they stay off: volumes are mounted as before.
     #[test]
-    fn files_over_the_protocol_are_off_unless_asked_with_the_protocol() {
-        assert!(!super::uses_sandbox_files(&crate::config::Config::default()));
-        let alone: crate::config::Config =
-            toml::from_str("[runtime.podman]\nsandbox_files = true\n").unwrap();
-        assert!(alone.runtime.podman.sandbox_files);
+    fn files_over_the_protocol_need_the_protocol() {
+        let linux = cfg!(target_os = "linux");
+        assert_eq!(
+            super::uses_sandbox_files(&crate::config::Config::default()),
+            linux
+        );
+        let mut alone = crate::config::Config::default();
+        alone.runtime.podman.sandbox_protocol = false;
         assert!(!super::uses_sandbox_files(&alone));
         let both: crate::config::Config =
             toml::from_str("[runtime.podman]\nsandbox_protocol = true\nsandbox_files = true\n")
                 .unwrap();
-        assert_eq!(super::uses_sandbox_files(&both), cfg!(target_os = "linux"));
+        assert_eq!(super::uses_sandbox_files(&both), linux);
         let mut kube = both.clone();
         kube.runtime.kind = crate::config::RuntimeKind::Kubernetes;
         assert!(!super::uses_sandbox_files(&kube));
@@ -1367,67 +1382,71 @@ mod tests {
     }
 
     #[test]
-    fn tunnels_are_off_unless_asked_and_need_the_protocol() {
-        let default = crate::config::Config::default();
-        assert!(!default.runtime.podman.sandbox_tunnels);
-        assert!(!super::uses_sandbox_tunnels(&default));
+    fn tunnels_are_on_by_default_and_need_the_protocol() {
+        let linux = cfg!(target_os = "linux");
+        let mut default = crate::config::Config::default();
+        default.gateway.harness_listen =
+            crate::config::HarnessListen::Unix("/tmp/n1/harness.sock".into());
+        assert_eq!(default.runtime.podman.sandbox_tunnels, linux);
+        assert_eq!(super::uses_sandbox_tunnels(&default), linux);
+        assert_eq!(RunSpec::from_config(&default, true).node_only, linux);
+        assert_eq!(
+            super::setup::images(&default)
+                .iter()
+                .any(|(_, dir)| *dir == "gateway"),
+            !linux,
+            "no gateway image when there is no gateway"
+        );
+        assert_eq!(
+            default.allow_proxy_socket(),
+            Path::new("/tmp/n1/allow.sock")
+        );
+
         // Off, the gateway is built, the sandbox joins the internal network
         // and the runner opens no tunnels: as before.
-        assert!(super::setup::images(&default)
+        let mut off = default.clone();
+        off.runtime.podman.sandbox_tunnels = false;
+        assert!(!super::uses_sandbox_tunnels(&off));
+        assert!(super::setup::images(&off)
             .iter()
             .any(|(_, dir)| *dir == "gateway"));
-        let spec = RunSpec::from_config(&default, true);
-        assert!(!spec.node_only);
+        assert!(!RunSpec::from_config(&off, true).node_only);
 
-        let alone: crate::config::Config =
-            toml::from_str("[runtime.podman]\nsandbox_tunnels = true\n").unwrap();
+        let mut alone = default.clone();
+        alone.runtime.podman.sandbox_protocol = false;
         assert!(
             !super::uses_sandbox_tunnels(&alone),
             "needs sandbox_protocol"
         );
         assert!(!RunSpec::from_config(&alone, true).node_only);
 
-        let mut on: crate::config::Config =
-            toml::from_str("[runtime.podman]\nsandbox_protocol = true\nsandbox_tunnels = true\n")
-                .unwrap();
-        on.gateway.harness_listen =
-            crate::config::HarnessListen::Unix("/tmp/n1/harness.sock".into());
-        let linux = cfg!(target_os = "linux");
-        assert_eq!(super::uses_sandbox_tunnels(&on), linux);
-        assert_eq!(RunSpec::from_config(&on, true).node_only, linux);
-        assert_eq!(
-            super::setup::images(&on)
-                .iter()
-                .any(|(_, dir)| *dir == "gateway"),
-            !linux,
-            "no gateway image when there is no gateway"
-        );
-        assert_eq!(on.allow_proxy_socket(), Path::new("/tmp/n1/allow.sock"));
+        let mut kube = default.clone();
+        kube.runtime.kind = crate::config::RuntimeKind::Kubernetes;
+        assert!(!super::uses_sandbox_tunnels(&kube));
     }
 
     #[test]
-    fn services_stay_sidecars_unless_asked_and_need_the_sandbox_protocol() {
+    fn services_run_in_the_sandbox_by_default_and_need_the_sandbox_protocol() {
         let catalogue = "[[service]]\nname = \"browser\"\nport = 9222\n\
                          bundle = \"/srv/browser/amd64\"\n\
                          [[service]]\nname = \"db\"\nport = 5432\n\
                          image = \"pg@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n";
-        let default: crate::config::Config = toml::from_str(catalogue).unwrap();
-        assert!(!default.runtime.podman.sandbox_services);
-        assert!(!super::uses_sandbox_services(&default));
-        assert!(crate::provider::podman::service_bundles(&default).is_empty());
+        let off: crate::config::Config = toml::from_str(&format!(
+            "[runtime.podman]\nsandbox_services = false\n{catalogue}"
+        ))
+        .unwrap();
+        assert!(!super::uses_sandbox_services(&off));
+        assert!(crate::provider::podman::service_bundles(&off).is_empty());
 
         // Asked for without the sandbox protocol: still sidecars.
         let alone: crate::config::Config = toml::from_str(&format!(
-            "[runtime.podman]\nsandbox_services = true\n{catalogue}"
+            "[runtime.podman]\nsandbox_protocol = false\nsandbox_services = true\n{catalogue}"
         ))
         .unwrap();
         assert!(!super::uses_sandbox_services(&alone));
         assert!(crate::provider::podman::service_bundles(&alone).is_empty());
 
-        let on: crate::config::Config = toml::from_str(&format!(
-            "[runtime.podman]\nsandbox_protocol = true\nsandbox_services = true\n{catalogue}"
-        ))
-        .unwrap();
+        let on: crate::config::Config = toml::from_str(catalogue).unwrap();
         assert_eq!(super::uses_sandbox_services(&on), cfg!(target_os = "linux"));
         if cfg!(target_os = "linux") {
             // Only the bundled service is mounted; the image one stays a sidecar.

@@ -1193,7 +1193,11 @@ mod tests {
         let bundle = dir.path().join("bundle");
         std::fs::create_dir_all(bundle.join("bin")).unwrap();
         std::fs::write(bundle.join("bin/tracon-sandbox"), b"").unwrap();
-        let mut spec = RunSpec::from_config(&crate::config::Config::default(), true);
+        // The protocol over the internal network and mounted volumes: what
+        // a node with tunnels and files off runs.
+        let mut cfg = crate::config::Config::default();
+        cfg.runtime.podman = crate::config::PodmanRuntime::legacy();
+        let mut spec = RunSpec::from_config(&cfg, true);
         spec.extra_mounts = vec![Mount::volume(
             "tracon-harness-state",
             "/root/.claude",

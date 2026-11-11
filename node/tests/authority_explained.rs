@@ -91,11 +91,13 @@ async fn the_explanation_answers_in_the_terms_the_operator_thinks_in() {
     assert_eq!(view["node"]["id"], "n1");
     assert_eq!(view["harness"]["id"], "fake");
     // The image is the one the configured runtime would actually launch, not
-    // whichever of the two fields was easiest to reach.
-    assert!(view["image"]["execution"]
-        .as_str()
-        .unwrap()
-        .contains("harness"));
+    // whichever of the two fields was easiest to reach: on Linux, the stock
+    // base every harness runs in from the bundle.
+    let execution = view["image"]["execution"].as_str().unwrap();
+    match cfg!(target_os = "linux") {
+        true => assert!(execution.contains("tracon-sandbox-base"), "{execution}"),
+        false => assert!(execution.contains("harness"), "{execution}"),
+    }
     assert_eq!(view["access"]["workspace"], "/work/tree");
     assert_eq!(view["access"]["branch"], "feat/x");
     assert_eq!(view["limits"]["budget_tokens"], 1000);

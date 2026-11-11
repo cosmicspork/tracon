@@ -1159,13 +1159,19 @@ pub struct Runtime {
 }
 
 /// `[runtime.podman]`: how the Podman boundary runs what it runs.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// Every `sandbox_*` switch but `sandbox_init` is on by default on a Linux
+/// host, which is the only one the sandbox protocol runs on. Turning one off
+/// keeps the path it replaced (the gateway container, harness images,
+/// mounted volumes, sidecars), which is deprecated: the node says so at load
+/// (`deprecated_podman_settings`), and the old paths go in a later release.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PodmanRuntime {
     /// Run every harness, check and preparation under `tracon-sandbox` from
-    /// `[sandbox] bundle`, with its control and stdio over the sandbox
-    /// protocol rather than `podman run`'s own pipes. The network, volumes
-    /// and images stay as they are. Linux hosts only.
+    /// the harness bundle, with its control and stdio over the sandbox
+    /// protocol rather than `podman run`'s own pipes. Linux hosts only. Off,
+    /// every other switch here is off too unless set on.
     pub sandbox_protocol: bool,
     /// Start `tracon-sandbox` under Podman's `--init` rather than as the
     /// container's PID 1.
@@ -1196,6 +1202,109 @@ pub struct PodmanRuntime {
     /// Needs `sandbox_protocol`. A service with only an image stays a
     /// container.
     pub sandbox_services: bool,
+}
+
+impl Default for PodmanRuntime {
+    fn default() -> Self {
+        let on = cfg!(target_os = "linux");
+        Self {
+            sandbox_protocol: on,
+            sandbox_init: false,
+            sandbox_files: on,
+            sandbox_tunnels: on,
+            sandbox_images: on,
+            sandbox_services: on,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Config {
+    /// A Podman node with every sandbox switch off: the deprecated paths,
+    /// which the tests written against them still cover.
+    pub fn podman_legacy() -> Self {
+        let mut config = Self::default();
+        config.runtime.podman = PodmanRuntime::legacy();
+        config
+    }
+}
+
+/// The `[runtime.podman]` switches that stand on `sandbox_protocol`.
+const PROTOCOL_SWITCHES: [&str; 4] = [
+    "sandbox_files",
+    "sandbox_tunnels",
+    "sandbox_images",
+    "sandbox_services",
+];
+
+impl PodmanRuntime {
+    /// Every switch off: the deprecated paths, as Podman runs them off a
+    /// Linux host or where a node turns the protocol off.
+    pub fn legacy() -> Self {
+        Self {
+            sandbox_protocol: false,
+            sandbox_init: false,
+            sandbox_files: false,
+            sandbox_tunnels: false,
+            sandbox_images: false,
+            sandbox_services: false,
+        }
+    }
+
+    /// The switches as `text` writes them, settled: with `sandbox_protocol`
+    /// off, each switch that stands on it and that `text` leaves out is off
+    /// too, rather than on by default and refused or ignored for want of the
+    /// protocol. One the file turns on beside it is left to be refused.
+    fn settle(&mut self, text: &str) {
+        if self.sandbox_protocol {
+            return;
+        }
+        let written = podman_settings(text);
+        for key in PROTOCOL_SWITCHES {
+            if written.iter().any(|(name, _)| *name == key) {
+                continue;
+            }
+            match key {
+                "sandbox_files" => self.sandbox_files = false,
+                "sandbox_tunnels" => self.sandbox_tunnels = false,
+                "sandbox_images" => self.sandbox_images = false,
+                _ => self.sandbox_services = false,
+            }
+        }
+    }
+}
+
+/// The `sandbox_*` switches `[runtime.podman]` in `text` sets, by name, with
+/// the value each is set to; `sandbox_init` is a choice of how, not a path,
+/// and is left out.
+fn podman_settings(text: &str) -> Vec<(&'static str, bool)> {
+    let Ok(value) = toml::from_str::<toml::Value>(text) else {
+        return Vec::new();
+    };
+    let Some(podman) = value
+        .get("runtime")
+        .and_then(|runtime| runtime.get("podman"))
+    else {
+        return Vec::new();
+    };
+    std::iter::once("sandbox_protocol")
+        .chain(PROTOCOL_SWITCHES)
+        .filter_map(|key| Some((key, podman.get(key)?.as_bool()?)))
+        .collect()
+}
+
+/// The `[runtime.podman]` switches `text` turns off on a Podman node, each of
+/// which keeps a deprecated path: worth one line each in the log, since the
+/// node still runs them.
+fn deprecated_podman_settings(text: &str, kind: RuntimeKind) -> Vec<&'static str> {
+    if kind != RuntimeKind::Podman || !cfg!(target_os = "linux") {
+        return Vec::new();
+    }
+    podman_settings(text)
+        .into_iter()
+        .filter(|(_, on)| !on)
+        .map(|(key, _)| key)
+        .collect()
 }
 
 /// `[runtime.apple]`: a Mac node whose sandboxes are Apple Containerization
@@ -3202,6 +3311,14 @@ impl Config {
             config.providers.entry(name).or_insert(provider);
         }
         config.review.lift_retired_defaults();
+        config.runtime.podman.settle(text);
+        for key in deprecated_podman_settings(text, config.runtime.kind) {
+            tracing::warn!(
+                "{}: [runtime.podman] {key} = false keeps a deprecated path that a later \
+                 release removes; delete the line to run the default",
+                path.display()
+            );
+        }
         for section in retired_opencode_sections(text) {
             tracing::warn!(
                 "{}: [{section}] is ignored; it configured the OpenCode harness, which was removed",
@@ -3242,7 +3359,7 @@ impl Config {
         crate::provider::digitalocean::validate(
             &config.digitalocean,
             &config.mesh,
-            config.runtime.podman.sandbox_images,
+            config.runtime.kind == RuntimeKind::Podman && config.runtime.podman.sandbox_images,
         )
         .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_services(&config.service)
@@ -3363,7 +3480,10 @@ mod tests {
 
     #[test]
     fn the_other_harness_image_follows_the_configured_one() {
+        // Harness images are the deprecated path's; on the sandbox images
+        // every harness runs in the base, from the bundle.
         let mut cfg = Config::default();
+        cfg.runtime.podman = PodmanRuntime::legacy();
         assert_eq!(
             cfg.podman_harness_image("native"),
             "localhost/tracon-harness-native"
@@ -3681,6 +3801,56 @@ mod tests {
         assert_eq!(retired_qa_section("[review]\nmax_files = 1\n"), None);
     }
 
+    /// The Podman sandbox switches are on by default on Linux. Turning the
+    /// protocol off turns off what stands on it, unless the file turns that
+    /// on beside it (and is then refused), and every switch turned off is
+    /// named as deprecated.
+    #[test]
+    fn podman_sandbox_switches_default_on_and_an_explicit_off_is_deprecated() {
+        let linux = cfg!(target_os = "linux");
+        let load = |text: &str| Config::from_toml(text, Path::new("node.toml"));
+        let fresh = load("").unwrap().runtime.podman;
+        assert_eq!(
+            (
+                fresh.sandbox_protocol,
+                fresh.sandbox_files,
+                fresh.sandbox_tunnels,
+                fresh.sandbox_images,
+                fresh.sandbox_services,
+                fresh.sandbox_init,
+            ),
+            (linux, linux, linux, linux, linux, false)
+        );
+
+        // The protocol off takes the rest with it, so the file still loads.
+        let off = load("[runtime.podman]\nsandbox_protocol = false\n").unwrap();
+        let podman = &off.runtime.podman;
+        assert!(!podman.sandbox_files && !podman.sandbox_tunnels);
+        assert!(!podman.sandbox_images && !podman.sandbox_services);
+        assert!(!crate::sandbox_images::enabled(&off));
+        assert!(
+            load("[runtime.podman]\nsandbox_protocol = false\nsandbox_images = true\n")
+                .unwrap_err()
+                .contains("needs runtime.podman.sandbox_protocol = true")
+        );
+        // One switch off leaves the others as they were.
+        let one = load("[runtime.podman]\nsandbox_tunnels = false\n").unwrap();
+        assert!(!one.runtime.podman.sandbox_tunnels);
+        assert_eq!(one.runtime.podman.sandbox_images, linux);
+
+        let text = "[runtime.podman]\nsandbox_protocol = true\nsandbox_tunnels = false\n\
+                    sandbox_images = false\nsandbox_init = false\n";
+        assert_eq!(
+            deprecated_podman_settings(text, RuntimeKind::Podman),
+            match linux {
+                true => vec!["sandbox_tunnels", "sandbox_images"],
+                false => Vec::new(),
+            }
+        );
+        assert!(deprecated_podman_settings(text, RuntimeKind::Apple).is_empty());
+        assert!(deprecated_podman_settings("", RuntimeKind::Podman).is_empty());
+    }
+
     /// The OpenCode harness's own tables still load, and are named rather
     /// than silently dropped.
     #[test]
@@ -3962,16 +4132,17 @@ mod tests {
         let toml = |runtime: &str| {
             format!("{runtime}\n[[repo]]\npath = \"/srv/code/app\"\nbuild = [\"apt-get update\"]\n")
         };
-        let legacy = Config::from_toml(&toml(""), Path::new("node.toml")).unwrap_err();
+        let legacy = Config::from_toml(
+            &toml("[runtime.podman]\nsandbox_images = false"),
+            Path::new("node.toml"),
+        )
+        .unwrap_err();
         assert!(
             legacy.contains("runtime.podman.sandbox_images = true"),
             "{legacy}"
         );
-        Config::from_toml(
-            &toml("[runtime.podman]\nsandbox_protocol = true\nsandbox_images = true"),
-            Path::new("node.toml"),
-        )
-        .unwrap();
+        let fresh = Config::from_toml(&toml(""), Path::new("node.toml"));
+        assert_eq!(fresh.is_ok(), cfg!(target_os = "linux"));
         Config::from_toml(&toml("[runtime]\nkind = \"apple\""), Path::new("node.toml")).unwrap();
         let kube = Config::from_toml(
             &toml("[runtime]\nkind = \"kubernetes\""),

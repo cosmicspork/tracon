@@ -1017,8 +1017,15 @@ the id the review will have, `review_status` carries the wait and then reports t
 review or the same refusal the call would have given, and a retry of the same candidate
 against the same check definitions attaches to the run instead of starting another. A
 restart interrupts whatever was still `running` and closes the sessions that asked for
-it, like every other live session. An entry may name the repository's Dockerfile instead of an
-image: the node then builds it (`crate::repo_image`) from the **default branch**, read
+it, like every other live session. Where sandboxes run on the stock base (a Podman node
+on Linux by default, an Apple node, and Kubernetes with `[runtime.kubernetes]
+sandbox_protocol`), an entry gives root `build` steps instead: the node layers them on
+the pinned `tracon-sandbox-base` as the repository's one image, every harness runs in it
+from the mounted bundle with no layer of the node's, and an `image` or a Dockerfile not
+`FROM ${TRACON_SANDBOX_BASE}` is refused (`repo_image::stock_base_only`). What follows is
+the path that remains for Kubernetes without the protocol and for a Podman node that turns
+the sandbox switches off (deprecated) or runs off Linux. An entry may name the repository's
+Dockerfile instead of an image: the node then builds it (`crate::repo_image`) from the **default branch**, read
 through Git's object store and never from a working tree, adds one layer of its own,
 and records the digest it built in its own state — the recipe is configuration, the
 digest is not, because a locally built image has a different one on every node. That

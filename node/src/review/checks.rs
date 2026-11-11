@@ -1372,7 +1372,7 @@ mod tests {
     /// change to what a prepared check runs with reruns it.
     #[test]
     fn a_prepared_check_is_identified_by_the_environment_it_runs_with() {
-        let cfg = Config::default();
+        let cfg = Config::podman_legacy();
         let mut environment = RepoEnvironment {
             image: "local".into(),
             image_source: "harness image",
@@ -1400,7 +1400,7 @@ mod tests {
 
     #[test]
     fn required_commands_are_operator_configuration_only() {
-        let mut cfg = Config::default();
+        let mut cfg = Config::podman_legacy();
         cfg.supervision.checks = vec!["  cargo test  ".into(), "".into()];
         assert_eq!(required_definitions(&cfg), vec!["cargo test".to_string()]);
     }
@@ -1720,7 +1720,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&snapshot).unwrap();
 
-        let mut cfg = Config::default();
+        let mut cfg = Config::podman_legacy();
         cfg.runtime.kind = RuntimeKind::Podman;
         // Deliberately a mutable tag, never pinnable on its own: the backend's
         // confirmed identity is what must grant reuse, not this string.
@@ -1805,7 +1805,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&snapshot).unwrap();
 
-        let mut cfg = Config::default();
+        let mut cfg = Config::podman_legacy();
         cfg.runtime.kind = RuntimeKind::Podman;
         // A digest-shaped string in config, but this backend never runs any
         // image at all — it must not borrow that string's pinning.
@@ -2060,7 +2060,7 @@ mod tests {
             capture_json: "{}".into(),
         };
         store.insert_candidate(&candidate).unwrap();
-        let mut cfg = Config::default();
+        let mut cfg = Config::podman_legacy();
         cfg.runtime.kind = RuntimeKind::Podman;
         cfg.supervision.checks = vec!["node-wide check".into()];
         cfg.repo = vec![crate::config::Repo {

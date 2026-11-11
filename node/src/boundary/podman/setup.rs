@@ -1043,7 +1043,14 @@ mod tests {
 
     #[test]
     fn a_converge_with_tunnels_retires_the_gateway_and_one_without_keeps_it() {
-        assert_eq!(gateway_plan(&Config::default()), GatewayPlan::Keep);
+        let mut off = Config::default();
+        off.runtime.podman = crate::config::PodmanRuntime::legacy();
+        assert_eq!(gateway_plan(&off), GatewayPlan::Keep);
+        // On by default, where tunnels run at all.
+        assert_eq!(
+            gateway_plan(&Config::default()) == GatewayPlan::Keep,
+            !cfg!(target_os = "linux")
+        );
         let on = tunnels("tracon", "tracon-gw", "tracon-int");
         if !cfg!(target_os = "linux") {
             // Tunnels need the sandbox protocol, which needs a Linux host.
