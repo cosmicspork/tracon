@@ -198,6 +198,7 @@ async fn a_channel_name_the_protocol_refuses_is_refused_here() {
 
 #[tokio::test]
 async fn credentials_import_by_paste_and_only_their_names_come_back() {
+    let _credentials = state::credentials_lock().await;
     let n = node();
     let toml = r#"
 [credentials.gh]
@@ -243,6 +244,7 @@ fn private_state(name: &str) -> std::path::PathBuf {
 #[tokio::test]
 async fn a_cli_import_reaches_the_running_node() {
     use std::os::unix::fs::PermissionsExt;
+    let _credentials = state::credentials_lock().await;
     let n = node();
     let dir = state::scratch("a_cli_import_reaches_the_running_node");
     let own = private_state("a_cli_import_reaches_the_running_node");
@@ -324,6 +326,7 @@ fn sealed() -> Broker {
 #[tokio::test]
 async fn a_cli_rm_reaches_the_running_node() {
     use std::os::unix::fs::PermissionsExt;
+    let _credentials = state::credentials_lock().await;
     let n = node();
     let own = private_state("a_cli_rm_reaches_the_running_node");
     let toml = "[credentials.vega]\nchannels = [\"personal\"]\n\
@@ -459,6 +462,7 @@ async fn a_cli_rm_reaches_the_running_node() {
 /// names the other node owed a revoke.
 #[tokio::test]
 async fn removing_a_provider_credential_publishes_the_provider_as_disconnected() {
+    let _credentials = state::credentials_lock().await;
     let n = node();
     let key = tracon::mesh::identity::load_or_generate()
         .unwrap()
@@ -517,6 +521,7 @@ async fn removing_a_provider_credential_publishes_the_provider_as_disconnected()
 /// other holder's copy stay; the answer names peer-b.
 #[tokio::test]
 async fn removing_a_copy_another_node_shared_revokes_nothing_elsewhere() {
+    let _credentials = state::credentials_lock().await;
     let n = node();
     let toml = "[credentials.glab]\nchannels = [\"personal\"]\n\
                 nodes = [\"peer-b\", \"n1\", \"peer-c\"]\n\
@@ -548,6 +553,7 @@ async fn removing_a_copy_another_node_shared_revokes_nothing_elsewhere() {
 /// sends nothing and names node-a, as a share of it would.
 #[tokio::test]
 async fn removing_a_legacy_copy_revokes_nothing_and_names_its_first_node() {
+    let _credentials = state::credentials_lock().await;
     let n = node();
     let legacy = tracon::broker::Credential {
         channels: vec!["personal".into()],
@@ -579,6 +585,7 @@ async fn removing_a_legacy_copy_revokes_nothing_and_names_its_first_node() {
 /// and it is this node's to share.
 #[tokio::test]
 async fn an_import_is_this_nodes_whichever_node_it_lists_first() {
+    let _credentials = state::credentials_lock().await;
     let n = node();
     let toml = "[credentials.glab]\nchannels = [\"personal\"]\n\
                 nodes = [\"peer-a\", \"n1\"]\n\
@@ -681,6 +688,7 @@ async fn an_offline_import_over_a_shared_credential_warns_naming_its_holders() {
 /// peer-d a revoke its copy goes with.
 #[tokio::test]
 async fn importing_over_a_shared_credential_keeps_the_holders_a_revoke_reaches() {
+    let _credentials = state::credentials_lock().await;
     let n = node();
     let shared = "[credentials.glab]\nchannels = [\"personal\"]\n\
                   nodes = [\"n1\", \"peer-d\"]\n\
@@ -731,6 +739,7 @@ async fn importing_over_a_shared_credential_keeps_the_holders_a_revoke_reaches()
 /// credential that happens to carry the name is still removable.
 #[tokio::test]
 async fn a_credential_named_import_can_be_removed() {
+    let _credentials = state::credentials_lock().await;
     let n = node();
     let toml = "[credentials.import]\nchannels = [\"personal\"]\n\
                 [credentials.import.env]\nIMPORT_KEY = \"not-a-real-key\"\n";
@@ -753,6 +762,7 @@ async fn a_credential_named_import_can_be_removed() {
 
 #[tokio::test]
 async fn forge_tokens_are_write_only_replaceable_and_removable() {
+    let _credentials = state::credentials_lock().await;
     let n = node();
     let (status, value) = call(
         &n,
@@ -997,6 +1007,7 @@ async fn without_a_token_writing_the_config_is_refused_off_the_machine() {
 #[tokio::test]
 async fn provider_creation_seals_a_credential_first_then_registers_the_provider() {
     let _guard = state::config_lock().await;
+    let _credentials = state::credentials_lock().await;
     let n = node();
 
     let toml = r#"
@@ -1301,6 +1312,9 @@ async fn a_settings_save_is_audited_and_a_repeat_writes_nothing() {
 
 #[tokio::test]
 async fn an_unknown_setting_is_refused_rather_than_dropped() {
+    // The save names the version it read, so another test's write between
+    // the read and the save would be refused as a conflict first.
+    let _guard = state::config_lock().await;
     let n = node();
     let (s, v) = call(
         &n,
