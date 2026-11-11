@@ -214,7 +214,7 @@ async fn runs_asked_for_together_build_once_and_a_removed_image_is_never_pulled(
     assert!(!said.contains("registry"), "never pulled: {said}");
     assert!(took < Duration::from_secs(10), "at once: {took:?}");
 
-    let provider = PodmanProvider::from_config(&cfg, RunSpec::from_config(&cfg, true));
+    let provider = PodmanProvider::from_config(&cfg, RunSpec::from_config(&cfg));
     let refused = provider.entry_for(&image).await;
     let Err(error) = refused else {
         panic!("a removed image is refused");

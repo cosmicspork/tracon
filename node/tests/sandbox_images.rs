@@ -104,7 +104,7 @@ impl Rig {
 
     /// The runner a session or check gets, in `image`.
     fn runner(&self, image: &str, mounts: Vec<Mount>) -> Arc<dyn Runner> {
-        let mut spec = RunSpec::for_harness(&self.cfg, "claude", true);
+        let mut spec = RunSpec::for_harness(&self.cfg, "claude");
         spec.image = image.to_string();
         spec.extra_mounts = mounts;
         tracon::boundary::podman::protocol_runner(&self.cfg, spec)
@@ -113,7 +113,7 @@ impl Rig {
     fn provider(&self) -> Arc<PodmanProvider> {
         Arc::new(PodmanProvider::from_config(
             &self.cfg,
-            RunSpec::from_config(&self.cfg, true),
+            RunSpec::from_config(&self.cfg),
         ))
     }
 
@@ -259,7 +259,7 @@ async fn the_node_fetches_its_bundle_and_runs_harnesses_from_it_in_the_base_imag
     // base image, as its own user.
     for harness in ["claude", "native"] {
         assert_eq!(
-            tracon::runner::podman::RunSpec::for_harness(&rig.cfg, harness, false).image,
+            tracon::runner::podman::RunSpec::for_harness(&rig.cfg, harness).image,
             pinned
         );
     }

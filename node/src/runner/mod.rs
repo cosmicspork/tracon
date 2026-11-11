@@ -1,7 +1,7 @@
 //! How the node gets a harness process. `ProtocolRunner` puts it inside a
 //! sandbox provider's sandbox over the sandbox protocol: Podman's, Apple's,
 //! DigitalOcean's, or a Kubernetes pod's. `PodmanRunner`
-//! answers for a Podman sandbox's image identity and image-only services;
+//! answers for a Podman sandbox's image identity;
 //! `LocalRunner` (tests only) runs the argv on the host so the adapter can be
 //! exercised without containers.
 
@@ -361,57 +361,38 @@ pub trait Runner: Send + Sync {
         let _ = image;
         None
     }
-    /// Start a service container beside a running session, in its network
-    /// namespace, detached. A runtime that cannot share a namespace says so
-    /// rather than starting the service somewhere the session cannot reach.
+    /// Start a catalogue service inside a running session's sandbox, under
+    /// its supervisor, which times each start and restarts it by its policy.
+    /// A runner that runs no services says so.
     async fn start_sidecar(&self, sidecar: &Sidecar) -> Result<(), RunnerError> {
         let _ = sidecar;
-        Err(RunnerError::Other(SIDECARS_UNSUPPORTED.into()))
+        Err(RunnerError::Other(NO_SERVICES.into()))
     }
-    /// Whether the service answers yet, asked from inside the session's
-    /// network namespace. `Ok(false)` is "not yet"; an error is a probe that
-    /// could not be run at all.
+    /// Whether the service answers yet, asked by the sandbox's supervisor.
+    /// `Ok(false)` is "not yet"; `ServiceFailed` is the supervisor giving up
+    /// on it; any other error is a probe that could not be asked at all.
     async fn probe_sidecar(&self, sidecar: &Sidecar) -> Result<bool, RunnerError> {
         let _ = sidecar;
-        Err(RunnerError::Other(SIDECARS_UNSUPPORTED.into()))
-    }
-    /// Whether the runtime keeps `sidecar` up itself and decides when it
-    /// has failed (a sandbox's supervisor, with a readiness timeout for each
-    /// start and a restart policy), so a caller waiting for it applies no
-    /// timeout of its own: a restart is not a failure.
-    fn supervises_sidecar(&self, sidecar: &Sidecar) -> bool {
-        let _ = sidecar;
-        false
-    }
-    /// Whether `sidecar` runs inside its session's sandbox from its bundle,
-    /// rather than as a container of its own from its image.
-    fn sidecar_in_sandbox(&self, sidecar: &Sidecar) -> bool {
-        let _ = sidecar;
-        false
+        Err(RunnerError::Other(NO_SERVICES.into()))
     }
 }
 
-pub const SIDECARS_UNSUPPORTED: &str =
-    "this node's runtime cannot run a service beside a session; services need the podman boundary";
+const NO_SERVICES: &str = "this runner runs no catalogue services";
 
-/// A service run beside one session: the operator's catalogue entry, placed
-/// in the session's network namespace so it reaches what the session reaches
-/// and is reached on the session's loopback.
+/// A catalogue service in one session's sandbox: the operator's entry, run
+/// by the sandbox's supervisor on its loopback, so it reaches what the
+/// session reaches and is reached on the session's loopback.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sidecar {
-    /// The container's own name, from `sidecar_name`.
+    /// What the node stops it by, from `sidecar_name`.
     pub name: String,
-    /// The session's harness container, whose namespace it joins.
+    /// The session's sandbox, which runs it.
     pub session_container: String,
-    pub image: String,
-    pub command: Vec<String>,
     pub port: u16,
     /// An HTTP path answering 2xx when ready; `None` is a TCP connect.
     pub ready: Option<String>,
-    /// How the session's sandbox runs it under its own supervisor, when the
-    /// catalogue entry has a bundle. A runner that runs services in the
-    /// sandbox uses this and ignores `image`; any other ignores this.
-    pub in_sandbox: Option<InSandbox>,
+    /// How the sandbox's supervisor runs it.
+    pub in_sandbox: InSandbox,
 }
 
 /// A catalogue service as a sandbox's supervisor runs it.
@@ -426,8 +407,8 @@ pub struct InSandbox {
     pub ready_within: std::time::Duration,
 }
 
-/// The container name of a session's service: derived, so everything that
-/// removes a session's container can remove its services without a lookup.
+/// The name of a session's service: derived, so everything that removes a
+/// session's sandbox can stop its services without a lookup.
 pub fn sidecar_name(session_container: &str, service: &str) -> String {
     format!("{session_container}-svc-{service}")
 }

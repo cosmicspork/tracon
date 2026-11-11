@@ -345,22 +345,6 @@
       "editable_by_peer": true,
       "exec_path": false,
       "fs_path": false,
-      "key": "boundary.selinux_label_disable",
-      "path": null,
-      "secret": false,
-      "shape": {
-        "kind": "bool",
-        "optional": true
-      }
-    },
-    {
-      "admin": true,
-      "apply": "restart",
-      "editable": true,
-      "editable_at_node": true,
-      "editable_by_peer": true,
-      "exec_path": false,
-      "fs_path": false,
       "key": "boundary.stop_timeout_secs",
       "path": null,
       "secret": false,
@@ -2025,23 +2009,6 @@
       "exec_path": false,
       "fs_path": false,
       "key": "service.name",
-      "path": null,
-      "secret": false,
-      "shape": {
-        "kind": "string",
-        "optional": false
-      }
-    },
-    {
-      "admin": true,
-      "apply": "restart",
-      "array": "service",
-      "editable": true,
-      "editable_at_node": true,
-      "editable_by_peer": true,
-      "exec_path": false,
-      "fs_path": false,
-      "key": "service.image",
       "path": null,
       "secret": false,
       "shape": {

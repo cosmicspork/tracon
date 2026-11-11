@@ -146,7 +146,7 @@ async fn start(
     .unwrap();
     let prepare = began.elapsed();
 
-    let mut spec = tracon::runner::podman::RunSpec::for_harness(cfg, "claude", true);
+    let mut spec = tracon::runner::podman::RunSpec::for_harness(cfg, "claude");
     spec.image = environment.image.clone();
     let runner = tracon::boundary::podman::protocol_runner(cfg, spec);
     let began = Instant::now();

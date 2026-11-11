@@ -186,8 +186,7 @@ async fn a_node_whose_catalogue_names_no_release_bundle_fetches_nothing() {
     let mut cfg = node(&url);
     cfg.runtime.kind = RuntimeKind::Kubernetes;
     assert!(service_bundle::wanted(&cfg));
-    cfg.service[0].bundle = None;
-    cfg.service[0].image = "browser@sha256:1".into();
+    cfg.service.clear();
     assert!(!service_bundle::wanted(&cfg));
     assert!(!service_bundle::converge(&cfg).await.unwrap());
     assert_eq!(service_bundle::missing(&cfg, false), None);

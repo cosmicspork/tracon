@@ -1040,24 +1040,17 @@ fn source_builder(
 
 /// Whether `service` runs in a sandbox made from `template`, which holds
 /// the service bundles `held` (`None`: an image of the operator's, taken on
-/// trust). One with a bundle runs inside, under the sandbox's supervisor,
-/// from the template's copy: nothing is mounted there and nothing runs
-/// beside a sandbox, so one with only an image cannot, and nor can one whose
-/// bundle that template does not hold. Its traffic is the sandbox's own: the
+/// trust). It runs inside, under the sandbox's supervisor, from the
+/// template's copy: nothing is mounted there, so one whose bundle that
+/// template does not hold cannot. Its traffic is the sandbox's own: the
 /// node's allowlist proxy through the tunnel, never a wider egress.
 fn service_support(
     service: &crate::config::Service,
     held: Option<&[String]>,
     template: Option<&str>,
 ) -> Result<(), String> {
-    match (&service.bundle, held) {
-        (None, _) => Err(format!(
-            "service {} runs as a container of its own beside a session, and DigitalOcean \
-             runs nothing beside its sandboxes: give it a bundle ([[service]] bundle) to run \
-             it inside one",
-            service.name
-        )),
-        (Some(_), Some(held)) if !held.contains(&service.name) => Err(format!(
+    match held {
+        Some(held) if !held.contains(&service.name) => Err(format!(
             "service {}'s bundle is not in DigitalOcean's template{}: {}",
             service.name,
             template.map(|t| format!(" {t}")).unwrap_or_default(),
@@ -1069,6 +1062,6 @@ fn service_support(
                 _ => "this node has no copy of it".into(),
             }
         )),
-        (Some(_), _) => Ok(()),
+        _ => Ok(()),
     }
 }

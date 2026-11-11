@@ -216,13 +216,6 @@ wait until **Now** and **Next** have made a day's work unremarkable.
 
 - [ ] More catalogue services, with an optional persistent volume per repository (a
       database's data, a browser profile).
-- [ ] A catalogue entry can name an `entrypoint`. Without one, an upstream image's own
-      wrapper runs: chromedp's headless-shell puts socat on `0.0.0.0:9222`, which is why the
-      browser is tracon's own image (#405).
-- [ ] Say when a newer `tracon-browser` digest is published than the one a `[[service]]`
-      entry pins, and pin it on the operator's word (Settings, or a CLI command; not
-      `tracon service`, which already manages the node's own system service). The entry
-      stays a digest; only the step of copying one in goes away.
 - [ ] A keyed per-repository stash for artefacts that are expensive to rebuild
       (`stash_put` / `stash_get`, keyed on a digest of named input paths so a stale one is
       never silently reused); cached "before" screenshots of the default branch are a

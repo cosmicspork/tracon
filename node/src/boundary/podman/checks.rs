@@ -10,7 +10,7 @@ use crate::{
     runner::{podman::RunSpec, RunnerCommand},
 };
 
-pub async fn check_all(cfg: &Config, selinux: bool, deep: bool) -> BoundaryReport {
+pub async fn check_all(cfg: &Config, deep: bool) -> BoundaryReport {
     let mut checks = Vec::new();
 
     let runtime = check_runtime(cfg).await;
@@ -29,7 +29,7 @@ pub async fn check_all(cfg: &Config, selinux: bool, deep: bool) -> BoundaryRepor
         return BoundaryReport { checks };
     }
 
-    let mut spec = RunSpec::from_config(cfg, selinux);
+    let mut spec = RunSpec::from_config(cfg);
     // Verify the same mount set a session runs, not a bare spec: the socket
     // check is only meaningful against what is actually mounted. The persistent
     // mounts (the harness state dir and credential db) are what every session
@@ -44,8 +44,7 @@ pub async fn check_all(cfg: &Config, selinux: bool, deep: bool) -> BoundaryRepor
     checks.extend(probe_checks(cfg, &spec, &probe).await);
 
     if deep {
-        checks
-            .push(check_egress(cfg, selinux, &crate::config::resource_name("egress-probe")).await);
+        checks.push(check_egress(cfg, &crate::config::resource_name("egress-probe")).await);
     }
     BoundaryReport { checks }
 }
@@ -390,8 +389,8 @@ fn node_only_verdict(out: &str) -> CheckResult {
 /// Actively prove the boundary from inside it: no direct egress, allowlisted
 /// hosts reachable through the proxy, unlisted hosts refused. `probe` names
 /// the container it runs in.
-pub async fn check_egress(cfg: &Config, selinux: bool, probe: &str) -> CheckResult {
-    let spec = RunSpec::from_config(cfg, selinux);
+pub async fn check_egress(cfg: &Config, probe: &str) -> CheckResult {
+    let spec = RunSpec::from_config(cfg);
     // The per-client proxy must serve nobody who presents no grant. A node
     // that is not running answers nothing at all, which proves the same. Asked
     // first: the script's last command is what decides its exit status.

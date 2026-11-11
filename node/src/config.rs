@@ -46,7 +46,7 @@ pub struct Config {
     #[serde(skip)]
     pub live: ConfigHandle,
     /// Services a session may ask for by name (`service_start`): each a
-    /// digest-pinned image run beside the session in its network namespace.
+    /// bundle the session's sandbox runs under its supervisor.
     pub service: Vec<Service>,
     /// MCP servers outside the node whose tools sessions reach through the
     /// node's own MCP endpoint, each tool decided allow, ask or deny.
@@ -281,8 +281,8 @@ pub fn immutable_image(value: &str) -> Result<(), String> {
 }
 
 /// One entry of the `[[service]]` catalogue: something a session may start
-/// beside itself by name, never by image or command. The operator chooses
-/// the image and how it runs; the session chooses only whether it wants it,
+/// in its sandbox by name, never by path or command. The operator chooses
+/// the bundle and how it runs; the session chooses only whether it wants it,
 /// and the policy bundle decides whether it may have it (`service_start` with
 /// `name`), so a browser can run unattended while a database is asked.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -290,13 +290,7 @@ pub fn immutable_image(value: &str) -> Result<(), String> {
 pub struct Service {
     /// What a session asks for: `browser`, `postgres`.
     pub name: String,
-    /// Pinned by digest, as a repository image is: what ran is what was named.
-    /// Started as a container beside the session. May be left out when
-    /// `bundle` is set and every session runs in a sandbox.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub image: String,
-    /// The image's arguments, when its own entrypoint needs them; with
-    /// `bundle`, the arguments after `run`.
+    /// The arguments after `run`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub command: Vec<String>,
     /// A directory of binaries for this host's architecture (one
@@ -305,18 +299,19 @@ pub struct Service {
     /// which the node fetches and checks (`crate::service_bundle`).
     /// It is at `/opt/tracon-services/<name>`, read-only, in every sandbox
     /// (mounted on Podman and Apple, copied into every session's pod on
-    /// Kubernetes), and the service runs there under the sandbox's
-    /// supervisor instead of in `image`.
+    /// Kubernetes, baked into DigitalOcean's templates), and the service
+    /// runs there under the sandbox's supervisor. Required: `None` is
+    /// refused at load.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bundle: Option<PathBuf>,
-    /// With `bundle`: what the supervisor starts, inside the sandbox.
-    /// Default `/opt/tracon-services/<name>/run`.
+    /// What the supervisor starts, inside the sandbox. Default
+    /// `/opt/tracon-services/<name>/run`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub run: Vec<String>,
-    /// With `bundle`: environment added to the sandbox's own.
+    /// Environment added to the sandbox's own.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub env: std::collections::BTreeMap<String, String>,
-    /// With `bundle`: whether the supervisor starts it again when it exits.
+    /// Whether the supervisor starts it again when it exits.
     #[serde(skip_serializing_if = "ServiceRestart::is_default")]
     pub restart: ServiceRestart,
     /// The port the service listens on, on the session's loopback.
@@ -398,11 +393,16 @@ pub fn validate_services(services: &[Service]) -> Result<(), String> {
         if !seen.insert(name) {
             return Err(format!("service {name}: named twice"));
         }
-        match (&service.bundle, service.image.is_empty()) {
-            (None, true) => {
-                return Err(format!("service {name}: needs an image or a bundle"));
+        match &service.bundle {
+            None => {
+                return Err(format!(
+                    "service {name}: needs a bundle, which every runtime runs inside the \
+                     session's sandbox (bundle = \"release\" for the browser, or a directory \
+                     of binaries); a service that is only an image, run as a container beside \
+                     the sandbox, is no longer supported"
+                ));
             }
-            (Some(bundle), _) if bundle.as_os_str() == crate::service_bundle::RELEASE => {
+            Some(bundle) if bundle.as_os_str() == crate::service_bundle::RELEASE => {
                 if name != crate::service_bundle::BROWSER {
                     return Err(format!(
                         "service {name}: bundle = \"release\" is the release's browser bundle, \
@@ -410,24 +410,12 @@ pub fn validate_services(services: &[Service]) -> Result<(), String> {
                     ));
                 }
             }
-            (Some(bundle), _) if !bundle.is_absolute() => {
+            Some(bundle) if !bundle.is_absolute() => {
                 return Err(format!(
                     "service {name}: bundle must be an absolute path, or \"release\""
                 ));
             }
-            _ => {}
-        }
-        if !service.image.is_empty() {
-            immutable_image(&service.image).map_err(|e| format!("service {name}: image {e}"))?;
-        }
-        if service.bundle.is_none()
-            && (!service.run.is_empty()
-                || !service.env.is_empty()
-                || service.restart != ServiceRestart::default())
-        {
-            return Err(format!(
-                "service {name}: run, env and restart apply to a bundle, and it has none"
-            ));
+            Some(_) => {}
         }
         if service.run.iter().any(String::is_empty) {
             return Err(format!("service {name}: run has an empty argument"));
@@ -1413,6 +1401,39 @@ const RETIRED_BOUNDARY_KEYS: [(&str, &str); 7] = [
     ("boundary", "start_machine"),
     ("harness", "native_binary"),
 ];
+
+/// The `[[service]]` entries `text` gives an `image`, by name: the container
+/// a service once ran as beside the sandbox, which a bundle has replaced.
+fn retired_service_images(text: &str) -> Vec<String> {
+    let Ok(value) = toml::from_str::<toml::Value>(text) else {
+        return Vec::new();
+    };
+    value
+        .get("service")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|service| service.get("image").is_some())
+        .map(|service| {
+            service
+                .get("name")
+                .and_then(toml::Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect()
+}
+
+/// Whether `text` still sets `[boundary] selinux_label_disable`, which
+/// configured image-only services' containers.
+fn retired_selinux_key(text: &str) -> bool {
+    toml::from_str::<toml::Value>(text).is_ok_and(|value| {
+        value
+            .get("boundary")
+            .and_then(|boundary| boundary.get("selinux_label_disable"))
+            .is_some()
+    })
+}
 
 /// The retired keys `text` still sets, as `table.key`.
 fn retired_boundary_keys(text: &str) -> Vec<String> {
@@ -2470,10 +2491,6 @@ pub struct Boundary {
     /// Once also the gateway container's name, which an upgraded node
     /// removes under it (`boundary::podman::setup::retire_gateway`).
     pub gateway_container: String,
-    /// Whether an image-only service's sidecar container, which shares the
-    /// session sandbox's network namespace, runs with `label=disable` on an
-    /// SELinux host. Unset: whenever SELinux is enforcing.
-    pub selinux_label_disable: Option<bool>,
     /// Seconds between the SIGTERM a stopped harness container's init receives
     /// and the SIGKILL that follows. It bounds how long a stop can take, not
     /// how thorough it is: the container's PID namespace goes either way, and
@@ -3016,7 +3033,6 @@ impl Default for Config {
             boundary: Boundary {
                 podman: String::new(),
                 gateway_container: "tracon-gw".into(),
-                selinux_label_disable: None,
                 stop_timeout_secs: 10,
                 auto_reconcile: true,
                 resource_prefix: DEFAULT_RESOURCE_PREFIX.into(),
@@ -3405,6 +3421,20 @@ impl Config {
                 path.display()
             );
         }
+        if retired_selinux_key(text) {
+            tracing::warn!(
+                "{}: [boundary] selinux_label_disable configured the containers image-only \
+                 services ran in, which were removed; it is ignored, and the line can go",
+                path.display()
+            );
+        }
+        for name in retired_service_images(text) {
+            tracing::warn!(
+                "{}: [[service]] {name}: image is ignored; the service runs from its bundle \
+                 inside the session's sandbox, so the line can go",
+                path.display()
+            );
+        }
         for section in retired_opencode_sections(text) {
             tracing::warn!(
                 "{}: [{section}] is ignored; it configured the OpenCode harness, which was removed",
@@ -3659,11 +3689,10 @@ mod tests {
     }
 
     #[test]
-    fn a_service_is_named_safely_and_pinned() {
-        let pinned = "img@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    fn a_service_is_named_safely_and_bundled() {
         let ok = Service {
             name: "browser".into(),
-            image: pinned.into(),
+            bundle: Some("/srv/browser/157/amd64".into()),
             port: 9222,
             ready: Some("/json/version".into()),
             ..Service::default()
@@ -3687,13 +3716,6 @@ mod tests {
             ),
             (
                 Service {
-                    image: "chrome:latest".into(),
-                    ..ok.clone()
-                },
-                "pinned",
-            ),
-            (
-                Service {
                     port: 0,
                     ..ok.clone()
                 },
@@ -3714,13 +3736,8 @@ mod tests {
             .unwrap_err()
             .contains("twice"));
 
-        // A bundle in place of an image, run in the sandbox.
-        let bundled = Service {
-            image: String::new(),
-            bundle: Some("/srv/browser/157/amd64".into()),
-            ..ok.clone()
-        };
-        assert!(validate_services(std::slice::from_ref(&bundled)).is_ok());
+        // Run in the sandbox, from the bundle.
+        let bundled = ok.clone();
         assert_eq!(bundled.sandbox_argv(), ["/opt/tracon-services/browser/run"]);
         let custom = Service {
             run: vec!["/opt/tracon-services/browser/bin/chrome".into()],
@@ -3737,7 +3754,7 @@ mod tests {
                     bundle: None,
                     ..bundled.clone()
                 },
-                "an image or a bundle",
+                "needs a bundle",
             ),
             (
                 Service {
@@ -3756,13 +3773,6 @@ mod tests {
             ),
             (
                 Service {
-                    restart: ServiceRestart::Always,
-                    ..ok.clone()
-                },
-                "apply to a bundle",
-            ),
-            (
-                Service {
                     env: [("A=B".to_string(), "c".to_string())].into(),
                     ..bundled.clone()
                 },
@@ -3772,7 +3782,7 @@ mod tests {
             let err = validate_services(&[bad]).unwrap_err();
             assert!(err.contains(why), "{err}");
         }
-        // The release's own browser, with no path and no image.
+        // The release's own browser, with no path.
         let release: Service =
             toml::from_str("name = \"browser\"\nport = 9222\nbundle = \"release\"\n").unwrap();
         assert!(validate_services(std::slice::from_ref(&release)).is_ok());
@@ -4062,6 +4072,39 @@ mod tests {
         let fresh = Config::from_toml("", Path::new("node.toml")).unwrap();
         assert_eq!(fresh.retired, RetiredNames::default());
         assert!(retired_boundary_keys("").is_empty());
+    }
+
+    /// A service that is only an image is refused, naming the bundle to use
+    /// instead; an image beside a bundle still loads and is named as ignored,
+    /// as is `[boundary] selinux_label_disable`.
+    #[test]
+    fn image_only_services_are_retired() {
+        let pinned = format!(
+            "ghcr.io/cosmicspork/tracon-browser@sha256:{}",
+            "a".repeat(64)
+        );
+        let image_only =
+            format!("[[service]]\nname = \"browser\"\nimage = \"{pinned}\"\nport = 9222\n");
+        let refused = Config::from_toml(&image_only, Path::new("node.toml")).unwrap_err();
+        assert!(
+            refused.contains("service browser: needs a bundle")
+                && refused.contains("bundle = \"release\"")
+                && refused.contains("no longer supported"),
+            "{refused}"
+        );
+
+        let both = format!(
+            "[boundary]\nselinux_label_disable = true\n\
+             [[service]]\nname = \"browser\"\nimage = \"{pinned}\"\nbundle = \"release\"\n\
+             port = 9222\n"
+        );
+        let cfg = Config::from_toml(&both, Path::new("node.toml")).unwrap();
+        assert!(crate::service_bundle::is_release(&cfg.service[0]));
+        assert_eq!(retired_service_images(&both), ["browser"]);
+        assert!(retired_selinux_key(&both));
+        let bundled = "[[service]]\nname = \"browser\"\nbundle = \"release\"\nport = 9222\n";
+        assert!(retired_service_images(bundled).is_empty());
+        assert!(!retired_selinux_key(bundled));
     }
 
     /// The OpenCode harness's own tables still load, and are named rather

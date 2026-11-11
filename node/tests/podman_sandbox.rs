@@ -94,7 +94,7 @@ impl Rig {
     }
 
     fn runner(&self, mounts: Vec<Mount>) -> Arc<dyn Runner> {
-        let mut spec = RunSpec::from_config(&self.cfg, true);
+        let mut spec = RunSpec::from_config(&self.cfg);
         spec.image = self.image.clone();
         spec.extra_mounts = mounts;
         tracon::boundary::podman::protocol_runner(&self.cfg, spec)

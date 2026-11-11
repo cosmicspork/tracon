@@ -144,7 +144,7 @@ pub struct PodmanOptions {
     /// The boundary each sandbox gets: network, gateway, the gate, the
     /// stop timeout, the proxy and state environment. Its image is the
     /// default when a create names none, its `extra_mounts` are mounted
-    /// into every sandbox, and its `selinux_label_disable` is ignored.
+    /// into every sandbox.
     pub spec: RunSpec,
     /// The bundle for this host's architecture, holding
     /// `bin/tracon-sandbox`.
@@ -194,8 +194,7 @@ impl PodmanProvider {
     }
 
     /// The provider a node configured for it runs with, around `spec`.
-    pub fn from_config(cfg: &crate::config::Config, mut spec: RunSpec) -> Self {
-        spec.selinux_label_disable = false;
+    pub fn from_config(cfg: &crate::config::Config, spec: RunSpec) -> Self {
         Self::new(PodmanOptions {
             spec,
             bundle: crate::bundle::effective(cfg).unwrap_or_default(),
@@ -1127,7 +1126,7 @@ mod tests {
         std::fs::create_dir_all(bundle.join("bin")).unwrap();
         std::fs::write(bundle.join("bin/tracon-sandbox"), b"").unwrap();
         let cfg = crate::config::Config::default();
-        let mut spec = RunSpec::from_config(&cfg, true);
+        let mut spec = RunSpec::from_config(&cfg);
         spec.extra_mounts = vec![Mount::volume(
             "tracon-harness-state",
             "/root/.claude",
@@ -1254,7 +1253,6 @@ mod tests {
             assert!(line.contains(expected), "{expected:?} not in {line}");
         }
         assert!(line.ends_with("localhost/harness@sha256:aa"), "{line}");
-        // The selinux spec asked for it; a sandbox never gets it.
         assert!(!line.contains("label=disable"), "{line}");
         assert!(!line.contains("--init"), "{line}");
         assert!(!line.contains("run-secret"), "the token stays off the argv");
@@ -1668,7 +1666,7 @@ mod snapshot_tests {
         std::fs::write(bundle.join("bin/tracon-sandbox"), b"").unwrap();
         PodmanProvider::with_cli(
             PodmanOptions {
-                spec: RunSpec::from_config(&crate::config::Config::default(), true),
+                spec: RunSpec::from_config(&crate::config::Config::default()),
                 bundle,
                 socket_dir: dir.join("s"),
                 init: false,

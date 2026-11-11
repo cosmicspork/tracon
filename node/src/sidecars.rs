@@ -1,13 +1,13 @@
-//! Services beside a session: a browser, a database, a mail catcher, started
-//! by name from the operator's `[[service]]` catalogue.
+//! Services in a session's sandbox: a browser, a database, a mail catcher,
+//! started by name from the operator's `[[service]]` catalogue.
 //!
-//! A session never names an image or a command. It asks for `browser`, and
+//! A session never names a bundle or a command. It asks for `browser`, and
 //! the policy bundle decides whether it may (`service_start` with `name`), so
-//! one service can run unattended while another is asked. The service joins
-//! the session container's network namespace: it is reached on the session's
+//! one service can run unattended while another is asked. The sandbox's
+//! supervisor runs it from its bundle: it is reached on the session's
 //! loopback, and it reaches exactly what the session's network does — the
 //! gateway and nothing of its own. It lives as long as the session's
-//! container: every path that removes that container removes its services,
+//! sandbox: every path that removes the sandbox stops its services first,
 //! found from the session's own `service` events, so none is left running
 //! after the session it served.
 
@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 
 use crate::config::{Config, Service};
 use crate::runner::{sidecar_name, InSandbox, Runner, RunnerError, Sidecar};
-use crate::store::{now_ms, SessionRow, Store};
+use crate::store::{SessionRow, Store};
 
 pub const STARTED: &str = "started";
 pub const READY: &str = "ready";
@@ -33,39 +33,27 @@ const PROBE_INTERVAL: Duration = Duration::from_millis(500);
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Recorded {
     pub name: String,
-    /// Its own container; empty for one run inside the session's sandbox.
-    pub container: String,
-    /// The session's sandbox it runs in, from its bundle.
+    /// The session's sandbox it runs in. `None` for one an older node ran as
+    /// a container of its own.
     pub sandbox: Option<String>,
     pub state: String,
     pub detail: Option<String>,
-    /// When it was started: the clock its readiness timeout runs on.
-    pub started_ms: i64,
 }
 
 /// Each service's latest state on a session, from its events.
 pub fn recorded(store: &Store, session_id: &str) -> BTreeMap<String, Recorded> {
     let mut out: BTreeMap<String, Recorded> = BTreeMap::new();
-    for (payload, at_ms) in store.session_service_events(session_id).unwrap_or_default() {
+    for (payload, _) in store.session_service_events(session_id).unwrap_or_default() {
         let (Some(name), Some(state)) = (
             payload.get("name").and_then(Value::as_str),
             payload.get("state").and_then(Value::as_str),
         ) else {
             continue;
         };
-        let started_ms = match (state, out.get(name)) {
-            (STARTED, _) | (_, None) => at_ms,
-            (_, Some(previous)) => previous.started_ms,
-        };
         out.insert(
             name.to_string(),
             Recorded {
                 name: name.to_string(),
-                container: payload
-                    .get("container")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
                 sandbox: payload
                     .get("sandbox")
                     .and_then(Value::as_str)
@@ -76,32 +64,21 @@ pub fn recorded(store: &Store, session_id: &str) -> BTreeMap<String, Recorded> {
                     .get("detail")
                     .and_then(Value::as_str)
                     .map(str::to_string),
-                started_ms,
             },
         );
     }
     out
 }
 
-/// The containers of every service a session started: what removing the
-/// session's container has to remove too.
-pub fn containers(store: &Store, session_id: &str) -> Vec<String> {
-    recorded(store, session_id)
-        .into_values()
-        .map(|service| service.container)
-        .filter(|container| !container.is_empty())
-        .collect()
-}
-
-/// Remove a session's services: their containers, and those in its sandbox
-/// by the name the runner stops them by. Errors are logged, not returned:
-/// this runs on the way out of a session, where a service that is already
-/// gone is fine.
+/// Stop a session's services in its sandbox, by the name the runner stops
+/// them by. Errors are logged, not returned: this runs on the way out of a
+/// session, where a service that is already gone is fine.
 pub async fn stop_all(runner: &dyn Runner, store: &Store, session_id: &str) {
     let services = recorded(store, session_id).into_values();
-    let names = services.filter_map(|service| match service.sandbox {
-        Some(sandbox) => Some(sidecar_name(&sandbox, &service.name)),
-        None => Some(service.container).filter(|container| !container.is_empty()),
+    let names = services.filter_map(|service| {
+        service
+            .sandbox
+            .map(|sandbox| sidecar_name(&sandbox, &service.name))
     });
     for name in names {
         if let Err(error) = runner.kill(&name).await {
@@ -130,43 +107,33 @@ fn sidecar(service: &Service, session_container: &str) -> Sidecar {
     Sidecar {
         name: sidecar_name(session_container, &service.name),
         session_container: session_container.to_string(),
-        image: service.image.clone(),
-        command: service.command.clone(),
         port: service.port,
         ready: service.ready.clone(),
-        in_sandbox: service.bundle.as_ref().map(|_| InSandbox {
+        in_sandbox: InSandbox {
             service: service.name.clone(),
             argv: service.sandbox_argv(),
             env: service.env.clone(),
             restart: service.restart,
             ready_within: Duration::from_secs(service.timeout_secs()),
-        }),
+        },
     }
 }
 
-/// A `service` event, saying where it runs: the session's sandbox with its
-/// bundle, or a container of its own (from its image, said when it starts).
-fn event(cx: &Context<'_>, service: &Service, sidecar: &Sidecar, state: &str) -> Value {
-    let mut out = json!({ "name": service.name, "state": state });
-    if cx.runner.sidecar_in_sandbox(sidecar) {
-        out["in_sandbox"] = json!(true);
-        out["sandbox"] = json!(sidecar.session_container);
-        out["bundle"] = json!(crate::service_bundle::resolve(service));
-        out["mounted_at"] = json!(service.bundle_target());
-        return out;
-    }
-    out["container"] = json!(sidecar.name);
-    if state == STARTED {
-        out["image"] = json!(service.image);
-        if let Some(bundle) = &service.bundle {
-            out["bundle"] = json!(bundle);
-        }
-    }
-    out
+/// A `service` event, saying where it runs: the session's sandbox, from its
+/// bundle.
+fn event(service: &Service, sidecar: &Sidecar, state: &str) -> Value {
+    json!({
+        "name": service.name,
+        "state": state,
+        "in_sandbox": true,
+        "sandbox": sidecar.session_container,
+        "bundle": crate::service_bundle::resolve(service),
+        "mounted_at": service.bundle_target(),
+    })
 }
 
-fn failed(cx: &Context<'_>, service: &Service, sidecar: &Sidecar, detail: &str) -> Value {
-    let mut out = event(cx, service, sidecar, FAILED);
+fn failed(service: &Service, sidecar: &Sidecar, detail: &str) -> Value {
+    let mut out = event(service, sidecar, FAILED);
     out["detail"] = json!(detail);
     out
 }
@@ -207,26 +174,25 @@ fn container(session: &SessionRow) -> Result<&str, String> {
         .ok_or_else(|| "this session has no container for a service to join".to_string())
 }
 
-/// Start `name` beside the session unless it is already running, then wait up
+/// Start `name` in the session's sandbox unless it is already running, then wait up
 /// to `wait` for it to answer.
 pub async fn start(cx: &Context<'_>, name: &str, wait: Duration) -> Result<Value, String> {
     let service = lookup(cx.cfg, name)?;
     let session_container = container(cx.session)?;
     let sidecar = sidecar(service, session_container);
     let current = recorded(cx.store, &cx.session.id).remove(name);
-    let started_ms = match &current {
-        Some(running) if running.state == STARTED || running.state == READY => running.started_ms,
-        _ => {
-            if let Err(error) = cx.runner.start_sidecar(&sidecar).await {
-                let detail = error.to_string();
-                (cx.record)(failed(cx, service, &sidecar, &detail));
-                return Ok(view(service, FAILED, Some(&detail)));
-            }
-            (cx.record)(event(cx, service, &sidecar, STARTED));
-            now_ms()
+    let running = current
+        .as_ref()
+        .is_some_and(|c| c.state == STARTED || c.state == READY);
+    if !running {
+        if let Err(error) = cx.runner.start_sidecar(&sidecar).await {
+            let detail = error.to_string();
+            (cx.record)(failed(service, &sidecar, &detail));
+            return Ok(view(service, FAILED, Some(&detail)));
         }
-    };
-    await_ready(cx, service, &sidecar, started_ms, current.as_ref(), wait).await
+        (cx.record)(event(service, &sidecar, STARTED));
+    }
+    await_ready(cx, service, &sidecar, current.as_ref(), wait).await
 }
 
 /// Where `name` stands, waiting up to `wait` for a starting service.
@@ -240,57 +206,34 @@ pub async fn status(cx: &Context<'_>, name: &str, wait: Duration) -> Result<Valu
         return Ok(view(service, &current.state, current.detail.as_deref()));
     }
     let sidecar = sidecar(service, session_container);
-    await_ready(
-        cx,
-        service,
-        &sidecar,
-        current.started_ms,
-        Some(&current),
-        wait,
-    )
-    .await
+    await_ready(cx, service, &sidecar, Some(&current), wait).await
 }
 
 async fn await_ready(
     cx: &Context<'_>,
     service: &Service,
     sidecar: &Sidecar,
-    started_ms: i64,
     current: Option<&Recorded>,
     wait: Duration,
 ) -> Result<Value, String> {
     let deadline = tokio::time::Instant::now() + wait;
-    let timeout_ms = (service.timeout_secs() * 1000) as i64;
     loop {
         let ready = match cx.runner.probe_sidecar(sidecar).await {
             Ok(ready) => ready,
-            // Given up on where it runs: failed now, not at the timeout.
+            // The supervisor times each start and restarts it by its
+            // policy; this is it giving up.
             Err(RunnerError::ServiceFailed(detail)) => {
                 let _ = cx.runner.kill(&sidecar.name).await;
-                (cx.record)(failed(cx, service, sidecar, &detail));
+                (cx.record)(failed(service, sidecar, &detail));
                 return Ok(view(service, FAILED, Some(&detail)));
             }
             Err(error) => return Err(error.to_string()),
         };
         if ready {
             if current.is_none_or(|c| c.state != READY) {
-                (cx.record)(event(cx, service, sidecar, READY));
+                (cx.record)(event(service, sidecar, READY));
             }
             return Ok(view(service, READY, None));
-        }
-        // A supervised service is timed by its supervisor, each start, and
-        // restarted by its policy; it fails when the supervisor gives up.
-        if !cx.runner.supervises_sidecar(sidecar) && now_ms() - started_ms >= timeout_ms {
-            let detail = format!(
-                "did not answer on {} within {}s",
-                service.port,
-                service.timeout_secs()
-            );
-            // The container is removed rather than left half-started; asking
-            // again starts it afresh.
-            let _ = cx.runner.kill(&sidecar.name).await;
-            (cx.record)(failed(cx, service, sidecar, &detail));
-            return Ok(view(service, FAILED, Some(&detail)));
         }
         if tokio::time::Instant::now() + PROBE_INTERVAL > deadline {
             return Ok(view(service, STARTING, None));
@@ -326,15 +269,12 @@ mod tests {
     use super::*;
     use crate::runner::{RunnerCommand, RunnerError, Spawned};
     use crate::session::state::event_kind as ek;
-    use crate::store::NewEvent;
+    use crate::store::{now_ms, NewEvent};
     use async_trait::async_trait;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
     };
-
-    const PINNED: &str =
-        "img@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     #[derive(Default)]
     struct FakeRunner {
@@ -343,8 +283,6 @@ mod tests {
         /// Probes before the service answers; `usize::MAX` never.
         ready_after: usize,
         probes: AtomicUsize,
-        /// Runs services under a supervisor of its own.
-        supervises: bool,
         /// Probes before the supervisor gives up on it.
         fails_after: Option<usize>,
     }
@@ -372,12 +310,6 @@ mod tests {
             }
             Ok(probes >= self.ready_after)
         }
-        fn supervises_sidecar(&self, _: &Sidecar) -> bool {
-            self.supervises
-        }
-        fn sidecar_in_sandbox(&self, _: &Sidecar) -> bool {
-            self.supervises
-        }
     }
 
     fn service_events(store: &Store) -> Vec<Value> {
@@ -393,7 +325,7 @@ mod tests {
         Config {
             service: vec![Service {
                 name: "browser".into(),
-                image: PINNED.into(),
+                bundle: Some("/srv/browser/amd64".into()),
                 command: vec!["--remote-debugging-port=9222".into()],
                 port: 9222,
                 ready: Some("/json/version".into()),
@@ -435,7 +367,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_service_joins_the_session_and_is_removed_with_it() {
+    async fn a_service_runs_in_the_sessions_sandbox_and_stops_with_it() {
         let store = Arc::new(Store::open_in_memory().unwrap());
         let row = session(&store);
         let cfg = cfg(30);
@@ -458,21 +390,18 @@ mod tests {
         assert_eq!(started.len(), 1);
         assert_eq!(started[0].session_container, "tracon-h-s1");
         assert_eq!(started[0].name, "tracon-h-s1-svc-browser");
-        // Its events name the container it runs in and the image it runs.
+        // Recorded as what runs: the session's sandbox and the bundle.
         let events = service_events(&store);
-        assert_eq!(
-            events[0],
+        let in_sandbox = |state: &str| {
             json!({
-                "name": "browser", "state": STARTED,
-                "container": "tracon-h-s1-svc-browser", "image": PINNED,
+                "name": "browser", "state": state, "in_sandbox": true,
+                "sandbox": "tracon-h-s1", "bundle": "/srv/browser/amd64",
+                "mounted_at": "/opt/tracon-services/browser",
             })
-        );
-        assert_eq!(
-            events[1],
-            json!({ "name": "browser", "state": READY, "container": "tracon-h-s1-svc-browser" })
-        );
+        };
+        assert_eq!(events, [in_sandbox(STARTED), in_sandbox(READY)]);
 
-        // Asked again: still the one container.
+        // Asked again: still the one.
         let v = start(&cx, "browser", Duration::from_secs(1)).await.unwrap();
         assert_eq!(v["state"], READY);
         assert_eq!(runner.started.lock().unwrap().len(), 1);
@@ -489,11 +418,28 @@ mod tests {
         );
     }
 
+    /// A service an older node ran as a container of its own is not one
+    /// this node stops in a sandbox.
     #[tokio::test]
-    async fn a_service_that_never_answers_fails_after_its_timeout() {
+    async fn an_older_nodes_container_service_is_not_stopped_in_a_sandbox() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        session(&store);
+        recorder(store.clone())(json!({
+            "name": "browser", "state": STARTED,
+            "container": "tracon-h-s1-svc-browser", "image": "img@sha256:00",
+        }));
+        assert_eq!(recorded(&store, "s1")["browser"].sandbox, None);
+        let runner = FakeRunner::default();
+        stop_all(&runner, &store, "s1").await;
+        assert!(runner.killed.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_service_is_described_for_the_sandbox_and_timed_by_its_supervisor() {
         let store = Arc::new(Store::open_in_memory().unwrap());
         let row = session(&store);
-        let cfg = cfg(1);
+        let mut cfg = cfg(1);
+        cfg.service[0].restart = crate::config::ServiceRestart::Always;
         let runner = FakeRunner {
             ready_after: usize::MAX,
             ..Default::default()
@@ -510,45 +456,8 @@ mod tests {
         assert_eq!(v["state"], NOT_STARTED);
         let v = start(&cx, "browser", Duration::ZERO).await.unwrap();
         assert_eq!(v["state"], STARTING, "{v}");
-        let v = status(&cx, "browser", Duration::from_secs(3))
-            .await
-            .unwrap();
-        assert_eq!(v["state"], FAILED, "{v}");
-        assert!(v["detail"].as_str().unwrap().contains("within 1s"));
-        assert_eq!(
-            runner.killed.lock().unwrap().clone(),
-            vec!["tracon-h-s1-svc-browser"]
-        );
-        // Asking again starts it afresh.
-        start(&cx, "browser", Duration::ZERO).await.unwrap();
-        assert_eq!(runner.started.lock().unwrap().len(), 2);
-    }
-
-    #[tokio::test]
-    async fn a_bundled_service_is_described_for_the_sandbox_and_timed_by_its_supervisor() {
-        let store = Arc::new(Store::open_in_memory().unwrap());
-        let row = session(&store);
-        let mut cfg = cfg(1);
-        cfg.service[0].image = String::new();
-        cfg.service[0].bundle = Some("/srv/browser/amd64".into());
-        cfg.service[0].restart = crate::config::ServiceRestart::Always;
-        let runner = FakeRunner {
-            ready_after: usize::MAX,
-            supervises: true,
-            ..Default::default()
-        };
-        let record = recorder(store.clone());
-        let cx = Context {
-            cfg: &cfg,
-            store: &store,
-            runner: &runner,
-            session: &row,
-            record: &record,
-        };
-        let v = start(&cx, "browser", Duration::ZERO).await.unwrap();
-        assert_eq!(v["state"], STARTING, "{v}");
         let started = runner.started.lock().unwrap()[0].clone();
-        let in_sandbox = started.in_sandbox.unwrap();
+        let in_sandbox = started.in_sandbox;
         assert_eq!(in_sandbox.service, "browser");
         assert_eq!(
             in_sandbox.argv,
@@ -563,20 +472,6 @@ mod tests {
             recorded(&store, "s1")["browser"].state,
             STARTED,
             "recorded as started"
-        );
-        // Recorded as what runs: the session's sandbox and the bundle, with
-        // no container or image of its own.
-        assert_eq!(
-            service_events(&store)[0],
-            json!({
-                "name": "browser", "state": STARTED, "in_sandbox": true,
-                "sandbox": "tracon-h-s1", "bundle": "/srv/browser/amd64",
-                "mounted_at": "/opt/tracon-services/browser",
-            })
-        );
-        assert!(
-            containers(&store, "s1").is_empty(),
-            "no container to reconcile"
         );
 
         // Past the catalogue's timeout, still restarting: not failed, since
@@ -603,7 +498,6 @@ mod tests {
         let cfg = cfg(30);
         let runner = FakeRunner {
             ready_after: usize::MAX,
-            supervises: true,
             fails_after: Some(1),
             ..Default::default()
         };

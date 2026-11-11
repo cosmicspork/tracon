@@ -168,7 +168,6 @@ pub const KEYS: &[KeySpec] = &[
     // [boundary]
     restart("boundary.podman").exec(),
     restart("boundary.gateway_container"),
-    restart("boundary.selinux_label_disable"),
     restart("boundary.stop_timeout_secs"),
     restart("boundary.auto_reconcile"),
     restart("boundary.resource_prefix").host_only(),
@@ -285,7 +284,6 @@ pub const KEYS: &[KeySpec] = &[
     live("repo.style.no_ticket_keys"),
     // [[service]]
     restart("service.name"),
-    restart("service.image"),
     restart("service.command"),
     restart("service.port"),
     restart("service.ready"),

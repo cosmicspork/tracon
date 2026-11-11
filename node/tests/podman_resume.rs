@@ -80,7 +80,7 @@ impl Rig {
 
     /// A provider as a node process makes one.
     fn provider(&self) -> PodmanProvider {
-        let mut spec = RunSpec::from_config(&self.cfg, true);
+        let mut spec = RunSpec::from_config(&self.cfg);
         spec.image = self.image.clone();
         PodmanProvider::from_config(&self.cfg, spec)
     }

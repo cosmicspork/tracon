@@ -1,5 +1,5 @@
-//! `service_start` and `service_status`: a catalogue service beside the
-//! session, asked for by name.
+//! `service_start` and `service_status`: a catalogue service in the
+//! session's sandbox, asked for by name.
 //!
 //! Unlike `show_work`, these go through the policy bundle like any other
 //! tool, with the service's name as the argument a rule can scope: the
@@ -47,7 +47,7 @@ pub fn definitions_for(names: &[&str], offered: &str) -> Vec<Value> {
         json!({
             "name": START,
             "description": format!(
-                "Start a service from the node's catalogue beside this session, by name, and \
+                "Start a service from the node's catalogue in this session's sandbox, by name, and \
                  wait for it to answer. It shares this session's network: reach it on \
                  127.0.0.1 at its port, and it reaches what this session can and nothing \
                  more. It runs until the session ends; starting it again is harmless. A \
@@ -83,7 +83,7 @@ pub async fn call(
 ) -> Result<Value, String> {
     let session_id = ctx
         .session_id()
-        .ok_or("services run beside a session this node started")?;
+        .ok_or("services run in a session this node started")?;
     let service = args
         .get("name")
         .and_then(Value::as_str)
