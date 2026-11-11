@@ -90,10 +90,17 @@ async fn a_sandbox_pod_holds_nothing_of_the_claim_and_sits_beside_the_node() {
         .unwrap()[0];
     assert_eq!(term.topology_key, "kubernetes.io/hostname");
     assert_eq!(term.namespaces, Some(vec!["tracon-node".to_string()]));
+    // This node's pod alone: another node in the namespace has the role too.
     assert_eq!(
         term.label_selector.as_ref().unwrap().match_labels,
-        Some(BTreeMap::from([(ROLE_LABEL.into(), "node".into())]))
+        Some(BTreeMap::from([
+            (ROLE_LABEL.into(), "node".into()),
+            (NODE_LABEL.into(), "tracon".into()),
+        ]))
     );
+    let labels = pod.metadata.labels.clone().unwrap();
+    assert_eq!(labels[ROLE_LABEL], SANDBOX_ROLE);
+    assert_eq!(labels[NODE_LABEL], "tracon");
     assert!(spec.volumes.iter().flatten().all(|v| v.empty_dir.is_some()));
     // Every directory the run names is an emptyDir at its target.
     let mounted: Vec<&str> = spec.containers[0]
@@ -446,4 +453,86 @@ async fn connections_go_to_the_run_expected_at_their_address() {
     );
     drop(expected);
     assert!(dispatcher.state.lock().unwrap().waiting.is_empty());
+}
+
+/// The node's own pod is found by its role and its prefix: one with only
+/// the role, or another node's prefix, is not this node's.
+#[test]
+fn the_node_pod_is_found_by_its_role_and_its_prefix() {
+    assert_eq!(node_pod_unlabelled(&node_pod_labels()), None);
+    let mut more = node_pod_labels();
+    more.insert("app".into(), "tracon".into());
+    assert_eq!(node_pod_unlabelled(&more), None);
+    let why = node_pod_unlabelled(&BTreeMap::from([(ROLE_LABEL.into(), "node".into())])).unwrap();
+    assert!(why.contains("tracon.dev/node: tracon"), "{why}");
+    assert!(!why.contains("tracon.dev/role"), "{why}");
+    let another = BTreeMap::from([
+        (ROLE_LABEL.into(), "node".into()),
+        (NODE_LABEL.into(), "spike".into()),
+    ]);
+    assert!(node_pod_unlabelled(&another).is_some());
+}
+
+/// Only a policy besides the sandbox's own, selecting the sandbox, with a
+/// rule of its own, widens its route; one that selects other pods, or only
+/// denies, does not.
+#[test]
+fn another_policy_selecting_a_sandbox_widens_its_route() {
+    use k8s_openapi::api::networking::v1::{
+        NetworkPolicy, NetworkPolicyEgressRule, NetworkPolicySpec,
+    };
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelectorRequirement;
+    let policy = |name: &str, selector: LabelSelector, egress: bool| NetworkPolicy {
+        metadata: ObjectMeta {
+            name: Some(name.into()),
+            ..Default::default()
+        },
+        spec: Some(NetworkPolicySpec {
+            pod_selector: Some(selector),
+            policy_types: Some(vec!["Egress".into()]),
+            egress: Some(match egress {
+                true => vec![NetworkPolicyEgressRule::default()],
+                false => vec![],
+            }),
+            ..Default::default()
+        }),
+    };
+    let labels = |map: &[(&str, &str)]| LabelSelector {
+        match_labels: Some(
+            map.iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        ),
+        ..Default::default()
+    };
+    let pod = sandbox_pod_labels();
+    let own = sandbox_policy();
+    let policies = vec![
+        policy(&own, labels(&[(ROLE_LABEL, SANDBOX_ROLE)]), true),
+        policy("spike-sandbox", labels(&[(ROLE_LABEL, SANDBOX_ROLE)]), true),
+        policy(
+            "spike-only",
+            labels(&[(ROLE_LABEL, SANDBOX_ROLE), (NODE_LABEL, "spike")]),
+            true,
+        ),
+        policy("deny-all", LabelSelector::default(), false),
+        policy("harness", labels(&[(ROLE_LABEL, "harness")]), true),
+        policy("everything", LabelSelector::default(), true),
+        policy(
+            "by-expression",
+            LabelSelector {
+                match_expressions: Some(vec![LabelSelectorRequirement {
+                    key: NODE_LABEL.into(),
+                    operator: "In".into(),
+                    values: Some(vec!["tracon".into(), "spike".into()]),
+                }]),
+                ..Default::default()
+            },
+            true,
+        ),
+    ];
+    assert_eq!(
+        widening_policies(&policies, &own, &pod),
+        ["spike-sandbox", "everything", "by-expression"]
+    );
 }

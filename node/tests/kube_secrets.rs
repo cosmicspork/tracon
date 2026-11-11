@@ -426,6 +426,26 @@ async fn reconcile_sweeps_orphaned_run_secrets() {
         Some(Time(old)),
     ));
     api.insert_secret(secret("someone-elses", None, Some(Time(old))));
+    // Another node's in the same namespace, its pod gone: its to sweep.
+    api.insert_secret(secret(
+        "spike-w-gone-1-env",
+        Some("spike-w-gone-1"),
+        Some(Time(old)),
+    ));
+    // Labelled with its node: this one's is swept by the label, and one
+    // labelled for another node is not, whatever its name says.
+    let labelled = |name: &str, pod: &str, node: &str| {
+        let mut secret = secret(name, Some(pod), Some(Time(old)));
+        secret
+            .metadata
+            .labels
+            .as_mut()
+            .unwrap()
+            .insert("tracon.dev/node".into(), node.into());
+        secret
+    };
+    api.insert_secret(labelled("tracon-w-gone-2-env", "tracon-w-gone-2", "tracon"));
+    api.insert_secret(labelled("tracon-w-gone-3-env", "tracon-w-gone-3", "spike"));
 
     let state = tempfile::tempdir().unwrap();
     let mut cfg = config();
@@ -440,6 +460,7 @@ async fn reconcile_sweeps_orphaned_run_secrets() {
         deleted,
         vec![
             "tracon-w-gone-1-env".to_string(),
+            "tracon-w-gone-2-env".to_string(),
             "tracon-w-running-1-env".to_string()
         ]
     );
@@ -452,6 +473,8 @@ async fn reconcile_sweeps_orphaned_run_secrets() {
         live,
         vec![
             "someone-elses".to_string(),
+            "spike-w-gone-1-env".to_string(),
+            "tracon-w-gone-3-env".to_string(),
             "tracon-w-new-1-env".to_string(),
             "tracon-w-pulling-1-env".to_string()
         ]

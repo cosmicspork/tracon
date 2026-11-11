@@ -234,6 +234,10 @@ impl KubeApi {
                 "/apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies/{name}",
                 get(read_policy),
             )
+            .route(
+                "/apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies",
+                get(list_policies),
+            )
             .route("/api/v1/namespaces/{ns}/pods", get(list).post(create))
             .route(
                 "/api/v1/namespaces/{ns}/pods/{name}",
@@ -729,6 +733,20 @@ async fn review(
         ..Default::default()
     });
     (StatusCode::CREATED, Json(review)).into_response()
+}
+
+/// Every policy in place, as a list (`list` on networkpolicies).
+async fn list_policies(State(api): State<KubeApi>) -> Response {
+    let inner = api.inner.lock().unwrap();
+    let mut items: Vec<NetworkPolicy> = inner.policies.values().cloned().collect();
+    items.sort_by(|a, b| a.metadata.name.cmp(&b.metadata.name));
+    Json(json!({
+        "kind": "NetworkPolicyList",
+        "apiVersion": "networking.k8s.io/v1",
+        "metadata": {},
+        "items": items,
+    }))
+    .into_response()
 }
 
 async fn read_policy(

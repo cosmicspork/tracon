@@ -5,6 +5,11 @@
 # the MCP and model gateway and both proxies are tunnels over that one
 # connection. The node verifies this policy's shape before it runs a
 # sandbox. Selects nothing until the node runs sandboxes.
+#
+# Per node: `<prefix>-sandbox` selects that node's sandboxes and lets them
+# reach that node's pod alone, both by `tracon.dev/node: <prefix>`. A second
+# node in the namespace carries a copy with its own prefix in all three
+# places.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -13,6 +18,7 @@ spec:
   podSelector:
     matchLabels:
       tracon.dev/role: sandbox
+      tracon.dev/node: tracon
   policyTypes: ["Ingress", "Egress"]
   ingress: []
   egress:
@@ -20,6 +26,7 @@ spec:
         - podSelector:
             matchLabels:
               tracon.dev/role: node
+              tracon.dev/node: tracon
       ports:
         - protocol: TCP
           port: 7426

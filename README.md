@@ -2195,13 +2195,18 @@ the base) for it:
   turn end, every 60 s in a turn and at exit, as with Podman's `sandbox_files`. A
   session's harness state is its own; the state every session once shared is never
   sent. Caches are sent in and come back only from a preparation.
-- **Placement.** Pods sit beside the node pod (`tracon.dev/role=node`) by pod
-  affinity on `kubernetes.io/hostname`, through the scheduler: a machine with no
-  room refuses the pod (`out_of_cpu`, `out_of_memory`, ...), as one bound by
-  `nodeName` was refused by the kubelet.
+- **Placement.** Pods sit beside this node's own pod (`tracon.dev/role=node` and
+  `tracon.dev/node=<prefix>`, its `[boundary] resource_prefix`) by pod affinity on
+  `kubernetes.io/hostname`, through the scheduler: a machine with no room refuses
+  the pod (`out_of_cpu`, `out_of_memory`, ...), as one bound by `nodeName` was
+  refused by the kubelet. The node's pod must carry both labels (the base Deployment
+  sets `tracon.dev/node: tracon`), which the `runtime` check reads back from its own
+  pod (`TRACON_POD_NAME`).
 - **Route.** A sandbox dials the node pod's address on `sandbox_port` (7426) over TLS
-  pinned to the node's certificate. Its policy, `tracon-sandbox`, allows that and
-  nothing else: no DNS, no ingress, none of the node pod's other ports. The MCP and
+  pinned to the node's certificate. Its policy, `tracon-sandbox`, selects this node's
+  sandboxes (`tracon.dev/role=sandbox`, `tracon.dev/node=<prefix>`) and allows that
+  route to this node's pod and nothing else: no DNS, no ingress, none of the node
+  pod's other ports, no other node's pod. The MCP and
   model gateway and both proxies are tunnels over the connection, and the gateway's
   name is the sandbox's loopback, so a harness addresses them as it always did.
 - **No Secrets.** A run's secret environment travels with its spawn over the
@@ -2212,12 +2217,34 @@ the base) for it:
   connect. The overlay's Role has no rule on Secrets and no `pods/attach`.
 
 The checks read the provider's own rendering back after admission (a gated probe),
-the `tracon-sandbox` policy's shape and that `tracon-node` admits sandboxes on the
-port; `--deep` runs the egress script in a sandbox through its tunnels and also
+the `tracon-sandbox` policy's shape, that no other NetworkPolicy in the namespace
+selects the node's sandboxes with a rule of its own (policies add up, so one would
+widen the route; the overlay's Role lists them for this), and that `tracon-node`
+admits sandboxes on the port; a sandbox's `verify_isolation` reads the same and
+reports `route: unverified` when another policy widens it; `--deep` runs the egress script in a sandbox through its tunnels and also
 checks that no name resolves and that the node pod's forward port is not reachable
 directly. Names follow `[boundary] resource_prefix`: the policies a node reads are
 `<prefix>-sandbox`, `<prefix>-harness` and `<prefix>-node`, and the repository images
 it pushes are `<registry>/<prefix>-repo-…`.
+
+**Two nodes in one namespace.** Give the second its own `resource_prefix` (say
+`spike`) and its own Deployment, whose selector and pod template carry
+`tracon.dev/node: spike` (the first's keeps `tracon`), and copies of the overlay's
+policies named `spike-sandbox` and `spike-node` with `spike` in every
+`tracon.dev/node`. Every pod and run Secret a node makes carries its prefix in that
+label and its name; each node counts, sweeps and places only its own, and the checks
+refuse a sandbox policy that selects or reaches another node's pods.
+
+**Probe before turning it on.** `tracon sandbox probe --provider kubernetes`, run in
+the node's pod (`kubectl exec deploy/tracon-node -- tracon sandbox probe --provider
+kubernetes`), makes one sandbox pod as the node would (the stock base unless
+`--image`, this release's bundle unless `--bundle`) under a name of its own
+(`<prefix>-probe-…`; `--name` is refused here, since a pod of the given name would be
+replaced), takes its connection on the sandbox port, runs a command in it, reads its
+isolation back (the admitted pod, `<prefix>-sandbox` and the namespace's other
+policies) and removes it, on Ctrl-C too. It needs the sandbox port free, so it is for a
+node that does not serve sandboxes yet; once it does, the boundary check covers the
+same ground.
 
 #### Images on Kubernetes
 

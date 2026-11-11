@@ -2,6 +2,14 @@
 //! over the sandbox protocol, run a command in it, read its isolation back
 //! from the provider, and remove it. A check that a provider works on this
 //! host, end to end, before any session depends on it.
+//!
+//! On Kubernetes it runs inside the node's pod (`kubectl exec`), with the
+//! node's own pod facts, client and `[runtime.kubernetes]` settings: one
+//! sandbox pod beside the node's, which dials this process on the sandbox
+//! port and fetches the bundle there, held to the sandbox NetworkPolicy the
+//! deployment carries, which `verify_isolation` reads back. It is for a node
+//! about to turn `sandbox_protocol` on: a node already serving its sandboxes
+//! holds the port, and its boundary check covers the same ground.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -13,6 +21,7 @@ use tracon_sandbox::tls::NodeIdentity;
 
 use super::apple::{AppleOptions, AppleProvider, BUNDLE_TARGET};
 use super::capabilities::{Dns, Route};
+use super::kubernetes::{KubeSandboxOptions, KubeSandboxProvider};
 use super::podman::PodmanProvider;
 use super::{
     Bootstrap, Capabilities, CreateSpec, Handle, ProviderKind, Resources, SandboxProvider,
@@ -23,25 +32,70 @@ const CONNECT_WITHIN: Duration = Duration::from_secs(60);
 
 pub struct ProbeOptions {
     pub provider: ProviderKind,
-    pub image: String,
+    /// The image to run; `None` is the provider's default ([`default_image`]).
+    pub image: Option<String>,
     /// The harness bundle for the provider's architecture, holding
-    /// `bin/tracon-sandbox`.
-    pub bundle: PathBuf,
+    /// `bin/tracon-sandbox`. `None` is this release's for this host, fetched
+    /// and checked as the node fetches its own.
+    pub bundle: Option<PathBuf>,
     /// Leave the sandbox running afterwards, for a look inside.
     pub keep: bool,
     /// What to call the sandbox, where the provider names it as asked.
     pub name: Option<String>,
 }
 
+/// The image a probe runs when it is given none: any small image does where
+/// the bundle is mounted from the host; on Kubernetes the sandbox's own image
+/// fetches the bundle (a shell, `curl` or `wget`, `sha256sum` and `tar`), so
+/// it is the stock base the node's sandboxes run.
+pub fn default_image(provider: ProviderKind, cfg: &crate::config::Config) -> String {
+    match provider {
+        ProviderKind::Kubernetes => cfg.sandbox.base_image_ref(),
+        _ => "ubuntu:24.04".into(),
+    }
+}
+
 /// What one probe saw. Each line is printed as it happens.
 pub async fn run(options: ProbeOptions) -> Result<()> {
-    let bundle = options
-        .bundle
+    let cfg = crate::config::Config::load();
+    let bundle = match &options.bundle {
+        Some(bundle) => bundle.clone(),
+        None => {
+            let ensured = crate::bundle::ensure_release(&cfg)
+                .await
+                .context("fetch this release's harness bundle (or pass --bundle)")?;
+            line("bundle", ensured.path().display().to_string());
+            ensured.path().to_path_buf()
+        }
+    };
+    let bundle = bundle
         .canonicalize()
-        .with_context(|| format!("bundle {}", options.bundle.display()))?;
+        .with_context(|| format!("bundle {}", bundle.display()))?;
+    let image = options
+        .image
+        .clone()
+        .unwrap_or_else(|| default_image(options.provider, &cfg));
+    // A pod is made under its name after any pod of that name is removed, so
+    // a name given here could be the node's own pod or another node's
+    // sandbox: on Kubernetes the probe always names its pod itself, uniquely.
+    let name = match options.provider {
+        ProviderKind::Kubernetes => {
+            if let Some(given) = &options.name {
+                bail!(
+                    "--name {given:?} is refused on Kubernetes: a pod of that name would be \
+                     replaced; the probe names its own pod"
+                );
+            }
+            Some(crate::config::resource_name(&format!(
+                "probe-{}",
+                &uuid::Uuid::new_v4().simple().to_string()[..12]
+            )))
+        }
+        _ => options.name.clone(),
+    };
     let provider: Box<dyn SandboxProvider> = match options.provider {
         ProviderKind::Apple => Box::new(AppleProvider::new(AppleOptions {
-            bundle,
+            bundle: bundle.clone(),
             socket_dir: AppleOptions::default_socket_dir(),
             limit: None,
             ..AppleOptions::default()
@@ -49,14 +103,15 @@ pub async fn run(options: ProbeOptions) -> Result<()> {
         // The boundary this node's configuration describes: its network,
         // gateway and proxy, as a session's sandbox gets them.
         ProviderKind::Podman => {
-            let mut cfg = crate::config::Config::load();
-            cfg.sandbox.bundle = Some(bundle);
+            let mut cfg = cfg.clone();
+            cfg.sandbox.bundle = Some(bundle.clone());
             let spec = crate::runner::podman::RunSpec::from_config(&cfg, false);
             Box::new(PodmanProvider::from_config(&cfg, spec))
         }
+        ProviderKind::Kubernetes => Box::new(kubernetes(&cfg, &bundle).await?),
         other => bail!("the probe does not support {} yet", other.as_str()),
     };
-    let supervisor = options.bundle.join("bin/tracon-sandbox");
+    let supervisor = bundle.join("bin/tracon-sandbox");
     if !supervisor.is_file() {
         bail!(
             "{} is missing: build tracon-sandbox for the provider's architecture into the bundle",
@@ -76,8 +131,8 @@ pub async fn run(options: ProbeOptions) -> Result<()> {
     let started = Instant::now();
     let handle = provider
         .create(&CreateSpec {
-            name: options.name.as_deref(),
-            image: &options.image,
+            name: name.as_deref(),
+            image: &image,
             resources: &Resources::default(),
             mounts: &[],
             bootstrap: &bootstrap,
@@ -88,7 +143,11 @@ pub async fn run(options: ProbeOptions) -> Result<()> {
         .context("create")?;
     line("created", format!("{} in {}", handle.0, ms(started)));
 
-    let outcome = exercise(provider.as_ref(), &server, &handle).await;
+    // Interrupted, the sandbox is still removed (unless it is to be kept).
+    let outcome = tokio::select! {
+        outcome = exercise(provider.as_ref(), &server, &handle) => outcome,
+        _ = tokio::signal::ctrl_c() => Err(anyhow::anyhow!("interrupted")),
+    };
     match options.keep {
         true => line("kept", handle.0.clone()),
         false => {
@@ -106,6 +165,34 @@ pub async fn run(options: ProbeOptions) -> Result<()> {
     }
     println!("probe passed");
     Ok(())
+}
+
+/// The provider this pod's node would make its sandboxes with, from inside
+/// its pod, on `bundle`; its listener bound now, so a port the running node
+/// holds is said before any pod is made.
+async fn kubernetes(
+    cfg: &crate::config::Config,
+    bundle: &std::path::Path,
+) -> Result<KubeSandboxProvider> {
+    let mut cfg = cfg.clone();
+    cfg.sandbox.bundle = Some(bundle.to_path_buf());
+    let backend = crate::boundary::kubernetes::KubeBackend::new(&cfg);
+    let spec = backend
+        .spec()
+        .map_err(|why| anyhow::anyhow!("run the probe inside the node's pod: {why}"))?;
+    let client = backend.client().await.map_err(anyhow::Error::msg)?;
+    let provider = KubeSandboxProvider::new(client, KubeSandboxOptions::from_config(&cfg, spec));
+    let listen = provider.options().listen;
+    match crate::provider::kubernetes::Dispatcher::bind(listen).await {
+        Ok(_) => Ok(provider),
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => bail!(
+            "port {} is already taken, most likely by the node itself serving its sandboxes \
+             ([runtime.kubernetes] sandbox_protocol is on): the probe is for a node about to \
+             turn it on; with it on, the node's boundary check covers the same ground",
+            listen.port()
+        ),
+        Err(error) => bail!("listen for the sandbox on {listen}: {error}"),
+    }
 }
 
 async fn exercise(
