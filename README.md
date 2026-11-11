@@ -466,8 +466,9 @@ named none — and a check whose command is not in the image is reported as *not
 naming the missing tool and the image it looked in, rather than as a failing check the
 agent is told to fix.
 
-The image can be the repository's own dev environment. Name its Dockerfile
-(`dockerfile = ".devcontainer/Dockerfile"`) instead of an image and the node builds it
+Where sandboxes don't run on the stock base, the image can be the repository's own dev
+environment. Name its Dockerfile (`dockerfile = ".devcontainer/Dockerfile"`) instead of
+an image and the node builds it
 from the repository's **default branch** — read out of Git, never from a working tree or
 a candidate, which could otherwise choose the image its own checks run in — pins what it
 built, and rebuilds when the Dockerfile or its build context changes there. Only the
@@ -481,12 +482,16 @@ trust `devcontainer up` asks for, which is why it is per repository and yours to
 `tracon repo ls` shows each repository's image and any command it has no tool for.
 `tracon repo build host/owner/name` on a repository no session has cloned yet clones it
 first, with the node's forge credential or anonymously, so `repo set` then `repo build`
-works on a fresh node.
+works on a fresh node. Where sandboxes run on the stock base, the recipe is build steps
+instead (next section): an `image`, or a Dockerfile whose first `FROM` is not
+`${TRACON_SANDBOX_BASE}`, is refused there.
 
 #### Repository recipes on the stock base
 
 Where sandboxes run on the stock base (`[runtime.podman] sandbox_images`, or an Apple
-node), a repository's recipe lives in `node.toml` and nothing goes in the repository:
+node), a repository's recipe lives in `node.toml` and nothing goes in the repository.
+A devcontainer stays the developers' environment and is no longer the node's recipe. An
+entry looks like this:
 
 ```toml
 [[repo]]
@@ -533,7 +538,23 @@ shell. On any other node the key is refused at load, naming the setting it needs
 Install what sessions need where uid 65532 can read and run it: under `/usr/local`
 (its `bin` is on `PATH`), not root's home. For rustup, set `CARGO_HOME=/usr/local/cargo`
 and `RUSTUP_HOME=/usr/local/rustup` in the step and link `cargo`, `rustc` and the rest
-into `/usr/local/bin`.
+into `/usr/local/bin`. A Rust repository, for example:
+
+```toml
+[[repo]]
+path = "github.com/owner/rust-app"
+build = [
+  "apt-get update && apt-get install -y --no-install-recommends libssl-dev && rm -rf /var/lib/apt/lists/*",
+  "curl -fsSL -o /tmp/rustup-init \"https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init\" && chmod +x /tmp/rustup-init && CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.98.1 -c clippy -c rustfmt && rm /tmp/rustup-init && ln -s /usr/local/rustup/toolchains/1.98.1-*/bin/* /usr/local/bin/",
+]
+prepare = ["cargo fetch --locked"]
+egress = ["apt", "crates", "static.rust-lang.org"]
+checks = ["cargo test --locked"]
+```
+
+The links are to the toolchain's own binaries, not rustup's proxies, which would need
+`RUSTUP_HOME` set wherever they run. So nothing reads the repository's
+`rust-toolchain.toml`: name the same version in the step.
 
 **From a devcontainer Dockerfile.** Take its `RUN` lines as steps, in order, and drop
 what the base already has (git, curl, a C toolchain, jq, Node, Python with uv, PHP 8.5
@@ -541,11 +562,12 @@ with Composer: see `containers/sandbox-base/Containerfile`). `ENV` and `ARG` val
 into the steps that read them (`export NAME=value && …`); a `COPY` from the repository
 becomes a step that writes or fetches the file, since there is no build context. Name
 the hosts the steps fetch from in `egress`, then drop `dockerfile` (or `image`): an
-entry names one of the three.
+entry names one of the three, and `tracon repo set <path> --build …` drops the others
+for you.
 
 The table is edited where you would look for it: **Settings → Repositories**, or
-`tracon repo set <path> --dockerfile .devcontainer/Dockerfile --check "just check"
---prepare "cargo fetch --locked" --egress crates` (and `show`, `rm`). Either writes
+`tracon repo set <path> --check "just check" --prepare "cargo fetch --locked"
+--egress crates` (and `show`, `rm`). Either writes
 `node.toml` and takes effect for the next session and the next check without a restart —
 a restart would end every session on the node to change one repository's environment. A
 session already running keeps the image and the egress it started with. A hand edit of
@@ -564,7 +586,9 @@ failure even when it ran out of time. A trial being refused will not recover, an
 session can cancel it rather than wait it out. `repo_setup_propose` puts it to you on a card, which you may edit. The node
 writes the entry only when you allow it, and a proposal never opens the repository's
 egress to its sessions. Hosts you opened to the session while it tried are suggested in
-`egress`.
+`egress`. A draft never has `build` steps. Where sandboxes run on the stock base, turn a
+drafted `dockerfile` into steps yourself, as above: unless it begins
+`FROM ${TRACON_SANDBOX_BASE}`, it is refused there.
 
 A session runs in that image too, with Claude Code or `tracon-agent`. The node copies the
 harness onto the repository's image as one more layer, proves it runs there, and launches
@@ -611,7 +635,9 @@ keeps a session in bounds is the runtime around it, not what the image contains.
 Settings → Repositories sends its recipe to the other members of a channel you pick:
 the Dockerfile and its context, the checks, the preparation, its registries and whether
 sessions reach them, and the time limit, with the repository named by its forge identity
-(`github.com/owner/name`). Never its pinned image or any digest, the credentials it lends
+(`github.com/owner/name`). Never its pinned image or any digest, its build steps (they run
+as root on each node's own base, so each node writes its own, and an entry keeps them
+unless you replace them with an offered Dockerfile), the credentials it lends
 to preparation, its path, or how its commits are published; a command naming a home
 directory is refused. Each receiving node only stages the offer and notifies its
 operator, who sees what would change on the entry it lands on (the entry already
@@ -2295,8 +2321,9 @@ once. Without that flag, starting it prompts for a kernel and fails when there i
   The commit keeps the preparation's environment, so the node builds it over once more
   with the base's configuration, the preparation's token emptied and the snapshot's
   labels, among them the commit it was prepared from. A session at that commit skips
-  `prepare`. A commit is one flattened layer, so each snapshot costs about the base's
-  size on disk. `tracon gc` removes snapshots that a newer one superseded, with the
+  `prepare`. A commit is one flattened layer that holds the repository's toolchain and
+  what `prepare` cached, so a snapshot costs far more on disk than the base: tracon's is
+  about 2.7 GB. `tracon gc` removes snapshots that a newer one superseded, with the
   other image classes (see [Starting work](#starting-work)).
 - **Placement.** The node reports its sandboxes as tier `microvm`, so work that
   requires one (`tier = ["microvm"]`) stays on the Mac.
@@ -2362,7 +2389,8 @@ subnet = "10.89.7.0/24"            # a network of its own needs a subnet of its 
 gateway_ip = "10.89.7.2"
 gateway_container = "scratch-gw"   # also gives its gateway a user service of its own
 gateway_image = "localhost/scratch-gateway"
-harness_image = "localhost/scratch-harness-claude"  # the other harness follows its stem
+harness_image = "localhost/scratch-harness-claude"  # for [harness] id "claude"; end it in
+                                   # -native for "native". The other harness's image swaps the ending
 
 [gateway]
 harness_listen = "$XDG_RUNTIME_DIR/tracon-scratch/harness.sock"
@@ -2384,7 +2412,6 @@ remove what carries its names, and its two directories:
 podman ps -a --format '{{.Names}}' | grep '^scratch-' | xargs -r podman rm -f
 podman volume ls -q --filter name='^scratch-' | xargs -r podman volume rm
 podman network rm scratch-int
-podman image rm localhost/scratch-gateway localhost/scratch-harness-claude localhost/scratch-harness-native
 podman images --format '{{.Repository}}:{{.Tag}}' | grep '^localhost/scratch-' | xargs -r podman image rm
 systemctl --user disable --now tracon-gateway-scratch-gw.service   # Linux, if setup made it
 rm -rf "$TRACON_STATE_DIR" "$TRACON_CONFIG_DIR"
