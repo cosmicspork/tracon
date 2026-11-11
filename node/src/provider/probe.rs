@@ -75,6 +75,24 @@ pub async fn run(options: ProbeOptions) -> Result<()> {
         .image
         .clone()
         .unwrap_or_else(|| default_image(options.provider, &cfg));
+    // A pod is made under its name after any pod of that name is removed, so
+    // a name given here could be the node's own pod or another node's
+    // sandbox: on Kubernetes the probe always names its pod itself, uniquely.
+    let name = match options.provider {
+        ProviderKind::Kubernetes => {
+            if let Some(given) = &options.name {
+                bail!(
+                    "--name {given:?} is refused on Kubernetes: a pod of that name would be \
+                     replaced; the probe names its own pod"
+                );
+            }
+            Some(crate::config::resource_name(&format!(
+                "probe-{}",
+                &uuid::Uuid::new_v4().simple().to_string()[..12]
+            )))
+        }
+        _ => options.name.clone(),
+    };
     let provider: Box<dyn SandboxProvider> = match options.provider {
         ProviderKind::Apple => Box::new(AppleProvider::new(AppleOptions {
             bundle: bundle.clone(),
@@ -113,7 +131,7 @@ pub async fn run(options: ProbeOptions) -> Result<()> {
     let started = Instant::now();
     let handle = provider
         .create(&CreateSpec {
-            name: options.name.as_deref(),
+            name: name.as_deref(),
             image: &image,
             resources: &Resources::default(),
             mounts: &[],
@@ -125,7 +143,11 @@ pub async fn run(options: ProbeOptions) -> Result<()> {
         .context("create")?;
     line("created", format!("{} in {}", handle.0, ms(started)));
 
-    let outcome = exercise(provider.as_ref(), &server, &handle).await;
+    // Interrupted, the sandbox is still removed (unless it is to be kept).
+    let outcome = tokio::select! {
+        outcome = exercise(provider.as_ref(), &server, &handle) => outcome,
+        _ = tokio::signal::ctrl_c() => Err(anyhow::anyhow!("interrupted")),
+    };
     match options.keep {
         true => line("kept", handle.0.clone()),
         false => {

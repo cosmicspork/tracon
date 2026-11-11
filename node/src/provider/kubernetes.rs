@@ -160,6 +160,54 @@ pub fn node_pod_unlabelled(labels: &BTreeMap<String, String>) -> Option<String> 
     })
 }
 
+/// Whether `selector` selects a pod labelled `labels`: every `matchLabels`
+/// entry and every `matchExpressions` term holds. An empty selector selects
+/// every pod; an operator this cannot read selects it too, so a policy it
+/// does not understand is never taken for one that leaves the pod alone.
+pub fn selects(selector: &LabelSelector, labels: &BTreeMap<String, String>) -> bool {
+    let matched = selector
+        .match_labels
+        .iter()
+        .flatten()
+        .all(|(key, value)| labels.get(key) == Some(value));
+    matched
+        && selector.match_expressions.iter().flatten().all(|term| {
+            let value = labels.get(&term.key);
+            let values = term.values.as_deref().unwrap_or_default();
+            match term.operator.as_str() {
+                "In" => value.is_some_and(|v| values.contains(v)),
+                "NotIn" => value.is_none_or(|v| !values.contains(v)),
+                "Exists" => value.is_some(),
+                "DoesNotExist" => value.is_none(),
+                _ => true,
+            }
+        })
+}
+
+/// The policies besides `own` (the sandbox's `<prefix>-sandbox`) that select
+/// a pod labelled `labels` and allow it anything: an ingress or egress rule
+/// of their own. NetworkPolicies add up, so any of them widens the one route
+/// `own` allows (an older node's `role: sandbox` policy, say). One with no
+/// rules only denies, and leaves the route as it is.
+pub fn widening_policies(
+    policies: &[NetworkPolicy],
+    own: &str,
+    labels: &BTreeMap<String, String>,
+) -> Vec<String> {
+    policies
+        .iter()
+        .filter(|policy| policy.metadata.name.as_deref() != Some(own))
+        .filter(|policy| {
+            policy.spec.as_ref().is_some_and(|spec| {
+                selects(&spec.pod_selector.clone().unwrap_or_default(), labels)
+                    && (spec.ingress.as_ref().is_some_and(|rules| !rules.is_empty())
+                        || spec.egress.as_ref().is_some_and(|rules| !rules.is_empty()))
+            })
+        })
+        .map(|policy| policy.metadata.name.clone().unwrap_or_default())
+        .collect()
+}
+
 /// What the provider is configured with.
 #[derive(Debug, Clone)]
 pub struct KubeSandboxOptions {
@@ -1444,7 +1492,27 @@ impl SandboxProvider for KubeSandboxProvider {
         let route = match self.policies().get_opt(&sandbox_policy()).await {
             Ok(Some(policy)) => {
                 match crate::boundary::kubernetes::checks::sandbox_policy_shape(&policy, port) {
-                    Ok(()) => Route::NodeOnly,
+                    Ok(()) => match self.policies().list(&ListParams::default()).await {
+                        Ok(listed) => {
+                            let wider =
+                                widening_policies(&listed.items, &sandbox_policy(), &labels);
+                            match wider.is_empty() {
+                                true => Route::NodeOnly,
+                                false => {
+                                    tracing::warn!(
+                                        sandbox = %handle.0,
+                                        policies = %wider.join(", "),
+                                        "other NetworkPolicies select this sandbox and widen its route"
+                                    );
+                                    Route::Unverified
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "could not list the NetworkPolicies that might widen the sandbox's route");
+                            Route::Unverified
+                        }
+                    },
                     Err(why) => {
                         tracing::warn!(%why, "the sandbox policy does not hold");
                         Route::Unverified

@@ -10,6 +10,7 @@ spec:
   podSelector:
     matchLabels:
       tracon.dev/role: node
+      tracon.dev/node: tracon
   policyTypes: ["Ingress"]
   ingress:
     - from:

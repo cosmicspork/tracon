@@ -161,6 +161,23 @@ pub fn render(namespace: &str, pod: &str, cmd: &RunnerCommand) -> Secret {
     }
 }
 
+/// Whether the node with `prefix` sweeps a run Secret labelled `labels`
+/// for `pod`. One that names its node (`tracon.dev/node`) is that node's
+/// alone. One made before Secrets named their node is claimed by name only
+/// by the default prefix, `tracon-`, which no other prefix may begin with
+/// (`config::validate_resource_prefix`): a name cannot tell `dev-b-w-1`
+/// from a run of a node `dev`, so any other node leaves its unlabelled
+/// Secrets to the pod's own removal.
+pub fn swept_here(prefix: &str, labels: &BTreeMap<String, String>, pod: &str) -> bool {
+    match labels.get(super::NODE_LABEL) {
+        Some(node) => node == prefix,
+        None => {
+            prefix == crate::config::DEFAULT_RESOURCE_PREFIX
+                && pod.starts_with(&format!("{prefix}-"))
+        }
+    }
+}
+
 /// `text` with every secret value of `cmd` taken out. An API error about a
 /// Secret is not expected to quote its data, and is not trusted not to.
 fn redacted(cmd: &RunnerCommand, text: String) -> String {
@@ -363,32 +380,48 @@ impl KubeRunner {
     /// started (the kubelet read them then) and those whose pod is gone and
     /// that are older than `SWEEP_GRACE`. Returns how many it removed. A
     /// node that may not list Secrets has made none to sweep. Only this
-    /// node's, by the prefix its pods' names carry: another node in the same
-    /// namespace sweeps its own.
+    /// node's ([`swept_here`]): another node in the same namespace sweeps
+    /// its own.
     pub async fn sweep_run_secrets(&self) -> usize {
         let secrets = self.secrets();
-        let listed = match secrets
-            .list_metadata(&ListParams::default().labels(RUN_LABEL))
+        let prefix = crate::config::resource_prefix();
+        let own = format!("{RUN_LABEL},{}={prefix}", super::NODE_LABEL);
+        let mut listed = match secrets
+            .list_metadata(&ListParams::default().labels(&own))
             .await
         {
-            Ok(listed) => listed,
+            Ok(listed) => listed.items,
             Err(error) => {
                 tracing::debug!(%error, "run secrets not swept");
                 return 0;
             }
         };
+        // Those made before Secrets named their node, which only the
+        // default prefix can claim by name.
+        if prefix == crate::config::DEFAULT_RESOURCE_PREFIX {
+            if let Ok(all) = secrets
+                .list_metadata(&ListParams::default().labels(RUN_LABEL))
+                .await
+            {
+                listed.extend(all.items.into_iter().filter(|item| {
+                    item.metadata
+                        .labels
+                        .as_ref()
+                        .is_none_or(|l| !l.contains_key(super::NODE_LABEL))
+                }));
+            }
+        }
         let pods = self.pods();
         let now = k8s_openapi::jiff::Timestamp::now().as_second();
         let mut removed = 0;
-        for item in listed.items {
+        for item in listed {
             let meta = item.metadata;
-            let (Some(name), Some(pod)) = (
-                meta.name.clone(),
-                meta.labels.as_ref().and_then(|l| l.get(RUN_LABEL)).cloned(),
-            ) else {
+            let labels = meta.labels.clone().unwrap_or_default();
+            let (Some(name), Some(pod)) = (meta.name.clone(), labels.get(RUN_LABEL).cloned())
+            else {
                 continue;
             };
-            if !crate::gc::is_own(&pod) {
+            if !swept_here(prefix, &labels, &pod) {
                 continue;
             }
             let old = meta
@@ -413,5 +446,37 @@ impl KubeRunner {
             }
         }
         removed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn labels(node: Option<&str>) -> BTreeMap<String, String> {
+        let mut labels = BTreeMap::from([(RUN_LABEL.to_string(), "x".to_string())]);
+        if let Some(node) = node {
+            labels.insert(super::super::NODE_LABEL.to_string(), node.to_string());
+        }
+        labels
+    }
+
+    /// A node `dev` never takes the Secrets of a node `dev-b` (nor the
+    /// reverse), whose run names begin `dev-` too: a labelled Secret is its
+    /// node's by the label, and an unlabelled one only the default prefix's.
+    #[test]
+    fn a_longer_prefix_is_another_nodes() {
+        assert!(swept_here("dev", &labels(Some("dev")), "dev-w-1"));
+        assert!(!swept_here("dev", &labels(Some("dev-b")), "dev-b-w-1"));
+        assert!(swept_here("dev-b", &labels(Some("dev-b")), "dev-b-w-1"));
+        assert!(!swept_here("dev-b", &labels(Some("dev")), "dev-w-1"));
+        // Made before the label: neither claims it by a name both match.
+        assert!(!swept_here("dev", &labels(None), "dev-b-w-1"));
+        assert!(!swept_here("dev", &labels(None), "dev-w-1"));
+        // The default prefix, which no other may begin with, still sweeps
+        // its own from before.
+        assert!(swept_here("tracon", &labels(None), "tracon-w-1"));
+        assert!(!swept_here("tracon", &labels(None), "spike-w-1"));
+        assert!(!swept_here("tracon", &labels(Some("spike")), "tracon-w-1"));
     }
 }

@@ -329,6 +329,26 @@ async fn kubernetes_sandboxes_over_the_protocol() {
     api.insert_policy(own_sandbox_policy(i32::from(port)));
     let caps = provider.verify_isolation(&handle).await.unwrap();
     assert_eq!(caps.route, tracon::provider::capabilities::Route::NodeOnly);
+
+    // Policies add up: another that selects every sandbox in the namespace
+    // (an older node's `role: sandbox` one) widens the route, which is then
+    // not claimed.
+    let mut older = own_sandbox_policy(i32::from(port));
+    older.metadata.name = Some("spike-sandbox".into());
+    older
+        .spec
+        .as_mut()
+        .unwrap()
+        .pod_selector
+        .as_mut()
+        .unwrap()
+        .match_labels = Some(BTreeMap::from([(ROLE_LABEL.into(), SANDBOX_ROLE.into())]));
+    api.insert_policy(older);
+    let caps = provider.verify_isolation(&handle).await.unwrap();
+    assert_eq!(
+        caps.route,
+        tracon::provider::capabilities::Route::Unverified
+    );
     let _ = provider.destroy(&handle).await;
 
     // A sandbox pod of another node in the namespace is not this one's.

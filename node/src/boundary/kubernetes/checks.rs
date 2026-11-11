@@ -109,6 +109,8 @@ pub const PROTOCOL_RIGHTS: &[(&str, &str, &str, &str)] = &[
     ("", "pods", "", "delete"),
     ("", "pods", "log", "get"),
     ("networking.k8s.io", "networkpolicies", "", "get"),
+    // Every policy that might select a sandbox too, and widen its route.
+    ("networking.k8s.io", "networkpolicies", "", "list"),
 ];
 
 /// Whether this service account may do each of `rights` in `namespace`:
@@ -1110,6 +1112,31 @@ async fn sandbox_network(
     };
     if let Err(why) = sandbox_policy_shape(&policy, port) {
         return fail(why);
+    }
+    // NetworkPolicies add up: another that selects this node's sandboxes
+    // with a rule of its own widens the one route.
+    match policies.list(&kube::api::ListParams::default()).await {
+        Ok(listed) => {
+            let labels = pod.metadata.labels.clone().unwrap_or_default();
+            let wider =
+                crate::provider::kubernetes::widening_policies(&listed.items, &name, &labels);
+            if !wider.is_empty() {
+                return fail(format!(
+                    "{} also select this node's sandboxes and allow them more than {name} \
+                     does: NetworkPolicies add up, so the route is wider than one; narrow \
+                     their selectors (an older {}=sandbox policy wants {}=<its prefix>)",
+                    wider.join(", "),
+                    ROLE_LABEL,
+                    crate::runner::kube::NODE_LABEL
+                ));
+            }
+        }
+        Err(e) => {
+            return fail(format!(
+                "could not list the NetworkPolicies in {}, any of which might widen {name}: {e}",
+                spec.env.namespace
+            ))
+        }
     }
     let node = node_policy();
     match policies.get_opt(&node).await {

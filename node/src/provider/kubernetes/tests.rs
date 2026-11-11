@@ -472,3 +472,67 @@ fn the_node_pod_is_found_by_its_role_and_its_prefix() {
     ]);
     assert!(node_pod_unlabelled(&another).is_some());
 }
+
+/// Only a policy besides the sandbox's own, selecting the sandbox, with a
+/// rule of its own, widens its route; one that selects other pods, or only
+/// denies, does not.
+#[test]
+fn another_policy_selecting_a_sandbox_widens_its_route() {
+    use k8s_openapi::api::networking::v1::{
+        NetworkPolicy, NetworkPolicyEgressRule, NetworkPolicySpec,
+    };
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelectorRequirement;
+    let policy = |name: &str, selector: LabelSelector, egress: bool| NetworkPolicy {
+        metadata: ObjectMeta {
+            name: Some(name.into()),
+            ..Default::default()
+        },
+        spec: Some(NetworkPolicySpec {
+            pod_selector: Some(selector),
+            policy_types: Some(vec!["Egress".into()]),
+            egress: Some(match egress {
+                true => vec![NetworkPolicyEgressRule::default()],
+                false => vec![],
+            }),
+            ..Default::default()
+        }),
+    };
+    let labels = |map: &[(&str, &str)]| LabelSelector {
+        match_labels: Some(
+            map.iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        ),
+        ..Default::default()
+    };
+    let pod = sandbox_pod_labels();
+    let own = sandbox_policy();
+    let policies = vec![
+        policy(&own, labels(&[(ROLE_LABEL, SANDBOX_ROLE)]), true),
+        policy("spike-sandbox", labels(&[(ROLE_LABEL, SANDBOX_ROLE)]), true),
+        policy(
+            "spike-only",
+            labels(&[(ROLE_LABEL, SANDBOX_ROLE), (NODE_LABEL, "spike")]),
+            true,
+        ),
+        policy("deny-all", LabelSelector::default(), false),
+        policy("harness", labels(&[(ROLE_LABEL, "harness")]), true),
+        policy("everything", LabelSelector::default(), true),
+        policy(
+            "by-expression",
+            LabelSelector {
+                match_expressions: Some(vec![LabelSelectorRequirement {
+                    key: NODE_LABEL.into(),
+                    operator: "In".into(),
+                    values: Some(vec!["tracon".into(), "spike".into()]),
+                }]),
+                ..Default::default()
+            },
+            true,
+        ),
+    ];
+    assert_eq!(
+        widening_policies(&policies, &own, &pod),
+        ["spike-sandbox", "everything", "by-expression"]
+    );
+}

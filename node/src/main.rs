@@ -150,7 +150,8 @@ enum SandboxCommand {
         /// Leave the sandbox running afterwards.
         #[arg(long)]
         keep: bool,
-        /// What to call the sandbox (Podman's container name).
+        /// What to call the sandbox (Podman's container name). Refused on
+        /// Kubernetes, where the probe names its pod itself.
         #[arg(long)]
         name: Option<String>,
     },
