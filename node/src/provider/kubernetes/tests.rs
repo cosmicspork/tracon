@@ -536,3 +536,36 @@ fn another_policy_selecting_a_sandbox_widens_its_route() {
         ["spike-sandbox", "everything", "by-expression"]
     );
 }
+
+/// A snapshot is the image the preparation ran, with its cache and its
+/// prepared `/work` on top, owned by the sandbox's user: nothing else of the
+/// pod, and the image's own user, home and directory kept.
+#[test]
+fn a_snapshot_layers_the_prepared_trees_onto_the_image_it_ran() {
+    let snapshots = Snapshots::new(
+        Arc::new(crate::boundary::kubernetes::build::Unusable(
+            "unused".into(),
+        )),
+        Duration::from_secs(60),
+    );
+    assert_eq!(
+        snapshot_containerfile("registry.example/app@sha256:aa", &snapshots.trees),
+        "FROM registry.example/app@sha256:aa\n\
+         COPY --chown=65532:65532 cache/ /cache/\n\
+         COPY --chown=65532:65532 work/ /work/\n"
+    );
+}
+
+/// A snapshot's trees together get at most the prepared limit, less where
+/// the state volume cannot spare that and keep its margin; too little room
+/// refuses before anything is staged.
+#[test]
+fn a_snapshot_is_staged_only_within_what_the_volume_can_spare() {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    assert_eq!(snapshot_budget(None), Ok(SNAPSHOT_MAX_BYTES));
+    assert_eq!(snapshot_budget(Some(100 * GIB)), Ok(SNAPSHOT_MAX_BYTES));
+    assert_eq!(snapshot_budget(Some(SNAPSHOT_FREE_MARGIN + GIB)), Ok(GIB));
+    let why = snapshot_budget(Some(SNAPSHOT_FREE_MARGIN + 1024)).unwrap_err();
+    assert!(why.contains("make room"), "{why}");
+    assert!(snapshot_budget(Some(0)).is_err());
+}

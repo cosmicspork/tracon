@@ -19,8 +19,10 @@
 //! - **Prepare once, then fork.** A repository's `prepare` runs on its
 //!   default branch in one sandbox, with the dependency cache in the
 //!   sandbox's own filesystem; the provider then snapshots the sandbox
-//!   (`podman commit`, or `container commit` on an Apple node) and the
-//!   repository's sessions and checks start from the snapshot. The
+//!   (`podman commit`, `container commit` on an Apple node, or on a
+//!   pod-hosted node a build of the `/cache` and `/work` it read back onto
+//!   the image the pod ran) and the repository's sessions and checks start
+//!   from the snapshot. The
 //!   preparation's tree is sent into the sandbox's own filesystem, never a
 //!   volume, so the snapshot holds what `prepare` left in `/work` as well as
 //!   `/cache`; the default branch's tracked files are removed before the
@@ -122,10 +124,14 @@ pub fn enabled(cfg: &Config) -> bool {
 
 /// Whether this node's sandboxes run harnesses from the bundle on the stock
 /// base or a repository's image, with no harness images: Podman's with the
-/// setting, and an Apple node's always. A repository with a `prepare` starts
-/// from its prepared snapshot on either.
+/// setting, an Apple node's always, and a pod-hosted node's over the sandbox
+/// protocol. A repository with a `prepare` starts from its prepared snapshot
+/// on any of them (on Kubernetes, once `[runtime.kubernetes.builder]` can
+/// build one).
 pub fn bundled(cfg: &Config) -> bool {
-    enabled(cfg) || cfg.runtime.kind == crate::config::RuntimeKind::Apple
+    enabled(cfg)
+        || cfg.runtime.kind == crate::config::RuntimeKind::Apple
+        || crate::boundary::kubernetes::uses_sandbox_protocol(cfg)
 }
 
 /// The base image as configured, and as this process pinned it.
@@ -524,9 +530,13 @@ pub async fn current(
         .then_some(row.image)
 }
 
-/// Whether `image` is one of this node's prepared snapshots, by its name.
+/// Whether `image` is one of this node's prepared snapshots, by its name:
+/// `localhost/<prefix>-snapshot-…` in a local store, or the same name under
+/// a registry, where a pod-hosted node's builder pushes it.
 pub fn is_snapshot(image: &str) -> bool {
-    image.starts_with(&format!("{}-", snapshot_repo()))
+    let name = image.split_once('@').map_or(image, |(name, _)| name);
+    let last = name.rsplit('/').next().unwrap_or(name);
+    last.starts_with(&format!("{}-snapshot-", crate::config::resource_prefix()))
 }
 
 /// The default-branch commit `snapshot` was prepared from, while it is still
@@ -833,6 +843,9 @@ pub struct Held {
     provider: Arc<dyn SandboxProvider>,
     server: Arc<SandboxServer>,
     handle: Handle,
+    /// What it was made from, which a snapshot built rather than committed
+    /// stands on.
+    image: String,
     run: String,
     conn: SandboxConn,
     running: Mutex<HashMap<String, Arc<Process>>>,
@@ -938,6 +951,7 @@ impl Held {
                 provider,
                 server,
                 handle,
+                image: image.to_string(),
                 run,
                 conn,
                 running: Mutex::new(HashMap::new()),
@@ -1103,8 +1117,10 @@ impl Held {
         labels: &[(String, String)],
     ) -> Result<String, String> {
         self.provider
-            .snapshot_as(
+            .snapshot_from(
                 &self.handle,
+                &self.conn,
+                &self.image,
                 reference,
                 &crate::image_gc::with_owner(labels),
             )
@@ -1449,6 +1465,18 @@ mod tests {
             "ghcr.io/cosmicspork/tracon-sandbox-base@sha256:aa"
         ));
         assert!(!is_snapshot(""));
+        // Pushed by a pod-hosted node's builder, under its registry.
+        assert!(is_snapshot(
+            "registry.digitalocean.com/cs/tracon-snapshot-app-0123:abc"
+        ));
+        assert!(is_snapshot(
+            "registry.digitalocean.com/cs/tracon-snapshot-app-0123@sha256:aa"
+        ));
+        assert!(!is_snapshot(
+            "registry.digitalocean.com/cs/tracon-repo-app-0123@sha256:aa"
+        ));
+        // Another node's, whose prefix is not this one's.
+        assert!(!is_snapshot("localhost/spike-snapshot-app-0123:1"));
     }
 
     /// What is removed from a snapshot's `/work`: every file and link of the

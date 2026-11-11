@@ -494,10 +494,10 @@ instead (next section): an `image`, or a Dockerfile whose first `FROM` is not
 
 #### Repository recipes on the stock base
 
-Where sandboxes run on the stock base (`[runtime.podman] sandbox_images`, or an Apple
-node), a repository's recipe lives in `node.toml` and nothing goes in the repository.
-A devcontainer stays the developers' environment and is no longer the node's recipe. An
-entry looks like this:
+Where sandboxes run on the stock base (`[runtime.podman] sandbox_images`, an Apple
+node, or `[runtime.kubernetes] sandbox_protocol` with a builder), a repository's recipe
+lives in `node.toml` and nothing goes in the repository. A devcontainer stays the
+developers' environment and is no longer the node's recipe. An entry looks like this:
 
 ```toml
 [[repo]]
@@ -534,8 +534,18 @@ checks = ["just check"]
   preset names them. On Apple the steps don't go through `container build`, whose
   builder VM has a network of its own: they run as root in a sandbox from the base,
   with no network and one loopback tunnel to that grant, which is then committed and
-  given the base's user, home and directory. Kubernetes accepts the key but does not
-  build steps yet.
+  given the base's user, home and directory. On Kubernetes the steps build on the
+  cluster's BuildKit (`[runtime.kubernetes.builder]`), whose rootless steps share the
+  daemon's own network, which nothing in the node can narrow: each build gets the grant
+  at the node pod's address on the egress port, as BuildKit's predefined proxy
+  arguments (`HTTPS_PROXY`, `https_proxy` and the plain-HTTP pair), which every `RUN`
+  sees and no image history or cache key keeps. A tool that honours a proxy is held to
+  the list; a step that goes around the proxy is held only by the daemon's
+  NetworkPolicy (see "Images on Kubernetes"). BuildKit reuses a cached `RUN` (same
+  base digest, same command) whichever build ran it, so on a daemon shared with
+  other clients a step held to the list here may be a cache hit of one that was
+  not: give the node a daemon of its own, or set `[runtime.kubernetes.builder]
+  no_cache = true`.
 
 Settings → Repositories offers it as *Build steps on the stock base*, and
 `tracon repo set <path> --build "apt-get update" --build "…" --egress apt` sets it from a
@@ -1539,6 +1549,7 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node, or
 # docker_config = "/etc/tracon/registry"  # a directory holding config.json with the push credential
 # timeout_secs = 2700               # one build's limit; left out, 45 minutes
 # buildctl = "buildctl"             # the client to run; the node image carries one on PATH
+# no_cache = false                  # true: build without BuildKit's cache, for a daemon shared with others
 # do_token_file = "/etc/tracon/do/token"  # DigitalOcean only: an API token for removing old images,
                                     # when the registry refuses a delete; left out, the credential's own
 # approved_images = []              # digest-pinned project images preparation may use besides the harness image
@@ -2327,8 +2338,36 @@ down starts in its harness's own image with the reason, rather than waiting. A r
 cannot be asked whether an image is still there leaves the standing image in use and
 triggers no rebuild.
 
-The node removes only what it pushed, `<registry>/tracon-repo-…`, never an image an
-entry pinned. A superseded image is kept for one more generation, because a pod
+**Over the sandbox protocol** (`sandbox_protocol = true`) there are no harness images
+and no layer: every sandbox runs the stock base (`[sandbox] base_image`), or a
+repository's image built on it from its `build` steps, with the harness from the
+bundle, as on Podman with `sandbox_images`. The node pins the base when it converges
+(at start, and whenever the release, `base_image` or `bundle` changes) by the manifest
+its registry holds for the node's own architecture, which is every sandbox's, since
+affinity keeps them on the node pod's machine; nothing is pulled by the node, and a
+pod's kubelet pulls the pinned digest. A repository with a `prepare` is prepared once
+on its default branch in a sandbox pod from that image and snapshotted. A pod cannot
+be committed, so its `/cache` and `/work` are read back over the protocol (as a
+preparation's tree always is), layered onto the image it ran (`COPY --chown=65532:65532`,
+which keeps the image's user, home and environment) and pushed as
+`<registry>/<prefix>-snapshot-…`. Sessions and checks start from it, and a session at the
+snapshot's commit skips `prepare`, as on the other providers. Without a builder nothing
+is built or snapshotted: an entry with `build` steps has no image (the session is told
+why), and every session runs its own `prepare`.
+
+Build steps reach the network through the node: the node pod admits the daemon on its
+egress port (the overlay's `tracon-node-build` policy does, for a daemon in
+`tracon-build` labelled `app.kubernetes.io/name: buildkitd`), and the daemon's own
+egress policy must allow it there. Whether a step can go around the proxy is the
+daemon's policy's to decide. One that allows DNS, the node pod's egress port and the
+registry it pushes to (and pulls the base from) and nothing else holds every step to its
+`egress`, as Podman and Apple do; one that reaches the internet, as a daemon that
+builds Dockerfiles needs, holds only the tools that honour a proxy. To pull the base
+without the internet, keep a copy of it in the builder's registry and name that in
+`[sandbox] base_image`.
+
+The node removes only what it pushed, `<registry>/tracon-repo-…` and
+`<registry>/<prefix>-snapshot-…`, never an image an entry pinned. A superseded image is kept for one more generation, because a pod
 already scheduled on it may not have pulled it yet: the build two back is removed when
 a new one finishes. Removal is by digest through the distribution API. DigitalOcean's
 registry routes that delete but may refuse it, so on that host the node falls back to
