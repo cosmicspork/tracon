@@ -458,20 +458,13 @@ pub struct RunAs {
 }
 
 impl RunAs {
-    /// The profile `[runtime] kind` runs repository images with: a pod's
-    /// configured uid and home on Kubernetes (the pod says `runAsNonRoot`),
-    /// and elsewhere the stock base's own user, which every sandbox there
-    /// runs as.
+    /// The profile every runtime runs repository images with: the stock
+    /// base's own user, which every sandbox runs as.
     pub fn of(cfg: &Config) -> Self {
-        match cfg.runtime.kind {
-            crate::config::RuntimeKind::Kubernetes => RunAs {
-                uid: cfg.runtime.kubernetes.uid,
-                home: cfg.runtime.kubernetes.harness_home.clone(),
-            },
-            crate::config::RuntimeKind::Podman | crate::config::RuntimeKind::Apple => RunAs {
-                uid: 65532,
-                home: crate::sandbox_images::HOME.into(),
-            },
+        let _ = cfg;
+        RunAs {
+            uid: 65532,
+            home: crate::sandbox_images::HOME.into(),
         }
     }
 
@@ -734,7 +727,7 @@ fn layer_refusal(log: &str) -> Option<String> {
 /// Where a pod's session image keeps its init. Copied from the harness
 /// image's statically linked `tini`, so it runs on any base, and kept out of
 /// the paths a repository's own image installs to.
-const POD_INIT: &str = crate::runner::kube::SESSION_INIT;
+const POD_INIT: &str = "/usr/libexec/tracon/tini";
 
 /// Bumped when the session layer itself changes.
 const SESSION_LAYER: &str = "1";
@@ -754,8 +747,8 @@ fn layered(base: &str, harness_image: &str, layer: &HarnessLayer, run_as: &RunAs
     )
 }
 
-/// Whether this node runs every repository on its stock base: Podman,
-/// Apple, and Kubernetes with `sandbox_protocol`. A
+/// Whether this node runs every repository on its stock base, as every
+/// runtime does. A
 /// sandbox there runs as the base's own user, in the `/work`, `/cache` and
 /// home the base made that user's; an image of the repository's own has none
 /// of them, and no layer over an arbitrary image can be trusted to add them.
@@ -2103,8 +2096,7 @@ const STEPS_SCHEME: &str = "steps-2";
 
 /// Why an entry's `build` steps have no recipe yet.
 const STEPS_UNPINNED: &str = "build steps stand on the stock sandbox base, which this node \
-     has not pinned yet: it pins it when the boundary converges, with [runtime.podman] \
-     sandbox_images, on Apple, or with [runtime.kubernetes] sandbox_protocol";
+     has not pinned yet: it pins it when the boundary converges";
 
 /// The recipe of an entry's `build` steps on `base`, the pinned stock base.
 /// What the image is built from is the base and the steps alone (there is no
@@ -2446,7 +2438,7 @@ mod tests {
         sh(
             tmp.path(),
             "git init -q -b main . && git config user.email t@e && git config user.name t \
-             && mkdir .devcontainer && printf 'FROM scratch\\nCOPY tool.conf /etc/\\n' > .devcontainer/Dockerfile \
+             && mkdir .devcontainer && printf 'FROM ${TRACON_SANDBOX_BASE}\\nCOPY tool.conf /etc/\\n' > .devcontainer/Dockerfile \
              && echo a > .devcontainer/tool.conf && echo one > src.txt \
              && git add -A && git commit -qm one \
              && git update-ref refs/remotes/origin/main HEAD \
@@ -2585,52 +2577,6 @@ mod tests {
         assert!(in_flight(&store, repo, &base_row(&store, repo).recipe_hash).is_none());
         let again = ensure(&builder, &store, repo, true).await;
         assert!(matches!(again, Ensured::Rebuilt(_)), "{again:?}");
-    }
-
-    /// A build asked for while the last build of the same recipe is still
-    /// warming the base cache in the image it made: the request waits for the
-    /// warm-up and takes that image. Building again would move the tag off
-    /// the image the warm-up and the session that asked first were given,
-    /// and Podman resolves `name@digest` only while the name is on it.
-    #[tokio::test]
-    async fn a_build_asked_for_while_the_last_one_warms_joins_it() {
-        let tmp = checkout();
-        let repo = tmp.path();
-        let store = Store::open_in_memory().unwrap();
-        let pulling = Pulling {
-            builder: FakeBuilder {
-                warming: Some(Duration::from_millis(400)),
-                ..Default::default()
-            },
-        };
-        let cfg = Config {
-            repo: vec![Repo {
-                prepare: vec!["npm ci".into()],
-                ..entry(repo)
-            }],
-            ..Config::pod_hosted()
-        };
-        let warms = || *pulling.builder.warms.lock().unwrap();
-
-        let (first, forced) =
-            tokio::join!(ensure_base(&pulling, &cfg, &store, repo, false), async {
-                while warms() == 0 {
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
-                let recipe = base_row(&store, repo).recipe_hash;
-                assert!(
-                    in_flight(&store, repo, &recipe).is_some(),
-                    "the warm-up is part of the build a forced one joins"
-                );
-                ensure_base(&pulling, &cfg, &store, repo, true).await
-            });
-        let Ensured::Rebuilt(image) = first else {
-            panic!("the first request builds: {first:?}");
-        };
-        assert_eq!(forced, Ensured::Current(image));
-        assert_eq!(pulling.builder.builds.lock().unwrap().len(), 2);
-        assert_eq!(warms(), 1, "warmed once, in the one image");
-        assert!(in_flight(&store, repo, &base_row(&store, repo).recipe_hash).is_none());
     }
 
     fn base_row(store: &Store, repo: &Path) -> crate::store::RepoImageRow {
@@ -3133,20 +3079,13 @@ mod tests {
             toolchain_image: Some(toolchain.into()),
             note: None,
         };
-        let layered = image("localhost/tracon-session-claude-1", BASE_IMAGE);
-        let podman = Config::pod_hosted();
-        assert_eq!(SessionImage::default().source(&podman), "harness image");
-        assert_eq!(SessionImage::default().reported(&podman), None);
-        assert_eq!(layered.source(&podman), "repository image");
-
         let mut sandboxed: Config =
             toml::from_str("[runtime.podman]\nsandbox_protocol = true\nsandbox_images = true\n")
                 .unwrap();
         let mut apple = Config::pod_hosted();
         apple.runtime.kind = crate::config::RuntimeKind::Apple;
         sandboxed.sandbox.base_image = Some("ghcr.io/x/tracon-sandbox-base:1".into());
-        let mut bundled = vec![apple];
-        // Podman runs harnesses from the bundle only over the protocol.
+        let mut bundled = vec![apple, Config::pod_hosted()];
         if cfg!(target_os = "linux") {
             bundled.push(sandboxed);
         }
@@ -3186,54 +3125,6 @@ mod tests {
         Config::pod_hosted()
     }
 
-    /// The harness goes onto the repository's image as a layer, proven to run
-    /// there, and is rebuilt when the harness image moves — which leaves the
-    /// repository's image, and every check's evidence, where it was.
-    #[tokio::test]
-    async fn the_harness_is_layered_onto_the_repository_image_and_follows_the_harness() {
-        let repo = Path::new("/src/app");
-        let store = Store::open_in_memory().unwrap();
-        let builder = FakeBuilder::default();
-        let runner = ProbeRunner::saying("2.1.295 (Claude Code)\ngit version 2.50", 0);
-        let harness = claude("localhost/tracon-harness-claude");
-
-        let first =
-            ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
-        let image = first.image.clone().expect("the session image is built");
-        assert_eq!(first.toolchain_image.as_deref(), Some(BASE_IMAGE));
-        assert_eq!(first.note, None);
-        assert_eq!(first.source(&Config::pod_hosted()), "repository image");
-        // Proven in the image that was built, not in the harness's own.
-        assert_eq!(
-            runner.ran_in.lock().unwrap().as_slice(),
-            std::slice::from_ref(&image)
-        );
-        {
-            let builds = builder.builds.lock().unwrap();
-            let text = &builds[0].1;
-            assert!(text.starts_with("FROM localhost/tracon-harness-claude@sha256:"));
-            assert!(text.contains(&format!("FROM {BASE_IMAGE}\n")));
-            assert!(text.contains("COPY --from=harness /usr/local/bin/claude"));
-            assert!(text.contains("USER 0:0") && text.contains("ENTRYPOINT []"));
-        }
-
-        // Asked again, nothing is built and nothing is probed.
-        let again =
-            ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
-        assert_eq!(again, first);
-        assert_eq!(builder.builds.lock().unwrap().len(), 1);
-
-        // A harness image that moved is a new layer over the same base.
-        let upgraded = claude("localhost/tracon-harness-claude-next");
-        let next =
-            ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &upgraded).await;
-        assert_ne!(next.image, first.image);
-        assert_eq!(next.toolchain_image.as_deref(), Some(BASE_IMAGE));
-        let removed = builder.removed.lock().unwrap();
-        assert!(removed.contains(&image));
-        assert!(!removed.iter().any(|gone| gone == BASE_IMAGE));
-    }
-
     /// A session layer over an image an entry pinned is replaced without
     /// that image going with it: the node removes only what it built.
     #[tokio::test]
@@ -3267,7 +3158,6 @@ mod tests {
             let got =
                 ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
             assert_eq!(got.image, None, "{says}");
-            assert_eq!(got.source(&Config::pod_hosted()), "harness image");
             assert!(got.note.unwrap().contains("does not run"), "{says}");
             let row = store
                 .latest_repo_image("/src/musl-app", "session:claude")
@@ -3287,50 +3177,6 @@ mod tests {
             ensure_session_with(&builder, &runner, &store, repo, BASE_IMAGE, &harness).await;
         assert!(again.note.is_some());
         assert_eq!(builder.builds.lock().unwrap().len(), builds);
-    }
-
-    /// Which sessions get a repository image at all: one whose repository has
-    /// an entry naming an image, on a harness the node can layer, on a
-    /// runtime that can build.
-    #[tokio::test]
-    async fn a_session_keeps_the_harness_image_where_no_repository_image_applies() {
-        let backend: Arc<dyn Backend> = Arc::new(crate::runner::local::LocalBackend);
-        let store = Arc::new(Store::open_in_memory().unwrap());
-        let cfg = Arc::new(Config {
-            repo: vec![Repo {
-                path: "/src/app".into(),
-                image: Some(BASE_IMAGE.into()),
-                ..Default::default()
-            }],
-            ..Config::pod_hosted()
-        });
-        let ask = |repo: &'static str, harness: &'static str| {
-            let (backend, cfg, store) = (backend.clone(), cfg.clone(), store.clone());
-            async move {
-                let quiet = || panic!("nothing is built here");
-                session_image(
-                    &backend,
-                    &cfg,
-                    &store,
-                    Path::new(repo),
-                    (harness, "1"),
-                    &quiet,
-                )
-                .await
-                .unwrap()
-            }
-        };
-        assert_eq!(ask("/src/other", "claude").await, SessionImage::default());
-        let other = ask("/src/app", "pi").await;
-        assert!(other.image.is_none());
-        assert!(other.note.unwrap().contains("runs in its own image"));
-        for harness in ["claude", "native"] {
-            let unbuildable = ask("/src/app", harness).await;
-            assert!(
-                unbuildable.note.unwrap().contains("cannot build images"),
-                "{harness}"
-            );
-        }
     }
 
     /// A runtime that pulls its harness images from a registry and builds
@@ -3393,44 +3239,6 @@ mod tests {
             "/home/harness".into()
         }
         async fn reconcile(&self, _names: &[String]) {}
-    }
-
-    /// A runtime that pulls its harness images from a registry names the one
-    /// a layered build copies the harness from, not Podman's local name.
-    #[tokio::test]
-    async fn the_layer_copies_the_harness_from_the_runtimes_own_image() {
-        let pulling = Arc::new(Pulling {
-            builder: FakeBuilder::default(),
-        });
-        let backend: Arc<dyn Backend> = pulling.clone();
-        let store = Arc::new(Store::open_in_memory().unwrap());
-        let cfg = Arc::new(Config {
-            repo: vec![Repo {
-                path: "/src/app".into(),
-                image: Some(BASE_IMAGE.into()),
-                ..Default::default()
-            }],
-            ..Config::pod_hosted()
-        });
-        let got = session_image(
-            &backend,
-            &cfg,
-            &store,
-            Path::new("/src/app"),
-            ("claude", "1"),
-            &|| {},
-        )
-        .await
-        .unwrap();
-        assert!(got.image.is_some(), "{got:?}");
-        let builds = pulling.builder.builds.lock().unwrap();
-        assert!(
-            builds[0]
-                .1
-                .starts_with("FROM ghcr.io/cosmicspork/tracon-harness-claude:9@sha256:"),
-            "{}",
-            builds[0].1
-        );
     }
 
     /// The layer copies the harness out of its image and has to set what that
@@ -3573,16 +3381,13 @@ mod tests {
 
     /// The sandbox providers run every repository on the stock base: an
     /// `image`, or a Dockerfile that does not begin on the base, is refused
-    /// with what to do instead. Off them (a pod-hosted node off the sandbox
-    /// protocol) nothing changes.
+    /// with what to do instead.
     #[test]
     fn the_sandbox_providers_refuse_a_repository_off_the_stock_base() {
-        let legacy = Config::pod_hosted();
         let podman = Config::default();
         let mut apple = Config::default();
         apple.runtime.kind = crate::config::RuntimeKind::Apple;
-        let mut kube = kubernetes();
-        kube.runtime.kubernetes.sandbox_protocol = true;
+        let kube = kubernetes();
 
         let image = Repo {
             path: "github.com/o/mesa".into(),
@@ -3600,12 +3405,7 @@ mod tests {
             "# comment\nfrom $TRACON_SANDBOX_BASE as tools\nFROM rust AS other\n",
         ];
 
-        for (cfg, refuses) in [
-            (&legacy, false),
-            (&podman, true),
-            (&apple, true),
-            (&kube, true),
-        ] {
+        for (cfg, refuses) in [(&podman, true), (&apple, true), (&kube, true)] {
             assert_eq!(stock_base_only(cfg), refuses, "{:?}", cfg.runtime.kind);
             let refused = off_the_stock_base(cfg, &image, None);
             assert_eq!(refused.is_some(), refuses, "{refused:?}");
@@ -3650,6 +3450,11 @@ mod tests {
     #[tokio::test]
     async fn a_refused_repository_builds_and_starts_nothing() {
         let tmp = checkout();
+        sh(
+            tmp.path(),
+            "printf 'FROM scratch\\nCOPY tool.conf /etc/\\n' > .devcontainer/Dockerfile \
+             && git commit -qam scratch && git update-ref refs/remotes/origin/main HEAD",
+        );
         let mut cfg = Config::pod_hosted();
         cfg.runtime.kind = crate::config::RuntimeKind::Apple;
         cfg.repo = vec![entry(tmp.path())];
@@ -3714,7 +3519,7 @@ ENTRYPOINT []
         );
         assert_eq!(
             format!("{POD_INIT_DIR}/tini"),
-            crate::runner::kube::SESSION_INIT,
+            POD_INIT,
             "the init's directory is the one the guard keeps clear"
         );
         let text = layered(source, "ghcr.io/h@sha256:def", &layer, &pod());
@@ -3727,125 +3532,29 @@ ENTRYPOINT []
         let last_user = text.rfind("\nUSER ").unwrap();
         assert!(text[last_user..].starts_with("\nUSER 65532:65532\n"));
         assert!(!text[last_user..].contains("RUN "), "{text}");
-        assert_eq!(crate::runner::kube::SESSION_INIT, POD_INIT);
 
-        // The uid and the home are the configured ones.
-        let mut cfg = kubernetes();
-        cfg.runtime.kubernetes.uid = 1000;
-        cfg.runtime.kubernetes.harness_home = "/home/agent".into();
-        let other = normalised(source, &RunAs::of(&cfg));
+        // The uid and the home are the profile's.
+        let agent = RunAs {
+            uid: 1000,
+            home: "/home/agent".into(),
+        };
+        let other = normalised(source, &agent);
         assert!(other.contains("chown 1000:1000 /work /cache && chown -R 1000:1000 /home/agent"));
         assert!(other.contains("'harness:x:1000:1000::/home/agent:/bin/sh'"));
         assert!(other.contains("ENV HOME=/home/agent\n") && other.contains("USER 1000:1000\n"));
 
-        // Podman and Apple run the stock base's own user, which is the
-        // default pod's.
+        // Every runtime runs the stock base's own user.
         assert_eq!(RunAs::of(&Config::default()), pod());
 
         let tmp = checkout();
         let repo = tmp.path();
         let kube = recipe(repo, &entry(repo), &pod()).await.unwrap();
-        let elsewhere = recipe(repo, &entry(repo), &RunAs::of(&cfg)).await.unwrap();
+        let elsewhere = recipe(repo, &entry(repo), &agent).await.unwrap();
         assert_ne!(kube.hash, elsewhere.hash);
         assert_eq!(
             (kube.context_tree, kube.source_commit),
             (elsewhere.context_tree, elsewhere.source_commit)
         );
-    }
-
-    /// On Kubernetes the repository's image is built with the pod's layer,
-    /// and a session's harness is layered over it from the harness image in
-    /// its registry and probed.
-    #[tokio::test]
-    async fn a_kubernetes_session_is_layered_with_the_pods_profile() {
-        let tmp = checkout();
-        let repo = tmp.path();
-        let store = Store::open_in_memory().unwrap();
-        let builder = FakeBuilder::default();
-        let cfg = kubernetes();
-        let Ensured::Rebuilt(base) = ensure_with(
-            &builder,
-            &LocalRunner,
-            &cfg,
-            &store,
-            repo,
-            &entry(repo),
-            &[],
-            false,
-            None,
-        )
-        .await
-        else {
-            panic!("the first ensure builds");
-        };
-        {
-            let builds = builder.builds.lock().unwrap();
-            assert!(
-                builds[1].1.contains("USER 65532:65532\n"),
-                "{}",
-                builds[1].1
-            );
-            assert!(builds[1].1.contains("ENV HOME=/home/harness\n"));
-        }
-        let kube_recipe = base_row(&store, repo).recipe_hash;
-        assert_eq!(
-            kube_recipe,
-            recipe(repo, &entry(repo), &pod()).await.unwrap().hash
-        );
-
-        let pulling = Arc::new(Pulling {
-            builder: FakeBuilder::default(),
-        });
-        let backend: Arc<dyn Backend> = pulling.clone();
-        let sessions = Arc::new(Store::open_in_memory().unwrap());
-        let entries = vec![Repo {
-            path: "/src/app".into(),
-            image: Some(base.clone()),
-            ..Default::default()
-        }];
-        let ask = |cfg: Config| {
-            let (backend, sessions) = (backend.clone(), sessions.clone());
-            async move {
-                session_image(
-                    &backend,
-                    &Arc::new(cfg),
-                    &sessions,
-                    Path::new("/src/app"),
-                    ("claude", "1"),
-                    &|| {},
-                )
-                .await
-                .unwrap()
-            }
-        };
-        let on_kube = ask(Config {
-            repo: entries.clone(),
-            ..kubernetes()
-        })
-        .await;
-        let image = on_kube.image.clone().expect("layered on Kubernetes");
-        assert_eq!(on_kube.toolchain_image.as_deref(), Some(base.as_str()));
-        {
-            let builds = pulling.builder.builds.lock().unwrap();
-            let text = &builds[0].1;
-            assert!(
-                text.starts_with("FROM ghcr.io/cosmicspork/tracon-harness-claude:9@sha256:"),
-                "{text}"
-            );
-            assert!(text.contains(&format!("FROM {base}\n")));
-            assert!(text.contains("USER 65532:65532\n"));
-            assert!(text.contains("COPY --from=harness /usr/local/bin/claude"));
-            assert!(text.contains("/usr/bin/tini-static /usr/libexec/tracon/tini"));
-        }
-
-        // Asked again, nothing is built.
-        let again = ask(Config {
-            repo: entries,
-            ..kubernetes()
-        })
-        .await;
-        assert_eq!(again.image.as_deref(), Some(image.as_str()));
-        assert_eq!(pulling.builder.builds.lock().unwrap().len(), 1);
     }
 
     /// A harness image the builder cannot find leaves the session in the
@@ -4094,8 +3803,7 @@ WORKDIR /work
         let dir = tempfile::tempdir().unwrap();
         let mut apple = Config::pod_hosted();
         apple.runtime.kind = crate::config::RuntimeKind::Apple;
-        let mut kube = kubernetes();
-        kube.runtime.kubernetes.sandbox_protocol = true;
+        let kube = kubernetes();
         for cfg in [&apple, &kube] {
             assert!(stock_base_only(cfg));
             assert_eq!(refusal(cfg, dir.path(), &stepped(dir.path())).await, None);

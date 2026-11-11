@@ -761,9 +761,7 @@ impl DoRuntime {
         if !crate::boundary::sandboxes_over_protocol(cfg) {
             return Err(
                 "a DigitalOcean sandbox needs this node to run its own sandboxes over the \
-                 sandbox protocol (runtime.kind = \"podman\" or \"apple\", or \"kubernetes\" \
-                 with [runtime.kubernetes] sandbox_protocol = true): it mounts nothing and has \
-                 no gateway of its own"
+                 sandbox protocol: it mounts nothing and has no gateway of its own"
                     .into(),
             );
         }

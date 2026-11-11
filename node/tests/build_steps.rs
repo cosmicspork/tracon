@@ -151,7 +151,6 @@ async fn a_repository_built_from_steps_prepares_snapshots_and_starts() {
     }];
     tracon::config::validate_sandbox(&cfg).unwrap();
     tracon::config::validate_repos(&cfg.repo).unwrap();
-    tracon::config::validate_repo_builds(&cfg).unwrap();
     tracon::sandbox_images::converge(&cfg).await.unwrap();
     let pinned = tracon::sandbox_images::base_image(&cfg);
     assert!(pinned.contains("@sha256:"), "{pinned}");

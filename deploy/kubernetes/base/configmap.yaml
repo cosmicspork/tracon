@@ -14,7 +14,8 @@ data:
     kind = "kubernetes"
 
     [gateway]
-    # The harness reaches the node by pod IP; loopback would not be reachable.
+    # The node's listeners face its pod network; its sandboxes reach them
+    # only through their tunnels, which dial the node's loopback.
     harness_listen = "0.0.0.0:7421"
 
     [session]

@@ -468,39 +468,32 @@ An agent has no forge token and never runs `gh` or `glab`. To publish it commits
 submits, and waits: the node snapshots the workspace volume itself, runs the
 project's checks against that snapshot in a throwaway container, and refuses a failure
 or an oversized diff before you ever see it. Which checks, and what they run in, is that
-repository's `[[repo]]` entry in `node.toml`: its own commands and a digest-pinned
-toolchain image, or the node-wide `[supervision] checks` and the stock base where you
+repository's `[[repo]]` entry in `node.toml`: its own commands and the image its recipe
+builds, or the node-wide `[supervision] checks` and the stock base where you
 named none — and a check whose command is not in the image is reported as *not runnable*,
 naming the missing tool and the image it looked in, rather than as a failing check the
 agent is told to fix.
 
-On a pod-hosted node off the sandbox protocol, the image can be the repository's own dev
-environment. Name its Dockerfile (`dockerfile = ".devcontainer/Dockerfile"`) instead of
-an image and the node builds it
-from the repository's **default branch** — read out of Git, never from a working tree or
-a candidate, which could otherwise choose the image its own checks run in — pins what it
-built, and rebuilds when the Dockerfile or its build context changes there. Only the
-Dockerfile is honoured: a devcontainer's hooks, features, compose files and services are
-not, and `prepare` is where their work belongs. Over it the node adds one layer so every
-run meets the same thing whatever the Dockerfile ended on: the pod's uid (65532 unless
-`[runtime.kubernetes] uid` says otherwise) owning `/work`, `/cache` and its home, and no
-entrypoint (see "Images on Kubernetes"). The first check (or `tracon repo build`) pays for the build; a build that
-fails leaves the last image that worked in place and is not retried until you ask. A
-build runs on this machine's Podman with the network, outside the boundary — the same
-trust `devcontainer up` asks for, which is why it is per repository and yours to name.
+Every runtime runs a repository on the stock base, so its toolchain is installed by
+build steps (next section), or by a Dockerfile that begins `FROM ${TRACON_SANDBOX_BASE}`
+(`dockerfile = ".devcontainer/Dockerfile"`). An `image`, or a Dockerfile whose first
+`FROM` is anything else, is refused. The node builds from the repository's **default
+branch**, read out of Git, never from a working tree or a candidate, which could
+otherwise choose the image its own checks run in. It pins what it built, and rebuilds
+when the recipe changes there. Only the Dockerfile is honoured: a devcontainer's hooks,
+features, compose files and services are not, and `prepare` is where their work
+belongs. The first check (or `tracon repo build`) pays for the build; a build that
+fails leaves the last image that worked in place and is not retried until you ask.
 `tracon repo ls` shows each repository's image and any command it has no tool for.
 `tracon repo build host/owner/name` on a repository no session has cloned yet clones it
 first, with the node's forge credential or anonymously, so `repo set` then `repo build`
-works on a fresh node. Where sandboxes run on the stock base, the recipe is build steps
-instead (next section): an `image`, or a Dockerfile whose first `FROM` is not
-`${TRACON_SANDBOX_BASE}`, is refused there.
+works on a fresh node.
 
 #### Repository recipes on the stock base
 
-Where sandboxes run on the stock base (a Podman or Apple node, or
-`[runtime.kubernetes] sandbox_protocol` with a builder), a repository's recipe
-lives in `node.toml` and nothing goes in the repository. A devcontainer stays the
-developers' environment and is no longer the node's recipe. An entry looks like this:
+Sandboxes run on the stock base on every runtime (on Kubernetes, a recipe needs
+`[runtime.kubernetes.builder]`), so a repository's recipe lives in `node.toml` and
+nothing goes in the repository. A devcontainer stays the developers' environment and is no longer the node's recipe. An entry looks like this:
 
 ```toml
 [[repo]]
@@ -605,54 +598,16 @@ failure even when it ran out of time. A trial being refused will not recover, an
 session can cancel it rather than wait it out. `repo_setup_propose` puts it to you on a card, which you may edit. The node
 writes the entry only when you allow it, and a proposal never opens the repository's
 egress to its sessions. Hosts you opened to the session while it tried are suggested in
-`egress`. A draft never has `build` steps. Where sandboxes run on the stock base, turn a
-drafted `dockerfile` into steps yourself, as above: unless it begins
-`FROM ${TRACON_SANDBOX_BASE}`, it is refused there.
+`egress`. A draft never has `build` steps. Turn a drafted `dockerfile` into steps
+yourself, as above: unless it begins `FROM ${TRACON_SANDBOX_BASE}`, it is refused.
 
-A session runs in that image too, with Claude Code or `tracon-agent`. Where sandboxes run
-on the stock base (a Podman or Apple node, Kubernetes with `sandbox_protocol`), the
-harness comes from the bundle mounted at `/opt/tracon`, and the session runs in the
-repository's build-steps image, or its prepared snapshot, with no layer of the node's.
-The rest of this section is the path Kubernetes without the protocol still takes: the node copies the
-harness onto the repository's image as one more layer, proves it runs there, and launches
-the session in the result, so the agent has the compiler, the test runner and the formatter its checks
-will be run with instead of the bare harness image. The session's start line says which
-image it got, and why when it is not the repository's: a base the harness binary does not
-run on (a musl image, one with no Git) leaves the session in the harness image rather
-than failing to start. A repository with no image yet builds one at its first session,
-which waits; one whose Dockerfile changed starts on the image it has and is rebuilt behind
-the session. Sessions keep a build cache at `/cache`, one per repository and channel, that
-outlives each session: what a session fetched and, through `CARGO_TARGET_DIR=/cache/target`,
-what it compiled are there for the next one. It starts as a copy of the repository's base
-cache, and no check reads it. Two sessions on one repository share it, so a second
-`cargo build` waits for the first's lock. The layer runs as the pod's uid, so a tool the
-Dockerfile installed under another user's home has to be readable and executable by others.
-
-Either harness reads its configuration from the node and nowhere else, so its layer
-deletes what the harness would otherwise read from the image, and refuses an image that
-would configure the harness, or change what it loads, underneath the node.
-
-- **Both layers** refuse an image with a non-empty `/etc/ld.so.preload`, one whose
-  environment sets `LD_PRELOAD` or `LD_AUDIT`, and one where `/usr`, `/usr/local`,
-  `/usr/local/bin`, `/usr/libexec` or `/usr/libexec/tracon` is a symbolic link.
-  `LD_LIBRARY_PATH` is allowed: it only changes where the loader looks, `tracon-agent` is
-  static, and the image is already trusted for every command a session runs.
-- **`tracon-agent`'s layer** refuses any `TRACON_AGENT_*` variable, which would steer the
-  endpoint or key it reads.
-- **Claude Code's layer** deletes `/etc/claude-code` (its managed settings, which outrank
-  everything the node passes) and any `.claude` or `.claude.json` in the harness's home. It
-  refuses any `CLAUDE_*`, `ANTHROPIC_*` or `BUN_*` variable and `NODE_OPTIONS`, except the three a
-  session always sets for itself: `CLAUDE_CONFIG_DIR`, `ANTHROPIC_BASE_URL` and
-  `ANTHROPIC_API_KEY`.
-
-The session's note names what was found, and the session runs in the harness image. This
-is by design even where the value is harmless (a devcontainer that sets
-`NODE_OPTIONS=--max-old-space-size=4096` for its own user): unset it in the image, or
-move it into the tool's own wrapper or the repository's `prepare` and `checks` commands. These checks catch an image that would change the harness
-by accident. They are not a boundary against a hostile
-Dockerfile. The image you name for a repository is trusted as you trust its Dockerfile,
-which already builds with the network and supplies every command the agent runs; what
-keeps a session in bounds is the runtime around it, not what the image contains.
+A session runs in that image too, with Claude Code or `tracon-agent`. Sandboxes run on
+the stock base on every runtime, so the harness comes from the bundle mounted at
+`/opt/tracon`, and the session runs in the repository's build-steps image, or its
+prepared snapshot, with no layer of the node's. The session's start line says which
+image it got, and why when it is not the repository's. A repository with no image yet
+builds one at its first session, which waits; one whose recipe changed starts on the
+image it has and is rebuilt behind the session.
 
 **Offer a repository's recipe to another node.** On a mesh, an entry's **Offer to…** in
 Settings → Repositories sends its recipe to the other members of a channel you pick:
@@ -730,10 +685,9 @@ reach without anyone editing the credential. Read the secret from the
 environment (`COMPOSER_AUTH`, or an `.npmrc` line like
 `//npm.pkg.github.com/:_authToken=${NPM_TOKEN}`) and never write it to a file: the cache
 the warm-up fills is copied into every session on the repository. What preparation
-prints is shown with the lent values taken out. The values never appear on a `podman run`
-command line or in a Kubernetes pod spec: Podman is given each name with `--env NAME` and
-the value in its own environment, and Kubernetes reads them from a Secret of the run's own
-(see [As a Kubernetes pod](#as-a-kubernetes-pod)). Two limits follow from lending it so
+prints is shown with the lent values taken out. The values never appear on a container's
+command line or in a Kubernetes pod spec: they travel with the spawn over the sandbox
+protocol (see [As a Kubernetes pod](#as-a-kubernetes-pod)). Two limits follow from lending it so
 narrowly. A candidate that adds or upgrades a private package cannot fetch it, so that
 change is checked after it merges and `tracon repo build <repo>` warms the cache again.
 And the warm-up runs whatever the default branch's install runs, so a Composer plugin or
@@ -798,8 +752,8 @@ session's own grant and no other. An agent that knows what it needs asks first w
 **`request_egress`**, which waits up to 45 seconds for your answer; once you decline, a
 retried connection is told so and does not ask again. The session's log shows each
 refusal, and the orientation it starts with says all of this before its first command.
-It works wherever grants are issued: on Podman, and on Kubernetes once the egress port
-is open and the node may manage Secrets (see [As a Kubernetes pod](#as-a-kubernetes-pod)).
+It works wherever grants are issued: on every runtime, through each sandbox's tunnel to
+the node's egress proxy.
 
 A repository's warm-up asks too. A registry often sends its downloads to another
 host (Nova's go to a Cloudflare R2 bucket), and the warm-up is the first thing to find
@@ -839,12 +793,10 @@ the `prepare` commands run on its workspace, with its own session cache writable
 same egress grant, so `node_modules` and the like are there when the agent arrives. It is
 bounded by the entry's `timeout_secs` and stopped with the session; a failure is recorded
 in the session's log and told to the agent in its orientation, and the session starts
-anyway. A session in the harness's own image has no cache to prepare against and is told
-the commands were not run, and why: on a Kubernetes node without a builder, that is every
-session.
+anyway.
 
-A session that starts from its repository's prepared snapshot (a Podman or Apple node)
-skips `prepare` when its workspace is at the very commit the snapshot was prepared from:
+A session that starts from its repository's prepared snapshot (on Kubernetes, once
+`[runtime.kubernetes.builder]` can make one) skips `prepare` when its workspace is at the very commit the snapshot was prepared from:
 its tree is sent over the snapshot's `/work`, which already holds what `prepare`
 installed, and its log says *workspace prepared from the snapshot*. At any other commit, or for a resumed workspace, `prepare` runs again,
 every step in one sandbox from the snapshot on its warm `/work` and `/cache`, and the
@@ -1430,7 +1382,8 @@ forward_port = 7421
                                     # credentials; the name is from the retired QA browser
 # egress_port = 7424                # where the node serves that proxy when harness_listen is a
                                     # TCP address; with a socket path it is a socket beside it.
-                                    # A pod-hosted node's harnesses reach it here directly
+                                    # A pod-hosted node's sandboxes reach it through their
+                                    # tunnels, and its BuildKit daemon at the node pod's address
 
 [session]
 budget_tokens = 2000000             # per session
@@ -1489,13 +1442,17 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
                                     # dropped waits for its sandbox to redial (see "When a
                                     # sandbox's connection drops"); 0 ends the run with the
                                     # connection, as before resuming existed
-# [runtime.kubernetes]              # namespace, harness_image,
-                                    # state_claim, state_mount, harness_home, uid, gateway_host
+# [runtime.kubernetes]              # namespace (for sandbox pods; empty, the node pod's own),
+                                    # state_mount (where the node's own claim is mounted),
+                                    # gateway_host (the name a sandbox resolves to its loopback).
+                                    # harness_image, state_claim, uid and harness_home configured
+                                    # the harness pods, which were removed: ignored, with a line in
+                                    # the log. Every sandbox runs as the base's user 65532
 # start_timeout_secs = 900          # (under [runtime.kubernetes]) how long a pod may take to be
                                     # scheduled, pull its image and start before the run is given
                                     # up with the reason it was waiting. Only the start: a started
                                     # check or preparation runs until it ends or its own timeout
-# image_pull_secrets = []           # (under [runtime.kubernetes]) Secrets harness pods pull with; empty
+# image_pull_secrets = []           # (under [runtime.kubernetes]) Secrets sandbox pods pull with; empty
                                     # leaves them to the namespace's default service account
 # shm_size = "1Gi"                  # (under [runtime.kubernetes]) memory-backed /dev/shm for browsers;
                                     # counts against the memory limit, so it must fit within it
@@ -1515,10 +1472,8 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
                                     # (on a cloud, the nodes' and load balancers' public IPs),
                                     # and any NAT64 (64:ff9b::/96) or 6to4 (2002::/16) range the
                                     # cluster uses, since an IPv4 address inside one is not decoded
-# sandbox_protocol = false          # (under [runtime.kubernetes]) every harness pod a sandbox over the
-                                    # sandbox protocol ("Sandboxes on Kubernetes"): tracon-sandbox
-                                    # from the node's own bundle, files and stdio over the protocol,
-                                    # tunnels for the gateways, no Secret, no claim mounted
+                                    # sandbox_protocol is always on: `false` is refused at load,
+                                    # naming the way over ("As a Kubernetes pod"); `true` can go
 # sandbox_port = 7426               # (under [runtime.kubernetes]) where sandboxes dial the node pod,
                                     # and where their init containers fetch the bundle
 # [runtime.kubernetes.builder]      # build repository images on a cluster ("Images on Kubernetes");
@@ -1546,25 +1501,22 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
                                     # a check's evidence is keyed on the image identity the runtime
                                     # confirmed, and a tag is not an identity. A locally built image has
                                     # a digest too (`podman image inspect` reports `RepoDigests`); the
-                                    # node refuses to start on a tag. Without one, the stock base (or a
-                                    # pod's harness image), which carries no project toolchain. Refused
-                                    # on Podman, Apple and with [runtime.kubernetes] sandbox_protocol, which
-                                    # run every repository on the stock base: use `build` steps and
-                                    # `prepare` there (Settings → Repositories names each refusal)
+                                    # node refuses to start on a tag. Without one, the stock base,
+                                    # which carries no project toolchain. Refused on every runtime,
+                                    # since each runs every repository on the stock base: use `build`
+                                    # steps and `prepare` (Settings → Repositories names each refusal)
 # dockerfile = ".devcontainer/Dockerfile"  # in place of `image`: the node builds this from the
                                     # repository's default branch, pins what it built, and rebuilds
-                                    # when the file or its context changes there. Where `image` is
-                                    # refused, so is a Dockerfile whose first FROM is not
-                                    # ${TRACON_SANDBOX_BASE}
+                                    # when the file or its context changes there. Refused unless
+                                    # its first FROM is ${TRACON_SANDBOX_BASE}
 # context = "."                     # the build context; left out, the Dockerfile's own directory
 # build = ["apt-get update", "apt-get install -y --no-install-recommends php8.5-cli"]
                                     # in place of `image` and `dockerfile`: steps run as root, one
                                     # `RUN` each, on the pinned stock base ([sandbox] base_image),
                                     # into one image that ends as the base's user 65532 in /work.
                                     # They reach only `egress`, over HTTPS. Rebuilt when the base,
-                                    # a step or the egress changes. Needs Podman, Apple, or
-                                    # Kubernetes sandbox_protocol (see
-                                    # "Repository recipes on the stock base")
+                                    # a step or the egress changes (see "Repository recipes on the
+                                    # stock base")
 # checks = ["just check"]           # in place of [supervision] checks
 # timeout_secs = 1800               # in place of [supervision] timeout_secs; covers preparation too
 # prepare = ["bun install --frozen-lockfile"]  # run once before a run's checks, on a copy each check
@@ -1633,9 +1585,8 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
                                     # proxy through the tunnel, not the runtime's. A [[service]] with a
                                     # bundle runs inside, from the template's copy; one with only an
                                     # image is refused there. Settings' capability view shows how it is
-                                    # reached and why it cannot take a session. Needs a node whose
-                                    # own sandboxes run over the sandbox protocol (Podman, Apple, or
-                                    # Kubernetes with sandbox_protocol): nothing is mounted there
+                                    # reached and why it cannot take a session. Nothing is mounted
+                                    # there: its trees and gateways go over the sandbox protocol
 # credential = "do"                 # a broker credential holding DIGITALOCEAN_ACCESS_TOKEN
 # registry = "registry.digitalocean.com/acme"  # where the node pushes the template sources it
                                     # builds: its pinned base and each repository's prepared snapshot,
@@ -1885,7 +1836,7 @@ kube-state-metrics needs
 for those labels to reach it.
 
 The shipped node NetworkPolicy (`deploy/kubernetes/base/networkpolicy-node.yaml`)
-admits ingress only from harness pods, and only on 7421, 8888 and 7424, so an
+admits ingress only from the node's own sandboxes, and only on 7426, so an
 in-cluster Prometheus cannot reach 7425 until an overlay adds a rule admitting the
 scraper alone, for example:
 
@@ -2063,8 +2014,8 @@ directory holding `node.toml`. `TRACON_LISTEN` or `serve --listen` moves the API
 
 ### When a sandbox's connection drops
 
-A run over the sandbox protocol (Podman, Kubernetes with `sandbox_protocol`, Apple,
-DigitalOcean) outlives a dropped connection:
+A run over the sandbox protocol (Podman, Kubernetes, Apple, DigitalOcean) outlives a
+dropped connection:
 
 - **The node's identity is kept.** The serving node keeps the certificate its sandboxes
   pin in `<state>/sandbox-identity/` (`cert.der` and `key.der`, 0600), made on the
@@ -2138,9 +2089,10 @@ configured by environment:
 
 ### As a Kubernetes pod
 
-The node is an image rather than a binary and the boundary is Kubernetes: one
-harness pod per session, a NetworkPolicy that makes the node the harness's only
-route. Manifests in `deploy/kubernetes/base`, ready for a kustomize overlay:
+The node is an image rather than a binary and the boundary is Kubernetes: every
+harness, check and preparation runs in a sandbox pod of its own over the sandbox
+protocol, as on Podman, and one NetworkPolicy makes the node pod's sandbox port that
+pod's only route. Manifests in `deploy/kubernetes/base`, ready for a kustomize overlay:
 
 ```sh
 kubectl apply -k deploy/kubernetes/base
@@ -2155,41 +2107,63 @@ for a restart is applied with **Restart when idle** in the interface (or
 `POST /api/admin/restart`): the node drains, exits 0, and the kubelet starts the
 container again on the same volume and pod IP, so a phone with a passkey restarts it
 without `kubectl`. That needs `TRACON_RESTART_BY_EXIT=1` in the pod's environment, as
-`deploy/kubernetes/base/deployment.yaml` sets it; without it the restart is refused. Every harness pod
+`deploy/kubernetes/base/deployment.yaml` sets it; without it the restart is refused. Every sandbox pod
 names its own requests and memory limit (`[runtime.kubernetes.resources]`, sized by
 default for one shared 4 vCPU / 8 GB node), so a namespace's LimitRange never
 substitutes its defaults. Each pod also gets a memory-backed `/dev/shm` for browsers
 and an emptyDir at `/tmp` that `TMPDIR` names.
 
-The node's Role (`deploy/kubernetes/base/role.yaml`) is what the `runtime` check
-asserts. Pods (create, get, list, watch, delete), `pods/attach` (create, get),
-`pods/log` (get) and NetworkPolicies (get) are required, and a node without them
-refuses to run harnesses. Secrets (create, patch, delete, list) are optional. They
-let a run that carries a credential keep it out of its pod spec, which anyone with
-`get pods` in the namespace can read. That covers a lent `prepare_credentials` value
-and an egress grant's proxy URL. Each such run gets an immutable Secret of its own,
-`<pod>-env`, labelled `tracon.dev/run=<pod>`, which the pod reads with
-`secretKeyRef`. The Secret is owned by the pod, so the cluster removes it if the node
-dies first. The node deletes it as soon as the pod has started, or when a run that
-never started ends. Without the Secrets rule the check still passes and says so, and
-every run carrying a credential is refused with the rule to add. No value is ever
-written into a pod spec instead. The rights make the node able to read every Secret in
-its namespace, so keep nothing else there that a harness should not reach through a
-compromised node.
+- **Bundle.** The node's own: `[sandbox] bundle`, else its release's, which it fetches
+  and checks into `<state>/bundles` as a Podman node does (at the
+  boundary check, so at start). It serves it as one tar on the sandbox port. Each pod's
+  init container, in the pod's own image (it needs `sh`, `curl` or `wget`, `sha256sum`
+  and `tar`), fetches it, checks it against the digest the node wrote into the pod
+  spec, and unpacks it into an emptyDir mounted read-only at `/opt/tracon`.
+  `tracon-sandbox` from it is the pod's only process, and the harness it starts over
+  the protocol is the bundle's. Pods run as uid 65532 with home `/home/harness`, the
+  stock base's own user.
+- **Files.** Nothing of the state claim is mounted, so the claim is the node's alone.
+  Every directory a run names is an emptyDir of the pod's own, filled over the
+  protocol and, for a session's workspace and own harness state, taken back at each
+  turn end, every 60 s in a turn and at exit, as on Podman. A
+  session's harness state is its own; the state every session once shared is never
+  sent. Caches are sent in and come back only from a preparation.
+- **Placement.** Pods sit beside this node's own pod (`tracon.dev/role=node` and
+  `tracon.dev/node=<prefix>`, its `[boundary] resource_prefix`) by pod affinity on
+  `kubernetes.io/hostname`, through the scheduler: a machine with no room refuses
+  the pod (`out_of_cpu`, `out_of_memory`, ...). The node's pod must carry both labels
+  (the base Deployment sets `tracon.dev/node: tracon`), which the `runtime` check reads
+  back from its own pod (`TRACON_POD_NAME`).
+- **Route.** A sandbox dials the node pod's address on `sandbox_port` (7426) over TLS
+  pinned to the node's certificate. Its policy, `tracon-sandbox`, selects this node's
+  sandboxes (`tracon.dev/role=sandbox`, `tracon.dev/node=<prefix>`) and allows that
+  route to this node's pod and nothing else: no DNS, no ingress, none of the node
+  pod's other ports, no other node's pod. `tracon-node` admits this node's sandboxes
+  on that port and nothing else from them. The MCP and model gateway and both proxies,
+  the per-client egress proxy on `[gateway] egress_port` (7424) among them, are tunnels
+  over the connection, and the gateway's name is the sandbox's loopback, so a harness
+  addresses them as it always did.
+- **No Secrets.** A run's secret environment (a session's gateway token, a lent
+  `prepare_credentials` value, an egress grant's proxy URL) travels with its spawn over
+  the protocol, never into a pod spec or a Secret. The run's one-time token is in the
+  pod spec, where it is worth nothing once spent: the first hello that presents it
+  consumes it, the node only takes a connection from the address of the pod it issued
+  the token to (anything else is closed before it is read), and the token is revoked
+  when the run ends or fails to connect.
 
-A session carries secrets too: its token at the node's gateway and MCP server, and its
-egress grant. They travel the same way, so a session
-on a node without the Secrets rule is refused with the rule to add rather than started
-with them in its pod spec.
-
-Per-client egress, the proxy credentials a preparation and a session present to reach the
-hosts their repository names, is served by the node on `[gateway] egress_port` (7424),
-which a harness pod reaches at the node's pod address. The shipped policies open it:
-`tracon-harness` lets harness pods out to it and `tracon-node` lets them in. A node is
-issued no grants until the `network` check finds both policies open the port and the
-`runtime` check finds the Secrets rule, and it says which is missing; it runs either way,
-so a release and the policy change that opens the port can roll out in either order.
-`--deep` asks the port with no credentials from a harness pod and expects a 407.
+The node's Role (`deploy/kubernetes/base/role.yaml`) is exactly what the `runtime`
+check asserts: pods (create, get, list, delete), `pods/log` (get), and NetworkPolicies
+(get, list). Nothing on Secrets and no `pods/attach`. The checks read the provider's
+own rendering back after admission (a gated probe), the `tracon-sandbox` policy's
+shape, that no other NetworkPolicy in the namespace selects the node's sandboxes with a
+rule of its own (policies add up, so one would widen the route; the Role lists them for
+this), and that `tracon-node` admits sandboxes on the port; a sandbox's
+`verify_isolation` reads the same and reports `route: unverified` when another policy
+widens it. `--deep` runs the egress script in a sandbox through its tunnels, asks the
+per-client proxy with no credentials and expects a 407, and checks that no name
+resolves and that the node pod's forward port is not reachable directly. Names follow
+`[boundary] resource_prefix`: the policies a node reads are `<prefix>-sandbox` and
+`<prefix>-node`, and the repository images it pushes are `<registry>/<prefix>-repo-…`.
 
 In a cluster both of the node's proxies, the allowlist proxy on `proxy_port` and the
 per-client one, refuse to dial a private address (RFC 1918, `100.64.0.0/10`,
@@ -2201,57 +2175,16 @@ in `internal_cidrs` too: they reach the cluster from outside it, and nothing pri
 about them says so. An entry that is not an address block is refused when `node.toml`
 loads.
 
-#### Sandboxes on Kubernetes
-
-With `[runtime.kubernetes] sandbox_protocol = true`, every harness pod is a sandbox
-over the sandbox protocol, as on Podman. Apply `deploy/kubernetes/sandbox-protocol` (an overlay of
-the base) for it:
-
-- **Bundle.** The node's own: `[sandbox] bundle`, else its release's, which it fetches
-  and checks into `<state>/bundles` as a Podman node does (at the
-  boundary check, so at start). It serves it as one tar on the sandbox port. Each pod's
-  init container, in the pod's own image (it needs `sh`, `curl` or `wget`, `sha256sum`
-  and `tar`), fetches it, checks it against the digest the node wrote into the pod
-  spec, and unpacks it into an emptyDir mounted read-only at `/opt/tracon`.
-  `tracon-sandbox` from it is the pod's only process, and the harness it starts over
-  the protocol is the bundle's. Pods run as uid 65532 with home `/home/harness`.
-- **Files.** Nothing of the state claim is mounted, so the claim is the node's alone.
-  Every directory a run names is an emptyDir of the pod's own, filled over the
-  protocol and, for a session's workspace and own harness state, taken back at each
-  turn end, every 60 s in a turn and at exit, as on Podman. A
-  session's harness state is its own; the state every session once shared is never
-  sent. Caches are sent in and come back only from a preparation.
-- **Placement.** Pods sit beside this node's own pod (`tracon.dev/role=node` and
-  `tracon.dev/node=<prefix>`, its `[boundary] resource_prefix`) by pod affinity on
-  `kubernetes.io/hostname`, through the scheduler: a machine with no room refuses
-  the pod (`out_of_cpu`, `out_of_memory`, ...), as one bound by `nodeName` was
-  refused by the kubelet. The node's pod must carry both labels (the base Deployment
-  sets `tracon.dev/node: tracon`), which the `runtime` check reads back from its own
-  pod (`TRACON_POD_NAME`).
-- **Route.** A sandbox dials the node pod's address on `sandbox_port` (7426) over TLS
-  pinned to the node's certificate. Its policy, `tracon-sandbox`, selects this node's
-  sandboxes (`tracon.dev/role=sandbox`, `tracon.dev/node=<prefix>`) and allows that
-  route to this node's pod and nothing else: no DNS, no ingress, none of the node
-  pod's other ports, no other node's pod. The MCP and
-  model gateway and both proxies are tunnels over the connection, and the gateway's
-  name is the sandbox's loopback, so a harness addresses them as it always did.
-- **No Secrets.** A run's secret environment travels with its spawn over the
-  protocol. The run's one-time token is in the pod spec, where it is worth nothing
-  once spent: the first hello that presents it consumes it, the node only takes a
-  connection from the address of the pod it issued the token to (anything else is
-  closed before it is read), and the token is revoked when the run ends or fails to
-  connect. The overlay's Role has no rule on Secrets and no `pods/attach`.
-
-The checks read the provider's own rendering back after admission (a gated probe),
-the `tracon-sandbox` policy's shape, that no other NetworkPolicy in the namespace
-selects the node's sandboxes with a rule of its own (policies add up, so one would
-widen the route; the overlay's Role lists them for this), and that `tracon-node`
-admits sandboxes on the port; a sandbox's `verify_isolation` reads the same and
-reports `route: unverified` when another policy widens it; `--deep` runs the egress script in a sandbox through its tunnels and also
-checks that no name resolves and that the node pod's forward port is not reachable
-directly. Names follow `[boundary] resource_prefix`: the policies a node reads are
-`<prefix>-sandbox`, `<prefix>-harness` and `<prefix>-node`, and the repository images
-it pushes are `<registry>/<prefix>-repo-…`.
+**Upgrading a node that ran harness pods.** `[runtime.kubernetes] sandbox_protocol =
+false` is refused when `node.toml` loads, naming the way over: apply the shipped
+manifests (the Role above, `tracon-node`, `tracon-node-build` and `tracon-sandbox`),
+delete the line, and move a `[[repo]]` entry's `image`, or a Dockerfile not on
+`FROM ${TRACON_SANDBOX_BASE}`, to `build` steps. `sandbox_protocol = true` and the
+`harness_image`, `state_claim`, `uid` and `harness_home` keys are ignored with a line in
+the log, and can go. What the harness pods left is the operator's to remove: pods
+labelled `tracon.dev/role=harness`, any run Secret a node that died left without an
+owner (`kubectl delete secret -l tracon.dev/run`), the `tracon-harness` NetworkPolicy,
+and the layered `-claude`/`-native` session images in the builder's registry.
 
 **DigitalOcean from a Kubernetes node.** A pod-hosted node over the sandbox protocol can
 place its sessions on DigitalOcean's Harness Runtime and build templates for itself and
@@ -2269,13 +2202,13 @@ templates from the sweep.
 
 **Two nodes in one namespace.** Give the second its own `resource_prefix` (say
 `spike`) and its own Deployment, whose selector and pod template carry
-`tracon.dev/node: spike` (the first's keeps `tracon`), and copies of the overlay's
+`tracon.dev/node: spike` (the first's keeps `tracon`), and copies of the base's
 policies named `spike-sandbox` and `spike-node` with `spike` in every
-`tracon.dev/node`. Every pod and run Secret a node makes carries its prefix in that
-label and its name; each node counts, sweeps and places only its own, and the checks
-refuse a sandbox policy that selects or reaches another node's pods.
+`tracon.dev/node`. Every pod a node makes carries its prefix in that label and its
+name; each node counts, sweeps and places only its own, and the checks refuse a
+sandbox policy that selects or reaches another node's pods.
 
-**Probe before turning it on.** `tracon sandbox probe --provider kubernetes`, run in
+**Probe before the node serves.** `tracon sandbox probe --provider kubernetes`, run in
 the node's pod (`kubectl exec deploy/tracon-node -- tracon sandbox probe --provider
 kubernetes`), makes one sandbox pod as the node would (the stock base unless
 `--image`, this release's bundle unless `--bundle`) under a name of its own
@@ -2283,40 +2216,49 @@ kubernetes`), makes one sandbox pod as the node would (the stock base unless
 replaced), takes its connection on the sandbox port, runs a command in it, reads its
 isolation back (the admitted pod, `<prefix>-sandbox` and the namespace's other
 policies) and removes it, on Ctrl-C too. It needs the sandbox port free, so it is for a
-node that does not serve sandboxes yet; once it does, the boundary check covers the
-same ground.
+pod whose node is not serving yet; once it is, the boundary check covers the same
+ground.
 
 #### Images on Kubernetes
 
-A pod-hosted node builds a `[[repo]]` entry's `dockerfile` only when
-`[runtime.kubernetes.builder]` names a BuildKit daemon and a registry. Without it the
-entry needs a digest-pinned `image`, and the `runtime` check says the builder is not
-configured. The node image carries `buildctl`; the daemon is the deployment's own (a
-rootless `moby/buildkit` in a namespace of its own, for example), listening for mutual
-TLS. Each build sends the default branch's tree and the Dockerfile from the node
-(`--local`), pushes the result (`push=true`), and pins the digest the daemon reports.
-The node names images as Podman does, `localhost/tracon-repo-…`, and that prefix becomes
-the configured `registry` here: `localhost/tracon-repo-app-1a2b3c4d5e:0123` is pushed as
-`<registry>/tracon-repo-app-1a2b3c4d5e:0123`. The image serves checks and preparation,
-and a session of either harness runs in it with the harness layered on, as under Podman:
-the layer copies the harness and a static `tini` out of the release's harness image, the
-session's pod runs under that `tini`, and the
-session gets its cache at `/cache` and its workspace prepared before the agent arrives.
-Without a builder every session runs in its harness's own image and is told so.
+There are no harness images: every sandbox runs the stock base (`[sandbox]
+base_image`), or a repository's image built on it from its `build` steps (or a
+Dockerfile on `FROM ${TRACON_SANDBOX_BASE}`), with the harness from the bundle, as on
+Podman. The node pins the base when it converges (at start, and whenever the release,
+`base_image` or `bundle` changes) by the manifest its registry holds for the node's
+own architecture, which is every sandbox's, since affinity keeps them on the node pod's
+machine; nothing is pulled by the node, and a pod's kubelet pulls the pinned digest.
 
-A harness pod is never root. It runs as `[runtime.kubernetes] uid` (65532) with
-`runAsNonRoot`, `HOME` at `harness_home` (`/home/harness`), and no capabilities, so the
-node's layer for Kubernetes differs from Podman's: it creates `/work`, `/cache` and the
-home owned by that uid, sets `HOME` there, ends on `USER 65532:65532`, and clears the
-entrypoint. Everything else in the image is the repository's, and **whatever its
-Dockerfile installs has to be readable and executable by any uid**: a toolchain under
-`/root`, or a cache only its build user can write, is not there for the run. A
-devcontainer that installs as root into `/usr/local` or `/opt` and leaves the default
-modes is fine; one that installs into its own user's home is not. Point the tool
-homes somewhere shared (`COMPOSER_HOME=/opt/composer`, `PLAYWRIGHT_BROWSERS_PATH` with
-`chmod -R a+rX`) and check with `podman run --user 65532:65532 -e HOME=/tmp/h <image>`.
-The profile is part of the image's key, so a Kubernetes image and a Podman one built
-from the same recipe never stand in for each other.
+A pod-hosted node builds a repository's image only when `[runtime.kubernetes.builder]`
+names a BuildKit daemon and a registry. Without it nothing is built or snapshotted: an
+entry with `build` steps has no image (the session is told why), every session runs its
+own `prepare`, and the `runtime` check says the builder is not configured. The node
+image carries `buildctl`; the daemon is the deployment's own (a rootless
+`moby/buildkit` in a namespace of its own, for example), listening for mutual TLS. Each
+build sends its context from the node (`--local`), pushes the result (`push=true`), and
+pins the digest the daemon reports. The node names images as Podman does,
+`localhost/tracon-repo-…`, and that prefix becomes the configured `registry` here:
+`localhost/tracon-repo-app-1a2b3c4d5e:0123` is pushed as
+`<registry>/tracon-repo-app-1a2b3c4d5e:0123`.
+
+A repository with a `prepare` is prepared once on its default branch in a sandbox pod
+from that image and snapshotted. A pod cannot be committed, so its `/cache` and `/work`
+are read back over the protocol (as a preparation's tree always is), layered onto the
+image it ran (`COPY --chown=65532:65532`, which keeps the image's user, home and
+environment) and pushed as `<registry>/<prefix>-snapshot-…`. Sessions and checks start
+from it, and a session at the snapshot's commit skips `prepare`, as on the other
+providers.
+
+Build steps reach the network through the node: the node pod admits the daemon on its
+egress port (the base's `tracon-node-build` policy does, for a daemon in
+`tracon-build` labelled `app.kubernetes.io/name: buildkitd`; change its selectors if
+yours is elsewhere), and the daemon's own egress policy must allow it there. Whether a
+step can go around the proxy is the daemon's policy's to decide. One that allows DNS,
+the node pod's egress port and the registry it pushes to (and pulls the base from) and
+nothing else holds every step to its `egress`, as Podman and Apple do; one that reaches
+the internet, as a daemon that builds Dockerfiles needs, holds only the tools that
+honour a proxy. To pull the base without the internet, keep a copy of it in the
+builder's registry and name that in `[sandbox] base_image`.
 
 What the node pod needs:
 
@@ -2327,28 +2269,28 @@ What the node pod needs:
   `registry`, mounted in the directory `docker_config` names (a
   `kubernetes.io/dockerconfigjson` Secret with its `.dockerconfigjson` key mounted as
   `config.json`). `buildctl` reads it as `DOCKER_CONFIG`, and the node reads the same
-  file to look images up and remove superseded ones. Credential helpers are not
-  consulted. The credential is mounted only in the node's pod, but it is not kept from
-  the daemon: during a build, BuildKit's session auth answers the daemon's credential
-  requests with this username and secret, so a daemon running a hostile Dockerfile
-  can obtain it. Give it a credential scoped to the registry and nothing else.
-  DigitalOcean's `doctl registry docker-config --read-write` is one: its token is
-  refused by the rest of the DigitalOcean API (account, Droplets, Kubernetes all
-  answer 403) and accepted only for the registry.
+  file to look images up, pin a base kept in that registry, and remove superseded ones.
+  Credential helpers are not consulted. The credential is mounted only in the node's
+  pod, but it is not kept from the daemon: during a build, BuildKit's session auth
+  answers the daemon's credential requests with this username and secret, so a daemon
+  running a hostile Dockerfile can obtain it. Give it a credential scoped to the
+  registry and nothing else. DigitalOcean's `doctl registry docker-config --read-write`
+  is one: its token is refused by the rest of the DigitalOcean API (account, Droplets,
+  Kubernetes all answer 403) and accepted only for the registry.
 - **Egress.** TCP to the daemon's port, and HTTPS to every registry a build pulls from
   or pushes to *and to their token services*, because the client fetches the tokens:
-  `auth.docker.io` and `registry-1.docker.io` for a `FROM` on Docker Hub, `ghcr.io` for
-  the harness images, `registry.digitalocean.com` and `api.digitalocean.com` for
-  DigitalOcean's registry. This is the node pod's own traffic, not a harness's: it
-  does not go through either of the node's proxies, so their refusal of private
-  addresses and `internal_cidrs` does not apply to it, and the node pod's own egress
-  policy has to allow it.
-- **Room for a build context.** A build stages the default branch's tree and its
-  Containerfile under `<state_mount>/tmp` on the state volume, and runs `buildctl`
-  with `TMPDIR` there, so a large repository does not fill the node container's
-  ephemeral storage. (A harness pod's `TMPDIR` is its own `/tmp` emptyDir.)
-- **Pull access for harness pods.** They pull the built images by digest with the
-  namespace's pull secrets; DigitalOcean's cluster integration adds them to the
+  `ghcr.io` for the release's base and bundle, `registry.digitalocean.com` and
+  `api.digitalocean.com` for DigitalOcean's registry. This is the node pod's own
+  traffic, not a sandbox's: it does not go through either of the node's proxies, so
+  their refusal of private addresses and `internal_cidrs` does not apply to it, and the
+  node pod's own egress policy has to allow it.
+- **Room for a build context.** A build stages its context under `<state_mount>/tmp`
+  on the state volume, and runs `buildctl` with `TMPDIR` there, so a large repository
+  does not fill the node container's ephemeral storage. (A sandbox pod's `TMPDIR` is
+  its own `/tmp` emptyDir.)
+- **Pull access for sandbox pods.** They pull the built images by digest with the
+  namespace's pull secrets (`[runtime.kubernetes] image_pull_secrets`, else the
+  `default` service account's); DigitalOcean's cluster integration adds them to the
   `default` service account.
 
 The `runtime` check runs `buildctl debug workers` over mutual TLS, then asks the
@@ -2363,37 +2305,9 @@ reason the check gave, and that failure is not held against the repository's rec
 The recipe is left alone for two minutes, so the check runs queued behind an outage
 do not each try again, and the next check or preparation after that tries again
 without `tracon repo build`, which retries at once. A session that finds the builder
-down starts in its harness's own image with the reason, rather than waiting. A registry that
+down starts on the stock base with the reason, rather than waiting. A registry that
 cannot be asked whether an image is still there leaves the standing image in use and
 triggers no rebuild.
-
-**Over the sandbox protocol** (`sandbox_protocol = true`) there are no harness images
-and no layer: every sandbox runs the stock base (`[sandbox] base_image`), or a
-repository's image built on it from its `build` steps, with the harness from the
-bundle, as on Podman. The node pins the base when it converges
-(at start, and whenever the release, `base_image` or `bundle` changes) by the manifest
-its registry holds for the node's own architecture, which is every sandbox's, since
-affinity keeps them on the node pod's machine; nothing is pulled by the node, and a
-pod's kubelet pulls the pinned digest. A repository with a `prepare` is prepared once
-on its default branch in a sandbox pod from that image and snapshotted. A pod cannot
-be committed, so its `/cache` and `/work` are read back over the protocol (as a
-preparation's tree always is), layered onto the image it ran (`COPY --chown=65532:65532`,
-which keeps the image's user, home and environment) and pushed as
-`<registry>/<prefix>-snapshot-…`. Sessions and checks start from it, and a session at the
-snapshot's commit skips `prepare`, as on the other providers. Without a builder nothing
-is built or snapshotted: an entry with `build` steps has no image (the session is told
-why), and every session runs its own `prepare`.
-
-Build steps reach the network through the node: the node pod admits the daemon on its
-egress port (the overlay's `tracon-node-build` policy does, for a daemon in
-`tracon-build` labelled `app.kubernetes.io/name: buildkitd`), and the daemon's own
-egress policy must allow it there. Whether a step can go around the proxy is the
-daemon's policy's to decide. One that allows DNS, the node pod's egress port and the
-registry it pushes to (and pulls the base from) and nothing else holds every step to its
-`egress`, as Podman and Apple do; one that reaches the internet, as a daemon that
-builds Dockerfiles needs, holds only the tools that honour a proxy. To pull the base
-without the internet, keep a copy of it in the builder's registry and name that in
-`[sandbox] base_image`.
 
 The node removes only what it pushed, `<registry>/tracon-repo-…` and
 `<registry>/<prefix>-snapshot-…`, never an image an entry pinned. A superseded image is kept for one more generation, because a pod
@@ -2428,8 +2342,7 @@ The Podman machine itself is left alone (`podman machine rm` when nothing else u
   egress proxy are tunnels on the VM's loopback, and the harness reaches them at
   `127.0.0.1` because `container` cannot add a hosts entry.
 - **Files.** Every volume is a tree in the node's `<state>/sandbox-files`. It is sent into
-  a sandbox when the sandbox starts and taken back as on a Kubernetes node over the
-  protocol.
+  a sandbox when the sandbox starts and taken back as on a Kubernetes node.
 - **Images.** Harnesses come from the bundle (`[sandbox] bundle`, else the release's
   arm64 bundle), mounted read-only at `/opt/tracon`. They run on the stock base
   (`[sandbox] base_image`), which is pulled and pinned at start by its linux/arm64

@@ -1319,7 +1319,7 @@ mod tests {
             "gateway.harness_listen",
             "sandbox.base_image",
             "sandbox.bundle",
-            "runtime.kubernetes.harness_image",
+            "sandbox.release_url",
         ] {
             assert_eq!(
                 check_named(&[op_set(key, s("x"))], Editor::Remote).len(),

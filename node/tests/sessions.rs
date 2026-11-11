@@ -3194,14 +3194,10 @@ async fn orientation_setup(
         tokens: Arc::new(Mutex::new(100)),
     });
     let mut cfg = Config::default();
-    // A repository image of its own, which only a pod-hosted node off the
-    // sandbox protocol still runs; the local backend runs no sandbox.
-    cfg.runtime.kind = tracon::config::RuntimeKind::Kubernetes;
     cfg.session.worktree_root = dir.join("worktrees");
     if !prepare.is_empty() {
         cfg.repo.push(tracon::config::Repo {
             path: repo.clone(),
-            image: Some("registry.example/toolchain:1".into()),
             prepare: prepare.iter().map(|command| command.to_string()).collect(),
             ..Default::default()
         });
@@ -3456,9 +3452,8 @@ async fn an_execute_session_starts_on_its_plan_without_a_nudge() {
 
 /// A repository that prepares its dependencies has that preparation run on a
 /// session's workspace before the harness starts, and the session is told how
-/// it went. A harness that runs in its own image has no cache of the
-/// repository's to prepare against, so here nothing runs and the session is
-/// told so, in the log and in its orientation, before its first turn.
+/// it went, in the log and in its orientation, before its first turn: here
+/// the command fails on the stock base, and the session starts anyway.
 #[tokio::test]
 async fn a_session_is_told_whether_its_workspace_was_prepared() {
     state::isolate();
@@ -3480,22 +3475,22 @@ async fn a_session_is_told_whether_its_workspace_was_prepared() {
     };
     let prepared = &events[at("workspace_prepared")];
     assert_eq!(
-        prepared.payload["outcome"], "not_run",
+        prepared.payload["outcome"], "failed",
         "{}",
         prepared.payload
     );
     assert_eq!(prepared.payload["commands"], json!(["make deps"]));
-    assert!(prepared.payload["reason"]
+    assert!(prepared.payload["detail"]
         .as_str()
         .unwrap()
-        .contains("harness's own image"));
+        .contains("preparation `make deps` failed"));
     assert!(prepared.payload["ms"].is_u64());
     // Recorded before the agent is told anything, so the log reads in the
     // order the session met it.
     assert!(at("workspace_prepared") < at("orientation"));
     let text = events[at("orientation")].payload["text"].as_str().unwrap();
     assert!(
-        text.contains("- Dependencies: this repository prepares with `make deps`; they were not run in `/work`"),
+        text.contains("- Dependencies: this repository prepares with `make deps`; they ran in `/work` before you started and failed"),
         "{text}"
     );
     tracon::session::materialize::remove(&row.id);
@@ -4860,10 +4855,10 @@ async fn a_started_session_records_what_the_harness_turned_out_to_be() {
     assert_eq!(start_event.payload["harness_version"], "1.0.0");
     assert_eq!(start_event.payload["harness_expected"], "1.0.0");
     assert_eq!(start_event.payload["harness_protocol"], "fake/1");
-    // No `[[repo]]` entry names an image for this repository, so the harness
-    // is in its own and there is nothing to explain.
-    assert_eq!(start_event.payload["image_source"], "harness image");
-    assert!(start_event.payload["image"].is_null());
+    // No `[[repo]]` entry names a recipe for this repository, so the harness
+    // runs on the stock base and there is nothing to explain.
+    assert_eq!(start_event.payload["image_source"], "stock base");
+    assert!(start_event.payload["image"].is_string());
     assert!(start_event.payload["image_note"].is_null());
 
     let app = tracon::http::router(tracon::http::api::AppState {

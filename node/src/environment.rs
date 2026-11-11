@@ -340,14 +340,10 @@ pub fn session_environment(cfg: &Config, store: &Store, session_id: &str) -> Rep
     environment_for(cfg, store, repo.as_deref())
 }
 
-/// The image the node's own sessions run in, for this runtime kind.
+/// The image the node's own sessions run in: the stock base, on every
+/// runtime.
 pub fn harness_image(cfg: &Config) -> String {
-    match cfg.runtime.kind {
-        crate::config::RuntimeKind::Kubernetes => cfg.kubernetes_harness_image(&cfg.harness.id),
-        crate::config::RuntimeKind::Podman | crate::config::RuntimeKind::Apple => {
-            crate::sandbox_images::base_image(cfg)
-        }
-    }
+    crate::sandbox_images::base_image(cfg)
 }
 
 /// A repository's session build cache, one per channel, mounted writable
@@ -1097,7 +1093,6 @@ mod tests {
         let image =
             "localhost/tc@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let mut cfg = Config::pod_hosted();
-        cfg.runtime.kubernetes.harness_image = "localhost/harness".into();
         cfg.supervision.checks = vec![" just check ".into(), String::new()];
         cfg.supervision.timeout_secs = 900;
         cfg.repo = vec![
@@ -1149,7 +1144,7 @@ mod tests {
             &store,
             Some(Path::new("/clones/github.com/owner/notes")),
         );
-        assert_eq!(notes.image, "localhost/harness");
+        assert_eq!(notes.image, harness_image(&cfg));
         assert_eq!(notes.image_source, "harness image");
         assert!(notes.checks.is_empty());
         assert_eq!(notes.timeout_secs, 900);
@@ -1170,7 +1165,7 @@ mod tests {
             ..Default::default()
         });
         let unbuilt = environment_for(&cfg, &store, Some(Path::new("/src/built")));
-        assert_eq!(unbuilt.image, "localhost/harness");
+        assert_eq!(unbuilt.image, harness_image(&cfg));
         assert_eq!(
             unbuilt.image_source,
             "harness image (repository image not built)"
@@ -1188,7 +1183,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             environment_for(&cfg, &store, Some(Path::new("/src/built"))).image,
-            "localhost/harness"
+            harness_image(&cfg)
         );
         store.finish_repo_image(&build, Ok(image), "", &[]).unwrap();
         let built = environment_for(&cfg, &store, Some(Path::new("/src/built")));

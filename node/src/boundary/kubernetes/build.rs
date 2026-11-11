@@ -1,6 +1,6 @@
 //! Building a repository's image on a cluster: `buildctl` in the node's pod,
 //! over mutual TLS to a BuildKit daemon of the deployment's
-//! (`[runtime.kubernetes.builder]`), pushing to a registry the harness pods
+//! (`[runtime.kubernetes.builder]`), pushing to a registry the sandbox pods
 //! pull from.
 //!
 //! The context and the Dockerfile are sent from the node (`--local`), where
@@ -44,8 +44,8 @@
 //! What a build stages (the context, the Containerfile, `buildctl`'s own
 //! `TMPDIR`) goes under `<state_mount>/tmp` on the state volume, not the
 //! node container's `/tmp`: a repository's tree can be larger than a pod's
-//! ephemeral storage. A harness pod's `TMPDIR` is its own emptyDir instead
-//! (`runner::kube::SCRATCH_MOUNT`); this one is the node's.
+//! ephemeral storage. A sandbox pod's `TMPDIR` is its own emptyDir instead
+//! (`provider::kubernetes::pod::SCRATCH_MOUNT`); this one is the node's.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -988,23 +988,24 @@ mod tests {
         );
     }
 
-    /// The overlay lets the default daemon, and only it, reach the node's
-    /// egress port, where its steps' grants are served.
+    /// The shipped manifests let the default daemon, and only it, reach the
+    /// node's egress port, where its steps' grants are served.
     #[test]
-    fn the_overlay_admits_the_daemon_on_the_egress_port() {
-        let overlay =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../deploy/kubernetes/sandbox-protocol");
+    fn the_manifests_admit_the_daemon_on_the_egress_port() {
+        let manifests = Path::new(env!("CARGO_MANIFEST_DIR")).join("../deploy/kubernetes/base");
         let policy =
-            std::fs::read_to_string(overlay.join("networkpolicy-node-build.yaml")).unwrap();
+            std::fs::read_to_string(manifests.join("networkpolicy-node-build.yaml")).unwrap();
         let port = crate::config::Config::default().gateway.egress_port;
         let ports: Vec<&str> = policy.lines().filter(|l| l.contains("port:")).collect();
         assert_eq!(ports, [format!("          port: {port}")], "{policy}");
         assert!(policy.contains("kubernetes.io/metadata.name: tracon-build"));
         assert!(policy.contains("app.kubernetes.io/name: buildkitd"));
         assert!(KubeBuilder::default().addr.contains(".tracon-build.svc:"));
-        assert!(std::fs::read_to_string(overlay.join("kustomization.yaml"))
-            .unwrap()
-            .contains("- networkpolicy-node-build.yaml"));
+        assert!(
+            std::fs::read_to_string(manifests.join("kustomization.yaml"))
+                .unwrap()
+                .contains("- networkpolicy-node-build.yaml")
+        );
     }
 
     /// A snapshot is pushed under this node's own snapshot stem, and only

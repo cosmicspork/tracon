@@ -85,13 +85,12 @@ spec:
                 fieldRef:
                   fieldPath: spec.nodeName
           ports:
-            - name: forward
-              containerPort: 7421
-            - name: proxy
-              containerPort: 8888
+            # The per-client egress proxy, which BuildKit hands a
+            # repository's `build` steps (networkpolicy-node-build.yaml).
             - name: egress
               containerPort: 7424
-            # Sandboxes dial it, with `[runtime.kubernetes] sandbox_protocol`.
+            # Sandboxes dial it, and their init containers fetch the harness
+            # bundle from it.
             - name: sandbox
               containerPort: 7426
           securityContext:

@@ -2691,13 +2691,6 @@ impl Manager {
         if !self.startable(id)? {
             return Ok(());
         }
-        // Every session carries secrets (its gateway token, and an egress
-        // grant's password where it holds one), and a runtime that cannot
-        // keep them out of what others read refuses here, before anything is
-        // staged, with what to change.
-        if let Some(why) = self.backend.secret_env_refusal() {
-            anyhow::bail!(why);
-        }
         // Registered before the harness starts: it connects to the node's MCP
         // server during `session/new`, so a token published afterwards is
         // published too late and the node refuses its own harness.
@@ -3297,15 +3290,7 @@ impl Manager {
             .map_err(anyhow::Error::msg)?;
         let container = crate::config::resource_name(&format!("h-{slug}"));
         let mut mounts = scratch.mounts;
-        if placed.is_elsewhere()
-            || crate::boundary::kubernetes::uses_sandbox_protocol(&self.cfg)
-            || matches!(
-                self.cfg.runtime.kind,
-                crate::config::RuntimeKind::Podman | crate::config::RuntimeKind::Apple
-            )
-        {
-            materialize::own_state(&mut mounts, &scratch.volume);
-        }
+        materialize::own_state(&mut mounts, &scratch.volume);
         mounts.push(workspace.mount("/work", false));
         // The image a session placed elsewhere started from: its template's
         // there, which `image` (this node's runtime's) knows nothing of.

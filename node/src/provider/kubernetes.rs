@@ -1,5 +1,4 @@
-//! Kubernetes sandboxes over the sandbox protocol
-//! (`[runtime.kubernetes] sandbox_protocol`): one pod per sandbox, on the
+//! Kubernetes sandboxes over the sandbox protocol: one pod per sandbox, on the
 //! node's own machine, whose only process the node starts is
 //! `tracon-sandbox`, which then runs the harness over the protocol.
 //!
@@ -14,7 +13,7 @@
 //!
 //! **Files.** Nothing of the state claim is mounted. Every directory a run
 //! names is an emptyDir of the pod's own, filled and read back over the
-//! protocol's files channel (`runner::sandbox_files`), so a harness pod never
+//! protocol's files channel (`runner::sandbox_files`), so a sandbox pod never
 //! holds a subPath of the node's ReadWriteOnce volume and needs no `nodeName`
 //! to share it. It is kept beside the node pod by pod affinity instead: this
 //! node's pod, by its role and its `tracon.dev/node` label (its `[boundary]
@@ -53,6 +52,8 @@
 //! Isolation is read back from the API (the admitted pod, the policies),
 //! never from inside.
 
+pub mod pod;
+
 use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -73,6 +74,11 @@ use kube::Api;
 use tokio::net::TcpStream;
 use tracon_sandbox::node::{SandboxConn, SandboxError, SandboxServer};
 
+use self::pod::{
+    harness_status, normalize_image_id, pending_reason, pod_labels, quota_refused, refusal,
+    refusal_error, KubeSpec, Refusal, Sizing, HARNESS_CONTAINER, NODE_LABEL, PROBE_GATE,
+    ROLE_LABEL, SCRATCH_MOUNT, SESSION_LABEL, SHM_VOLUME,
+};
 use super::capabilities::{
     Capabilities, Dns, ImageIdentityKind, Privilege, Route, RuntimeSocket, Tier,
 };
@@ -80,19 +86,14 @@ use super::{
     Capacity, CreateSpec, Handle, ImageIdentity, Network, ProviderError, ProviderKind,
     SandboxProvider, Shape, SnapshotId, Status,
 };
-use crate::runner::kube::{
-    harness_status, normalize_image_id, pending_reason, pod_labels, quota_refused, refusal,
-    refusal_error, KubeSpec, Refusal, Sizing, HARNESS_CONTAINER, NODE_LABEL, PROBE_GATE,
-    ROLE_LABEL, SCRATCH_MOUNT, SESSION_LABEL, SHM_VOLUME,
-};
 use crate::runner::podman::BUNDLE_TARGET;
 use crate::runner::RunnerError;
 use crate::telemetry::{run_kind, telemetry};
 
 /// The role a sandbox pod carries (`tracon.dev/role`), which its own
-/// NetworkPolicy selects. Not `harness`: a harness pod's policy opens the
-/// node pod's forward and proxy ports, which a sandbox reaches only through
-/// its tunnels.
+/// NetworkPolicy selects. Not `harness`, the role of the pods an older node
+/// ran, whose policy opened the node pod's forward and proxy ports: a
+/// sandbox reaches those only through its tunnels.
 pub const SANDBOX_ROLE: &str = "sandbox";
 /// Where on the sandbox port the node serves its bundle.
 pub const BUNDLE_PATH: &str = "/bundle.tar";
@@ -307,10 +308,10 @@ pub fn widening_policies(
 /// What the provider is configured with.
 #[derive(Debug, Clone)]
 pub struct KubeSandboxOptions {
-    /// The pod a harness would have run in: namespace, uid, home, gateway
-    /// name and proxy port, the node pod's facts, sizing, pull secrets,
-    /// stop and start timeouts. Its image is the default for a create that
-    /// names none; its `extra_mounts` and `init` are not used.
+    /// What every sandbox pod shares: namespace, uid, home, gateway name and
+    /// proxy port, the node pod's facts, sizing, pull secrets, stop and start
+    /// timeouts. Its image is the default for a create that names none; its
+    /// `extra_mounts` are not used.
     pub spec: KubeSpec,
     /// The bundle directory every sandbox gets, holding `bin/tracon-sandbox`.
     pub bundle: PathBuf,
@@ -329,7 +330,7 @@ impl KubeSandboxOptions {
     pub fn from_config(cfg: &crate::config::Config, spec: KubeSpec) -> Self {
         let k = &cfg.runtime.kubernetes;
         KubeSandboxOptions {
-            node_namespace: crate::runner::kube::PodEnv::own_namespace()
+            node_namespace: pod::PodEnv::own_namespace()
                 .unwrap_or_else(|| spec.env.namespace.clone()),
             spec,
             bundle: crate::bundle::effective(cfg).unwrap_or_default(),
@@ -703,8 +704,7 @@ pub struct KubeSandboxProvider {
     snapshots: Option<Snapshots>,
 }
 
-/// How each of the runner's shapes is sized: as the harness pod it stands
-/// in for.
+/// Which `[runtime.kubernetes.resources.*]` table sizes each shape.
 fn sizing(shape: Shape) -> Sizing {
     match shape {
         Shape::Session => Sizing::Session,
@@ -898,12 +898,8 @@ impl KubeSandboxProvider {
             });
             mounts.push(mount(SHM_VOLUME, "/dev/shm", None));
         }
-        volumes.push(empty(crate::runner::kube::SCRATCH_VOLUME));
-        mounts.push(mount(
-            crate::runner::kube::SCRATCH_VOLUME,
-            SCRATCH_MOUNT,
-            None,
-        ));
+        volumes.push(empty(pod::SCRATCH_VOLUME));
+        mounts.push(mount(pod::SCRATCH_VOLUME, SCRATCH_MOUNT, None));
         // Every directory the run names is storage of the pod's own: filled
         // over the files channel, or empty where nothing is sent.
         let mut targets: Vec<&str> = Vec::new();

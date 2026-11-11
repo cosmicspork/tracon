@@ -22,7 +22,7 @@ use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::metrics::MetricType;
 use prometheus_client::registry::{Registry, Unit};
 
-use crate::runner::kube::label_value;
+use crate::provider::kubernetes::pod::label_value;
 use crate::runner::RunKind;
 
 /// What a scrape is answered with.
@@ -43,7 +43,7 @@ const IMAGE_BUILD_BUCKETS: &[f64] = &[
 ];
 
 /// A repository's or a channel's name as a label value: what the pod labels
-/// carry for it (`runner::kube::label_value`), empty (absent) when none.
+/// carry for it (`provider::kubernetes::pod::label_value`), empty (absent) when none.
 pub fn name_label(name: Option<&str>) -> String {
     name.and_then(label_value).unwrap_or_default()
 }
@@ -397,7 +397,7 @@ impl Telemetry {
     }
 
     /// `reason`: `image_pull`, `config_error`, `start_timeout`,
-    /// `create_error`, `attach_error` or `other`.
+    /// `create_error` or `other`.
     pub fn pod_start_failed(&self, kind: &str, sizing: &str, reason: &str) {
         self.pod_start_failures
             .get_or_create(&PodReason {

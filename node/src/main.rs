@@ -136,7 +136,7 @@ enum SandboxCommand {
     /// isolation back from the provider, and remove it.
     Probe {
         /// The provider to probe (apple, kubernetes, podman). Kubernetes is
-        /// probed from inside the node's pod, before `sandbox_protocol` is on.
+        /// probed from inside the node's pod, before the node serves there.
         #[arg(long)]
         provider: String,
         /// The harness bundle for the sandbox's architecture, with

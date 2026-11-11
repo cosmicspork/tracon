@@ -23,11 +23,11 @@ use k8s_openapi::api::core::v1::Pod;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tracon::boundary::{BuildFailure, BuiltImage, ImageBuild, ImageBuilder};
 use tracon::config::{Config, RuntimeKind};
+use tracon::provider::kubernetes::pod::{KubeSpec, PodEnv, ROLE_LABEL};
 use tracon::provider::kubernetes::{
     KubeSandboxOptions, KubeSandboxProvider, Snapshots, SANDBOX_ROLE,
 };
 use tracon::provider::SandboxProvider as _;
-use tracon::runner::kube::{KubeSpec, PodEnv, ROLE_LABEL};
 use tracon::runner::protocol::ProtocolRunner;
 use tracon::runner::sandbox_files::FilesStore;
 use tracon::runner::{Mount, RunKind, RunLabels, Runner, RunnerCommand, SecretEnv};
@@ -156,7 +156,6 @@ impl Kubelet {
 fn provider(api: &KubeApi, bundle: &std::path::Path) -> KubeSandboxProvider {
     let mut cfg = Config::default();
     cfg.runtime.kind = RuntimeKind::Kubernetes;
-    cfg.runtime.kubernetes.sandbox_protocol = true;
     let spec = KubeSpec::from_config(
         &cfg,
         PodEnv {
@@ -259,8 +258,7 @@ async fn kubernetes_sandboxes_over_the_protocol() {
         !rendered.contains("lent-value-123"),
         "secret environment reached the pod spec: {rendered}"
     );
-    assert!(api.secrets_created().is_empty());
-    assert!(api.secret_patches().is_empty());
+    assert!(api.secret_requests().is_empty());
     assert!(api.live().is_empty(), "the pod outlived its run");
     // Its init container fetched the node's own bundle, as it checked out.
     assert_eq!(
@@ -312,7 +310,7 @@ async fn kubernetes_sandboxes_over_the_protocol() {
     let labels = session.metadata.labels.unwrap();
     assert_eq!(labels["tracon.dev/kind"], "session");
     assert_eq!(labels["tracon.dev/sizing"], "session");
-    assert!(api.secrets_created().is_empty());
+    assert!(api.secret_requests().is_empty());
 
     // The provider reads isolation back from the pod and the policy: with
     // no sandbox policy in place, the route is not claimed.

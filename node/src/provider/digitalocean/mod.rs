@@ -33,8 +33,7 @@
 //!
 //! Nothing on this provider is mounted from the node: a session's trees go
 //! over the files channel and its gateways through tunnels, as the node's
-//! own sandboxes' do over the protocol (Podman, Apple, or Kubernetes with
-//! `sandbox_protocol`). The
+//! own sandboxes' do over the protocol (Podman, Apple or Kubernetes). The
 //! sandbox is otherwise the same as a local one: the supervisor becomes the
 //! stock base's user before it starts anything ([`bootstrap::RunAs`]), every
 //! process gets the environment a local sandbox's image or container would
@@ -318,13 +317,6 @@ impl SourceBuilder {
                  (digitalocean.templates = \"peer\")"
                     .into(),
             ),
-            RuntimeKind::Kubernetes if !crate::boundary::sandboxes_over_protocol(cfg) => {
-                SourceBuilder::None(
-                    "a Kubernetes node builds them only over the sandbox protocol \
-                     ([runtime.kubernetes] sandbox_protocol = true)"
-                        .into(),
-                )
-            }
             RuntimeKind::Kubernetes => match &cfg.runtime.kubernetes.builder {
                 Some(builder) => SourceBuilder::BuildKit(
                     builder.registry.trim().trim_end_matches('/').to_string(),
@@ -1378,9 +1370,6 @@ mod tests {
         assert!(validate(&settings(), &standalone, &SourceBuilder::of(&cfg)).is_ok());
 
         cfg.runtime.kind = RuntimeKind::Kubernetes;
-        let off = validate(&built, &standalone, &SourceBuilder::of(&cfg)).unwrap_err();
-        assert!(off.contains("sandbox_protocol"), "{off}");
-        cfg.runtime.kubernetes.sandbox_protocol = true;
         let unbuilt = validate(&built, &standalone, &SourceBuilder::of(&cfg)).unwrap_err();
         assert!(
             unbuilt.contains("[runtime.kubernetes.builder]"),

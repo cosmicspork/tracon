@@ -806,10 +806,6 @@ async fn the_gateway_socket_and_images_are_changed_at_the_node_only() {
         ("gateway.harness_listen", "/tmp/elsewhere/harness.sock"),
         ("sandbox.base_image", "ghcr.io/evil/base:latest"),
         ("sandbox.release_url", "https://evil.example/releases"),
-        (
-            "runtime.kubernetes.harness_image",
-            "ghcr.io/evil/harness:latest",
-        ),
     ] {
         let body = patch(&hash(&n).await, vec![set(key, json!(value))]);
         let r = remote(&n, &cookie, "PATCH", "/api/config", Some(&body), None).await;

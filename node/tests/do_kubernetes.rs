@@ -87,7 +87,6 @@ fn built(dir: &Path) -> Source {
 fn kubernetes() -> Config {
     let mut cfg = Config::default();
     cfg.runtime.kind = RuntimeKind::Kubernetes;
-    cfg.runtime.kubernetes.sandbox_protocol = true;
     cfg.runtime.kubernetes.builder = Some(KubeBuilder {
         registry: REGISTRY.into(),
         ..Default::default()
@@ -191,13 +190,8 @@ async fn a_kubernetes_node_over_the_protocol_runs_sessions_there() {
         TemplateState::Ready { .. }
     ) {}
 
-    let mut cfg = kubernetes();
-    assert_eq!(runtime.health(&cfg), Ok(()));
-    cfg.runtime.kubernetes.sandbox_protocol = false;
-    let off = runtime.health(&cfg).unwrap_err();
-    assert!(off.contains("sandbox_protocol"), "{off}");
-
     let cfg = kubernetes();
+    assert_eq!(runtime.health(&cfg), Ok(()));
     let tunnels = runtime::do_tunnels(&cfg);
     assert_eq!(tunnels, tracon::runner::tunnels::kube_tunnels(&cfg));
     let proxy = tunnels.iter().find(|t| t.name == "proxy").unwrap();

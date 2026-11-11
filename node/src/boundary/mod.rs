@@ -2,7 +2,7 @@
 //! the boundary refuses to run harnesses; there is no advisory mode.
 //!
 //! The boundary has more than one implementation — rootless Podman on a
-//! laptop, harness pods behind a NetworkPolicy on a cluster — and every one of
+//! laptop, sandbox pods behind a NetworkPolicy on a cluster — and every one of
 //! them answers the same five checks (`checks::CheckId`) and hands out the
 //! same `Runner`. `Backend` is that seam; `backend_for` picks one from
 //! `[runtime] kind`.
@@ -396,15 +396,11 @@ pub trait Backend: Send + Sync {
     fn registry_builder(&self) -> Option<Arc<dyn ImageBuilder>> {
         None
     }
-    /// The image a named harness runs in here, which a repository's image
-    /// copies the harness from where one is layered: a pod-hosted node's
-    /// harness image off the sandbox protocol, and otherwise the stock base,
-    /// from which every harness runs out of the bundle.
+    /// The image a named harness runs in here: the stock base, from which
+    /// every harness runs out of the bundle.
     fn harness_image(&self, cfg: &Config, harness_id: &str) -> String {
-        match cfg.runtime.kind {
-            RuntimeKind::Kubernetes => cfg.kubernetes_harness_image(harness_id),
-            RuntimeKind::Podman | RuntimeKind::Apple => crate::sandbox_images::base_image(cfg),
-        }
+        let _ = harness_id;
+        crate::sandbox_images::base_image(cfg)
     }
     /// Copy an explicitly staged directory into runtime-owned storage. The
     /// source is never mounted into a harness.
@@ -484,13 +480,6 @@ pub trait Backend: Send + Sync {
     /// (`proxy_port`). This machine and its link unless a runtime says more.
     fn egress_refusal(&self) -> crate::gateway::proxy::Refusal {
         crate::gateway::proxy::Refusal::this_machine()
-    }
-    /// Why this runtime cannot, right now, start a harness whose secret
-    /// environment (its gateway token, its egress grant) stays out of what
-    /// others may read; `None` when it can. A session is refused with this
-    /// rather than started with the values somewhere readable.
-    fn secret_env_refusal(&self) -> Option<String> {
-        None
     }
     /// Remove harnesses left over from a previous run, by name.
     async fn reconcile(&self, names: &[String]);
@@ -718,11 +707,11 @@ pub async fn backend_for(cfg: &Config) -> Arc<dyn Backend> {
 
 /// Whether this node's sandboxes take their trees over the files channel and
 /// reach the node only through tunnels: what a sandbox that mounts nothing
-/// and has no network of its own (DigitalOcean's) needs of the node.
+/// and has no network of its own (DigitalOcean's) needs of the node. Every
+/// runtime's do.
 pub fn sandboxes_over_protocol(cfg: &Config) -> bool {
     match cfg.runtime.kind {
-        RuntimeKind::Apple | RuntimeKind::Podman => true,
-        RuntimeKind::Kubernetes => kubernetes::uses_sandbox_protocol(cfg),
+        RuntimeKind::Apple | RuntimeKind::Podman | RuntimeKind::Kubernetes => true,
     }
 }
 
