@@ -274,6 +274,8 @@ export function sessionImage(payload: Record<string, unknown>): string {
       return note ? ` · on the stock base: ${note}` : ''
     case 'prepared snapshot':
       return " · from the repository's prepared snapshot"
+    case 'operator image':
+      return " · in the operator's image"
   }
   if (typeof payload.image === 'string' && payload.image) return " · in the repository's image"
   return note ? ` · in the harness image: ${note}` : ''

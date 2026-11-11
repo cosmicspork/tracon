@@ -188,6 +188,10 @@ test('the start line says which image the harness is in only when it matters', (
   expect(
     sessionImage({ image: 'localhost/tracon-snapshot-app@sha256:d6cc', image_source: 'prepared snapshot' }),
   ).toBe(" · from the repository's prepared snapshot")
+  // On DigitalOcean, the image given for every session.
+  expect(sessionImage({ image: 'registry.example/sandbox@sha256:aa', image_source: 'operator image' })).toBe(
+    " · in the operator's image",
+  )
 })
 
 test('the repetition hint stands only until the harness moves on', () => {
