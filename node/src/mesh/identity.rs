@@ -44,8 +44,13 @@ pub fn load_or_generate_at(path: &Path) -> Result<(Identity, bool), IdentityErro
         })?;
     }
     let (seed, identity) = Identity::generate();
-    write_seed(path, &seed)?;
-    Ok((identity, true))
+    if write_seed(path, &seed)? {
+        return Ok((identity, true));
+    }
+    // Another first use wrote its seed between our read and our write; that
+    // one is the identity now, and ours was never anyone's.
+    let seed = read_seed(path)?.ok_or_else(|| IdentityError::Malformed(path.to_path_buf()))?;
+    Ok((Identity::from_seed(&seed), false))
 }
 
 /// The identity if a seed exists; `None` if the node has never been started.
@@ -71,10 +76,14 @@ fn read_seed(path: &Path) -> Result<Option<[u8; SEED_LEN]>, IdentityError> {
     Ok(Some(seed))
 }
 
-/// Written through a temporary file in the same directory and renamed into
+/// Written through a temporary file in the same directory and linked into
 /// place: a reader racing the write sees either no seed or a whole one, never
-/// the empty file a truncating write leaves behind for an instant.
-fn write_seed(path: &Path, seed: &[u8; SEED_LEN]) -> Result<(), IdentityError> {
+/// the empty file a truncating write leaves behind for an instant. The link,
+/// unlike a rename, never replaces a seed already there, so two first uses at
+/// once (a node starting while the CLI seals a credential, or tests sharing a
+/// state directory) cannot each go on with an identity the file does not hold.
+/// Returns false, writing nothing, when a seed was already in place.
+fn write_seed(path: &Path, seed: &[u8; SEED_LEN]) -> Result<bool, IdentityError> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -93,11 +102,15 @@ fn write_seed(path: &Path, seed: &[u8; SEED_LEN]) -> Result<(), IdentityError> {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
     }
-    fs::rename(&tmp, path).map_err(|source| {
-        let _ = fs::remove_file(&tmp);
-        io(path)(source)
-    })?;
-    Ok(())
+    let placed = match fs::hard_link(&tmp, path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        // A filesystem without hard links: renamed, as before, which leaves
+        // the race but still never a half-written seed.
+        Err(_) => fs::rename(&tmp, path).map(|()| true).map_err(io(path)),
+    };
+    let _ = fs::remove_file(&tmp);
+    placed
 }
 
 #[cfg(test)]
@@ -132,22 +145,31 @@ mod tests {
     /// One state directory is shared by every test in a binary, and they run at
     /// once, so two can reach the seed together. Whoever loses the race must
     /// still read a whole seed, not the empty file a truncating write leaves
-    /// behind for an instant.
+    /// behind for an instant, and it must be the seed that stays: a key sealed
+    /// under an identity the file no longer holds opens nothing afterwards.
     #[test]
-    fn a_racing_reader_never_sees_half_a_seed() {
+    fn racing_first_uses_agree_on_one_whole_seed() {
         let dir = std::env::temp_dir().join(format!("tracon-id-race-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join(SEED_FILE);
         for _ in 0..300 {
             let _ = fs::remove_file(&path);
-            std::thread::scope(|s| {
-                for _ in 0..8 {
-                    s.spawn(|| {
-                        load_or_generate_at(&path).unwrap();
-                    });
-                }
+            let ids: Vec<_> = std::thread::scope(|s| {
+                let racers: Vec<_> = (0..8)
+                    .map(|_| s.spawn(|| load_or_generate_at(&path).unwrap()))
+                    .collect();
+                racers.into_iter().map(|r| r.join().unwrap()).collect()
             });
+            assert_eq!(
+                ids.iter().filter(|(_, fresh)| *fresh).count(),
+                1,
+                "exactly one racer generated the seed"
+            );
+            let kept = load_or_generate_at(&path).unwrap().0.node_id();
+            for (identity, _) in &ids {
+                assert_eq!(identity.node_id(), kept);
+            }
         }
         let _ = fs::remove_dir_all(&dir);
     }

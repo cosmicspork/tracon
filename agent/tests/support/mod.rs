@@ -22,6 +22,9 @@ pub struct Reply {
     pub headers: Vec<(&'static str, String)>,
     /// Send the body, then drop the connection instead of ending it.
     pub cut: bool,
+    /// Held until this many requests have arrived: work that only finishes
+    /// if something else asks meanwhile. See `Fake::met`.
+    pub until: Option<usize>,
 }
 
 impl Reply {
@@ -32,6 +35,7 @@ impl Reply {
             delay: Duration::ZERO,
             headers: Vec::new(),
             cut: false,
+            until: None,
         }
     }
 
@@ -57,6 +61,11 @@ impl Reply {
         self.delay = delay;
         self
     }
+
+    pub fn until(mut self, requests: usize) -> Self {
+        self.until = Some(requests);
+        self
+    }
 }
 
 #[derive(Clone, Default)]
@@ -66,7 +75,14 @@ pub struct Fake {
     pub requests: Arc<Mutex<Vec<Value>>>,
     /// When each request arrived, in the order of `requests`.
     pub arrived: Arc<Mutex<Vec<std::time::Instant>>>,
+    /// For each reply held `until` a count, in the order they were let go:
+    /// whether the count was reached. A count that never comes lets the reply
+    /// go after `HOLD` with `false`, so a test fails rather than hangs.
+    pub met: Arc<Mutex<Vec<bool>>>,
 }
+
+/// The longest a reply waits for its `until` count.
+const HOLD: Duration = Duration::from_secs(10);
 
 /// In a reply's body, replaced by a quarter of the request's bytes: a prompt
 /// count that grows with the conversation, as a real server's does.
@@ -85,6 +101,14 @@ async fn completions(State(fake): State<Fake>, Json(body): Json<Value>) -> Respo
         }
     };
     reply.body = reply.body.replace(MEASURED, &measured);
+    if let Some(n) = reply.until {
+        let deadline = tokio::time::Instant::now() + HOLD;
+        let reached = || fake.arrived.lock().unwrap().len() >= n;
+        while !reached() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        fake.met.lock().unwrap().push(reached());
+    }
     tokio::time::sleep(reply.delay).await;
     let body = if reply.cut {
         use futures_util::StreamExt;

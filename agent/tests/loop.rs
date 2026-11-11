@@ -414,15 +414,14 @@ async fn a_responses_overflow_is_compacted_and_asked_again() {
 
 /// Two spawns in one response run at once, each child returning an object
 /// in the shape asked for, which comes back to the parent as the call's
-/// result.
+/// result. Each child's answer is held until both have asked, which only
+/// happens if neither waits on the other.
 #[tokio::test]
 async fn spawned_subagents_run_together_and_return_shaped_results() {
     let dir = tempfile::tempdir().unwrap();
     let schema = json!({"type": "object", "properties": {"lines": {"type": "integer"}},
         "required": ["lines"]});
-    let child = || {
-        tool_call("f", "finish", json!({"lines": 3})).after(std::time::Duration::from_millis(1200))
-    };
+    let child = || tool_call("f", "finish", json!({"lines": 3})).until(3);
     let (base, fake) = serve(vec![
         tool_calls(&[
             (
@@ -444,13 +443,12 @@ async fn spawned_subagents_run_together_and_return_shaped_results() {
     let r = run(&base, dir.path(), &[]).await;
 
     assert_eq!(r.code, 0, "{:#?}", r.events);
-    // Timed at the server, not around the run: the first process a test
-    // binary spawns can take a second to start on macOS.
-    let arrived = fake.arrived.lock().unwrap().clone();
-    assert!(
-        arrived[2] - arrived[1] < std::time::Duration::from_millis(1000),
-        "the second child asked only after the first was answered: {:?}",
-        arrived[2] - arrived[1]
+    // Ordered at the server, not timed: under load, or while macOS starts a
+    // test binary's first process, no fixed gap holds.
+    assert_eq!(
+        *fake.met.lock().unwrap(),
+        [true, true],
+        "the second child asked only after the first was answered"
     );
     let requests = fake.requests.lock().unwrap();
     assert_eq!(requests.len(), 4);

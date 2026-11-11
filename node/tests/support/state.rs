@@ -172,10 +172,24 @@ pub fn managed_clone(owner: &str) -> PathBuf {
 /// so tests that change different keys need nothing more. Two tests that
 /// change the same key and assert what landed on disk still interleave under
 /// `cargo test`, which runs every `#[tokio::test]` in a file concurrently:
-/// hold this for the span of such a test. An async `tokio::sync::Mutex`, not
-/// `std::sync::Mutex`, because the span crosses `.await` points.
+/// hold this for the span of such a test, and of one that saves against the
+/// version it read (`expected_hash`), which any write in between turns into a
+/// conflict. An async `tokio::sync::Mutex`, not `std::sync::Mutex`, because
+/// the span crosses `.await` points.
 #[allow(dead_code)]
 pub async fn config_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    LOCK.lock().await
+}
+
+/// The sealed credential store is one file per test binary too, and each
+/// test's node holds a broker of its own that writes the whole file on every
+/// change. Under `cargo test` one test's import replaces what another sealed
+/// a moment before. Hold this for the span of a test whose node writes the
+/// store, and of one that reads it back; a test that also holds
+/// `config_lock` takes that one first.
+#[allow(dead_code)]
+pub async fn credentials_lock() -> tokio::sync::MutexGuard<'static, ()> {
     static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     LOCK.lock().await
 }
