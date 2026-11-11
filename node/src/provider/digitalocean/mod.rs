@@ -118,7 +118,7 @@ impl Default for Settings {
             api_url: String::new(),
             image: String::new(),
             registry: String::new(),
-            base_template: "sandbox".into(),
+            base_template: "coding-base".into(),
             size: String::new(),
             limit: 4,
             listen: String::new(),

@@ -1627,7 +1627,8 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node, or
                                     # ready its sessions there run in the base's
 # image = "…@sha256:…"              # or one image of your own for every session there, built with
                                     # containers/do-sandbox; name this or registry, not both
-# base_template = "sandbox"         # the runtime's base the image is rebased onto
+# base_template = "coding-base"     # the runtime's base the image is rebased onto (DigitalOcean
+                                    # no longer accepts the old name "sandbox")
 # region = ""                       # the API host's region; empty for the default
 # size = ""                         # a sandbox size slug; empty for the runtime's default
 # limit = 4                         # sandboxes there at once

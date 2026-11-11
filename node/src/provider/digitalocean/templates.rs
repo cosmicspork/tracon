@@ -262,7 +262,12 @@ mod tests {
 
     #[test]
     fn a_template_is_named_for_its_node_and_image_digest() {
-        let t = Templates::new(Source::Given(IMAGE.into()), "sandbox", "tracon-tabcd1234").unwrap();
+        let t = Templates::new(
+            Source::Given(IMAGE.into()),
+            "coding-base",
+            "tracon-tabcd1234",
+        )
+        .unwrap();
         let name = t.name_for(IMAGE).unwrap();
         assert_eq!(name, "tracon-tabcd1234-1111111111111111");
         let wanted: HashSet<String> = [name.clone()].into();
@@ -278,14 +283,14 @@ mod tests {
 
     #[test]
     fn a_given_image_serves_alone_and_a_built_source_serves_any_pinned_image() {
-        let given = Templates::new(Source::Given(IMAGE.into()), "sandbox", "t").unwrap();
+        let given = Templates::new(Source::Given(IMAGE.into()), "coding-base", "t").unwrap();
         assert!(given.serves(IMAGE));
         assert!(!given.serves(SNAPSHOT));
         assert_eq!(
             given.default_image(Some(SNAPSHOT.into())).as_deref(),
             Some(IMAGE)
         );
-        let built = Templates::new(built(), "sandbox", "t").unwrap();
+        let built = Templates::new(built(), "coding-base", "t").unwrap();
         assert!(built.serves(SNAPSHOT));
         assert!(!built.serves("localhost/x:latest"));
         assert_eq!(
