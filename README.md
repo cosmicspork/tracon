@@ -541,7 +541,11 @@ checks = ["just check"]
   arguments (`HTTPS_PROXY`, `https_proxy` and the plain-HTTP pair), which every `RUN`
   sees and no image history or cache key keeps. A tool that honours a proxy is held to
   the list; a step that goes around the proxy is held only by the daemon's
-  NetworkPolicy (see "Images on Kubernetes").
+  NetworkPolicy (see "Images on Kubernetes"). BuildKit reuses a cached `RUN` (same
+  base digest, same command) whichever build ran it, so on a daemon shared with
+  other clients a step held to the list here may be a cache hit of one that was
+  not: give the node a daemon of its own, or set `[runtime.kubernetes.builder]
+  no_cache = true`.
 
 Settings → Repositories offers it as *Build steps on the stock base*, and
 `tracon repo set <path> --build "apt-get update" --build "…" --egress apt` sets it from a
@@ -1545,6 +1549,7 @@ kind = "podman"                     # or "kubernetes", for a pod-hosted node, or
 # docker_config = "/etc/tracon/registry"  # a directory holding config.json with the push credential
 # timeout_secs = 2700               # one build's limit; left out, 45 minutes
 # buildctl = "buildctl"             # the client to run; the node image carries one on PATH
+# no_cache = false                  # true: build without BuildKit's cache, for a daemon shared with others
 # do_token_file = "/etc/tracon/do/token"  # DigitalOcean only: an API token for removing old images,
                                     # when the registry refuses a delete; left out, the credential's own
 # approved_images = []              # digest-pinned project images preparation may use besides the harness image

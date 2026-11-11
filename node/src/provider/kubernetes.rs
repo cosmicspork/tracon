@@ -144,6 +144,45 @@ pub fn snapshot_containerfile(image: &str, trees: &[(String, String)]) -> String
     out
 }
 
+const MIB: u64 = 1024 * 1024;
+
+/// What a snapshot's trees may take together while they are staged.
+pub const SNAPSHOT_MAX_BYTES: u64 = crate::runner::sandbox_files::PREPARED_LIMITS.max_bytes;
+
+/// What staging a snapshot leaves free on the state volume, for the node's
+/// database and everything else it keeps there.
+pub const SNAPSHOT_FREE_MARGIN: u64 = 2 * 1024 * MIB;
+
+/// The least a snapshot's trees may be given before staging is refused.
+const SNAPSHOT_MIN_BYTES: u64 = 256 * MIB;
+
+/// Free bytes where `path` is, for an unprivileged writer; `None` when it
+/// cannot be asked.
+fn free_bytes(path: &Path) -> Option<u64> {
+    let stat = rustix::fs::statvfs(path).ok()?;
+    Some(stat.f_bavail.saturating_mul(stat.f_frsize))
+}
+
+/// What a snapshot's two trees may take together, given `free` bytes where
+/// they are staged: [`SNAPSHOT_MAX_BYTES`], or less where the volume cannot
+/// spare that and keep [`SNAPSHOT_FREE_MARGIN`] free; refused when that
+/// leaves too little to stage anything worth building.
+pub fn snapshot_budget(free: Option<u64>) -> Result<u64, String> {
+    let Some(free) = free else {
+        return Ok(SNAPSHOT_MAX_BYTES);
+    };
+    let spare = free.saturating_sub(SNAPSHOT_FREE_MARGIN);
+    if spare < SNAPSHOT_MIN_BYTES {
+        return Err(format!(
+            "the state volume has {} MiB free, and staging a snapshot keeps {} MiB of it free; \
+             make room on it (or grow it) and prepare again",
+            free / MIB,
+            SNAPSHOT_FREE_MARGIN / MIB
+        ));
+    }
+    Ok(spare.min(SNAPSHOT_MAX_BYTES))
+}
+
 /// What builds a sandbox's snapshot here: the node's builder, which pushes it
 /// to the registry the sandboxes' pods pull from, how long one build may
 /// take, and which of the sandbox's trees it carries.
@@ -1494,16 +1533,35 @@ impl SandboxProvider for KubeSandboxProvider {
                     .tempdir_in(&scratch)
             })
             .map_err(|e| failed(format!("stage a snapshot in {}: {e}", scratch.display())))?;
+        // Staged on the state volume beside the node's own database: the
+        // trees together may take no more than it can spare. `stage` goes
+        // with this call however it ends, and a refused export leaves
+        // nothing behind it (`SandboxConn::export_tar`).
+        let mut budget = snapshot_budget(free_bytes(stage.path()))
+            .map_err(|why| failed(format!("{}: {why}", handle.0)))?;
         let context = stage.path().join("context");
         for (dir, target) in &snapshots.trees {
-            conn.export_tar(
-                target.as_str(),
-                tracon_sandbox::protocol::Exclusions::None,
-                &context.join(dir),
-                crate::runner::sandbox_files::PREPARED_LIMITS,
-            )
-            .await
-            .map_err(|e| failed(format!("{}: read {target} back: {e}", handle.0)))?;
+            let limits = tracon_sandbox::files::Limits {
+                max_bytes: budget,
+                ..crate::runner::sandbox_files::PREPARED_LIMITS
+            };
+            let read = conn
+                .export_tar(
+                    target.as_str(),
+                    tracon_sandbox::protocol::Exclusions::None,
+                    &context.join(dir),
+                    limits,
+                )
+                .await
+                .map_err(|e| {
+                    failed(format!(
+                        "{}: read {target} back (the snapshot's trees may take {} MiB here \
+                         together): {e}",
+                        handle.0,
+                        budget / MIB
+                    ))
+                })?;
+            budget = budget.saturating_sub(read.bytes);
         }
         let containerfile = stage.path().join("Snapshot.Containerfile");
         std::fs::write(

@@ -2104,6 +2104,13 @@ pub struct KubeBuilder {
     pub do_token_file: Option<PathBuf>,
     /// The `buildctl` to run.
     pub buildctl: String,
+    /// Build without BuildKit's cache (`--no-cache`). A daemon shared with
+    /// anything else reuses a `RUN` it ran before on the same base for the
+    /// same command, however that build reached the network, so a
+    /// repository's `build` steps are held to their `egress` on a cache hit
+    /// only when this node is the daemon's sole client, or with this on.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub no_cache: bool,
 }
 
 impl Default for KubeBuilder {
@@ -2116,6 +2123,7 @@ impl Default for KubeBuilder {
             timeout_secs: None,
             do_token_file: None,
             buildctl: "buildctl".into(),
+            no_cache: false,
         }
     }
 }

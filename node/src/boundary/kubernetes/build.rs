@@ -132,6 +132,9 @@ pub struct BuildKitBuilder {
 pub struct StepsEgress {
     pub grants: crate::gateway::proxy::Grants,
     pub proxy: String,
+    /// Why the node issues no grant at all (`internal_cidrs` it cannot
+    /// read), which refuses a build's as it refuses a session's.
+    pub refused: Option<String>,
 }
 
 /// One build's grant, revoked when the build ends, however it ends.
@@ -142,6 +145,12 @@ struct StepsGrant {
 
 impl StepsGrant {
     fn issue(egress: &StepsEgress, hosts: &[String]) -> Result<Self, BuildFailure> {
+        if let Some(why) = &egress.refused {
+            return Err(BuildFailure::transient(format!(
+                "build steps reach the network only through a grant, and per-client egress \
+                 is off on this node: {why}"
+            )));
+        }
         let token = egress
             .grants
             .issue(crate::gateway::proxy::GrantSpec {
@@ -337,6 +346,9 @@ impl BuildKitBuilder {
             .to_os_string();
         let mut argv = self.connection();
         argv.extend(["build".into(), "--frontend".into(), "dockerfile.v0".into()]);
+        if self.settings.no_cache {
+            argv.push("--no-cache".into());
+        }
         let mut local = |name: &str, path: &std::ffi::OsStr| {
             let mut value = OsString::from(format!("{name}="));
             value.push(path);
@@ -347,6 +359,16 @@ impl BuildKitBuilder {
         let mut filename_opt = OsString::from("filename=");
         filename_opt.push(filename);
         argv.extend(["--opt".into(), filename_opt]);
+        // What this node's pods run, since they all sit on its machine: the
+        // platform the stock base is pinned for, whatever the daemon's own.
+        argv.extend([
+            "--opt".into(),
+            format!(
+                "platform=linux/{}",
+                crate::boundary::registry::host_architecture()
+            )
+            .into(),
+        ]);
         for (name, value) in build.labels {
             argv.extend(["--opt".into(), format!("label:{name}={value}").into()]);
         }
@@ -775,6 +797,10 @@ mod tests {
             timeout: Duration::from_secs(60),
         };
         let argv = strings(&builder.argv(&build, &target, Path::new("/tmp/stage/meta.json"), &[]));
+        let platform = format!(
+            "platform=linux/{}",
+            crate::boundary::registry::host_architecture()
+        );
         assert_eq!(
             argv,
             [
@@ -792,6 +818,8 @@ mod tests {
                 "--opt",
                 "filename=Containerfile",
                 "--opt",
+                platform.as_str(),
+                "--opt",
                 "label:io.tracon.recipe=abc",
                 "--output",
                 "type=image,name=registry.digitalocean.com/cosmicspork/tracon-repo-app-0123456789-src:abc,push=true",
@@ -801,6 +829,26 @@ mod tests {
                 "plain",
             ]
         );
+    }
+
+    /// `no_cache` builds without BuildKit's cache; off, nothing is added.
+    #[test]
+    fn no_cache_is_passed_to_buildctl() {
+        let mut config = settings("registry.digitalocean.com/cs");
+        let build = ImageBuild {
+            tag: "localhost/tracon-repo-a:t",
+            containerfile: Path::new("/tmp/stage/Containerfile"),
+            context: Path::new("/tmp/context"),
+            labels: &[],
+            timeout: Duration::from_secs(60),
+        };
+        let argv = |config: &KubeBuilder| {
+            let builder = BuildKitBuilder::new_for_test(config).unwrap();
+            strings(&builder.argv(&build, "t", Path::new("/tmp/m.json"), &[]))
+        };
+        assert!(!argv(&config).contains(&"--no-cache".to_string()));
+        config.no_cache = true;
+        assert!(argv(&config).contains(&"--no-cache".to_string()));
     }
 
     #[test]
@@ -883,6 +931,7 @@ mod tests {
             .with_steps_egress(StepsEgress {
                 grants: grants.clone(),
                 proxy: "10.244.0.9:7424".into(),
+                refused: None,
             });
         let built = build(&builder, &containerfile, tmp.path()).await.unwrap();
         assert_eq!(
@@ -909,6 +958,7 @@ mod tests {
         let egress = StepsEgress {
             grants: grants.clone(),
             proxy: "10.244.0.9:7424".into(),
+            refused: None,
         };
         let grant = StepsGrant::issue(&egress, &["deb.debian.org".to_string()]).unwrap();
         let held = grants.holder(&grant.token).unwrap();
@@ -917,6 +967,21 @@ mod tests {
         let token = grant.token.clone();
         drop(grant);
         assert!(grants.holder(&token).is_none());
+
+        // A node that issues no grants issues none to a build either.
+        let off = StepsEgress {
+            refused: Some("internal_cidrs: not an address block".into()),
+            ..egress
+        };
+        let refused = StepsGrant::issue(&off, &["deb.debian.org".to_string()])
+            .err()
+            .unwrap();
+        assert!(refused.transient);
+        assert!(
+            refused.error.contains("not an address block"),
+            "{}",
+            refused.error
+        );
     }
 
     /// The overlay lets the default daemon, and only it, reach the node's

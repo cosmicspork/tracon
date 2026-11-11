@@ -267,6 +267,7 @@ pub const KEYS: &[KeySpec] = &[
     restart("runtime.kubernetes.builder.timeout_secs"),
     restart("runtime.kubernetes.builder.do_token_file").path(PathKind::SecretFile),
     restart("runtime.kubernetes.builder.buildctl").exec(),
+    restart("runtime.kubernetes.builder.no_cache"),
     restart("runtime.kubernetes.shm_size"),
     restart("runtime.kubernetes.resources.session.cpu_request"),
     restart("runtime.kubernetes.resources.session.cpu_limit"),

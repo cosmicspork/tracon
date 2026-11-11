@@ -78,6 +78,7 @@ fn builder_for(
     cfg: &Config,
     env: Option<&PodEnv>,
     grants: &Grants,
+    refused: Option<&str>,
 ) -> Option<Result<Arc<build::BuildKitBuilder>, build::Unusable>> {
     let settings = cfg.runtime.kubernetes.builder.as_ref()?;
     let scratch = cfg.runtime.kubernetes.state_mount.join(build::SCRATCH);
@@ -88,6 +89,7 @@ fn builder_for(
                     Some(proxy) => builder.with_steps_egress(build::StepsEgress {
                         grants: grants.clone(),
                         proxy,
+                        refused: refused.map(str::to_string),
                     }),
                     None => builder,
                 };
@@ -163,7 +165,12 @@ impl KubeBackend {
         let refusal = Refusal::cluster(&cfg.runtime.kubernetes.internal_cidrs)
             .map_err(|error| format!("[runtime.kubernetes] internal_cidrs: {error}"));
         let grants = Grants::default();
-        let builder = builder_for(cfg, env.as_ref().ok(), &grants);
+        let builder = builder_for(
+            cfg,
+            env.as_ref().ok(),
+            &grants,
+            refusal.as_ref().err().map(String::as_str),
+        );
         Self {
             cfg: cfg.clone(),
             env,
@@ -529,10 +536,24 @@ impl Backend for KubeBackend {
         uses_sandbox_protocol(&self.cfg)
     }
 
+    /// The release, the base and the bundle; and, while the base is not
+    /// pinned (its registry did not answer), something new at every look,
+    /// so the node's upkeep tries again each time it looks rather than
+    /// staying unpinned until a restart.
     fn definitions(&self, cfg: &Config) -> Option<String> {
         uses_sandbox_protocol(cfg).then(|| {
+            let unpinned = match crate::sandbox_images::active_base() {
+                Some(_) => String::new(),
+                None => format!(
+                    "\u{1f}unpinned {}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or_default()
+                ),
+            };
             format!(
-                "{}\u{1f}{}\u{1f}{:?}",
+                "{}\u{1f}{}\u{1f}{:?}{unpinned}",
                 env!("CARGO_PKG_VERSION"),
                 cfg.sandbox.base_image_ref(),
                 cfg.sandbox.bundle

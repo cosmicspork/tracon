@@ -553,3 +553,17 @@ fn a_snapshot_layers_the_prepared_trees_onto_the_image_it_ran() {
          COPY --chown=65532:65532 work/ /work/\n"
     );
 }
+
+/// A snapshot's trees together get at most the prepared limit, less where
+/// the state volume cannot spare that and keep its margin; too little room
+/// refuses before anything is staged.
+#[test]
+fn a_snapshot_is_staged_only_within_what_the_volume_can_spare() {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    assert_eq!(snapshot_budget(None), Ok(SNAPSHOT_MAX_BYTES));
+    assert_eq!(snapshot_budget(Some(100 * GIB)), Ok(SNAPSHOT_MAX_BYTES));
+    assert_eq!(snapshot_budget(Some(SNAPSHOT_FREE_MARGIN + GIB)), Ok(GIB));
+    let why = snapshot_budget(Some(SNAPSHOT_FREE_MARGIN + 1024)).unwrap_err();
+    assert!(why.contains("make room"), "{why}");
+    assert!(snapshot_budget(Some(0)).is_err());
+}
