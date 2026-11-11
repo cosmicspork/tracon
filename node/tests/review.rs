@@ -2058,8 +2058,9 @@ const TOOLCHAIN: &str =
 async fn a_reviewer_starts_in_the_image_of_the_repository_under_review() {
     state::isolate();
     let f = fixture_with(test_name!(), WITH_GH, |c| {
-        // A repository's own image is the deprecated path's.
-        c.runtime.podman = tracon::config::PodmanRuntime::legacy();
+        // A repository's own image, which only a pod-hosted node off the
+        // sandbox protocol still runs.
+        c.runtime.kind = tracon::config::RuntimeKind::Kubernetes;
         c.repo = vec![tracon::config::Repo {
             path: "owner/reviewed-app".into(),
             image: Some(TOOLCHAIN.into()),

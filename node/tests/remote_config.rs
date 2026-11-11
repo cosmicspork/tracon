@@ -804,8 +804,8 @@ async fn the_gateway_socket_and_images_are_changed_at_the_node_only() {
     write_file(HAND_WRITTEN);
     for (key, value) in [
         ("gateway.harness_listen", "/tmp/elsewhere/harness.sock"),
-        ("boundary.gateway_image", "ghcr.io/evil/gateway:latest"),
-        ("boundary.harness_image", "ghcr.io/evil/harness:latest"),
+        ("sandbox.base_image", "ghcr.io/evil/base:latest"),
+        ("sandbox.release_url", "https://evil.example/releases"),
         (
             "runtime.kubernetes.harness_image",
             "ghcr.io/evil/harness:latest",
@@ -828,7 +828,7 @@ async fn the_gateway_socket_and_images_are_changed_at_the_node_only() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|k| k["key"] == "boundary.gateway_image")
+        .find(|k| k["key"] == "sandbox.base_image")
         .unwrap()
         .clone();
     assert_eq!(spec["editable"], false);
@@ -837,8 +837,8 @@ async fn the_gateway_socket_and_images_are_changed_at_the_node_only() {
     let body = patch(
         &hash(&n).await,
         vec![set(
-            "boundary.gateway_image",
-            json!("localhost/tracon-gateway:dev"),
+            "sandbox.base_image",
+            json!("localhost/tracon-sandbox-base:dev"),
         )],
     );
     let r = local(&n, "PATCH", "/api/config", Some(&body)).await;

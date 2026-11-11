@@ -290,11 +290,11 @@ tracon's immutable candidates, isolated checks and brokered publication.
 
 ## Current limitations
 
-- Where sandboxes run on the stock base (a Podman node on Linux by default, an Apple
-  node, Kubernetes with `sandbox_protocol`), a repository's toolchain is its `[[repo]]`
+- Where sandboxes run on the stock base (a Podman or Apple node, Kubernetes with
+  `sandbox_protocol`), a repository's toolchain is its `[[repo]]`
   `build` steps on `tracon-sandbox-base`, and a repository with none runs on the base
   itself. Kubernetes does not build steps yet. Elsewhere (Kubernetes without the
-  protocol, Podman with the deprecated switches off or off Linux):
+  protocol):
   required checks run in the image, and after the preparation, the operator named for the
   repository (`[[repo]]`), and in the harness image — which has no project toolchain —
   when they named none. A session of either harness runs in that same image with the

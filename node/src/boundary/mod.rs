@@ -316,7 +316,7 @@ pub trait Backend: Send + Sync {
         false
     }
     /// A digest of what `converge` would build from: when it changes under a
-    /// running node (a rebuilt `[harness] native_binary`), the node converges
+    /// running node (a new pinned base, a bundle named elsewhere), the node converges
     /// again. `None` where nothing is built.
     fn definitions(&self, _cfg: &Config) -> Option<String> {
         None
@@ -380,9 +380,14 @@ pub trait Backend: Send + Sync {
         Vec::new()
     }
     /// The image a named harness runs in here, which a repository's image
-    /// copies the harness from. Podman's unless a runtime says otherwise.
+    /// copies the harness from where one is layered: a pod-hosted node's
+    /// harness image off the sandbox protocol, and otherwise the stock base,
+    /// from which every harness runs out of the bundle.
     fn harness_image(&self, cfg: &Config, harness_id: &str) -> String {
-        cfg.podman_harness_image(harness_id)
+        match cfg.runtime.kind {
+            RuntimeKind::Kubernetes => cfg.kubernetes_harness_image(harness_id),
+            RuntimeKind::Podman | RuntimeKind::Apple => crate::sandbox_images::base_image(cfg),
+        }
     }
     /// Copy an explicitly staged directory into runtime-owned storage. The
     /// source is never mounted into a harness.
@@ -430,8 +435,8 @@ pub trait Backend: Send + Sync {
     /// The harness user's home inside its runner; state and gitconfig are
     /// mounted under it.
     fn harness_home(&self) -> String;
-    /// The port the node itself serves the CONNECT allowlist proxy on, when
-    /// no gateway container carries it.
+    /// The port the node itself serves the CONNECT allowlist proxy on, where
+    /// a harness reaches it directly rather than through a tunnel.
     fn proxy_port(&self) -> Option<u16> {
         None
     }
@@ -698,8 +703,7 @@ pub async fn backend_for(cfg: &Config) -> Arc<dyn Backend> {
 /// reach the node only through tunnels: what a sandbox that mounts nothing
 /// and has no network of its own (DigitalOcean's) needs of the node.
 pub fn sandboxes_over_protocol(cfg: &Config) -> bool {
-    cfg.runtime.kind == RuntimeKind::Apple
-        || (podman::uses_sandbox_files(cfg) && podman::uses_sandbox_tunnels(cfg))
+    matches!(cfg.runtime.kind, RuntimeKind::Apple | RuntimeKind::Podman)
 }
 
 #[cfg(test)]

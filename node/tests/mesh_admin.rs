@@ -711,7 +711,7 @@ async fn admin_peers_and_host_only_keys_are_not_changed_over_the_mesh() {
         set("mesh.admin_peers", json!([identity(3).node_id()])),
         json!({ "op": "remove", "key": "mesh.admin_peers" }),
         json!({ "op": "remove", "key": "mesh" }),
-        set("boundary.harness_image", json!("evil:latest")),
+        set("sandbox.base_image", json!("evil:latest")),
         set("gateway.harness_listen", json!("/tmp/h.sock")),
         set("mesh.hub_url", json!("https://elsewhere.example")),
         set("auth.public_origin", json!("https://elsewhere.example")),

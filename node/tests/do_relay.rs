@@ -202,9 +202,6 @@ async fn a_digitalocean_sandbox_reaches_the_node_over_the_hubs_url() {
         .unwrap();
 
     let mut cfg = Config::default();
-    cfg.runtime.podman.sandbox_protocol = true;
-    cfg.runtime.podman.sandbox_files = true;
-    cfg.runtime.podman.sandbox_tunnels = true;
     cfg.gateway.forward_port = free_port();
     cfg.gateway.proxy_port = free_port();
     cfg.gateway.qa_proxy_port = 0;

@@ -374,8 +374,8 @@ impl DoRuntime {
     pub fn health(&self, cfg: &Config) -> Result<(), String> {
         if !crate::boundary::sandboxes_over_protocol(cfg) {
             return Err(
-                "a DigitalOcean sandbox needs [runtime.podman] sandbox_protocol, sandbox_files and \
-                 sandbox_tunnels on this node, or runtime.kind = \"apple\": it mounts nothing \
+                "a DigitalOcean sandbox needs this node to run its own sandboxes over the \
+                 sandbox protocol (runtime.kind = \"podman\" or \"apple\"): it mounts nothing \
                  and has no gateway of its own"
                     .into(),
             );

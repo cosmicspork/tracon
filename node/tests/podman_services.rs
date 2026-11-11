@@ -1,5 +1,5 @@
-//! Catalogue services inside a session's sandbox, against real Podman: with
-//! `[runtime.podman] sandbox_services`, `service_start` has the sandbox's
+//! Catalogue services inside a session's sandbox, against real Podman:
+//! `service_start` has the sandbox's
 //! supervisor run the service from its mounted bundle, on the sandbox's
 //! loopback, with no container beside the session.
 //!
@@ -20,8 +20,7 @@
 //! this version's release. The image must be in the
 //! local store and have Node and Python, as the stock base does: Node drives
 //! the browser over CDP as an agent would, Python stands in for a service.
-//! `TRACON_SERVICES_TEST_TUNNELS=1` runs the sandboxes with
-//! `[runtime.podman] sandbox_tunnels` (`--network none`). Everything made is
+//! The sandboxes have no network (`--network none`). Everything made is
 //! named with `TRACON_SANDBOX_TEST_PREFIX` (default
 //! `svctest-`, which is also the node's `[boundary] resource_prefix`, so a
 //! workspace volume is `svctest-workspace-<id>`) and removed again.
@@ -80,18 +79,9 @@ impl Rig {
             .tempdir_in("/tmp")
             .unwrap();
         let mut cfg = Config::default();
-        // Each switch this suite runs is set below; the rest stay off.
-        cfg.runtime.podman = tracon::config::PodmanRuntime::legacy();
-        cfg.boundary.network = network.clone();
         cfg.boundary.gateway_container = format!("{prefix}gw");
-        cfg.boundary.harness_image = image.clone();
+        cfg.sandbox.base_image = Some(image.clone());
         cfg.gateway.harness_listen = HarnessListen::Unix(short.path().join("harness.sock"));
-        cfg.runtime.podman.sandbox_protocol = true;
-        cfg.runtime.podman.sandbox_services = true;
-        // The sandbox with no network of its own: services are on its
-        // loopback either way.
-        cfg.runtime.podman.sandbox_tunnels =
-            std::env::var("TRACON_SERVICES_TEST_TUNNELS").is_ok_and(|v| v == "1");
         cfg.sandbox.bundle = Some(bundle);
         cfg.boundary.resource_prefix = tracon::config::resource_prefix().to_string();
         Some(Rig {
@@ -344,10 +334,8 @@ async fn the_browser_runs_in_the_session_sandbox_and_show_work_carries_its_scree
     let tree = podman(&["exec", &session_container, "ps", "-eo", "pid,ppid,args"]).unwrap();
     eprintln!("{tree}");
     assert!(tree.contains("/opt/tracon-services/browser/headless-shell/headless-shell"));
-    if rig.cfg.runtime.podman.sandbox_tunnels {
-        let links = podman(&["exec", &session_container, "ls", "/sys/class/net"]).unwrap();
-        assert_eq!(links, "lo", "no network but loopback");
-    }
+    let links = podman(&["exec", &session_container, "ls", "/sys/class/net"]).unwrap();
+    assert_eq!(links, "lo", "no network but loopback");
     let status = mcp_tool(&h, &token, "service_status", json!({ "name": "browser" })).await;
     assert_eq!(status["state"], "ready", "{status}");
 

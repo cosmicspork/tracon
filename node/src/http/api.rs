@@ -7793,7 +7793,7 @@ fn provider_ops(
         .unwrap_or(false);
     if !allowed {
         let mut hosts = cfg.gateway.allow_hosts.clone();
-        hosts.push(crate::boundary::podman::setup::anchor_literal_host(host));
+        hosts.push(crate::gateway::proxy::anchor_literal_host(host));
         ops.push(crate::config::Op::set(
             crate::config::KeyPath::keys(&["gateway", "allow_hosts"]),
             hosts,

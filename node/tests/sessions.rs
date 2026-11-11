@@ -3194,8 +3194,9 @@ async fn orientation_setup(
         tokens: Arc::new(Mutex::new(100)),
     });
     let mut cfg = Config::default();
-    // The local backend runs no sandbox: the switches' deprecated side.
-    cfg.runtime.podman = tracon::config::PodmanRuntime::legacy();
+    // A repository image of its own, which only a pod-hosted node off the
+    // sandbox protocol still runs; the local backend runs no sandbox.
+    cfg.runtime.kind = tracon::config::RuntimeKind::Kubernetes;
     cfg.session.worktree_root = dir.join("worktrees");
     if !prepare.is_empty() {
         cfg.repo.push(tracon::config::Repo {

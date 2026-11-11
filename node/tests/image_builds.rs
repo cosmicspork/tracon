@@ -25,7 +25,6 @@ use tracon::config::{Config, Repo};
 use tracon::provider::podman::PodmanProvider;
 use tracon::repo_image::{ensure_base, Ensured};
 use tracon::runner::podman::RunSpec;
-use tracon::runner::RunnerCommand;
 use tracon::store::Store;
 
 use support::podman::{podman, requested};
@@ -33,7 +32,6 @@ use support::podman::{podman, requested};
 /// Removes what the test made, however it ends.
 struct Cleanup {
     prefix: String,
-    network: String,
     /// Images no name of the prefix's is on any more.
     ids: Vec<String>,
 }
@@ -54,7 +52,6 @@ impl Drop for Cleanup {
                 let _ = podman(&["image", "rm", "-f", id]);
             }
         }
-        let _ = podman(&["network", "rm", "-f", &self.network]);
     }
 }
 
@@ -67,19 +64,24 @@ fn git(repo: &Path, script: &str) {
     assert!(status.success(), "{script}");
 }
 
-/// `cmd` in `image` through the node's own `podman run` argv, as a check or
-/// probe would start it: its exit status, its output, and how long it took.
-fn run(cfg: &Config, image: &str, name: &str) -> (bool, String, Duration) {
-    let spec = RunSpec::from_config(cfg, true);
-    let cmd = RunnerCommand {
-        argv: vec!["cat".into(), "/built".into()],
-        image: Some(image.to_string()),
-        name: name.to_string(),
-        ..Default::default()
-    };
+/// `cat /built` in `image`, never pulled, as the node's sandboxes run a
+/// local image (`RunSpec::sandbox_args`): its exit status, its output, and
+/// how long it took.
+fn run(_cfg: &Config, image: &str, name: &str) -> (bool, String, Duration) {
     let began = Instant::now();
     let out = std::process::Command::new("podman")
-        .args(spec.podman_args(name, &cmd, false))
+        .args([
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--pull=never",
+            "--name",
+            name,
+            image,
+            "cat",
+            "/built",
+        ])
         .output()
         .unwrap();
     let said = format!(
@@ -100,12 +102,8 @@ async fn runs_asked_for_together_build_once_and_a_removed_image_is_never_pulled(
     assert!(podman(&["image", "exists", &base]).is_some(), "{base}");
     let prefix =
         std::env::var("TRACON_IMAGE_TEST_PREFIX").unwrap_or_else(|_| "tracon-test-ib-".into());
-    let network = format!("{prefix}net");
-    let _ = podman(&["network", "rm", "-f", &network]);
-    assert!(podman(&["network", "create", "--disable-dns", &network]).is_some());
     let mut cleanup = Cleanup {
         prefix: prefix.clone(),
-        network: network.clone(),
         ids: Vec::new(),
     };
 
@@ -126,13 +124,14 @@ async fn runs_asked_for_together_build_once_and_a_removed_image_is_never_pulled(
          && git update-ref refs/remotes/origin/main HEAD \
          && git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main",
     );
-    let mut cfg = Config::default();
-    cfg.boundary.network = network.clone();
-    cfg.repo = vec![Repo {
-        path: repo.clone(),
-        dockerfile: Some("Dockerfile".into()),
-        ..Default::default()
-    }];
+    let cfg = Config {
+        repo: vec![Repo {
+            path: repo.clone(),
+            dockerfile: Some("Dockerfile".into()),
+            ..Default::default()
+        }],
+        ..Config::default()
+    };
     let backend = tracon::boundary::podman::PodmanBackend::detect(&cfg).await;
     let store = Store::open_in_memory().unwrap();
     let path = repo.to_string_lossy().into_owned();

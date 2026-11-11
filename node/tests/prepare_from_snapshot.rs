@@ -74,9 +74,7 @@ fn git(repo: &Path, args: &[&str]) -> String {
 }
 
 /// Removes what the test made, however it ends.
-struct Cleanup {
-    network: String,
-}
+struct Cleanup {}
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
@@ -97,7 +95,6 @@ impl Drop for Cleanup {
                 let _ = podman(&["image", "rm", "-f", image]);
             }
         }
-        let _ = podman(&["network", "rm", "-f", &self.network]);
     }
 }
 
@@ -207,22 +204,13 @@ async fn a_session_at_its_snapshots_commit_skips_prepare_and_another_prepares_on
 
     let base = std::env::var("TRACON_SANDBOX_BASE").expect("TRACON_SANDBOX_BASE");
     assert!(podman(&["image", "exists", &base]).is_some(), "{base}");
-    let network = format!("{PREFIX}-net");
-    let _cleanup = Cleanup {
-        network: network.clone(),
-    };
-    let _ = podman(&["network", "rm", "-f", &network]);
-    assert!(podman(&["network", "create", "--disable-dns", &network]).is_some());
+    let _cleanup = Cleanup {};
     let short = tempfile::Builder::new()
         .prefix("b3")
         .tempdir_in("/tmp")
         .unwrap();
-    cfg.boundary.network = network.clone();
     cfg.boundary.gateway_container = format!("{PREFIX}-gw");
     cfg.gateway.harness_listen = HarnessListen::Unix(short.path().join("harness.sock"));
-    cfg.runtime.podman.sandbox_protocol = true;
-    cfg.runtime.podman.sandbox_images = true;
-    cfg.runtime.podman.sandbox_files = true;
     cfg.sandbox.base_image = Some(base.clone());
     cfg.sandbox.bundle = Some(PathBuf::from(
         std::env::var("TRACON_SANDBOX_BUNDLE").expect("TRACON_SANDBOX_BUNDLE"),

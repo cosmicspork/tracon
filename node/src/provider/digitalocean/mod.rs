@@ -32,8 +32,8 @@
 //!   else that front serves.
 //!
 //! Nothing on this provider is mounted from the node: a session's trees go
-//! over the files channel and its gateways through tunnels, as
-//! `[runtime.podman] sandbox_files` and `sandbox_tunnels` do locally. The
+//! over the files channel and its gateways through tunnels, as a Podman or
+//! Apple sandbox's do locally. The
 //! sandbox is otherwise the same as a local one: the supervisor becomes the
 //! stock base's user before it starts anything ([`bootstrap::RunAs`]), every
 //! process gets the environment a local sandbox's image or container would
@@ -93,7 +93,7 @@ pub struct Settings {
     /// its own sandbox images (the pinned base, a repository's prepared
     /// snapshot) with the bundle it verified and the service bundles it
     /// holds. DigitalOcean's container registry takes the same token. Needs
-    /// `[runtime.podman] sandbox_images`.
+    /// a Podman node.
     pub registry: String,
     /// The runtime's base template the image is rebased onto.
     pub base_template: String,
@@ -273,7 +273,7 @@ impl Settings {
 pub fn validate(
     settings: &Settings,
     mesh: &crate::config::Mesh,
-    sandbox_images: bool,
+    podman: bool,
 ) -> Result<(), String> {
     if !settings.is_configured() {
         return Ok(());
@@ -285,10 +285,10 @@ pub fn validate(
             templates::digest_of(&settings.image)
                 .map_err(|e| format!("digitalocean.image: {e}"))?;
         }
-        (true, false) if !sandbox_images => {
+        (true, false) if !podman => {
             return Err(
                 "digitalocean.registry builds templates from the node's own sandbox \
-                        images, which needs [runtime.podman] sandbox_images"
+                        images, which needs runtime.kind = \"podman\""
                     .into(),
             )
         }
@@ -790,7 +790,7 @@ impl SandboxProvider for DoProvider {
         if let Some(mount) = spec.mounts.iter().find(|m| !m.is_local()) {
             return Err(failed(format!(
                 "DigitalOcean mounts nothing from the node, and {} would be mounted at {}; \
-                 its trees go over the files channel ([runtime.podman] sandbox_files)",
+                 its trees go over the files channel",
                 mount.volume, mount.target
             )));
         }

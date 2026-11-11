@@ -1,16 +1,16 @@
 //! Workspaces and harness state on a Podman sandbox's own disk, over the
-//! sandbox protocol (`[runtime.podman] sandbox_files`), against real Podman:
-//! the trees go in at start onto the sandbox's own storage, a review's
-//! export reads the running sandbox, what changed comes back at exit, and a
-//! tracon-agent or Claude Code session resumes in a new sandbox after its
-//! first one has gone. Also measures the files path against the volume path
-//! on a real repository.
+//! sandbox protocol's files channel, against real Podman: the trees go in at
+//! start onto the sandbox's own storage, a review's export reads the running
+//! sandbox, what changed comes back at exit, and a tracon-agent or Claude
+//! Code session resumes in a new sandbox after its first one has gone, its
+//! model reached through the gateway's tunnel. Also times the files path on
+//! a real repository.
 //!
 //! Runs only when asked for:
 //!
 //! ```sh
 //! TRACON_PODMAN_TESTS=1 TRACON_SANDBOX_BUNDLE=<bundle>/<version>/amd64 \
-//!   TRACON_SANDBOX_TEST_IMAGE=<an image with git> \
+//!   [TRACON_SANDBOX_TEST_IMAGE=<default: this version's tracon-sandbox-base>] \
 //!   [TRACON_FILES_BENCH_REPO=/path/to/a/repo] \
 //!   cargo test -p tracon --test podman_sandbox_files -- --test-threads 1 --nocapture
 //! ```
@@ -40,7 +40,6 @@ struct Rig {
     prefix: String,
     cfg: Config,
     image: String,
-    network: String,
     volumes: Vec<String>,
     _short: tempfile::TempDir,
 }
@@ -55,40 +54,31 @@ impl Rig {
             .map(PathBuf::from)
             .expect("TRACON_PODMAN_TESTS=1 needs TRACON_SANDBOX_BUNDLE");
         assert!(bundle.join("bin/tracon-sandbox").is_file());
-        let image = std::env::var("TRACON_SANDBOX_TEST_IMAGE")
-            .unwrap_or_else(|_| "docker.io/library/ubuntu:24.04".into());
+        let image = std::env::var("TRACON_SANDBOX_TEST_IMAGE").unwrap_or_else(|_| {
+            format!(
+                "ghcr.io/cosmicspork/tracon-sandbox-base:{}",
+                env!("CARGO_PKG_VERSION")
+            )
+        });
         assert!(podman(&["image", "exists", &image]).is_some(), "{image}");
         let prefix = format!(
             "{}{tag}-",
             std::env::var("TRACON_SANDBOX_TEST_PREFIX")
                 .unwrap_or_else(|_| "tracon-test-sbf-".into())
         );
-        let network = format!("{prefix}net");
-        let _ = podman(&["network", "rm", "-f", &network]);
-        // Not internal: the fake models are on the host.
-        assert!(
-            podman(&["network", "create", "--disable-dns", &network]).is_some(),
-            "create {network}"
-        );
         let short = tempfile::Builder::new()
             .prefix("sbf")
             .tempdir_in("/tmp")
             .unwrap();
         let mut cfg = Config::default();
-        // Each switch this suite runs is set below; the rest stay off.
-        cfg.runtime.podman = tracon::config::PodmanRuntime::legacy();
-        cfg.boundary.network = network.clone();
         cfg.boundary.gateway_container = format!("{prefix}gw");
-        cfg.boundary.harness_image = image.clone();
+        cfg.sandbox.base_image = Some(image.clone());
         cfg.gateway.harness_listen = HarnessListen::Unix(short.path().join("harness.sock"));
-        cfg.runtime.podman.sandbox_protocol = true;
-        cfg.runtime.podman.sandbox_files = true;
         cfg.sandbox.bundle = Some(bundle);
         Some(Rig {
             prefix,
             cfg,
             image,
-            network,
             volumes: Vec::new(),
             _short: short,
         })
@@ -104,18 +94,28 @@ impl Rig {
         format!("tracon-{kind}-{}{what}", self.prefix)
     }
 
-    fn volume(&mut self, what: &str) -> String {
-        let name = self.name(what);
-        let _ = podman(&["volume", "rm", "-f", &name]);
-        self.volumes.push(name.clone());
-        name
-    }
-
     fn runner(&self, cfg: &Config, mounts: Vec<Mount>) -> Arc<dyn Runner> {
         let mut spec = RunSpec::from_config(cfg, true);
         spec.image = self.image.clone();
         spec.extra_mounts = mounts;
         tracon::boundary::podman::protocol_runner(cfg, spec)
+    }
+
+    /// Where a harness in a sandbox reaches the node's harness listener:
+    /// the gateway's name, on the sandbox's loopback, through its tunnel.
+    fn gateway(&self) -> String {
+        format!(
+            "http://{}:{}",
+            self.cfg.boundary.gateway_container, self.cfg.gateway.forward_port
+        )
+    }
+
+    /// The node's harness listener, which a fake model stands in for.
+    fn harness_socket(&self) -> PathBuf {
+        match &self.cfg.gateway.harness_listen {
+            HarnessListen::Unix(path) => path.clone(),
+            HarnessListen::Tcp(_) => unreachable!("the rig listens on a socket"),
+        }
     }
 
     async fn backend(&self, cfg: &Config) -> tracon::boundary::podman::PodmanBackend {
@@ -133,7 +133,6 @@ impl Drop for Rig {
         for volume in &self.volumes {
             let _ = podman(&["volume", "rm", "-f", volume]);
         }
-        let _ = podman(&["network", "rm", "-f", &self.network]);
     }
 }
 
@@ -193,19 +192,15 @@ fn workspace(id: &str, volume: &str) -> tracon::workspace::Workspace {
     }
 }
 
-/// The files path end to end on Podman, timed against the volume path on
-/// the same tree.
+/// The files path end to end on Podman, timed.
 #[tokio::test]
 async fn a_workspace_lives_on_the_sandboxs_own_disk() {
-    let Some(mut rig) = Rig::new("disk") else {
+    let Some(rig) = Rig::new("disk") else {
         return;
     };
     let tmp = tempfile::tempdir().unwrap();
     let seed = seed(tmp.path());
     let files = rig.backend(&rig.cfg).await;
-    let mut volumes_cfg = rig.cfg.clone();
-    volumes_cfg.runtime.podman.sandbox_files = false;
-    let plain = rig.backend(&volumes_cfg).await;
     let tracked = String::from_utf8(
         std::process::Command::new("git")
             .args(["ls-files"])
@@ -233,30 +228,6 @@ async fn a_workspace_lives_on_the_sandboxs_own_disk() {
 
     let mut rows = Vec::new();
     for round in 0..3 {
-        // The volume path, as today.
-        let volume = rig.volume(&format!("ws{round}"));
-        let at = Instant::now();
-        plain.import_volume(&volume, &seed).await.unwrap();
-        let vol_import = at.elapsed();
-        let vol_runner = rig.runner(&volumes_cfg, Vec::new());
-        let at = Instant::now();
-        let out = vol_runner
-            .run_capture(sh(
-                &rig.name(&format!("vstart{round}")),
-                RunKind::Probe,
-                "test -d /work/.git",
-                vec![Mount::volume(&volume, "/work", false)],
-            ))
-            .await
-            .unwrap();
-        assert!(out.status.success(), "{}", text(&out.stderr));
-        let vol_start = at.elapsed();
-        let at = Instant::now();
-        tracon::workspace::export(&plain, &workspace(&format!("vol{round}"), &volume))
-            .await
-            .unwrap();
-        let vol_export = at.elapsed();
-
         // The files path.
         let kept = rig.kept("workspace", &format!("ws{round}"));
         let at = Instant::now();
@@ -319,9 +290,6 @@ async fn a_workspace_lives_on_the_sandboxs_own_disk() {
             .unwrap();
         let files_export_kept = at.elapsed();
         rows.push([
-            vol_import,
-            vol_start,
-            vol_export,
             files_import,
             files_start,
             files_export_live,
@@ -336,9 +304,6 @@ async fn a_workspace_lives_on_the_sandboxs_own_disk() {
     };
     eprintln!("tracked files: {tracked}");
     for (i, what) in [
-        "volume: import (podman cp into a volume)",
-        "volume: start a sandbox on it (to first output)",
-        "volume: export the checkout (submit_review, show_work, diff)",
         "files: import (into the node's store)",
         "files: start a sandbox and send it in (to first output)",
         "files: export the checkout from the running sandbox",
@@ -426,12 +391,17 @@ async fn what_a_session_changed_is_there_for_the_next_sandbox() {
     backend.import_volume(&scratch, &staged).await.unwrap();
     let mounts = vec![
         Mount::volume(&work, "/work", false),
-        Mount::at(&scratch, "state", "/root/.claude", false),
-        Mount::at(&scratch, "harness/plugin", "/root/.claude/plugin", true),
+        Mount::at(&scratch, "state", "/home/harness/.claude", false),
+        Mount::at(
+            &scratch,
+            "harness/plugin",
+            "/home/harness/.claude/plugin",
+            true,
+        ),
         Mount::at(
             &scratch,
             "orientation.md",
-            "/root/.claude/orientation.md",
+            "/home/harness/.claude/orientation.md",
             true,
         ),
     ];
@@ -440,9 +410,9 @@ async fn what_a_session_changed_is_there_for_the_next_sandbox() {
         .spawn(sh(
             &rig.name("first"),
             RunKind::Session,
-            "cat /root/.claude/plugin/skill.md /root/.claude/orientation.md >&2; \
-             echo edited > /work/new.txt; mkdir -p /root/.claude/projects/-work; \
-             echo '{}' > /root/.claude/projects/-work/c.jsonl; touch /root/.claude/plugin/planted",
+            "cat /home/harness/.claude/plugin/skill.md /home/harness/.claude/orientation.md >&2; \
+             echo edited > /work/new.txt; mkdir -p /home/harness/.claude/projects/-work; \
+             echo '{}' > /home/harness/.claude/projects/-work/c.jsonl; touch /home/harness/.claude/plugin/planted",
             mounts.clone(),
         ))
         .await
@@ -452,8 +422,8 @@ async fn what_a_session_changed_is_there_for_the_next_sandbox() {
         .run_capture(sh(
             &rig.name("second"),
             RunKind::Probe,
-            "cat /work/new.txt /root/.claude/projects/-work/c.jsonl; \
-             test ! -e /root/.claude/plugin/planted && echo sealed",
+            "cat /work/new.txt /home/harness/.claude/projects/-work/c.jsonl; \
+             test ! -e /home/harness/.claude/plugin/planted && echo sealed",
             mounts,
         ))
         .await
@@ -542,11 +512,14 @@ impl Runner for FromBundle {
 }
 
 /// A fake model on `path`, answering each request with the next of
-/// `script` (and an empty body once it runs out).
+/// `script` (and an empty body once it runs out), served where the node's
+/// harness listener would be: a sandbox reaches it through the gateway's
+/// tunnel, as a harness reaches the node.
 async fn fake_model(
+    socket: &Path,
     path: &str,
     script: Vec<String>,
-) -> (u16, Arc<std::sync::Mutex<Vec<serde_json::Value>>>) {
+) -> Arc<std::sync::Mutex<Vec<serde_json::Value>>> {
     use axum::routing::post;
     let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
     let replies = Arc::new(std::sync::Mutex::new(script));
@@ -574,10 +547,10 @@ async fn fake_model(
             }
         }),
     );
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let _ = std::fs::remove_file(socket);
+    let listener = tokio::net::UnixListener::bind(socket).unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    (port, requests)
+    requests
 }
 
 fn sse(chunks: &[serde_json::Value]) -> String {
@@ -608,7 +581,8 @@ async fn a_tracon_agent_session_resumes_after_its_sandbox_ended() {
     let Some(rig) = Rig::new("native") else {
         return;
     };
-    let (port, requests) = fake_model(
+    let requests = fake_model(
+        &rig.harness_socket(),
         "/v1/chat/completions",
         vec![
             openai_answer("first answer"),
@@ -633,7 +607,7 @@ async fn a_tracon_agent_session_resumes_after_its_sandbox_ended() {
         json!([{
             "name": "fake",
             "shape": "openai",
-            "base_url": format!("http://host.containers.internal:{port}"),
+            "base_url": rig.gateway(),
             "key_env": "TRACON_PROVIDER_KEY_FAKE",
             "models": [{"id": "m", "context": 32000, "parallel_tools": true}],
         }])
@@ -644,14 +618,19 @@ async fn a_tracon_agent_session_resumes_after_its_sandbox_ended() {
     let mut mounts = vec![
         Mount::volume(
             tracon::session::materialize::harness_state_volume(),
-            "/root/.tracon-agent",
+            "/home/harness/.tracon-agent",
             false,
         ),
-        Mount::at(&scratch, "harness/run", "/root/.tracon-agent/run", false),
+        Mount::at(
+            &scratch,
+            "harness/run",
+            "/home/harness/.tracon-agent/run",
+            false,
+        ),
         Mount::at(
             &scratch,
             "harness/config",
-            "/root/.tracon-agent/config",
+            "/home/harness/.tracon-agent/config",
             true,
         ),
         Mount::volume(&work, "/work", false),
@@ -666,12 +645,18 @@ async fn a_tracon_agent_session_resumes_after_its_sandbox_ended() {
         cwd_in_runner: "/work".into(),
         model: "fake/m".into(),
         container_name: rig.name("session"),
-        harness_home: "/root".into(),
+        harness_home: "/home/harness".into(),
         mcp_servers: Vec::new(),
         tools: Vec::new(),
         env: vec![
-            ("NO_PROXY".into(), "host.containers.internal".into()),
-            ("no_proxy".into(), "host.containers.internal".into()),
+            (
+                "NO_PROXY".into(),
+                rig.cfg.boundary.gateway_container.clone(),
+            ),
+            (
+                "no_proxy".into(),
+                rig.cfg.boundary.gateway_container.clone(),
+            ),
         ],
         system_prompt_file: None,
         resume,
@@ -777,7 +762,8 @@ async fn a_claude_code_session_resumes_after_its_sandbox_ended() {
             .is_file(),
         "the bundle has no Claude Code"
     );
-    let (port, requests) = fake_model(
+    let requests = fake_model(
+        &rig.harness_socket(),
         "/v1/messages",
         (0..16)
             .map(|i| anthropic_answer(&format!("answer {i}")))
@@ -802,15 +788,20 @@ async fn a_claude_code_session_resumes_after_its_sandbox_ended() {
     let mut mounts = vec![
         Mount::volume(
             tracon::session::materialize::harness_state_volume(),
-            "/root/.claude",
+            "/home/harness/.claude",
             false,
         ),
-        Mount::at(&scratch, "harness/plugin", "/root/.claude/plugin", true),
+        Mount::at(
+            &scratch,
+            "harness/plugin",
+            "/home/harness/.claude/plugin",
+            true,
+        ),
         Mount::volume(&work, "/work", false),
     ];
     tracon::session::materialize::own_state(&mut mounts, &scratch);
     let runner = FromBundle("claude", rig.runner(&rig.cfg, mounts));
-    let base = format!("http://host.containers.internal:{port}");
+    let base = rig.gateway();
     let spec = |resume: Option<Resume>| LaunchSpec {
         secret_env: tracon::runner::SecretEnv::new(vec![(
             "ANTHROPIC_API_KEY".into(),
@@ -819,7 +810,7 @@ async fn a_claude_code_session_resumes_after_its_sandbox_ended() {
         cwd_in_runner: "/work".into(),
         model: "anthropic/claude-test".into(),
         container_name: rig.name("session"),
-        harness_home: "/root".into(),
+        harness_home: "/home/harness".into(),
         mcp_servers: Vec::new(),
         tools: Vec::new(),
         env: vec![
@@ -828,8 +819,14 @@ async fn a_claude_code_session_resumes_after_its_sandbox_ended() {
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(),
                 "1".into(),
             ),
-            ("NO_PROXY".into(), "host.containers.internal".into()),
-            ("no_proxy".into(), "host.containers.internal".into()),
+            (
+                "NO_PROXY".into(),
+                rig.cfg.boundary.gateway_container.clone(),
+            ),
+            (
+                "no_proxy".into(),
+                rig.cfg.boundary.gateway_container.clone(),
+            ),
         ],
         system_prompt_file: None,
         resume,

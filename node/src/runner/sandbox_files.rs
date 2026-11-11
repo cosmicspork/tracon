@@ -1,8 +1,8 @@
 //! Workspaces and harness state on a sandbox's own disk, moved over the
-//! sandbox protocol's files channel (`[runtime.podman] sandbox_files`).
+//! sandbox protocol's files channel: on every Podman and Apple sandbox, and
+//! a pod over the protocol.
 //!
-//! Without it a sandbox mounts runtime volumes, as a harness container
-//! always has. With it, the volumes a run works in are directories the node
+//! The volumes a run works in are directories the node
 //! keeps (`FilesStore`, under the state directory), and a sandbox never
 //! mounts them: the runner sends each one in when the sandbox has connected,
 //! onto storage that goes with the sandbox, and takes back what the run

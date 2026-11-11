@@ -142,9 +142,6 @@ async fn the_template_image_runs_a_session_as_a_digitalocean_sandbox_would() {
     let node = listener.local_addr();
     let (model, seen) = model().await;
     let mut cfg = Config::default();
-    cfg.runtime.podman.sandbox_protocol = true;
-    cfg.runtime.podman.sandbox_files = true;
-    cfg.runtime.podman.sandbox_tunnels = true;
     cfg.gateway.forward_port = free_port();
     cfg.gateway.proxy_port = free_port();
     cfg.gateway.qa_proxy_port = 0;

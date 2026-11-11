@@ -1,14 +1,18 @@
-//! The rootless Podman boundary: an internal network, a gateway container
-//! carrying the allowlist proxy and the node forward, and a harness container
-//! on the internal network only. Phase 0 proved it by hand; this is that
-//! proof as code.
+//! The rootless Podman boundary, on a Linux host: every harness, check and
+//! preparation in a sandbox container of its own, under `tracon-sandbox`
+//! from the harness bundle, over the sandbox protocol. A sandbox has no
+//! network (`--network none`): its one way out is the node's socket, and the
+//! MCP and model gateway, the allowlist proxy and the per-client egress proxy
+//! are tunnels over that connection, on the sandbox's loopback. Its
+//! workspace and harness state are on its own disk, sent in and read back
+//! over the files channel; it runs the stock base or a repository's image
+//! built on it.
 
 pub mod checks;
 pub mod setup;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
 
 use async_trait::async_trait;
 
@@ -294,13 +298,12 @@ impl PodmanBackend {
         RunSpec::from_config(&self.cfg, self.selinux)
     }
 
-    /// The node's own store when it keeps `volume` (whatever the setting is
-    /// now, so a tree it kept is still found), or when it is to keep a new
-    /// one of this name.
+    /// The node's own store when it keeps `volume`, or when it is to keep a
+    /// new one of this name. A volume it does not (a dependency cache, or a
+    /// workspace a node made before its trees were its own) is Podman's.
     fn files_for(&self, volume: &str) -> Option<crate::runner::sandbox_files::FilesStore> {
         let store = crate::runner::sandbox_files::FilesStore::for_node();
-        let keeps = store.holds(volume)
-            || (uses_sandbox_files(&self.cfg) && crate::runner::sandbox_files::backs(volume));
+        let keeps = store.holds(volume) || crate::runner::sandbox_files::backs(volume);
         keeps.then_some(store)
     }
 
@@ -353,93 +356,18 @@ impl PodmanBackend {
             .map_err(|e| BoundaryError::Other(e.to_string()))
     }
 
-    /// The runner for `spec`: `podman run` itself, or, with
-    /// `[runtime.podman] sandbox_protocol`, a sandbox per command over the
-    /// sandbox protocol.
+    /// The runner for `spec`: a sandbox per command, over the protocol.
     fn runner_with(&self, spec: RunSpec) -> Arc<dyn Runner> {
-        match uses_sandbox_protocol(&self.cfg) {
-            true => protocol_runner(&self.cfg, spec),
-            false => Arc::new(PodmanRunner::new(spec)),
-        }
+        protocol_runner(&self.cfg, spec)
     }
-}
-
-/// Whether this node runs its Podman commands over the sandbox protocol. Off
-/// a Linux host the supervisor's socket would be on the far side of the
-/// Podman machine's file sharing, which carries no sockets, so the setting
-/// is refused there. Only a Podman node's: the switches are on by default,
-/// and another kind's sandboxes are its own.
-pub fn uses_sandbox_protocol(cfg: &Config) -> bool {
-    if !cfg.runtime.podman.sandbox_protocol
-        || cfg.runtime.kind != crate::config::RuntimeKind::Podman
-    {
-        return false;
-    }
-    if !cfg!(target_os = "linux") {
-        static WARNED: std::sync::Once = std::sync::Once::new();
-        WARNED.call_once(|| {
-            tracing::warn!(
-                "[runtime.podman] sandbox_protocol needs a Linux host; running podman as before"
-            )
-        });
-        return false;
-    }
-    true
-}
-
-/// Whether this node keeps workspaces and harness state on each sandbox's
-/// own disk and moves them over the sandbox protocol
-/// (`runner::sandbox_files`). Only over the protocol: without it the setting
-/// is refused, and volumes are mounted as before.
-pub fn uses_sandbox_files(cfg: &Config) -> bool {
-    if !cfg.runtime.podman.sandbox_files || cfg.runtime.kind != crate::config::RuntimeKind::Podman {
-        return false;
-    }
-    if !uses_sandbox_protocol(cfg) {
-        static WARNED: std::sync::Once = std::sync::Once::new();
-        WARNED.call_once(|| {
-            tracing::warn!(
-                "[runtime.podman] sandbox_files needs sandbox_protocol; mounting volumes as before"
-            )
-        });
-        return false;
-    }
-    true
-}
-
-/// Whether this node's sandboxes have no network of their own, reaching
-/// the node's gateways through tunnels over the sandbox protocol. Needs the
-/// protocol; asked for without it, the setting is ignored and the gateway
-/// container serves as before.
-pub fn uses_sandbox_tunnels(cfg: &Config) -> bool {
-    if !cfg.runtime.podman.sandbox_tunnels || cfg.runtime.kind != crate::config::RuntimeKind::Podman
-    {
-        return false;
-    }
-    if !cfg.runtime.podman.sandbox_protocol {
-        static WARNED: std::sync::Once = std::sync::Once::new();
-        WARNED.call_once(|| {
-            tracing::warn!(
-                "[runtime.podman] sandbox_tunnels needs sandbox_protocol; the gateway container serves as before"
-            )
-        });
-        return false;
-    }
-    uses_sandbox_protocol(cfg)
-}
-
-/// Whether catalogue services with a bundle run inside each session's
-/// sandbox (`[runtime.podman] sandbox_services`). Only where sessions run
-/// in sandboxes at all.
-pub fn uses_sandbox_services(cfg: &Config) -> bool {
-    cfg.runtime.podman.sandbox_services && uses_sandbox_protocol(cfg)
 }
 
 /// A sandbox per command, made by the Podman provider around `spec`. The
 /// provider takes the boundary; the runner keeps `spec`'s mounts, image and
-/// working directory, and hands image identity and services on to a plain
-/// `PodmanRunner`. With `sandbox_tunnels`, each sandbox also gets the
-/// gateway's tunnels.
+/// working directory, sends the trees in and takes them back over the files
+/// channel, opens the gateway's tunnels, runs bundled services under the
+/// supervisor, and hands image identity and image-only services (sidecars)
+/// on to a `PodmanRunner`.
 pub fn protocol_runner(cfg: &Config, spec: RunSpec) -> Arc<dyn Runner> {
     let mounts = spec.extra_mounts.clone();
     let image = spec.image.clone();
@@ -447,33 +375,26 @@ pub fn protocol_runner(cfg: &Config, spec: RunSpec) -> Arc<dyn Runner> {
     let mut boundary = spec.clone();
     boundary.extra_mounts = Vec::new();
     let provider = crate::provider::podman::PodmanProvider::from_config(cfg, boundary);
-    let mut runner = crate::runner::protocol::ProtocolRunner::new(Arc::new(provider), image)
+    let runner = crate::runner::protocol::ProtocolRunner::new(Arc::new(provider), image)
         .with_mounts(mounts)
         .with_workdir(workdir)
         .with_delegate(Arc::new(PodmanRunner::new(spec)))
-        .with_bundled_harness(crate::sandbox_images::enabled(cfg))
-        .with_sandbox_services(uses_sandbox_services(cfg));
-    if uses_sandbox_files(cfg) {
-        runner = runner.with_files(crate::runner::sandbox_files::FilesStore::for_node());
-    }
-    if uses_sandbox_tunnels(cfg) {
-        runner = runner.with_tunnels(crate::runner::tunnels::gateway_tunnels(cfg));
-    }
+        .with_bundled_harness(true)
+        .with_sandbox_services(true)
+        .with_files(crate::runner::sandbox_files::FilesStore::for_node())
+        .with_tunnels(crate::runner::tunnels::gateway_tunnels(cfg));
     Arc::new(runner)
 }
 
 /// The image the node's own short-lived containers (volume transfers and
-/// copies) run, and the user they run as: the harness image as root, as it
-/// runs, or with `sandbox_images` the stock base, as root too (the base's
-/// own user would be a subordinate one here), which is the node's own user.
+/// copies) run, and the user they run as: the stock base, as root (the
+/// base's own user would be a subordinate one here), which is the node's own
+/// user.
 fn utility_image(cfg: &Config) -> (String, Option<&'static str>) {
-    match crate::sandbox_images::enabled(cfg) {
-        true => (
-            crate::sandbox_images::base_image(cfg),
-            Some(crate::sandbox_images::UTILITY_USER),
-        ),
-        false => (cfg.boundary.harness_image.clone(), None),
-    }
+    (
+        crate::sandbox_images::base_image(cfg),
+        Some(crate::sandbox_images::UTILITY_USER),
+    )
 }
 
 /// `--user` for a utility container, where its image's own user is not the
@@ -503,25 +424,6 @@ impl Backend for PodmanBackend {
 
     fn definitions(&self, cfg: &Config) -> Option<String> {
         Some(setup::definitions(cfg))
-    }
-
-    async fn recover(&self, cfg: &Config) {
-        // No gateway to bring back: the node is its sandboxes' gateway.
-        if uses_sandbox_tunnels(cfg) {
-            return;
-        }
-        match setup::recover_gateway(cfg).await {
-            Ok(setup::Recovery::Running) => {}
-            Ok(setup::Recovery::Started) => tracing::info!(
-                container = %cfg.boundary.gateway_container,
-                "the gateway was stopped; started it again"
-            ),
-            Ok(setup::Recovery::Missing) => tracing::warn!(
-                container = %cfg.boundary.gateway_container,
-                "there is no gateway; setting up the boundary makes one"
-            ),
-            Err(error) => tracing::warn!(%error, "could not start the stopped gateway"),
-        }
     }
 
     async fn check_all(&self, cfg: &Config, deep: bool) -> BoundaryReport {
@@ -560,18 +462,15 @@ impl Backend for PodmanBackend {
 
     fn preparer(&self) -> Option<crate::sandbox_images::Preparer> {
         let cfg = &self.cfg;
-        crate::sandbox_images::enabled(cfg).then(|| crate::sandbox_images::Preparer {
+        Some(crate::sandbox_images::Preparer {
             provider: Arc::new(crate::provider::podman::PodmanProvider::from_config(
                 cfg,
                 crate::runner::podman::RunSpec::from_config(cfg, false),
             )),
-            // Always: a preparation's tree goes over the files channel into
-            // the sandbox's own filesystem, so its commit carries it.
+            // A preparation's tree goes over the files channel into the
+            // sandbox's own filesystem, so its commit carries it.
             files: Some(crate::runner::sandbox_files::FilesStore::for_node()),
-            tunnels: match uses_sandbox_tunnels(cfg) {
-                true => crate::runner::tunnels::gateway_tunnels(cfg),
-                false => Vec::new(),
-            },
+            tunnels: crate::runner::tunnels::gateway_tunnels(cfg),
         })
     }
 
@@ -669,24 +568,18 @@ impl Backend for PodmanBackend {
     }
 
     fn harness_home(&self) -> String {
-        match crate::sandbox_images::enabled(&self.cfg) {
-            true => crate::sandbox_images::HOME.into(),
-            false => crate::session::materialize::PODMAN_HARNESS_HOME.into(),
-        }
+        crate::sandbox_images::HOME.into()
     }
 
     async fn reconcile(&self, names: &[String]) {
-        let provider = uses_sandbox_protocol(&self.cfg)
-            .then(|| crate::provider::podman::PodmanProvider::from_config(&self.cfg, self.spec()));
+        use crate::provider::SandboxProvider as _;
+        let provider = crate::provider::podman::PodmanProvider::from_config(&self.cfg, self.spec());
         for name in names {
             let _ = podman(&["rm", "-f", "-i", name]).await;
             // And the socket directory a sandbox of that name had.
-            if let Some(provider) = &provider {
-                use crate::provider::SandboxProvider as _;
-                let _ = provider
-                    .destroy(&crate::provider::Handle(name.clone()))
-                    .await;
-            }
+            let _ = provider
+                .destroy(&crate::provider::Handle(name.clone()))
+                .await;
         }
     }
 
@@ -747,10 +640,10 @@ impl Backend for PodmanBackend {
         }
     }
 
-    /// With `sandbox_files` a workspace from a snapshot is sent into the
-    /// snapshot's own `/work` (`FilesStore::plan_from`).
+    /// A workspace from a snapshot is sent into the snapshot's own `/work`
+    /// (`FilesStore::plan_from`).
     fn workspace_over_image(&self) -> bool {
-        uses_sandbox_files(&self.cfg)
+        true
     }
 
     async fn volume_exists(&self, volume: &str) -> bool {
@@ -1162,86 +1055,6 @@ pub(crate) async fn podman_json(args: &[&str]) -> Result<serde_json::Value, Boun
     Ok(serde_json::from_str(&text)?)
 }
 
-/// Where the podman machine stands. On macOS rootless podman runs inside a VM
-/// the node is outside of, and nothing starts that VM at login.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MachineState {
-    Missing,
-    Starting(String),
-    Stopped(String),
-    Running,
-}
-
-/// Read `podman machine list --format json`: the default machine, else the
-/// first one listed.
-pub fn machine_state_from(list: &serde_json::Value) -> MachineState {
-    let machines = list.as_array().map(Vec::as_slice).unwrap_or_default();
-    let Some(m) = machines
-        .iter()
-        .find(|m| m["Default"].as_bool() == Some(true))
-        .or_else(|| machines.first())
-    else {
-        return MachineState::Missing;
-    };
-    let name = m["Name"].as_str().unwrap_or("").to_string();
-    if m["Running"].as_bool() == Some(true) {
-        MachineState::Running
-    } else if m["Starting"].as_bool() == Some(true) {
-        MachineState::Starting(name)
-    } else {
-        MachineState::Stopped(name)
-    }
-}
-
-const MACHINE_START_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// Serializes starts: startup verification and a re-check from the interface
-/// can arrive together, and a second `podman machine start` fails on the first.
-static MACHINE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-/// Make sure the podman machine is up, starting it when `start_machine` allows.
-/// Off macOS podman runs on the host and there is nothing to do.
-pub async fn ensure_machine(cfg: &Config) -> Result<(), BoundaryError> {
-    if !cfg!(target_os = "macos") {
-        return Ok(());
-    }
-    let _one = MACHINE.lock().await;
-    let deadline = tokio::time::Instant::now() + MACHINE_START_TIMEOUT;
-    loop {
-        match machine_state_from(&podman_json(&["machine", "list", "--format", "json"]).await?) {
-            MachineState::Running => return Ok(()),
-            MachineState::Missing => {
-                return Err(BoundaryError::Other(
-                    "there is no podman machine; create one with `podman machine init`".into(),
-                ))
-            }
-            MachineState::Stopped(name) if cfg.boundary.start_machine => {
-                tokio::time::timeout(MACHINE_START_TIMEOUT, podman(&["machine", "start", &name]))
-                    .await
-                    .map_err(|_| {
-                        BoundaryError::Other(format!(
-                            "podman machine {name} did not start within two minutes"
-                        ))
-                    })??;
-                return Ok(());
-            }
-            MachineState::Stopped(name) => {
-                return Err(BoundaryError::Other(format!(
-                    "podman machine {name} is not running; start it with `podman machine start`"
-                )))
-            }
-            MachineState::Starting(name) => {
-                if tokio::time::Instant::now() >= deadline {
-                    return Err(BoundaryError::Other(format!(
-                        "podman machine {name} did not finish starting within two minutes"
-                    )));
-                }
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
-        }
-    }
-}
-
 /// Whether the container host enforces SELinux (Podman needs `label=disable`
 /// for bind mounts when it does).
 pub async fn selinux_enabled() -> bool {
@@ -1253,8 +1066,7 @@ pub async fn selinux_enabled() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{machine_state_from, resolve_podman, MachineState, RunSpec};
-    use serde_json::json;
+    use super::resolve_podman;
     use std::path::{Path, PathBuf};
 
     /// A build's steps get one port of the node's loopback and nothing
@@ -1282,27 +1094,17 @@ mod tests {
         assert!(args.iter().all(|arg| !arg.contains('@')), "{args:?}");
     }
 
-    /// On by default on a Linux host, the only one it runs on, and only for
-    /// a Podman node; off where the node says so.
+    /// Every sandbox is made by the provider from the bundle; the settings
+    /// it reads are its own block's and the sandbox section's.
     #[test]
-    fn the_sandbox_protocol_is_on_by_default_and_read_from_its_own_block() {
-        let linux = cfg!(target_os = "linux");
+    fn sandboxes_read_their_settings_and_sockets_from_the_node() {
         let default = crate::config::Config::default();
-        assert_eq!(super::uses_sandbox_protocol(&default), linux);
         assert!(!default.runtime.podman.sandbox_init);
         assert!(default.sandbox.bundle.is_none());
-        let mut kube = default.clone();
-        kube.runtime.kind = crate::config::RuntimeKind::Kubernetes;
-        assert!(!super::uses_sandbox_protocol(&kube));
-        let mut off = default.clone();
-        off.runtime.podman.sandbox_protocol = false;
-        assert!(!super::uses_sandbox_protocol(&off));
         let on: crate::config::Config = toml::from_str(
-            "[runtime.podman]\nsandbox_protocol = true\nsandbox_init = true\n\
-             [sandbox]\nbundle = \"/opt/bundle\"\n",
+            "[runtime.podman]\nsandbox_init = true\n[sandbox]\nbundle = \"/opt/bundle\"\n",
         )
         .unwrap();
-        assert_eq!(super::uses_sandbox_protocol(&on), linux);
         assert!(on.runtime.podman.sandbox_init);
         assert_eq!(on.sandbox.bundle.as_deref(), Some(Path::new("/opt/bundle")));
         // Beside the harness socket, so a node with its own keeps its own.
@@ -1310,32 +1112,15 @@ mod tests {
         scratch.gateway.harness_listen =
             crate::config::HarnessListen::Unix("/tmp/n1/harness.sock".into());
         assert_eq!(scratch.sandbox_socket_dir(), Path::new("/tmp/n1/sandbox"));
-    }
-
-    /// Files over the protocol are on with it by default, and asked for
-    /// without the protocol they stay off: volumes are mounted as before.
-    #[test]
-    fn files_over_the_protocol_need_the_protocol() {
-        let linux = cfg!(target_os = "linux");
         assert_eq!(
-            super::uses_sandbox_files(&crate::config::Config::default()),
-            linux
+            scratch.allow_proxy_socket(),
+            Path::new("/tmp/n1/allow.sock")
         );
-        let mut alone = crate::config::Config::default();
-        alone.runtime.podman.sandbox_protocol = false;
-        assert!(!super::uses_sandbox_files(&alone));
-        let both: crate::config::Config =
-            toml::from_str("[runtime.podman]\nsandbox_protocol = true\nsandbox_files = true\n")
-                .unwrap();
-        assert_eq!(super::uses_sandbox_files(&both), linux);
-        let mut kube = both.clone();
-        kube.runtime.kind = crate::config::RuntimeKind::Kubernetes;
-        assert!(!super::uses_sandbox_files(&kube));
     }
 
-    /// Off, a sandbox's mounts are what they were: named volumes the
-    /// provider mounts. Storage of the sandbox's own is an anonymous volume
-    /// owned by the image's user, which `--rm` removes with it.
+    /// A sandbox's mounts are named volumes the provider mounts. Storage of
+    /// the sandbox's own is an anonymous volume owned by the image's user,
+    /// which `--rm` removes with it.
     #[test]
     fn only_a_planned_mount_is_storage_of_the_sandboxs_own() {
         use crate::runner::podman::{SandboxEntry, SandboxLaunch};
@@ -1382,106 +1167,18 @@ mod tests {
     }
 
     #[test]
-    fn tunnels_are_on_by_default_and_need_the_protocol() {
-        let linux = cfg!(target_os = "linux");
-        let mut default = crate::config::Config::default();
-        default.gateway.harness_listen =
-            crate::config::HarnessListen::Unix("/tmp/n1/harness.sock".into());
-        assert_eq!(default.runtime.podman.sandbox_tunnels, linux);
-        assert_eq!(super::uses_sandbox_tunnels(&default), linux);
-        assert_eq!(RunSpec::from_config(&default, true).node_only, linux);
-        assert_eq!(
-            super::setup::images(&default)
-                .iter()
-                .any(|(_, dir)| *dir == "gateway"),
-            !linux,
-            "no gateway image when there is no gateway"
-        );
-        assert_eq!(
-            default.allow_proxy_socket(),
-            Path::new("/tmp/n1/allow.sock")
-        );
-
-        // Off, the gateway is built, the sandbox joins the internal network
-        // and the runner opens no tunnels: as before.
-        let mut off = default.clone();
-        off.runtime.podman.sandbox_tunnels = false;
-        assert!(!super::uses_sandbox_tunnels(&off));
-        assert!(super::setup::images(&off)
-            .iter()
-            .any(|(_, dir)| *dir == "gateway"));
-        assert!(!RunSpec::from_config(&off, true).node_only);
-
-        let mut alone = default.clone();
-        alone.runtime.podman.sandbox_protocol = false;
-        assert!(
-            !super::uses_sandbox_tunnels(&alone),
-            "needs sandbox_protocol"
-        );
-        assert!(!RunSpec::from_config(&alone, true).node_only);
-
-        let mut kube = default.clone();
-        kube.runtime.kind = crate::config::RuntimeKind::Kubernetes;
-        assert!(!super::uses_sandbox_tunnels(&kube));
-    }
-
-    #[test]
-    fn services_run_in_the_sandbox_by_default_and_need_the_sandbox_protocol() {
+    fn a_bundled_service_is_mounted_and_an_image_one_stays_a_sidecar() {
         let catalogue = "[[service]]\nname = \"browser\"\nport = 9222\n\
                          bundle = \"/srv/browser/amd64\"\n\
                          [[service]]\nname = \"db\"\nport = 5432\n\
                          image = \"pg@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n";
-        let off: crate::config::Config = toml::from_str(&format!(
-            "[runtime.podman]\nsandbox_services = false\n{catalogue}"
-        ))
-        .unwrap();
-        assert!(!super::uses_sandbox_services(&off));
-        assert!(crate::provider::podman::service_bundles(&off).is_empty());
-
-        // Asked for without the sandbox protocol: still sidecars.
-        let alone: crate::config::Config = toml::from_str(&format!(
-            "[runtime.podman]\nsandbox_protocol = false\nsandbox_services = true\n{catalogue}"
-        ))
-        .unwrap();
-        assert!(!super::uses_sandbox_services(&alone));
-        assert!(crate::provider::podman::service_bundles(&alone).is_empty());
-
         let on: crate::config::Config = toml::from_str(catalogue).unwrap();
-        assert_eq!(super::uses_sandbox_services(&on), cfg!(target_os = "linux"));
-        if cfg!(target_os = "linux") {
-            // Only the bundled service is mounted; the image one stays a sidecar.
-            assert_eq!(
-                crate::provider::podman::service_bundles(&on),
-                [(
-                    PathBuf::from("/srv/browser/amd64"),
-                    "/opt/tracon-services/browser".to_string()
-                )]
-            );
-        }
-    }
-
-    #[test]
-    fn machine_state_reads_the_list_json() {
-        let one = |running: bool, starting: bool| json!([{"Name": "podman-machine-default", "Default": true, "Running": running, "Starting": starting}]);
-        let name = || "podman-machine-default".to_string();
-        assert_eq!(machine_state_from(&one(true, false)), MachineState::Running);
         assert_eq!(
-            machine_state_from(&one(false, true)),
-            MachineState::Starting(name())
-        );
-        assert_eq!(
-            machine_state_from(&one(false, false)),
-            MachineState::Stopped(name())
-        );
-        assert_eq!(machine_state_from(&json!([])), MachineState::Missing);
-        // The default machine is the one podman talks to, wherever it is listed.
-        let two = json!([
-            {"Name": "other", "Default": false, "Running": true, "Starting": false},
-            {"Name": "main", "Default": true, "Running": false, "Starting": false}
-        ]);
-        assert_eq!(
-            machine_state_from(&two),
-            MachineState::Stopped("main".into())
+            crate::provider::podman::service_bundles(&on),
+            [(
+                PathBuf::from("/srv/browser/amd64"),
+                "/opt/tracon-services/browser".to_string()
+            )]
         );
     }
 

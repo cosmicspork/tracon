@@ -251,9 +251,6 @@ async fn a_session_runs_on_digitalocean_minus_digitalocean() {
     let (model, seen) = model().await;
 
     let mut cfg = Config::default();
-    cfg.runtime.podman.sandbox_protocol = true;
-    cfg.runtime.podman.sandbox_files = true;
-    cfg.runtime.podman.sandbox_tunnels = true;
     cfg.gateway.forward_port = free_port();
     cfg.gateway.proxy_port = free_port();
     cfg.gateway.qa_proxy_port = 0;

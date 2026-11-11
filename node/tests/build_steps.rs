@@ -72,7 +72,6 @@ fn claim_resource_prefix(prefix: &str) {
 struct Cleanup {
     prefix: String,
     repo_image: String,
-    network: String,
 }
 
 impl Drop for Cleanup {
@@ -96,7 +95,6 @@ impl Drop for Cleanup {
                 let _ = podman(&["image", "rm", "-f", image]);
             }
         }
-        let _ = podman(&["network", "rm", "-f", &self.network]);
     }
 }
 
@@ -122,13 +120,9 @@ async fn a_repository_built_from_steps_prepares_snapshots_and_starts() {
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-q", "-m", "one"]);
 
-    let network = format!("{prefix}net");
-    let _ = podman(&["network", "rm", "-f", &network]);
-    assert!(podman(&["network", "create", "--disable-dns", &network]).is_some());
     let _cleanup = Cleanup {
         prefix: prefix.clone(),
         repo_image: format!("localhost/{prefix}repo-{prefix}app-"),
-        network: network.clone(),
     };
     let short = tempfile::Builder::new()
         .prefix("bst")
@@ -137,11 +131,8 @@ async fn a_repository_built_from_steps_prepares_snapshots_and_starts() {
 
     let mut cfg = Config::default();
     cfg.boundary.resource_prefix = tracon::config::resource_prefix().to_string();
-    cfg.boundary.network = network.clone();
     cfg.boundary.gateway_container = format!("{prefix}gw");
     cfg.gateway.harness_listen = HarnessListen::Unix(short.path().join("harness.sock"));
-    cfg.runtime.podman.sandbox_protocol = true;
-    cfg.runtime.podman.sandbox_images = true;
     cfg.sandbox.base_image = Some(base.clone());
     cfg.sandbox.bundle = Some(bundle);
     // `jq` is in the base too; `tree` is not, so its presence is the build's.

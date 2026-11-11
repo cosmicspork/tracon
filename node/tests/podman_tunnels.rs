@@ -161,15 +161,9 @@ impl Rig {
             recording_server(origin.clone(), Default::default(), "hello from the origin").await;
 
         let mut cfg = Config::default();
-        // Each switch this suite runs is set below; the rest stay off.
-        cfg.runtime.podman = tracon::config::PodmanRuntime::legacy();
-        // Never created: a node-only sandbox joins no network.
-        cfg.boundary.network = format!("{prefix}net");
-        cfg.boundary.harness_image = image.clone();
+        cfg.sandbox.base_image = Some(image.clone());
         cfg.gateway.harness_listen = HarnessListen::Unix(short.path().join("harness.sock"));
         cfg.gateway.allow_hosts.push(r"^127\.0\.0\.1$".into());
-        cfg.runtime.podman.sandbox_protocol = true;
-        cfg.runtime.podman.sandbox_tunnels = true;
         cfg.sandbox.bundle = Some(bundle);
         cfg.providers.clear();
         cfg.providers.insert(
@@ -409,8 +403,6 @@ async fn a_sandbox_has_no_network_but_loopback_and_reaches_the_node_through_its_
     // 7: could not connect. No route, so at once.
     assert_eq!(lines[3], "direct=7", "{stdout}");
     assert_eq!(lines[4], "pong", "{stdout}");
-    // The network the gateway path would have used was never made.
-    assert!(podman(&["network", "exists", &rig.cfg.boundary.network]).is_none());
 }
 
 /// A Claude Code session: its model turns go through the model gateway's
@@ -498,7 +490,7 @@ async fn a_claude_code_session_uses_the_model_and_mcp_gateways_through_tunnels()
     let runner = FromBundle(
         "claude",
         rig.runner(vec![
-            Mount::volume(&state, "/root/.claude", false),
+            Mount::volume(&state, "/home/harness/.claude", false),
             Mount::volume(&work, "/work", false),
         ]),
     );
@@ -509,7 +501,7 @@ async fn a_claude_code_session_uses_the_model_and_mcp_gateways_through_tunnels()
         cwd_in_runner: "/work".into(),
         model: "anthropic/claude-test".into(),
         container_name: rig.name("session"),
-        harness_home: "/root".into(),
+        harness_home: "/home/harness".into(),
         mcp_servers: vec![mcp],
         tools: Vec::new(),
         env: vec![
@@ -642,7 +634,7 @@ async fn the_checks_verify_the_single_route() {
         return;
     };
     let state = rig.volume("state");
-    let spec = rig.spec(vec![Mount::volume(&state, "/root/.claude", false)]);
+    let spec = rig.spec(vec![Mount::volume(&state, "/home/harness/.claude", false)]);
     let mut checks =
         tracon::boundary::podman::checks::probe_checks(&rig.cfg, &spec, &rig.name("probe")).await;
     // The deep check runs in the configured harness image.

@@ -2,8 +2,8 @@
 //! `tracon-agent` and Claude Code for one architecture, as
 //! `scripts/harness-bundle.sh` assembles it and a release publishes it.
 //!
-//! With `[runtime.podman] sandbox_images` on and no `[sandbox] bundle`, the
-//! node fetches the bundle of its own version and architecture from the
+//! On Podman and Apple, and Kubernetes over the sandbox protocol, with no
+//! `[sandbox] bundle`, the node fetches the bundle of its own version and architecture from the
 //! release, checks it, and keeps it under its state directory
 //! (`bundles/<version>/<arch>`). The boundary's own converge does this at
 //! start and whenever the definitions move, so a node that was updated mounts
@@ -65,7 +65,7 @@ pub fn host_arch() -> Option<&'static str> {
 }
 
 /// The bundle this node's sandboxes mount: `[sandbox] bundle` when set,
-/// else, with `sandbox_images` on (or a pod-hosted node's
+/// else, on Podman and Apple (or a pod-hosted node with
 /// `sandbox_protocol`), the one the node fetches for itself.
 /// `None` when neither applies.
 pub fn effective(cfg: &Config) -> Option<PathBuf> {
@@ -84,7 +84,7 @@ pub fn managed(cfg: &Config) -> bool {
 }
 
 /// Whether the node's sandboxes run a bundle it fetches for itself when it is
-/// given none: Podman's with `sandbox_images`, and a pod-hosted node's with
+/// given none: Podman's and Apple's, and a pod-hosted node's with
 /// `[runtime.kubernetes] sandbox_protocol`, whose init containers copy it in.
 fn fetches_own(cfg: &Config) -> bool {
     crate::sandbox_images::enabled(cfg)
@@ -706,33 +706,26 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn only_a_node_on_the_sandbox_images_fetches_its_bundle() {
-        let linux = cfg!(target_os = "linux");
-        assert_eq!(managed(&Config::default()), linux);
+    fn a_node_on_the_sandbox_images_fetches_its_bundle_unless_given_one() {
+        assert!(managed(&Config::default()));
         let mut kube = Config::default();
         kube.runtime.kind = crate::config::RuntimeKind::Kubernetes;
-        assert!(!managed(&kube), "the Podman switches are not a pod's");
+        assert!(
+            !managed(&kube),
+            "a pod without the protocol runs harness images"
+        );
+        assert_eq!(effective(&kube), None);
         let mut cfg = Config::default();
-        cfg.runtime.podman = crate::config::PodmanRuntime::legacy();
-        assert_eq!(effective(&cfg), None);
-        assert!(!managed(&cfg));
         cfg.sandbox.bundle = Some("/opt/bundle".into());
-        assert_eq!(effective(&cfg), Some(PathBuf::from("/opt/bundle")));
-        cfg.runtime.podman.sandbox_protocol = true;
-        cfg.runtime.podman.sandbox_images = true;
         // An explicit bundle wins over fetching one.
         assert!(!managed(&cfg));
         assert_eq!(effective(&cfg), Some(PathBuf::from("/opt/bundle")));
         cfg.sandbox.bundle = None;
-        assert_eq!(managed(&cfg), linux);
-        if !linux {
+        assert!(managed(&cfg));
+        let Some(arch) = host_arch() else {
             return;
-        }
+        };
         let managed = effective(&cfg).unwrap();
-        assert!(managed.ends_with(format!(
-            "{DIR}/{}/{}",
-            env!("CARGO_PKG_VERSION"),
-            host_arch().unwrap()
-        )));
+        assert!(managed.ends_with(format!("{DIR}/{}/{arch}", env!("CARGO_PKG_VERSION"))));
     }
 }

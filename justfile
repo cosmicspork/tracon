@@ -36,12 +36,15 @@ check:
     if cargo nextest --version >/dev/null 2>&1; then cargo nextest run --no-fail-fast && cargo test --doc; else cargo test; fi
     cd spa && bun run check && bun test
 
-# The tests that build and run real containers, which `check` skips. They use a
-# harness image of their own and a network they remove again, never the node's,
-# though they still share its Podman machine: run them while no session is.
-check-podman:
+# The Claude Code layer a pod-hosted node puts on a repository's image, built
+# and probed for real with Podman, which `check` skips; `bundle` is a harness
+# bundle's `<version>/<arch>` with `bin/tracon-sandbox` from this tree. It uses
+# images and names of its own, never the node's, though it shares its Podman
+# store. The other suites that run real containers say how to run them at the
+# top of each `node/tests/*.rs` that reads `TRACON_PODMAN_TESTS`.
+check-podman bundle:
     podman build -t localhost/tracon-harness-claude-test containers/harness-claude
-    TRACON_PODMAN_TESTS=1 TRACON_CLAUDE_IMAGE=localhost/tracon-harness-claude-test cargo test -p tracon --test claude_layer
+    TRACON_PODMAN_TESTS=1 TRACON_CLAUDE_IMAGE=localhost/tracon-harness-claude-test TRACON_SANDBOX_BUNDLE={{bundle}} cargo test -p tracon --test claude_layer
 
 fmt:
     cargo fmt --all
@@ -54,12 +57,6 @@ hub admit="":
 # Build the hub image as the release pipeline does.
 hub-image:
     podman build -t localhost/tracon-hub .
-
-# Build the gateway and Claude Code images. `tracon setup` builds the native
-# harness's, which needs this version's tracon-agent (`just native-agent`).
-images:
-    podman build -t localhost/tracon-gateway containers/gateway
-    podman build -t localhost/tracon-harness-claude containers/harness-claude
 
 # `just sandbox-base`, then `just sandbox-smoke target/harness-bundle/<version>/<arch>`.
 # The stock sandbox base image, for this host's architecture.
@@ -76,8 +73,8 @@ sandbox-smoke bundle tag="dev":
 bundle arch *args:
     ./scripts/harness-bundle.sh --arch {{arch}} {{args}}
 
-# Create the harness network and gateway the node owns.
-setup: images
+# Fetch the harness bundle and pull the sandbox base the node runs.
+setup:
     cargo run --bin tracon -- setup
 
 # Verify the boundary, including an egress probe from inside it.
@@ -112,10 +109,9 @@ musl: spa
     cargo $build --release --target x86_64-unknown-linux-musl --bin tracon --bin tracon-hub --bin tracon-agent
     file target/x86_64-unknown-linux-musl/release/tracon
 
-# A static Linux `tracon-agent` for the native harness image, for the
-# architecture this host's Podman runs (an Apple Silicon Mac's machine is
-# arm64). Point `[harness] native_binary` at the path it prints, then run
-# `tracon setup`: for a node whose own version has no release yet.
+# A static Linux `tracon-agent` for the architecture this host's Podman runs,
+# for `just bundle <arch> --agent <path>`: a harness bundle for a node whose
+# own version has no release yet.
 native-agent:
     #!/usr/bin/env sh
     set -e
@@ -127,7 +123,6 @@ native-agent:
     rustup target add "$target"
     cargo zigbuild --release --target "$target" -p tracon-agent
     file "target/$target/release/tracon-agent"
-    echo "native_binary = \"$(pwd)/target/$target/release/tracon-agent\""
 
 # The desktop bundle (the AppImage here, the .dmg on a Mac) with the node
 # carried inside it as a sidecar, built in the same container as `wrapper`

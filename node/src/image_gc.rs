@@ -151,10 +151,11 @@ pub struct Knowledge {
     /// own.
     pub bases_are_ours: bool,
     pub kept: Vec<Kept>,
-    /// Sessions run from the bundle on the base (`sandbox_images`), so harness
-    /// images and layers over repository images serve nothing.
+    /// Sessions run from the bundle on the base (Podman, Apple, Kubernetes
+    /// over the protocol), so harness images and layers over repository
+    /// images serve nothing.
     pub bundled: bool,
-    /// The harness images' repositories (and, under tunnels, the gateway's).
+    /// The harness images' repositories, and the old gateway's.
     pub legacy_repositories: Vec<String>,
     pub now_ms: i64,
     /// Remove legacy images too.
@@ -496,13 +497,13 @@ fn judge(
         Class::Dangling => remove("a later build of this node's took its tag"),
         Class::Legacy if !k.bundled => keep(
             class,
-            "harness images run sessions while [runtime.podman] sandbox_images is off",
+            "harness images run sessions on a pod-hosted node off the sandbox protocol",
         ),
         Class::Legacy if !k.legacy => keep(
             class,
-            "unused with sandbox_images; removed only with --legacy",
+            "unused now sessions run from the bundle; removed only with --legacy",
         ),
-        Class::Legacy => remove("unused with sandbox_images"),
+        Class::Legacy => remove("unused now sessions run from the bundle"),
         Class::Unowned => keep(class, "not this node's"),
     }
 }
