@@ -749,9 +749,14 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     manager.record_egress_refusals();
     // Off unless `[digitalocean]` names a credential and `[placement]
     // digitalocean` is not `off`.
-    if let Err(error) =
-        crate::provider::digitalocean::runtime::DoRuntime::start(&cfg, broker.clone(), &node_id)
-            .await
+    if let Err(error) = crate::provider::digitalocean::runtime::DoRuntime::start(
+        &cfg,
+        broker.clone(),
+        &node_id,
+        backend.clone(),
+        store.clone(),
+    )
+    .await
     {
         tracing::error!(%error, "the DigitalOcean sandbox provider did not start");
     }

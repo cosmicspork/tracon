@@ -9,6 +9,12 @@
 //! registers the template. One per local image digest and what goes into it:
 //! the template is named from both (`super::templates`), so nothing is built
 //! or pushed again for an image that already has one.
+//!
+//! A Podman node builds it locally and pushes it with the API token. A
+//! Kubernetes node has no image store of its own: its BuildKit
+//! (`[runtime.kubernetes.builder]`) builds it from the same context and
+//! pushes it with the builder's credential, so `registry` there must be the
+//! builder's ([`build_and_push_with`]).
 
 use std::path::{Path, PathBuf};
 
@@ -177,6 +183,70 @@ pub async fn build_and_push(
     Ok(format!("{repository}@{digest}"))
 }
 
+/// The Containerfile with `from` as its base's default: a builder that takes
+/// no build arguments (`ImageBuild` has none) builds on it all the same.
+pub fn containerfile_from(from: &str) -> Result<String, String> {
+    crate::boundary::registry::Reference::parse(from)
+        .map_err(|e| format!("{from} is not an image reference: {e}"))?;
+    let file = CONTAINERFILE.replacen("ARG BASE\n", &format!("ARG BASE={from}\n"), 1);
+    match file != CONTAINERFILE {
+        true => Ok(file),
+        false => Err("containers/do-sandbox/Containerfile declares no ARG BASE".into()),
+    }
+}
+
+/// Build `from` + the bundles + the service on `builder`, which pushes it
+/// to its own registry, and return it by digest,
+/// `<registry>/<prefix>-do-sandbox@sha256:…`. Refused unless `registry` is
+/// that one: the builder would otherwise move the tag into its own, where
+/// the runtime is not told to look.
+pub async fn build_and_push_with(
+    builder: &dyn crate::boundary::ImageBuilder,
+    from: &str,
+    contents: &Contents<'_>,
+    registry: &str,
+    prefix: &str,
+) -> Result<String, String> {
+    let tag = tag_for(registry, prefix, from)?;
+    let pushes_to = builder
+        .registry()
+        .ok_or("this node's builder pushes to no registry")?;
+    let repository = tag.rsplit_once(':').map(|(r, _)| r).unwrap_or(&tag);
+    if !repository.starts_with(&format!("{}/", pushes_to.trim_end_matches('/'))) {
+        return Err(format!(
+            "digitalocean.registry {registry} is not the builder's registry {pushes_to}, \
+             which is where it pushes"
+        ));
+    }
+    let containerfile = containerfile_from(from)?;
+    // On the builder's scratch (a pod's state volume), not a small /tmp.
+    let scratch = builder.scratch_dir().unwrap_or_else(std::env::temp_dir);
+    std::fs::create_dir_all(&scratch).map_err(|e| format!("{}: {e}", scratch.display()))?;
+    let dir = tempfile::tempdir_in(&scratch).map_err(|e| format!("{}: {e}", scratch.display()))?;
+    let context = dir.path().join("context");
+    stage(&context, contents).map_err(|e| format!("stage the template source: {e}"))?;
+    let file = context.join("Containerfile");
+    std::fs::write(&file, containerfile).map_err(|e| format!("stage the template source: {e}"))?;
+    let built = builder
+        .build(crate::boundary::ImageBuild {
+            tag: &tag,
+            containerfile: &file,
+            context: &context,
+            labels: &[],
+            timeout: crate::repo_image::BUILD_TIMEOUT,
+        })
+        .await
+        .map_err(|failure| format!("build the template source: {}", failure.error))?;
+    super::templates::digest_of(&built.image)?;
+    match built.image.strip_prefix(repository) {
+        Some(rest) if rest.starts_with('@') => Ok(built.image),
+        _ => Err(format!(
+            "the builder pushed {} rather than under {repository}",
+            built.image
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,5 +323,155 @@ mod tests {
             std::fs::read_to_string(context.join("run")).unwrap(),
             RUN_SCRIPT
         );
+    }
+
+    /// A builder that records what it was given, as BuildKit would see it,
+    /// and says it pushed under the tag's name.
+    struct Recording {
+        registry: String,
+        scratch: PathBuf,
+        seen: std::sync::Mutex<Option<Seen>>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct Seen {
+        tag: String,
+        containerfile: String,
+        context: PathBuf,
+        files: Vec<String>,
+    }
+
+    const PUSHED: &str = "sha256:5555555555555555666666666666666666666666666666666666666666666666";
+
+    #[async_trait::async_trait]
+    impl crate::boundary::ImageBuilder for Recording {
+        async fn build(
+            &self,
+            build: crate::boundary::ImageBuild<'_>,
+        ) -> Result<crate::boundary::BuiltImage, crate::boundary::BuildFailure> {
+            let mut files = files_under(build.context);
+            files.sort();
+            *self.seen.lock().unwrap() = Some(Seen {
+                tag: build.tag.to_string(),
+                containerfile: std::fs::read_to_string(build.containerfile).unwrap(),
+                context: build.context.to_path_buf(),
+                files,
+            });
+            let name = build.tag.rsplit_once(':').unwrap().0;
+            Ok(crate::boundary::BuiltImage {
+                image: format!("{name}@{PUSHED}"),
+                log_tail: String::new(),
+            })
+        }
+        async fn exists(&self, _image: &str) -> bool {
+            false
+        }
+        async fn identity(&self, _image: &str) -> Option<String> {
+            None
+        }
+        async fn remove(&self, _image: &str) {}
+        fn scratch_dir(&self) -> Option<PathBuf> {
+            Some(self.scratch.clone())
+        }
+        fn registry(&self) -> Option<String> {
+            Some(self.registry.clone())
+        }
+    }
+
+    fn files_under(root: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                match path.is_dir() {
+                    true => pending.push(path),
+                    false => out.push(
+                        path.strip_prefix(root)
+                            .unwrap()
+                            .to_string_lossy()
+                            .into_owned(),
+                    ),
+                }
+            }
+        }
+        out
+    }
+
+    /// A Kubernetes node's BuildKit gets the context Podman would, staged on
+    /// its scratch, with the base as the Containerfile's default since it
+    /// takes no build arguments; the image comes back by the digest it
+    /// pushed. Another registry than the builder's is refused unbuilt.
+    #[tokio::test]
+    async fn a_builder_of_the_nodes_builds_and_pushes_the_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = dir.path().join("b");
+        std::fs::create_dir_all(bundle.join("bin")).unwrap();
+        std::fs::write(bundle.join("bin/tracon-sandbox"), "x").unwrap();
+        let browser = dir.path().join("browser");
+        std::fs::create_dir_all(&browser).unwrap();
+        std::fs::write(browser.join("run"), "#!/bin/sh\n").unwrap();
+        let builder = Recording {
+            registry: "registry.digitalocean.com/acme".into(),
+            scratch: dir.path().join("state/tmp"),
+            seen: Default::default(),
+        };
+        let services = [(browser, "/opt/tracon-services/browser".to_string())];
+        let contents = Contents {
+            bundle: &bundle,
+            services: &services,
+        };
+        let pushed = build_and_push_with(
+            &builder,
+            FROM,
+            &contents,
+            "registry.digitalocean.com/acme/",
+            "tracon",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            pushed,
+            format!("registry.digitalocean.com/acme/tracon-do-sandbox@{PUSHED}")
+        );
+        let seen = builder.seen.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            seen.tag,
+            "registry.digitalocean.com/acme/tracon-do-sandbox:aaaaaaaaaaaaaaaa"
+        );
+        assert!(seen.containerfile.contains(&format!("ARG BASE={FROM}\n")));
+        assert!(seen.containerfile.contains("FROM ${BASE}"));
+        assert!(seen.context.starts_with(dir.path().join("state/tmp")));
+        for file in ["bundle/bin/tracon-sandbox", "services/browser/run", "run"] {
+            assert!(seen.files.contains(&file.to_string()), "{:?}", seen.files);
+        }
+        // The staging went with the build.
+        assert!(!seen.context.exists());
+
+        *builder.seen.lock().unwrap() = None;
+        let refused = build_and_push_with(
+            &builder,
+            FROM,
+            &contents,
+            "registry.digitalocean.com/other",
+            "tracon",
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            refused.contains("is not the builder's registry"),
+            "{refused}"
+        );
+        assert!(builder.seen.lock().unwrap().is_none());
+    }
+
+    /// A template's name hashes the Containerfile as it is kept: the base's
+    /// default is only ever written into a builder's copy.
+    #[test]
+    fn the_base_is_the_containerfiles_default_for_a_builder() {
+        let file = containerfile_from(FROM).unwrap();
+        assert_eq!(file.matches("ARG BASE=").count(), 1);
+        assert!(CONTAINERFILE.contains("ARG BASE\n"));
+        assert!(containerfile_from("not a reference\nRUN x").is_err());
     }
 }

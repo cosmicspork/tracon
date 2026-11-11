@@ -9,7 +9,8 @@
 //! (`[digitalocean] image`, used for every session), or one the node builds
 //! from its own image, the harness bundle it verified and the catalogue's
 //! service bundles it holds, and pushes to the operator's registry
-//! (`[digitalocean] registry`, see [`super::images`]). A built template is
+//! (`[digitalocean] registry`, see [`super::images`]), with Podman or, on
+//! Kubernetes, BuildKit ([`Templates::with_builder`]). A built template is
 //! named for everything it was built from, not the image alone: a release
 //! moves the harness bundle, and a new browser bundle or a change to the
 //! template's own recipe moves what the sandbox runs, so each makes a new
@@ -27,11 +28,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
+use crate::boundary::ImageBuilder;
 use crate::do_harness::{Client, DoError, Template, TemplateStatus};
 
 /// Where one image's template stands.
@@ -176,6 +178,9 @@ pub struct Templates {
     /// The last template seen ready for each image, by the image's digest:
     /// what its sandboxes start from while a newer one builds.
     ready: Mutex<HashMap<String, Known>>,
+    /// What builds and pushes a built source where the node's own Podman
+    /// does not: a Kubernetes node's BuildKit.
+    builder: Option<Arc<dyn ImageBuilder>>,
 }
 
 impl Templates {
@@ -194,7 +199,14 @@ impl Templates {
             shared: super::shared::Shared::in_memory(),
             states: Mutex::new(HashMap::new()),
             ready: Mutex::new(HashMap::new()),
+            builder: None,
         })
+    }
+
+    /// Build and push each built source on `builder` rather than Podman.
+    pub fn with_builder(mut self, builder: Arc<dyn ImageBuilder>) -> Self {
+        self.builder = Some(builder);
+        self
     }
 
     /// Keep what peers asked for in `shared` (a builder's file).
@@ -447,17 +459,29 @@ impl Templates {
                         bundle,
                         services,
                     } => {
-                        super::images::build_and_push(
-                            image,
-                            &super::images::Contents {
-                                bundle,
-                                services: &present(services),
-                            },
-                            registry,
-                            prefix,
-                            token,
-                        )
-                        .await
+                        let services = present(services);
+                        let contents = super::images::Contents {
+                            bundle,
+                            services: &services,
+                        };
+                        match &self.builder {
+                            Some(builder) => {
+                                super::images::build_and_push_with(
+                                    builder.as_ref(),
+                                    image,
+                                    &contents,
+                                    registry,
+                                    prefix,
+                                )
+                                .await
+                            }
+                            None => {
+                                super::images::build_and_push(
+                                    image, &contents, registry, prefix, token,
+                                )
+                                .await
+                            }
+                        }
                     }
                 };
                 let source = match source {

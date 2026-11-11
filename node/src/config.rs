@@ -3462,7 +3462,7 @@ impl Config {
         crate::provider::digitalocean::validate(
             &config.digitalocean,
             &config.mesh,
-            config.runtime.kind == RuntimeKind::Podman,
+            &crate::provider::digitalocean::SourceBuilder::of(&config),
         )
         .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_services(&config.service)

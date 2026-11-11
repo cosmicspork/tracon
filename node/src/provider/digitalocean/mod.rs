@@ -32,8 +32,9 @@
 //!   else that front serves.
 //!
 //! Nothing on this provider is mounted from the node: a session's trees go
-//! over the files channel and its gateways through tunnels, as a Podman or
-//! Apple sandbox's do locally. The
+//! over the files channel and its gateways through tunnels, as the node's
+//! own sandboxes' do over the protocol (Podman, Apple, or Kubernetes with
+//! `sandbox_protocol`). The
 //! sandbox is otherwise the same as a local one: the supervisor becomes the
 //! stock base's user before it starts anything ([`bootstrap::RunAs`]), every
 //! process gets the environment a local sandbox's image or container would
@@ -95,8 +96,10 @@ pub struct Settings {
     /// Where the node pushes the template sources it builds itself: each of
     /// its own sandbox images (the pinned base, a repository's prepared
     /// snapshot) with the bundle it verified and the service bundles it
-    /// holds. DigitalOcean's container registry takes the same token. Needs
-    /// a Podman node.
+    /// holds. A Podman node pushes with the API token, which DigitalOcean's
+    /// container registry takes; a Kubernetes node over the sandbox
+    /// protocol builds on its BuildKit and pushes with the builder's
+    /// credential, so it must be `[runtime.kubernetes.builder] registry`.
     pub registry: String,
     /// The runtime's base template the image is rebased onto.
     pub base_template: String,
@@ -118,8 +121,9 @@ pub struct Settings {
     /// Reach the node through the hub relay (`[mesh.sandbox_relay]`).
     pub relay: bool,
     /// Where templates come from: `own` (this node's `image` or `registry`)
-    /// or `peer`, made by a peer with `registry` that builds amd64, which
-    /// is all the runtime runs: for a node that cannot build them (Apple).
+    /// or `peer`, made by a peer with `registry` that builds amd64 (Podman,
+    /// or Kubernetes with BuildKit), which is all the runtime runs: for a
+    /// node that cannot build them (Apple).
     pub templates: TemplateSource,
     /// With `templates = "peer"`, the one peer (by node name or id) to take
     /// templates from; empty for any that builds them. Left out of a saved
@@ -291,12 +295,56 @@ impl Settings {
     }
 }
 
+/// What builds the template sources `[digitalocean] registry` names, on a
+/// node of this runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceBuilder {
+    /// The node's own Podman, pushing with the API token.
+    Podman,
+    /// A Kubernetes node's BuildKit (`[runtime.kubernetes.builder]`),
+    /// pushing to its own registry, named here without a trailing slash.
+    BuildKit(String),
+    /// Nothing here can, and why.
+    None(String),
+}
+
+impl SourceBuilder {
+    pub fn of(cfg: &crate::config::Config) -> Self {
+        use crate::config::RuntimeKind;
+        match cfg.runtime.kind {
+            RuntimeKind::Podman => SourceBuilder::Podman,
+            RuntimeKind::Apple => SourceBuilder::None(
+                "an Apple node cannot build amd64: take templates from a peer \
+                 (digitalocean.templates = \"peer\")"
+                    .into(),
+            ),
+            RuntimeKind::Kubernetes if !crate::boundary::sandboxes_over_protocol(cfg) => {
+                SourceBuilder::None(
+                    "a Kubernetes node builds them only over the sandbox protocol \
+                     ([runtime.kubernetes] sandbox_protocol = true)"
+                        .into(),
+                )
+            }
+            RuntimeKind::Kubernetes => match &cfg.runtime.kubernetes.builder {
+                Some(builder) => SourceBuilder::BuildKit(
+                    builder.registry.trim().trim_end_matches('/').to_string(),
+                ),
+                None => SourceBuilder::None(
+                    "a Kubernetes node builds them on its BuildKit, and \
+                     [runtime.kubernetes.builder] is not configured"
+                        .into(),
+                ),
+            },
+        }
+    }
+}
+
 /// Refuse a `[digitalocean]` block the node could not run sessions with.
 /// One with no credential is not in use and is not checked.
 pub fn validate(
     settings: &Settings,
     mesh: &crate::config::Mesh,
-    podman: bool,
+    builder: &SourceBuilder,
 ) -> Result<(), String> {
     if !settings.is_configured() {
         return Ok(());
@@ -327,14 +375,25 @@ pub fn validate(
             templates::digest_of(&settings.image)
                 .map_err(|e| format!("digitalocean.image: {e}"))?;
         }
-        (true, false) if !podman => {
-            return Err(
-                "digitalocean.registry builds templates from the node's own sandbox \
-                        images, which needs runtime.kind = \"podman\""
-                    .into(),
-            )
-        }
-        (true, false) => {}
+        (true, false) => match builder {
+            SourceBuilder::Podman => {}
+            SourceBuilder::BuildKit(pushes_to)
+                if settings.registry.trim().trim_end_matches('/') == pushes_to => {}
+            SourceBuilder::BuildKit(pushes_to) => {
+                return Err(format!(
+                    "digitalocean.registry {:?} is not [runtime.kubernetes.builder] registry \
+                     {pushes_to:?}: this node's BuildKit builds the templates' sources and \
+                     pushes them there, with its own credential",
+                    settings.registry
+                ))
+            }
+            SourceBuilder::None(why) => {
+                return Err(format!(
+                    "digitalocean.registry builds templates from the node's own sandbox \
+                     images, and {why}"
+                ))
+            }
+        },
         _ => {
             return Err(
                 "name exactly one of digitalocean.image (an image of your own) and \
@@ -1196,8 +1255,10 @@ mod tests {
     #[test]
     fn settings_are_checked_only_when_in_use() {
         let standalone = mesh(false, None);
-        assert!(validate(&Settings::default(), &standalone, false).is_ok());
-        assert!(validate(&settings(), &standalone, false).is_ok());
+        let podman = SourceBuilder::Podman;
+        let none = SourceBuilder::None("no".into());
+        assert!(validate(&Settings::default(), &standalone, &none).is_ok());
+        assert!(validate(&settings(), &standalone, &none).is_ok());
         for bad in [
             Settings {
                 node_addr: "node.example.net:443".into(),
@@ -1224,14 +1285,14 @@ mod tests {
                 ..settings()
             },
         ] {
-            assert!(validate(&bad, &standalone, true).is_err(), "{bad:?}");
+            assert!(validate(&bad, &standalone, &podman).is_err(), "{bad:?}");
         }
         let relayed = Settings {
             relay: true,
             ..settings()
         };
-        assert!(validate(&relayed, &standalone, false).is_err());
-        assert!(validate(&relayed, &mesh(true, None), false).is_ok());
+        assert!(validate(&relayed, &standalone, &none).is_err());
+        assert!(validate(&relayed, &mesh(true, None), &none).is_ok());
         // Through the hub's own URL: the relay on, and a hub to dial.
         let over_hub = Settings {
             relay: true,
@@ -1239,11 +1300,11 @@ mod tests {
             ..settings()
         };
         let hub = Some("https://hub.example.net");
-        assert!(validate(&over_hub, &mesh(true, hub), false).is_ok());
-        assert!(validate(&over_hub, &mesh(false, hub), false).is_err());
-        let no_hub = validate(&over_hub, &mesh(true, None), false).unwrap_err();
+        assert!(validate(&over_hub, &mesh(true, hub), &none).is_ok());
+        assert!(validate(&over_hub, &mesh(false, hub), &none).is_err());
+        let no_hub = validate(&over_hub, &mesh(true, None), &none).unwrap_err();
         assert!(no_hub.contains("hub_url"), "{no_hub}");
-        assert!(validate(&over_hub, &mesh(true, Some("ftp://hub")), false).is_err());
+        assert!(validate(&over_hub, &mesh(true, Some("ftp://hub")), &none).is_err());
         // The node builds its own templates only from its own sandbox
         // images, and only one source is named.
         let built = Settings {
@@ -1251,18 +1312,18 @@ mod tests {
             registry: "registry.digitalocean.com/acme".into(),
             ..settings()
         };
-        assert!(validate(&built, &standalone, false).is_err());
-        assert!(validate(&built, &standalone, true).is_ok());
+        assert!(validate(&built, &standalone, &none).is_err());
+        assert!(validate(&built, &standalone, &podman).is_ok());
         let both = Settings {
             registry: "registry.digitalocean.com/acme".into(),
             ..settings()
         };
-        assert!(validate(&both, &standalone, true).is_err());
+        assert!(validate(&both, &standalone, &podman).is_err());
         let neither = Settings {
             image: String::new(),
             ..settings()
         };
-        assert!(validate(&neither, &standalone, true).is_err());
+        assert!(validate(&neither, &standalone, &podman).is_err());
         // From a peer: neither source of its own, any runtime, and a hub to
         // ask through.
         let peer = Settings {
@@ -1272,15 +1333,15 @@ mod tests {
             ..settings()
         };
         let hub = mesh(false, Some("https://hub.example.net"));
-        assert!(validate(&peer, &hub, false).is_ok());
-        assert!(validate(&peer, &standalone, false).is_err());
+        assert!(validate(&peer, &hub, &none).is_ok());
+        assert!(validate(&peer, &standalone, &none).is_err());
         assert!(validate(
             &Settings {
                 registry: "registry.digitalocean.com/acme".into(),
                 ..peer.clone()
             },
             &hub,
-            true
+            &podman
         )
         .is_err());
         assert!(validate(
@@ -1289,9 +1350,60 @@ mod tests {
                 ..settings()
             },
             &hub,
-            true
+            &podman
         )
         .is_err());
+    }
+
+    /// A Kubernetes node builds templates on its BuildKit, over the sandbox
+    /// protocol, into the builder's own registry; Podman as before, and
+    /// Apple not at all.
+    #[test]
+    fn who_builds_the_templates_is_the_runtimes() {
+        use crate::config::{Config, KubeBuilder, RuntimeKind};
+        let built = Settings {
+            image: String::new(),
+            registry: "registry.digitalocean.com/cosmicspork/".into(),
+            ..settings()
+        };
+        let standalone = mesh(false, None);
+        let mut cfg = Config::default();
+        assert_eq!(SourceBuilder::of(&cfg), SourceBuilder::Podman);
+        assert!(validate(&built, &standalone, &SourceBuilder::of(&cfg)).is_ok());
+
+        cfg.runtime.kind = RuntimeKind::Apple;
+        let apple = validate(&built, &standalone, &SourceBuilder::of(&cfg)).unwrap_err();
+        assert!(apple.contains("templates = \"peer\""), "{apple}");
+        // Its own image, or a peer's, on any runtime.
+        assert!(validate(&settings(), &standalone, &SourceBuilder::of(&cfg)).is_ok());
+
+        cfg.runtime.kind = RuntimeKind::Kubernetes;
+        let off = validate(&built, &standalone, &SourceBuilder::of(&cfg)).unwrap_err();
+        assert!(off.contains("sandbox_protocol"), "{off}");
+        cfg.runtime.kubernetes.sandbox_protocol = true;
+        let unbuilt = validate(&built, &standalone, &SourceBuilder::of(&cfg)).unwrap_err();
+        assert!(
+            unbuilt.contains("[runtime.kubernetes.builder]"),
+            "{unbuilt}"
+        );
+        cfg.runtime.kubernetes.builder = Some(KubeBuilder {
+            registry: "registry.digitalocean.com/cosmicspork".into(),
+            ..Default::default()
+        });
+        assert_eq!(
+            SourceBuilder::of(&cfg),
+            SourceBuilder::BuildKit("registry.digitalocean.com/cosmicspork".into())
+        );
+        assert!(validate(&built, &standalone, &SourceBuilder::of(&cfg)).is_ok());
+        let elsewhere = Settings {
+            registry: "registry.digitalocean.com/acme".into(),
+            ..built.clone()
+        };
+        let mismatch = validate(&elsewhere, &standalone, &SourceBuilder::of(&cfg)).unwrap_err();
+        assert!(
+            mismatch.contains("is not [runtime.kubernetes.builder] registry"),
+            "{mismatch}"
+        );
     }
 
     #[test]
