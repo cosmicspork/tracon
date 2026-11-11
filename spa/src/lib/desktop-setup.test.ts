@@ -44,7 +44,7 @@ test('stopped and unaskable services both block setup with distinct recovery', (
   expect(stopped.services.command).toBe('container system start --enable-kernel-install')
   expect(stopped.services.reason).toBe('apiserver is not running')
   const failed = byId({ ...fresh, services: 'error', services_error: 'permission denied' })
-  expect(failed.services.detail).toContain('Could not ask')
+  expect(failed.services.detail).toContain('too old or broken')
   expect(failed.services.command).toBe('container system status')
   expect(blocked(setupSteps({ ...fresh, services: 'stopped' }))).toBe(true)
   expect(blocked(setupSteps({ ...fresh, services: 'error' }))).toBe(true)

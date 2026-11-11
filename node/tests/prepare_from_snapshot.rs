@@ -202,7 +202,7 @@ async fn a_session_at_its_snapshots_commit_skips_prepare_and_another_prepares_on
         format!("[boundary]\nresource_prefix = \"{PREFIX}\"\n"),
     )
     .unwrap();
-    let mut cfg = Config::load();
+    let mut cfg = Config::load().unwrap();
     assert_eq!(tracon::config::resource_prefix(), PREFIX);
 
     let base = std::env::var("TRACON_SANDBOX_BASE").expect("TRACON_SANDBOX_BASE");

@@ -685,28 +685,38 @@ pub(crate) fn prompt(text: &str, ops: &[Op]) -> Result<(Vec<Change>, String), Re
         &Config::config_path(),
         text,
         ops,
+        crate::config::HostRules::here(),
         super::config_prompt::summarize,
     )
 }
 
-/// [`prompt`], in `budget` characters of the prompt's line: what is left of
-/// one once a peer's `On <peer>: ` has taken its share. `file` is what a
-/// refusal names the text: the peer's file, not this node's.
+/// [`prompt`] for a peer's file, in `budget` characters of the prompt's
+/// line: what is left of one once a peer's `On <peer>: ` has taken its
+/// share. `file` is what a refusal names the text: the peer's file, not this
+/// node's. `host` is the peer's rules, never this node's.
 fn prompt_within(
     file: &std::path::Path,
     text: &str,
     ops: &[Op],
+    host: crate::config::HostRules,
     budget: usize,
 ) -> Result<(Vec<Change>, String), Refused> {
-    prompt_with(file, text, ops, |before, after, effective, changes| {
-        super::config_prompt::summarize_within(before, after, effective, changes, budget)
-    })
+    prompt_with(
+        file,
+        text,
+        ops,
+        host,
+        |before, after, effective, changes| {
+            super::config_prompt::summarize_within(before, after, effective, changes, budget)
+        },
+    )
 }
 
 fn prompt_with(
     file: &std::path::Path,
     text: &str,
     ops: &[Op],
+    host: crate::config::HostRules,
     summarize: impl FnOnce(
         &toml::Table,
         &toml::Table,
@@ -714,9 +724,9 @@ fn prompt_with(
         &[Change],
     ) -> Result<String, String>,
 ) -> Result<(Vec<Change>, String), Refused> {
-    let seen = edit::preview_of(file, text, ops).map_err(edit_refusal)?;
+    let seen = edit::preview_of(file, text, ops, host).map_err(edit_refusal)?;
     let parse = |t: &str| toml::from_str::<toml::Table>(t).unwrap_or_default();
-    let effective = edit::preview_of(file, text, &[])
+    let effective = edit::preview_of(file, text, &[], host)
         .ok()
         .and_then(|now| toml::Table::try_from(&now.config).ok())
         .unwrap_or_default();
@@ -1089,6 +1099,16 @@ pub async fn get_node_config(
     Ok(Json(with_node(v, &s, &node_id)))
 }
 
+/// The rules a peer's `node.toml` is read under here: the runtime kind the
+/// peer reports it runs (its `effective` table, which its own host settled),
+/// for a file that names none, and none of this host's own.
+fn peer_rules(read: &Value) -> crate::config::HostRules {
+    let runs = read["effective"]["runtime"]["kind"]
+        .as_str()
+        .and_then(|kind| serde_json::from_value(json!(kind)).ok());
+    crate::config::HostRules::peer(runs)
+}
+
 /// `PATCH /api/nodes/{id}/config`: edit that node's `node.toml`, the body
 /// as `PATCH /api/config` takes it.
 ///
@@ -1140,7 +1160,13 @@ pub async fn patch_node_config(
         "node.toml on {}",
         super::peer_admin::peer_label(&s, &node_id)
     );
-    let (changes, line) = prompt_within(std::path::Path::new(&file), text, &ops, budget)?;
+    let (changes, line) = prompt_within(
+        std::path::Path::new(&file),
+        text,
+        &ops,
+        peer_rules(&current),
+        budget,
+    )?;
     let errors = check_changes(&changes, Editor::Peer);
     if !errors.is_empty() {
         return Err(refused_keys(&errors));
@@ -1222,6 +1248,38 @@ mod tests {
         let errors = ops_of(&bad).err().unwrap();
         assert_eq!(errors.len(), 2);
         assert_eq!(errors[0].key, "ops[0]");
+    }
+
+    /// A peer's file is read under that peer's rules: the kind it reports
+    /// it runs, and nothing refused for this host's sake. A Mac checking an
+    /// edit to a Linux peer whose file says `kind = "podman"` passes it on.
+    #[test]
+    fn a_peers_file_is_read_under_its_own_rules_not_this_hosts() {
+        use crate::config::{HostRules, RuntimeKind};
+        let file = std::path::Path::new("node.toml on peer");
+        let text = "[runtime]\nkind = \"podman\"\n";
+        let ops = [op_set("review.max_files", toml::Value::Integer(3))];
+        let mac = HostRules {
+            default_kind: Some(RuntimeKind::Apple),
+            mac: true,
+        };
+        // This host's rules, were they applied, would refuse it.
+        assert!(edit::preview_of(file, text, &ops, mac).is_err());
+        let linux = json!({"effective": {"runtime": {"kind": "podman"}}});
+        assert_eq!(
+            peer_rules(&linux),
+            HostRules::peer(Some(RuntimeKind::Podman))
+        );
+        let Ok((changes, _)) = prompt_within(file, text, &ops, peer_rules(&linux), 400) else {
+            panic!("a Linux peer's Podman file was refused here");
+        };
+        assert_eq!(changes.len(), 1);
+        // A Mac peer's file that names no kind runs Apple there.
+        let apple = json!({"effective": {"runtime": {"kind": "apple"}}});
+        let seen = edit::preview_of(file, "", &[], peer_rules(&apple)).unwrap();
+        assert_eq!(seen.config.runtime.kind, RuntimeKind::Apple);
+        // A peer that says nothing: the file alone.
+        assert_eq!(peer_rules(&json!({})), HostRules::peer(None));
     }
 
     fn op_set(key: &str, value: toml::Value) -> Op {

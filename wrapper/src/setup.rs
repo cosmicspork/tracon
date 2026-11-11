@@ -80,39 +80,75 @@ fn find_container() -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// `container system status`: zero when its services run. A non-zero exit
-/// is them stopped, with what it said; a CLI that will not run is an error.
+/// How long `container system status` may take before it is taken as
+/// broken: it asks a local service, which answers at once or not at all.
+const STATUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// `container system status`: zero when its services run, and "not
+/// running" or "not registered" when they are stopped. Anything else (a CLI
+/// that does not know the subcommand, one that crashed or hung) is an
+/// error, with what it said: starting the services would not fix it.
 async fn services_state(container: &Path) -> (&'static str, Option<String>) {
-    let out = match tokio::process::Command::new(container)
+    let run = tokio::process::Command::new(container)
         .args(["system", "status"])
         .stdin(std::process::Stdio::null())
-        .output()
-        .await
-    {
-        Ok(out) => out,
-        Err(e) => {
+        .kill_on_drop(true)
+        .output();
+    let out = match tokio::time::timeout(STATUS_TIMEOUT, run).await {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => {
             return (
                 "error",
                 Some(format!("Could not run `container system status`: {e}")),
             )
         }
+        Err(_) => {
+            return (
+                "error",
+                Some(format!(
+                    "`container system status` did not answer within {} seconds.",
+                    STATUS_TIMEOUT.as_secs()
+                )),
+            )
+        }
     };
-    services_state_from(out.status.success(), &out.stdout, &out.stderr)
+    services_state_from(out.status.code(), &out.stdout, &out.stderr)
 }
 
 fn services_state_from(
-    success: bool,
+    code: Option<i32>,
     stdout: &[u8],
     stderr: &[u8],
 ) -> (&'static str, Option<String>) {
-    if success {
+    if code == Some(0) {
         return ("running", None);
     }
     let said = [stderr, stdout]
         .iter()
         .map(|bytes| String::from_utf8_lossy(bytes).trim().to_string())
         .find(|text| !text.is_empty());
-    ("stopped", said)
+    let stopped = said.as_deref().is_some_and(|text| {
+        let text = text.to_ascii_lowercase();
+        text.contains("not running") || text.contains("not registered")
+    });
+    if code == Some(1) && stopped {
+        return ("stopped", said);
+    }
+    let how = match code {
+        Some(code) => format!("exited with {code}"),
+        None => "was killed by a signal".into(),
+    };
+    let what = match said {
+        Some(said) => format!(": {said}"),
+        None => " and said nothing".into(),
+    };
+    (
+        "error",
+        Some(format!(
+            "`container system status` {how}{what}. The container CLI may be too old or broken; \
+             reinstall its signed package."
+        )),
+    )
 }
 
 /// Why the service cannot be installed yet, if it cannot: the boundary the
@@ -133,11 +169,14 @@ fn boundary_failure(status: &SetupStatus) -> Option<String> {
     }
     match status.services {
         Some("running") => None,
-        _ => Some(
+        Some("stopped") => Some(
             "container's services are not running. Start them with \
              `container system start --enable-kernel-install`, then retry setup."
                 .into(),
         ),
+        _ => Some(status.services_error.clone().unwrap_or_else(|| {
+            "Could not tell whether container's services run. Retry setup.".into()
+        })),
     }
 }
 
@@ -280,18 +319,38 @@ mod tests {
     #[test]
     fn the_services_state_is_what_container_system_status_exits_with() {
         assert_eq!(
-            services_state_from(true, b"apiserver is running", b""),
+            services_state_from(Some(0), b"apiserver is running", b""),
             ("running", None)
         );
         assert_eq!(
-            services_state_from(false, b"", b"apiserver is not running\n"),
+            services_state_from(Some(1), b"", b"apiserver is not running\n"),
             ("stopped", Some("apiserver is not running".into()))
         );
         assert_eq!(
-            services_state_from(false, b"not registered\n", b"  "),
-            ("stopped", Some("not registered".into()))
+            services_state_from(
+                Some(1),
+                b"apiserver is not registered with launchd\n",
+                b"  "
+            ),
+            (
+                "stopped",
+                Some("apiserver is not registered with launchd".into())
+            )
         );
-        assert_eq!(services_state_from(false, b"", b""), ("stopped", None));
+        // A subcommand it does not know, a crash, or silence: not something
+        // starting the services fixes.
+        let (state, why) = services_state_from(Some(64), b"", b"Error: Unknown subcommand\n");
+        assert_eq!(state, "error");
+        let why = why.unwrap();
+        assert!(
+            why.contains("exited with 64: Error: Unknown subcommand"),
+            "{why}"
+        );
+        assert!(why.contains("too old or broken"), "{why}");
+        let (state, why) = services_state_from(None, b"", b"");
+        assert_eq!(state, "error");
+        assert!(why.unwrap().contains("killed by a signal and said nothing"));
+        assert_eq!(services_state_from(Some(1), b"", b"").0, "error");
     }
 
     fn mac() -> SetupStatus {
@@ -325,7 +384,10 @@ mod tests {
             .unwrap()
             .contains("container system start --enable-kernel-install"));
         status.services = Some("error");
-        assert!(boundary_failure(&status).is_some());
+        status.services_error = Some("the CLI may be too old or broken".into());
+        let failure = boundary_failure(&status).unwrap();
+        assert!(failure.contains("too old or broken"), "{failure}");
+        assert!(!failure.contains("container system start"), "{failure}");
         status.container = None;
         status.services = None;
         assert!(boundary_failure(&status)

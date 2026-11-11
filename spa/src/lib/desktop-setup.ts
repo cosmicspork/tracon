@@ -134,7 +134,7 @@ function containerSteps(s: SetupStatus): SetupStep[] {
             title: 'container services',
             done: false,
             blocking: true,
-            detail: 'Could not ask whether they are running. Resolve the problem and retry.',
+            detail: 'Could not tell whether they run: the container CLI may be too old or broken. Resolve it, then retry.',
             reason: s.services_error ?? undefined,
             command: 'container system status',
           }

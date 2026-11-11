@@ -1407,7 +1407,7 @@ tools = []                          # the only tools a session may use; empty is
 podman = ""                         # empty: found on PATH, then the usual install locations
                                     # network, subnet, gateway_* and harness_image serve only the
                                     # deprecated paths ([runtime.podman] sandbox_tunnels or
-                                    # sandbox_images off) and Podman on a Mac
+                                    # sandbox_images off)
 network = "tracon-int"
 subnet = "10.89.0.0/24"
 gateway_ip = "10.89.0.2"
@@ -1419,7 +1419,6 @@ harness_image = "localhost/tracon-harness-claude"  # the image for [harness] id;
                                     # end in [harness] id), which setup builds too. Unused on
                                     # the sandbox images, where every harness runs from the
                                     # bundle on the base
-start_machine = true                # macOS: start the podman machine when it is stopped
 auto_reconcile = true               # set up the boundary at start and when its definitions
                                     # change; false leaves it to `tracon setup`
 resource_prefix = "tracon"          # every runtime volume and container this node names starts
@@ -2492,7 +2491,7 @@ named from `node.toml`, so a scratch node with its own values shares none of the
 one's harness state, images, probes or sockets, and neither node's `tracon gc` lists the
 other's volumes. On Linux its sandboxes have no network and no gateway of their own, so a
 prefix of its own is all the boundary needs. A node with the sandbox switches off
-(deprecated), or Podman on a Mac, also names its own `network`, `subnet`, `gateway_ip`,
+(deprecated) also names its own `network`, `subnet`, `gateway_ip`,
 `gateway_container`, `gateway_image` and `harness_image` under `[boundary]` (say
 `scratch-int`, `10.89.7.0/24`, `10.89.7.2`, `scratch-gw`, `localhost/scratch-gateway`
 and `localhost/scratch-harness-claude`), since the gateway, its user service and the

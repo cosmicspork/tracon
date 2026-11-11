@@ -24,7 +24,7 @@ use std::sync::Arc;
 use sha2::{Digest, Sha256};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, TableLike};
 
-use super::Config;
+use super::{Config, HostRules};
 use crate::config_schema::{self, Apply};
 use crate::store::{config_audit::ConfigAuditRow, Store};
 
@@ -439,9 +439,14 @@ pub fn snapshot_at(path: &Path) -> Result<Snapshot, EditError> {
 /// harness is migrated in memory, as a load migrates it (the file itself is
 /// rewritten by the next start, not by a reader).
 pub fn load_text(text: &str, path: &Path) -> Result<Config, String> {
+    load_text_with(text, path, HostRules::here())
+}
+
+/// [`load_text`] under `host`'s rules.
+fn load_text_with(text: &str, path: &Path, host: HostRules) -> Result<Config, String> {
     match crate::legacy::migrate_config(text) {
-        Some(migration) => Config::from_toml(&migration.text, path),
-        None => Config::from_toml(text, path),
+        Some(migration) => Config::from_toml_with(&migration.text, path, host),
+        None => Config::from_toml_with(text, path, host),
     }
 }
 
@@ -537,11 +542,7 @@ pub fn edit_at(
     })?;
     // Checked as a load would see it, so a file still naming the retired
     // harness (migrated at every load) can be edited.
-    let config = match crate::legacy::migrate_config(&next) {
-        Some(migration) => Config::from_toml(&migration.text, path),
-        None => Config::from_toml(&next, path),
-    }
-    .map_err(EditError::Invalid)?;
+    let config = load_text(&next, path).map_err(EditError::Invalid)?;
     let changes = diff(&text, &next);
     check_builder(&config, &changes)?;
     if changes.is_empty() {
@@ -558,11 +559,7 @@ pub fn edit_at(
     // No key may come to name a program, a secret or a directory the path
     // guard refuses. A key that already did is left to the start's warning,
     // so it does not hold up an unrelated edit.
-    let before = match crate::legacy::migrate_config(&text) {
-        Some(migration) => Config::from_toml(&migration.text, path),
-        None => Config::from_toml(&text, path),
-    }
-    .ok();
+    let before = load_text(&text, path).ok();
     let refused = super::path_guard::new_refusals(before.as_ref(), &config);
     if !refused.is_empty() {
         return Err(EditError::Refused(refused));
@@ -623,18 +620,21 @@ pub struct Preview {
 /// Apply `ops` to `text` and load the result with every check a load makes,
 /// without writing anything.
 pub fn preview(text: &str, ops: &[Op]) -> Result<Preview, EditError> {
-    preview_of(&Config::config_path(), text, ops)
+    preview_of(&Config::config_path(), text, ops, HostRules::here())
 }
 
 /// [`preview`], for the text of a file other than this node's own: `file`
-/// is what a refusal names it, such as a peer's `node.toml`.
-pub fn preview_of(file: &Path, text: &str, ops: &[Op]) -> Result<Preview, EditError> {
+/// is what a refusal names it, such as a peer's `node.toml`, and `host` the
+/// rules of the host it is for ([`HostRules::peer`] for a peer's, so this
+/// host's own never decide another's file).
+pub fn preview_of(
+    file: &Path,
+    text: &str,
+    ops: &[Op],
+    host: HostRules,
+) -> Result<Preview, EditError> {
     let next = apply_to_text(text, ops)?;
-    let config = match crate::legacy::migrate_config(&next) {
-        Some(migration) => Config::from_toml(&migration.text, file),
-        None => Config::from_toml(&next, file),
-    }
-    .map_err(EditError::Invalid)?;
+    let config = load_text_with(&next, file, host).map_err(EditError::Invalid)?;
     let changes = diff(text, &next);
     check_builder(&config, &changes)?;
     Ok(Preview {

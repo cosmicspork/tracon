@@ -337,7 +337,7 @@ pub async fn admit(
         )));
     }
     // The hub must know this node holds what it is about to grant.
-    let own_name = crate::config::Config::load().node_name;
+    let own_name = crate::config::Config::load().map_err(local)?.node_name;
     sync_own_channels(store, identity, hub_url, &own_name).await?;
     if node_id.eq_ignore_ascii_case(&identity.node_id()) {
         // Extending our own record is the whole job; there is no one to hand
@@ -442,7 +442,7 @@ pub async fn share_with_hub(
                 .into(),
         ));
     }
-    let own_name = crate::config::Config::load().node_name;
+    let own_name = crate::config::Config::load().map_err(local)?.node_name;
     sync_own_channels(store, identity, hub_url, &own_name).await?;
     let chans: Vec<String> = channels
         .iter()

@@ -21,12 +21,20 @@
 
   const message = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
+  // One look at a time: a slow `container system status` must not let the
+  // timer stack another on top of it.
+  let refreshing = false
+
   async function refresh() {
+    if (refreshing) return
+    refreshing = true
     error = null
     try {
       status = await setupStatus()
     } catch (e) {
       error = message(e)
+    } finally {
+      refreshing = false
     }
   }
 

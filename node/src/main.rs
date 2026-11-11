@@ -881,7 +881,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Policy(PolicyCommand::Push) => {
-            let cfg = config::Config::load();
+            let cfg = node_config()?;
             let hub = cfg
                 .mesh
                 .hub_url
@@ -1054,7 +1054,7 @@ async fn mesh_command(cmd: MeshCommand) -> Result<()> {
             Ok(())
         }
         MeshCommand::Remove { node_id } => {
-            let cfg = config::Config::load();
+            let cfg = node_config()?;
             let hub = cfg.mesh.hub_url.clone().ok_or_else(|| {
                 anyhow::anyhow!("no hub configured; run tracon mesh init or tracon enroll")
             })?;
@@ -1064,7 +1064,7 @@ async fn mesh_command(cmd: MeshCommand) -> Result<()> {
             Ok(())
         }
         MeshCommand::Members => {
-            let cfg = config::Config::load();
+            let cfg = node_config()?;
             let hub = cfg.mesh.hub_url.clone().ok_or_else(|| {
                 anyhow::anyhow!("no hub configured; run tracon mesh init or tracon enroll")
             })?;
@@ -1088,7 +1088,7 @@ async fn mesh_command(cmd: MeshCommand) -> Result<()> {
         }
         MeshCommand::Invite { channels, ttl, yes } => invite_command(channels, ttl, yes).await,
         MeshCommand::Admit { node_id, channels } => {
-            let cfg = config::Config::load();
+            let cfg = node_config()?;
             let hub = cfg
                 .mesh
                 .hub_url
@@ -1207,6 +1207,14 @@ async fn enroll_command(
     Ok(())
 }
 
+/// This node's configuration, for a command that acts as this node (its
+/// name, its hub, its runtime). A missing `node.toml` is the defaults; one
+/// that is there and does not load is refused with the reason, never
+/// replaced by them.
+fn node_config() -> Result<config::Config> {
+    config::Config::load().map_err(|error| anyhow::anyhow!("node.toml does not load: {error}"))
+}
+
 /// The configuration `setup` and `check-boundary` act on, loaded strictly:
 /// on the defaults a file that does not parse would fall back to, setup could
 /// retire a gateway or harness images the file keeps. A missing file is the
@@ -1219,7 +1227,7 @@ fn boundary_config() -> Result<config::Config> {
 
 async fn invite_command(channels: Vec<String>, ttl: u64, yes: bool) -> Result<()> {
     use tracon::mesh::enroll;
-    let cfg = config::Config::load();
+    let cfg = node_config()?;
     let hub = cfg
         .mesh
         .hub_url
@@ -1297,7 +1305,7 @@ async fn channel_command(cmd: ChannelCommand) -> Result<()> {
             if !hub {
                 anyhow::bail!("only --hub is supported; a node gets channels by enrollment");
             }
-            let cfg = config::Config::load();
+            let cfg = node_config()?;
             let hub_url = cfg
                 .mesh
                 .hub_url
@@ -1310,7 +1318,7 @@ async fn channel_command(cmd: ChannelCommand) -> Result<()> {
         }
         ChannelCommand::Create { name } => {
             let (id, _) = tracon::mesh::identity::load_or_generate()?;
-            let cfg = config::Config::load();
+            let cfg = node_config()?;
             let (created, note) =
                 tracon::mesh::channels::create_and_sync(&store, &id, &name, &cfg).await?;
             if !created.minted {
@@ -1326,7 +1334,7 @@ async fn channel_command(cmd: ChannelCommand) -> Result<()> {
         }
         ChannelCommand::Leave { name, forget_key } => {
             let (id, _) = tracon::mesh::identity::load_or_generate()?;
-            let cfg = config::Config::load();
+            let cfg = node_config()?;
             tracon::mesh::channels::leave(&store, &id, &name, &cfg, forget_key).await?;
             println!("left channel {name}");
             Ok(())
@@ -3305,7 +3313,7 @@ async fn credential_command(cmd: CredentialCommand) -> Result<()> {
                 broker.put(&name, cred.clone());
                 broker.save(&key)?;
             }
-            let cfg = config::Config::load();
+            let cfg = node_config()?;
             let hub = cfg
                 .mesh
                 .hub_url

@@ -158,7 +158,8 @@ it; refused, unreachable, and mismatched nodes are listed with the reason and
 not selectable).
 
 **First run.** On the desktop the app opens on its own setup page until the node
-runs under the user's service manager: podman (and on macOS its machine), the
+runs under the user's service manager: the boundary's runtime (rootless Podman
+on Linux; Apple's `container` and its running services on a Mac), the
 background service, and the CLI, each with the button or the command that does
 it. In the node's interface the composer then carries what stands between it and
 a first session — verify the local runtime boundary, connect a provider, and use

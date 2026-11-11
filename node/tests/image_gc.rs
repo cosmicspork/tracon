@@ -143,7 +143,7 @@ fn claim_resource_prefix() {
         )
         .unwrap();
     }
-    Config::load();
+    Config::load().unwrap();
     assert_eq!(tracon::config::resource_prefix(), PREFIX);
 }
 
