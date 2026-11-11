@@ -4,9 +4,9 @@
 //! A `[[service]]` entry says `bundle = "release"` to run the browser bundle
 //! its node's release attaches (`tracon-browser-<chrome>-<arch>.tar.gz`, from
 //! `scripts/browser-bundle.sh`), rather than a directory the operator
-//! unpacked. Only `browser` is published. Where the node runs services in its
-//! sandboxes (Podman and Apple),
-//! the boundary's converge fetches it into
+//! unpacked. Only `browser` is published. Every runtime runs services in its
+//! sandboxes (Podman and Apple mount the bundle, a Kubernetes node's session
+//! pods copy it in from the node), so the boundary's converge fetches it into
 //! `<state>/bundles/browser/<chrome>/<arch>`, at start and whenever the
 //! definitions move, and removes other Chrome versions.
 //!
@@ -82,35 +82,26 @@ pub fn mounts(cfg: &Config) -> Vec<(PathBuf, String)> {
         .collect()
 }
 
-/// Whether this node runs `[[service]]` bundles in its sandboxes.
-fn runs_in_sandboxes(cfg: &Config) -> bool {
-    matches!(
-        cfg.runtime.kind,
-        crate::config::RuntimeKind::Podman | crate::config::RuntimeKind::Apple
-    )
+/// Each catalogue service's bundle on this host, by the service's name: what
+/// a Kubernetes node serves its sessions' pods to copy in.
+pub fn named(cfg: &Config) -> Vec<(String, PathBuf)> {
+    cfg.service
+        .iter()
+        .filter_map(|service| Some((service.name.clone(), resolve(service)?)))
+        .collect()
 }
 
-/// Whether the node bakes `[[service]]` bundles into the DigitalOcean
-/// templates it builds (`[digitalocean] registry`), where nothing is
-/// mounted.
-fn bakes_for_digitalocean(cfg: &Config) -> bool {
-    crate::provider::digitalocean::runtime::enabled(cfg) && !cfg.digitalocean.registry.is_empty()
-}
-
-/// Whether the node fetches the release's browser bundle: it runs services
-/// in its sandboxes, or bakes them into DigitalOcean's templates, and one
-/// asks for it.
+/// Whether the node fetches the release's browser bundle: one asks for it.
+/// Every runtime runs services in its sandboxes, and a node building
+/// DigitalOcean's templates bakes them in.
 pub fn wanted(cfg: &Config) -> bool {
-    (runs_in_sandboxes(cfg) || bakes_for_digitalocean(cfg)) && cfg.service.iter().any(is_release)
+    cfg.service.iter().any(is_release)
 }
 
-/// The first in-sandbox service bundle that is not here, in words for the
-/// operator; `None` when every one is, or the node runs none. `fetching`:
-/// the node is converging, so the release's is on its way.
+/// The first service bundle that is not here, in words for the operator;
+/// `None` when every one is. `fetching`: the node is converging, so the
+/// release's is on its way.
 pub fn missing(cfg: &Config, fetching: bool) -> Option<String> {
-    if !runs_in_sandboxes(cfg) {
-        return None;
-    }
     for service in cfg.service.iter().filter(|s| s.bundle.is_some()) {
         match resolve(service) {
             Some(dir) if dir.is_dir() => {}
@@ -523,44 +514,31 @@ pub(crate) mod tests {
         assert_eq!(resolve(&service("pg", None)), None);
     }
 
+    /// Every runtime runs services in its sandboxes (a Kubernetes node's
+    /// session pods copy the bundle in from the node), so every node that
+    /// names the release's bundle fetches it.
     #[test]
-    fn only_a_node_running_services_in_its_sandboxes_wants_it() {
+    fn a_node_naming_the_release_bundle_wants_it() {
         let mut cfg = Config {
             service: vec![service("browser", Some("release"))],
             ..Config::default()
         };
-        assert!(wanted(&cfg));
-        cfg.runtime.kind = crate::config::RuntimeKind::Kubernetes;
-        assert!(!wanted(&cfg));
-        assert_eq!(missing(&cfg, false), None);
-        cfg.runtime.kind = crate::config::RuntimeKind::Apple;
-        assert!(wanted(&cfg));
+        for kind in [
+            crate::config::RuntimeKind::Podman,
+            crate::config::RuntimeKind::Apple,
+            crate::config::RuntimeKind::Kubernetes,
+        ] {
+            cfg.runtime.kind = kind;
+            assert!(wanted(&cfg), "{kind:?}");
+        }
         cfg.service = vec![service("browser", Some("/srv/browser"))];
         assert!(!wanted(&cfg), "an explicit bundle is not fetched");
-    }
-
-    /// A node that builds DigitalOcean's templates bakes the browser into
-    /// them, so it fetches the bundle though its own sandboxes run none; its
-    /// own checks do not ask for it.
-    #[test]
-    fn a_node_baking_digitalocean_templates_wants_it() {
-        let mut cfg = Config {
-            service: vec![service("browser", Some("release"))],
-            ..Config::default()
-        };
-        // The node's own sandboxes run no services: a pod-hosted node off
-        // the protocol (in a test, where only the wanting is asked).
-        cfg.runtime.kind = crate::config::RuntimeKind::Kubernetes;
+        assert!(missing(&cfg, false)
+            .unwrap()
+            .contains("\"/srv/browser\" is not a directory"));
+        cfg.service = vec![service("pg", None)];
         assert!(!wanted(&cfg));
-        cfg.digitalocean.credential = "do".into();
-        cfg.digitalocean.registry = "registry.digitalocean.com/acme".into();
-        assert!(!wanted(&cfg), "placement is off");
-        cfg.placement.digitalocean = crate::provider::requirements::DoMode::Overflow;
-        assert!(wanted(&cfg));
         assert_eq!(missing(&cfg, false), None);
-        cfg.digitalocean.registry = String::new();
-        cfg.digitalocean.image = format!("x@sha256:{}", "a".repeat(64));
-        assert!(!wanted(&cfg), "an image of the operator's holds its own");
     }
 
     #[test]

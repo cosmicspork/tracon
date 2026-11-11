@@ -177,12 +177,17 @@ async fn the_node_fetches_its_releases_browser_and_keeps_only_that_chrome() {
     assert!(!fetched.exists());
 }
 
+/// Every runtime runs bundled services in its sandboxes, so only a catalogue
+/// that names no release bundle fetches nothing.
 #[tokio::test]
-async fn a_node_that_runs_no_services_in_its_sandboxes_fetches_nothing() {
+async fn a_node_whose_catalogue_names_no_release_bundle_fetches_nothing() {
     support::state::isolate();
     let (url, asked) = serve(tempfile::tempdir().unwrap().path().to_path_buf()).await;
     let mut cfg = node(&url);
     cfg.runtime.kind = RuntimeKind::Kubernetes;
+    assert!(service_bundle::wanted(&cfg));
+    cfg.service[0].bundle = None;
+    cfg.service[0].image = "browser@sha256:1".into();
     assert!(!service_bundle::wanted(&cfg));
     assert!(!service_bundle::converge(&cfg).await.unwrap());
     assert_eq!(service_bundle::missing(&cfg, false), None);

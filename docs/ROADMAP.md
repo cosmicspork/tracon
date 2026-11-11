@@ -343,8 +343,8 @@ Kept as intent, off the plan until the supported configuration has earned them.
   transfer with Git history fetched from the forge, lineage, fencing, chunked transfers
   past 2 MB, compatibility re-evaluated at the destination); the hub roll-ups. The
   homelab node keeps what exists running.
-- **Kubernetes parity.** A refuse-not-drop egress policy, and service sidecars as pods
-  of their own. Per-client egress grants and the egress ask work there now. What earns it:
+- **Kubernetes parity.** A refuse-not-drop egress policy. Per-client egress grants, the
+  egress ask and bundled services in a session's sandbox work there now. What earns it:
   work left running unattended belongs on an always-on node, which is the homelab
   cluster, not a laptop that sleeps. Deferred until the laptop node is good.
 - **Post-publication follow-through and product metrics.** Recording merge, deployment,

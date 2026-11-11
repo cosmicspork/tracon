@@ -1,9 +1,9 @@
 //! Kubernetes sandboxes over the sandbox protocol (`provider::kubernetes`),
 //! against a fake API and `tracon-sandbox`'s own loop: the fake's "kubelet"
-//! runs each pod the node creates as the pod spec says. Its init container's
-//! part: fetch the bundle from the node's sandbox port and check it against
-//! the digest the spec names. Then the loop, from the environment the spec
-//! gives it, dialling the same port over TCP as a sandbox pod would.
+//! runs each pod the node creates as the pod spec says. Its init containers'
+//! part: fetch each bundle from the node's sandbox port, check it against the
+//! digest the spec names, and unpack it. Then the loop, from the environment
+//! the spec gives it, dialling the same port over TCP as a sandbox pod would.
 //!
 //! The loop reaps every child of its process with `waitpid(-1)`, so this is
 //! one test function in a file of its own (see `protocol_runner.rs`), and a
@@ -64,12 +64,15 @@ fn env_of(pod: &Pod) -> BTreeMap<String, String> {
 struct Kubelet {
     threads: Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>,
     task: tokio::task::JoinHandle<()>,
-    /// What each init container unpacked, by entry name.
-    fetched: Arc<Mutex<Vec<Vec<String>>>>,
+    fetched: Fetched,
 }
 
-/// An init container's fetch: `GET` the bundle, check its digest, list it.
-async fn fetch_bundle(url: &str, sha256: &str) -> Vec<String> {
+/// What each pod's init containers unpacked: by container, its entries.
+type Fetched = Arc<Mutex<Vec<Vec<(String, Vec<String>)>>>>;
+
+/// An init container's fetch: `GET` the bundle, check its digest, unpack it
+/// into `into`, list it.
+async fn fetch_bundle(url: &str, sha256: &str, into: &std::path::Path) -> Vec<String> {
     use sha2::Digest as _;
     use tokio::io::AsyncReadExt as _;
     let rest = url.strip_prefix("http://").unwrap();
@@ -85,6 +88,7 @@ async fn fetch_bundle(url: &str, sha256: &str) -> Vec<String> {
     let at = answer.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
     let body = &answer[at..];
     assert_eq!(hex::encode(sha2::Sha256::digest(body)), sha256);
+    tar::Archive::new(body).unpack(into).unwrap();
     tar::Archive::new(body)
         .entries()
         .unwrap()
@@ -93,32 +97,39 @@ async fn fetch_bundle(url: &str, sha256: &str) -> Vec<String> {
 }
 
 impl Kubelet {
-    fn start(api: KubeApi) -> Self {
+    /// Each pod's bundles are unpacked under `unpacked/<pod>/<container>`.
+    fn start(api: KubeApi, unpacked: std::path::PathBuf) -> Self {
         let threads: Arc<Mutex<Vec<std::thread::JoinHandle<()>>>> = Arc::default();
         let started = threads.clone();
-        let fetched: Arc<Mutex<Vec<Vec<String>>>> = Arc::default();
+        let fetched: Fetched = Arc::default();
         let fetches = fetched.clone();
         let task = tokio::spawn(async move {
             let mut seen = HashSet::new();
             loop {
                 for pod in api.created() {
                     let name = pod.metadata.name.clone().unwrap();
-                    if !seen.insert(name) {
+                    if !seen.insert(name.clone()) {
                         continue;
                     }
-                    let init = &pod.spec.as_ref().unwrap().init_containers.as_ref().unwrap()[0];
-                    let init_env: BTreeMap<String, String> = init
-                        .env
-                        .iter()
-                        .flatten()
-                        .map(|e| (e.name.clone(), e.value.clone().unwrap_or_default()))
-                        .collect();
-                    let unpacked = fetch_bundle(
-                        &init_env["TRACON_BUNDLE_URL"],
-                        &init_env["TRACON_BUNDLE_SHA256"],
-                    )
-                    .await;
-                    fetched.lock().unwrap().push(unpacked);
+                    let mut pod_fetched = Vec::new();
+                    for init in pod.spec.as_ref().unwrap().init_containers.iter().flatten() {
+                        let init_env: BTreeMap<String, String> = init
+                            .env
+                            .iter()
+                            .flatten()
+                            .map(|e| (e.name.clone(), e.value.clone().unwrap_or_default()))
+                            .collect();
+                        let into = unpacked.join(&name).join(&init.name);
+                        std::fs::create_dir_all(&into).unwrap();
+                        let entries = fetch_bundle(
+                            &init_env["TRACON_BUNDLE_URL"],
+                            &init_env["TRACON_BUNDLE_SHA256"],
+                            &into,
+                        )
+                        .await;
+                        pod_fetched.push((init.name.clone(), entries));
+                    }
+                    fetched.lock().unwrap().push(pod_fetched);
                     let env = env_of(&pod);
                     let config = inside::Config::new(
                         Dial::Tcp(env["TRACON_SANDBOX_ADDR"].clone()),
@@ -153,6 +164,8 @@ impl Kubelet {
     }
 }
 
+/// A provider whose bundles are under `bundle`: the node's own at `bundle`,
+/// the catalogue's `web` service's at `web`.
 fn provider(api: &KubeApi, bundle: &std::path::Path) -> KubeSandboxProvider {
     let mut cfg = Config::default();
     cfg.runtime.kind = RuntimeKind::Kubernetes;
@@ -170,6 +183,7 @@ fn provider(api: &KubeApi, bundle: &std::path::Path) -> KubeSandboxProvider {
             listen: "127.0.0.1:0".parse().unwrap(),
             node_namespace: NAMESPACE.into(),
             bundle: bundle.join("bundle"),
+            service_bundles: vec![("web".into(), bundle.join("web"))],
             served_dir: bundle.join("served"),
             ..KubeSandboxOptions::from_config(&cfg, spec)
         },
@@ -183,14 +197,27 @@ async fn kubernetes_sandboxes_over_the_protocol() {
             .pod_ip("127.0.0.1")
             .running(Duration::from_secs(3600)),
     );
-    let kubelet = Kubelet::start(api.clone());
+    let disk = tempfile::tempdir().unwrap();
+    let unpacked = disk.path().join("unpacked");
+    let kubelet = Kubelet::start(api.clone(), unpacked.clone());
     let identity = NodeIdentity::generate().unwrap();
     let server = Arc::new(SandboxServer::new(&identity, ServerOptions::default()).unwrap());
-    let disk = tempfile::tempdir().unwrap();
     // The node's bundle, as it would hold one: here, only a supervisor's
     // name in it, since the loop runs in this process.
     std::fs::create_dir_all(disk.path().join("bundle/bin")).unwrap();
     std::fs::write(disk.path().join("bundle/bin/tracon-sandbox"), "stand-in").unwrap();
+    // A catalogue service's bundle: its `run` serves HTTP on its port.
+    let web_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    std::fs::create_dir_all(disk.path().join("web")).unwrap();
+    std::fs::write(
+        disk.path().join("web/run"),
+        format!("exec python3 -m http.server {web_port} --bind 127.0.0.1\n"),
+    )
+    .unwrap();
     let store = FilesStore::new(disk.path().join("claim"))
         .withholding("tracon-harness-state")
         .keeping_every_volume();
@@ -204,7 +231,8 @@ async fn kubernetes_sandboxes_over_the_protocol() {
         "registry.example/harness:1",
     )
     .with_server(server.clone())
-    .with_files(store.clone());
+    .with_files(store.clone())
+    .with_sandbox_services(true);
 
     // A captured command: its workspace sent in over the files channel, its
     // secret environment over the protocol, its output and exit code back.
@@ -260,10 +288,14 @@ async fn kubernetes_sandboxes_over_the_protocol() {
     );
     assert!(api.secret_requests().is_empty());
     assert!(api.live().is_empty(), "the pod outlived its run");
-    // Its init container fetched the node's own bundle, as it checked out.
+    // Its init container fetched the node's own bundle, as it checked out,
+    // and no service's: only a session starts one.
     assert_eq!(
         kubelet.fetched.lock().unwrap()[0],
-        ["bin", "bin/tracon-sandbox"]
+        [(
+            "bundle".to_string(),
+            vec!["bin".to_string(), "bin/tracon-sandbox".to_string()]
+        )]
     );
 
     // Its token was spent by the sandbox's first hello: presented again, to
@@ -304,13 +336,58 @@ async fn kubernetes_sandboxes_over_the_protocol() {
         lines.next_line().await.unwrap().as_deref(),
         Some("over the protocol")
     );
-    drop(stdin);
-    assert_eq!(spawned.done.await.unwrap(), 0);
     let session = api.created().last().cloned().unwrap();
-    let labels = session.metadata.labels.unwrap();
+    let labels = session.metadata.labels.clone().unwrap();
     assert_eq!(labels["tracon.dev/kind"], "session");
     assert_eq!(labels["tracon.dev/sizing"], "session");
     assert!(api.secret_requests().is_empty());
+    // A session's pod copied the service's bundle in beside the node's.
+    let fetched = kubelet.fetched.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(
+        fetched[1],
+        ("svc-web".to_string(), vec!["run".to_string()]),
+        "{fetched:?}"
+    );
+
+    // The service, started in the session's sandbox from its bundle, under
+    // the sandbox's supervisor, answers on the sandbox's loopback.
+    let web = tracon::runner::Sidecar {
+        name: tracon::runner::sidecar_name("tracon-h-1", "web"),
+        session_container: "tracon-h-1".into(),
+        image: String::new(),
+        command: Vec::new(),
+        port: web_port,
+        ready: None,
+        in_sandbox: Some(tracon::runner::InSandbox {
+            service: "web".into(),
+            // The supervisor would run `/opt/tracon-services/web/run`; this
+            // sandbox's paths are the test's.
+            argv: vec![
+                "sh".into(),
+                unpacked
+                    .join("tracon-h-1/svc-web/run")
+                    .to_string_lossy()
+                    .into(),
+            ],
+            env: Default::default(),
+            restart: tracon::config::ServiceRestart::Never,
+            ready_within: Duration::from_secs(20),
+        }),
+    };
+    assert!(runner.sidecar_in_sandbox(&web));
+    runner.start_sidecar(&web).await.unwrap();
+    let mut ready = false;
+    for _ in 0..200 {
+        if runner.probe_sidecar(&web).await.unwrap() {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(ready, "the service never answered");
+    runner.kill(&web.name).await.unwrap();
+    drop(stdin);
+    assert_eq!(spawned.done.await.unwrap(), 0);
 
     // The provider reads isolation back from the pod and the policy: with
     // no sandbox policy in place, the route is not claimed.
@@ -583,7 +660,7 @@ fn session_pod(provider: &KubeSandboxProvider, name: &str) -> Pod {
                 shape: Shape::Session,
             },
             "127.0.0.1:1",
-            &"ab".repeat(32),
+            &tracon::provider::kubernetes::BundleDigests::harness("ab".repeat(32)),
             false,
         )
         .unwrap()

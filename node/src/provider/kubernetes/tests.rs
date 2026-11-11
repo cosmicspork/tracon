@@ -48,6 +48,15 @@ fn session_mounts() -> Vec<Mount> {
 }
 
 fn render(shape: Shape, labels: &RunLabels, gated: bool) -> Pod {
+    render_with(
+        shape,
+        labels,
+        gated,
+        &BundleDigests::harness("cd".repeat(32)),
+    )
+}
+
+fn render_with(shape: Shape, labels: &RunLabels, gated: bool, bundles: &BundleDigests) -> Pod {
     let mounts = session_mounts();
     provider()
         .render(
@@ -62,10 +71,18 @@ fn render(shape: Shape, labels: &RunLabels, gated: bool) -> Pod {
                 shape,
             },
             "10.244.0.9:7426",
-            &"cd".repeat(32),
+            bundles,
             gated,
         )
         .unwrap()
+}
+
+fn env_of(c: &Container) -> BTreeMap<String, String> {
+    c.env
+        .iter()
+        .flatten()
+        .map(|e| (e.name.clone(), e.value.clone().unwrap()))
+        .collect()
 }
 
 /// Nothing of the claim, no Secret, no subPath, no `nodeName`: the pod's
@@ -149,6 +166,7 @@ async fn the_bundle_is_fetched_from_the_node_and_the_supervisor_runs_from_it() {
         "http://10.244.0.9:7426/bundle.tar"
     );
     assert_eq!(env["TRACON_BUNDLE_SHA256"], "cd".repeat(32));
+    assert_eq!(env["TRACON_BUNDLE_DIR"], BUNDLE_TARGET);
     assert_eq!(c.command, Some(vec![SUPERVISOR.to_string()]));
     assert!(c.args.is_none());
     assert_eq!(c.stdin, None);
@@ -234,6 +252,200 @@ async fn the_node_serves_its_bundle_on_the_sandbox_port() {
     assert!(served_bundle(&empty, &dir.path().join("served"))
         .await
         .is_err());
+}
+
+/// A session's pod copies each catalogue service's bundle in as it does the
+/// harness's: an init container of its own, in the sandbox's image, fetching
+/// it from the node and checking it against its digest, into an emptyDir the
+/// sandbox mounts read-only where Podman and Apple mount it.
+#[tokio::test]
+async fn a_session_copies_in_each_service_bundle() {
+    let bundles = BundleDigests {
+        harness: "cd".repeat(32),
+        services: vec![("browser".into(), "ef".repeat(32))],
+    };
+    let pod = render_with(Shape::Session, &RunLabels::default(), false, &bundles);
+    assert!(breaches(&pod, "tracon-gw").is_empty());
+    let spec = pod.spec.clone().unwrap();
+    let inits = spec.init_containers.as_ref().unwrap();
+    let names: Vec<&str> = inits.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, [BUNDLE_CONTAINER, "svc-browser"]);
+    let init = &inits[1];
+    assert_eq!(init.image, spec.containers[0].image);
+    assert_eq!(init.command, inits[0].command);
+    assert_eq!(init.security_context, inits[0].security_context);
+    let env = env_of(init);
+    assert_eq!(
+        env["TRACON_BUNDLE_URL"],
+        "http://10.244.0.9:7426/services/browser.tar"
+    );
+    assert_eq!(env["TRACON_BUNDLE_SHA256"], "ef".repeat(32));
+    assert_eq!(env["TRACON_BUNDLE_DIR"], "/opt/tracon-services/browser");
+    let into = &init.volume_mounts.as_ref().unwrap()[0];
+    assert_eq!(
+        (into.name.as_str(), into.mount_path.as_str(), into.read_only),
+        ("svc-browser", "/opt/tracon-services/browser", None)
+    );
+    let volume = spec
+        .volumes
+        .iter()
+        .flatten()
+        .find(|v| v.name == "svc-browser")
+        .unwrap();
+    assert!(volume.empty_dir.is_some());
+    let mounted = spec.containers[0]
+        .volume_mounts
+        .iter()
+        .flatten()
+        .find(|m| m.name == "svc-browser")
+        .unwrap();
+    assert_eq!(mounted.mount_path, "/opt/tracon-services/browser");
+    assert_eq!(mounted.read_only, Some(true));
+
+    // Writable where the sandbox runs it, or fetched in another image: a
+    // breach.
+    let mut writable = pod.clone();
+    for m in writable.spec.as_mut().unwrap().containers[0]
+        .volume_mounts
+        .as_mut()
+        .unwrap()
+    {
+        if m.name == "svc-browser" {
+            m.read_only = None;
+        }
+    }
+    let found = breaches(&writable, "tracon-gw").join("\n");
+    assert!(
+        found.contains("/opt/tracon-services/browser is not mounted read-only"),
+        "{found}"
+    );
+    let mut elsewhere = pod;
+    elsewhere
+        .spec
+        .as_mut()
+        .unwrap()
+        .init_containers
+        .as_mut()
+        .unwrap()[1]
+        .image = Some("evil/fetcher".into());
+    let found = breaches(&elsewhere, "tracon-gw").join("\n");
+    assert!(
+        found.contains("init container svc-browser runs another image"),
+        "{found}"
+    );
+}
+
+/// A bundle's copy failing names the bundle it was copying.
+#[test]
+fn a_failed_copy_names_its_bundle() {
+    use k8s_openapi::api::core::v1::{ContainerState, ContainerStateTerminated, ContainerStatus};
+    let failed_in = |container: &str| PodStatus {
+        phase: Some("Pending".into()),
+        init_container_statuses: Some(vec![ContainerStatus {
+            name: container.into(),
+            state: Some(ContainerState {
+                terminated: Some(ContainerStateTerminated {
+                    exit_code: 1,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }]),
+        ..Default::default()
+    };
+    let k = options().spec;
+    for (container, said) in [
+        (BUNDLE_CONTAINER, "copying the harness bundle in failed (1)"),
+        (
+            "svc-browser",
+            "copying service browser's bundle in failed (1)",
+        ),
+    ] {
+        match progress("tracon-h-1", &failed_in(container), Sizing::Session, &k) {
+            Progress::Failed("bundle", error) => {
+                assert!(error.to_string().contains(said), "{error}")
+            }
+            _ => panic!("{container}: not failed"),
+        }
+    }
+}
+
+/// The node serves each catalogue service's bundle beside its own, to a
+/// session's pod only: nothing else starts a service.
+#[tokio::test]
+async fn the_node_serves_service_bundles_to_sessions() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let dir = tempfile::tempdir().unwrap();
+    let bundle = dir.path().join("bundle");
+    std::fs::create_dir_all(bundle.join("bin")).unwrap();
+    std::fs::write(bundle.join("bin/tracon-sandbox"), "#!/bin/sh\n").unwrap();
+    let browser = dir.path().join("browser");
+    std::fs::create_dir_all(browser.join("headless-shell")).unwrap();
+    std::fs::write(browser.join("run"), "#!/bin/sh\n").unwrap();
+    std::fs::write(browser.join("headless-shell/headless-shell"), "chrome").unwrap();
+    let client = kube::Client::new(axum::Router::new(), "tracon-node");
+    let provider = KubeSandboxProvider::new(
+        client,
+        KubeSandboxOptions {
+            bundle,
+            service_bundles: vec![("browser".into(), browser.clone())],
+            served_dir: dir.path().join("served"),
+            listen: "127.0.0.1:0".parse().unwrap(),
+            ..options()
+        },
+    );
+    let dispatcher = provider.dispatcher().await.unwrap();
+    let command = provider.bundles(&dispatcher, Shape::Command).await.unwrap();
+    assert!(command.services.is_empty(), "{command:?}");
+    let session = provider.bundles(&dispatcher, Shape::Session).await.unwrap();
+    assert_eq!(session.harness, command.harness);
+    let [(name, sha256)] = session.services.as_slice() else {
+        panic!("one service: {session:?}");
+    };
+    assert_eq!(name, "browser");
+
+    let port = dispatcher.local_addr().port();
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    stream
+        .write_all(b"GET /services/browser.tar HTTP/1.1\r\nHost: n\r\n\r\n")
+        .await
+        .unwrap();
+    let mut answer = Vec::new();
+    stream.read_to_end(&mut answer).await.unwrap();
+    assert!(answer.starts_with(b"HTTP/1.1 200 OK"));
+    let split = answer.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+    use sha2::Digest as _;
+    assert_eq!(
+        &hex::encode(sha2::Sha256::digest(&answer[split + 4..])),
+        sha256
+    );
+    let names: Vec<String> = tar::Archive::new(&answer[split + 4..])
+        .entries()
+        .unwrap()
+        .map(|e| e.unwrap().path().unwrap().display().to_string())
+        .collect();
+    assert_eq!(
+        names,
+        ["headless-shell", "headless-shell/headless-shell", "run"]
+    );
+
+    // A service whose bundle is not here refuses the session's pod.
+    let missing = KubeSandboxProvider::new(
+        kube::Client::new(axum::Router::new(), "tracon-node"),
+        KubeSandboxOptions {
+            service_bundles: vec![("browser".into(), dir.path().join("gone"))],
+            ..provider.options().clone()
+        },
+    );
+    let refused = missing
+        .bundles(&dispatcher, Shape::Session)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("service browser: its bundle"), "{refused}");
 }
 
 /// The gateway's name is the pod's loopback, where the tunnels listen; no

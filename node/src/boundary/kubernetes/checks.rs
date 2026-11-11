@@ -473,12 +473,35 @@ async fn sandbox_runtime(
         Ok(bundle) => bundle,
         Err(e) => return CheckResult::fail(CheckId::Runtime, format!("harness bundle: {e}")),
     };
+    // The catalogue's bundles, which a session's pod copies in the same way.
+    if let Err(e) = crate::service_bundle::ensure(&b.cfg).await {
+        return CheckResult::fail(CheckId::Runtime, format!("browser bundle: {e}"));
+    }
+    if let Some(missing) = crate::service_bundle::missing(&b.cfg, false) {
+        return CheckResult::fail(CheckId::Runtime, missing);
+    }
+    let services = match provider
+        .bundles(&dispatcher, crate::provider::Shape::Session)
+        .await
+    {
+        Ok(bundles) if bundles.services.is_empty() => String::new(),
+        Ok(bundles) => format!(
+            "; a session's pod copies in the service bundles of {} there too",
+            bundles
+                .services
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Err(e) => return CheckResult::fail(CheckId::Runtime, e.to_string()),
+    };
     CheckResult::ok(
         CheckId::Runtime,
         format!(
             "api reachable; pods, pods/log and networkpolicies granted in {}; sandboxes over \
-             the protocol dial {} and fetch the bundle {} (sha256 {}) there, and no run keeps \
-             anything in a Secret; node {}; the node's pod is labelled {}",
+             the protocol dial {} and fetch the bundle {} (sha256 {}) there{services}, and no \
+             run keeps anything in a Secret; node {}; the node's pod is labelled {}",
             spec.env.namespace,
             provider.advertise(&dispatcher),
             provider.options().bundle.display(),
@@ -527,8 +550,8 @@ async fn create_sandbox_probe(
         .to_string();
     let labels = crate::runner::RunLabels::of(crate::runner::RunKind::Probe);
     let dispatcher = provider.dispatcher().await.map_err(|e| e.to_string())?;
-    let bundle = provider
-        .bundle(&dispatcher)
+    let bundles = provider
+        .bundles(&dispatcher, Shape::Session)
         .await
         .map_err(|e| e.to_string())?;
     let name = probe();
@@ -549,7 +572,7 @@ async fn create_sandbox_probe(
                 shape: Shape::Session,
             },
             &provider.advertise(&dispatcher),
-            &bundle.sha256,
+            &bundles,
             true,
         )
         .map_err(|e| e.to_string())?;
@@ -574,7 +597,7 @@ fn sandbox_storage(
     CheckResult::ok(
         CheckId::NoRuntimeSocket,
         "no host namespaces, no API token, no hostPath, no Secret and nothing of the state \
-         claim: only emptyDirs of the pod's own, the bundle read-only among them",
+         claim: only emptyDirs of the pod's own, the bundles read-only among them",
     )
 }
 
@@ -845,7 +868,10 @@ mod tests {
                     shape: Shape::Session,
                 },
                 "10.0.0.5:7426",
-                &"cd".repeat(32),
+                &crate::provider::kubernetes::BundleDigests {
+                    harness: "cd".repeat(32),
+                    services: vec![("browser".into(), "ef".repeat(32))],
+                },
                 true,
             )
             .unwrap()
@@ -864,6 +890,8 @@ mod tests {
             "{}",
             check_no_runtime_socket(&p).detail
         );
+        let found = crate::provider::kubernetes::breaches(&p, "tracon-gw");
+        assert!(found.is_empty(), "{found:?}");
     }
 
     fn ingress(

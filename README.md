@@ -1659,11 +1659,13 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
 # port = 9222                       # where the session reaches it
 # ready = "/json/version"           # an HTTP path answering 2xx once ready; left out, a TCP connect
 # timeout_secs = 60                 # how long it may take to answer before it is reported failed
-# bundle = "release"                # on Podman and Apple: what is
+# bundle = "release"                # on Podman, Apple and Kubernetes: what is
                                     # mounted read-only at /opt/tracon-services/<name> in every
                                     # sandbox, whose supervisor runs it on the sandbox's loopback
                                     # instead of a container from `image`, which may then be left out.
-                                    # On DigitalOcean it is baked into the templates the node builds
+                                    # On Kubernetes a session's pod copies it in from the node, into
+                                    # the same place ("As a Kubernetes pod"). On DigitalOcean it is
+                                    # baked into the templates the node builds
                                     # and runs the same way. A port one of the sandbox's tunnels
                                     # listens on is refused at service_start.
                                     # "release", on `browser` only: the browser bundle of the node's
@@ -2122,6 +2124,18 @@ and an emptyDir at `/tmp` that `TMPDIR` names.
   `tracon-sandbox` from it is the pod's only process, and the harness it starts over
   the protocol is the bundle's. Pods run as uid 65532 with home `/home/harness`, the
   stock base's own user.
+- **Services.** A session's sandbox runs each `[[service]]` with a bundle under its
+  supervisor, on its loopback, as on Podman and Apple. The node serves each bundle
+  (`bundle = "release"`'s browser, which it fetches into `<state>/bundles` as it
+  converges, or the operator's directory) as a tar on the sandbox port, and a session's
+  pod copies it in as it does the harness bundle: one init container per service
+  (`svc-<name>`), in the pod's own image, checking it against the digest in the pod spec
+  and unpacking it into an emptyDir mounted read-only at `/opt/tracon-services/<name>`.
+  Only a session's pod copies them, and every session's does, whether or not it starts
+  one: the browser is about 280 MB of the pod's ephemeral storage and a few seconds of
+  its start. A browser's shared memory is the pod's `/dev/shm` (`[runtime.kubernetes]
+  shm_size`, 1 GiB by default), counted against the session's memory limit (4 GiB by
+  default). A `[[service]]` with only an `image` does not run here.
 - **Files.** Nothing of the state claim is mounted, so the claim is the node's alone.
   Every directory a run names is an emptyDir of the pod's own, filled over the
   protocol and, for a session's workspace and own harness state, taken back at each
@@ -2195,8 +2209,8 @@ template's source on the cluster and pushes it with the builder's credential), a
 the node through the hub relay: `relay = true`, `listen = "127.0.0.1:<port>"` on a port
 other than the sandbox port (7426), and `[mesh.sandbox_relay] target` the same address.
 The node pod's own egress is open, so it reaches `api.digitalocean.com` and the hub with
-no policy change. The node must run on amd64, which is all the runtime runs, and it
-fetches the release's browser bundle into `<state>/bundles` for the templates to hold.
+no policy change. The node must run on amd64, which is all the runtime runs, and the
+release's browser bundle it fetches into `<state>/bundles` is what the templates hold.
 Prepared snapshots stay in the builder's registry; the store's ready ones keep their
 templates from the sweep.
 
