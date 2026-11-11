@@ -43,8 +43,10 @@
 pub mod bootstrap;
 pub mod images;
 pub mod listener;
+pub mod peers;
 pub mod portable;
 pub mod runtime;
+pub mod shared;
 pub mod templates;
 pub mod upkeep;
 
@@ -115,6 +117,22 @@ pub struct Settings {
     pub server_name: String,
     /// Reach the node through the hub relay (`[mesh.sandbox_relay]`).
     pub relay: bool,
+    /// Where templates come from: `own` (this node's `image` or `registry`)
+    /// or `peer`, made by a peer with `registry` that builds amd64, which
+    /// is all the runtime runs: for a node that cannot build them (Apple).
+    pub templates: TemplateSource,
+    /// With `templates = "peer"`, the one peer (by node name or id) to take
+    /// templates from; empty for any that builds them.
+    pub builder: String,
+}
+
+/// `[digitalocean] templates`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TemplateSource {
+    #[default]
+    Own,
+    Peer,
 }
 
 impl Default for Settings {
@@ -132,6 +150,8 @@ impl Default for Settings {
             node_addr: String::new(),
             server_name: String::new(),
             relay: false,
+            templates: TemplateSource::Own,
+            builder: String::new(),
         }
     }
 }
@@ -281,7 +301,26 @@ pub fn validate(
     }
     settings.reach(mesh.hub_url.as_deref())?;
     settings.listen_addr()?;
+    if settings.templates == TemplateSource::Peer {
+        if !settings.image.is_empty() || !settings.registry.is_empty() {
+            return Err(
+                "digitalocean.templates = \"peer\" takes its templates from a peer: leave \
+                 digitalocean.image and digitalocean.registry out"
+                    .into(),
+            );
+        }
+        if mesh.hub_url.is_none() {
+            return Err(
+                "digitalocean.templates = \"peer\" asks a peer over the mesh, and [mesh] \
+                 hub_url is not set"
+                    .into(),
+            );
+        }
+    } else if !settings.builder.is_empty() {
+        return Err("digitalocean.builder names a peer only with templates = \"peer\"".into());
+    }
     match (settings.image.is_empty(), settings.registry.is_empty()) {
+        _ if settings.templates == TemplateSource::Peer => {}
         (false, true) => {
             templates::digest_of(&settings.image)
                 .map_err(|e| format!("digitalocean.image: {e}"))?;
@@ -1222,6 +1261,35 @@ mod tests {
             ..settings()
         };
         assert!(validate(&neither, &standalone, true).is_err());
+        // From a peer: neither source of its own, any runtime, and a hub to
+        // ask through.
+        let peer = Settings {
+            image: String::new(),
+            templates: TemplateSource::Peer,
+            builder: "amd64-box".into(),
+            ..settings()
+        };
+        let hub = mesh(false, Some("https://hub.example.net"));
+        assert!(validate(&peer, &hub, false).is_ok());
+        assert!(validate(&peer, &standalone, false).is_err());
+        assert!(validate(
+            &Settings {
+                registry: "registry.digitalocean.com/acme".into(),
+                ..peer.clone()
+            },
+            &hub,
+            true
+        )
+        .is_err());
+        assert!(validate(
+            &Settings {
+                builder: "amd64-box".into(),
+                ..settings()
+            },
+            &hub,
+            true
+        )
+        .is_err());
     }
 
     #[test]

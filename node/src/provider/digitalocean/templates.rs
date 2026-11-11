@@ -19,6 +19,11 @@
 //! one; once the new one is ready it takes over, and only then is the old
 //! one stale and swept. A node process that starts after its template's
 //! name moved (an upgrade) has no previous one to fall back on, and waits.
+//!
+//! A node that cannot build amd64 takes its templates from a peer instead
+//! (`[digitalocean] templates = "peer"`): each image there is a portable
+//! key ([`super::portable`]), and its template is the one a builder says in
+//! its hello is ready for that key ([`super::peers`], [`super::shared`]).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -47,6 +52,17 @@ pub enum TemplateState {
     Failed {
         reason: String,
     },
+    /// Being made by a peer (`[digitalocean] templates = "peer"`), as its
+    /// hello says, or asked of it.
+    OnPeer {
+        peer: String,
+        detail: String,
+    },
+    /// No peer that builds templates has said hello lately (or not the one
+    /// `[digitalocean] builder` names).
+    NoBuilder {
+        named: Option<String>,
+    },
 }
 
 impl TemplateState {
@@ -59,6 +75,13 @@ impl TemplateState {
             }
             Self::Ready { .. } => "its template is ready".into(),
             Self::Failed { reason } => format!("its template failed: {reason}"),
+            Self::OnPeer { peer, detail } => format!("its template is {detail} on {peer}"),
+            Self::NoBuilder { named: None } => {
+                "no peer that builds DigitalOcean templates has said hello lately".into()
+            }
+            Self::NoBuilder { named: Some(name) } => {
+                format!("the template builder {name} has not said hello lately")
+            }
         }
     }
 }
@@ -94,6 +117,16 @@ pub enum Source {
         /// host and where a sandbox has it (`/opt/tracon-services/<name>`).
         /// Those present when a template is built are baked into it.
         services: Vec<(PathBuf, String)>,
+    },
+    /// Made by a peer that builds amd64 templates, asked for by portable key
+    /// ([`super::portable`]): a node that cannot build them itself. Every
+    /// image is a portable key's (`tracon-do-portable/…@sha256:<key>`).
+    Peer {
+        /// `[digitalocean] builder`: the one peer to take templates from.
+        builder: Option<String>,
+        /// The catalogue services with bundles, by name, which the key
+        /// names and the builder will not build without.
+        services: Vec<String>,
     },
 }
 
@@ -133,7 +166,11 @@ struct Known {
 pub struct Templates {
     base_template: String,
     stem: String,
+    /// The team-wide stem templates made for peers are named under.
+    team: String,
     source: Source,
+    /// The templates made here for peers.
+    shared: super::shared::Shared,
     /// By template name.
     states: Mutex<HashMap<String, TemplateState>>,
     /// The last template seen ready for each image, by the image's digest:
@@ -152,23 +189,63 @@ impl Templates {
         Ok(Templates {
             base_template: base_template.to_string(),
             stem: format!("{stem}-"),
+            team: super::portable::team_stem(crate::config::resource_prefix()),
             source,
+            shared: super::shared::Shared::in_memory(),
             states: Mutex::new(HashMap::new()),
             ready: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Keep what peers asked for in `shared` (a builder's file).
+    pub fn with_shared(mut self, shared: super::shared::Shared) -> Self {
+        self.shared = shared;
+        self
+    }
+
+    /// Name templates made for peers under `team` (`<prefix>-tp-`).
+    pub fn with_team(mut self, team: &str) -> Self {
+        self.team = team.to_string();
+        self
     }
 
     pub fn source(&self) -> &Source {
         &self.source
     }
 
+    pub fn shared(&self) -> &super::shared::Shared {
+        &self.shared
+    }
+
+    pub fn team_stem(&self) -> &str {
+        &self.team
+    }
+
     /// The template named for `image`: the operator's by its digest alone;
     /// one the node builds by its digest and what the node adds to it (the
-    /// template's recipe, the harness bundle, the service bundles present).
+    /// template's recipe, the harness bundle, the service bundles present),
+    /// or by the portable key a peer asked for it under while that is
+    /// unchanged; a peer's by its portable key.
     pub fn name_for(&self, image: &str) -> Result<String, String> {
+        let own = self.own_name_for(image)?;
+        if let Source::Built { .. } = self.source {
+            if let Some(shared) = self.shared.name_for(digest_of(image)?, &own) {
+                return Ok(shared);
+            }
+        }
+        Ok(own)
+    }
+
+    /// The template named for `image` as this node alone would name it.
+    pub fn own_name_for(&self, image: &str) -> Result<String, String> {
         let digest = digest_of(image)?;
         let hex = match &self.source {
             Source::Given(_) => digest.trim_start_matches("sha256:").to_string(),
+            Source::Peer { .. } => {
+                let key = super::portable::key_of(image)
+                    .ok_or_else(|| format!("{image} is not a portable template key"))?;
+                return Ok(super::portable::team_name(&self.team, key));
+            }
             Source::Built {
                 bundle, services, ..
             } => {
@@ -202,6 +279,7 @@ impl Templates {
     pub fn current_services(&self) -> Option<Vec<String>> {
         match &self.source {
             Source::Given(_) => None,
+            Source::Peer { services, .. } => Some(services.clone()),
             Source::Built { services, .. } => Some(
                 present(services)
                     .iter()
@@ -215,8 +293,11 @@ impl Templates {
     /// node process saw it ready. `None` for an image of the operator's,
     /// taken on trust; one it never saw ready holds none it knows of.
     pub fn services_of(&self, name: &str) -> Option<Vec<String>> {
-        if let Source::Given(_) = self.source {
-            return None;
+        match &self.source {
+            Source::Given(_) => return None,
+            // Named for them: its builder refuses to make it without them.
+            Source::Peer { services, .. } => return Some(services.clone()),
+            Source::Built { .. } => {}
         }
         let known = self.ready.lock().unwrap();
         Some(
@@ -258,7 +339,7 @@ impl Templates {
     pub fn default_image(&self, fallback: Option<String>) -> Option<String> {
         match &self.source {
             Source::Given(image) => Some(image.clone()),
-            Source::Built { .. } => fallback,
+            Source::Built { .. } | Source::Peer { .. } => fallback,
         }
     }
 
@@ -268,10 +349,17 @@ impl Templates {
         match &self.source {
             Source::Given(given) => given == image,
             Source::Built { .. } => digest_of(image).is_ok(),
+            Source::Peer { .. } => super::portable::key_of(image).is_some(),
         }
     }
 
     pub fn state(&self, image: &str) -> TemplateState {
+        if let Source::Peer { builder, .. } = &self.source {
+            return match super::portable::key_of(image) {
+                Some(key) => super::peers::state(key, builder.as_deref(), crate::store::now_ms()),
+                None => TemplateState::Unknown,
+            };
+        }
         self.name_for(image)
             .ok()
             .and_then(|name| self.states.lock().unwrap().get(&name).cloned())
@@ -285,16 +373,30 @@ impl Templates {
         if !self.serves(image) {
             return Err(format!("DigitalOcean has no template for {image}"));
         }
+        if let Source::Peer { builder, .. } = &self.source {
+            let key = super::portable::key_of(image).unwrap_or_default();
+            return super::peers::ready(key, builder.as_deref(), crate::store::now_ms())
+                .map(|(_, _, template)| template)
+                .ok_or_else(|| self.state(image).describe());
+        }
         match self.state(image) {
             TemplateState::Ready { .. } => self.name_for(image),
             other => self.previous(image).ok_or_else(|| other.describe()),
         }
     }
 
+    /// Where the template `name` stands, as this node process last saw it.
+    pub fn state_named(&self, name: &str) -> Option<TemplateState> {
+        self.states.lock().unwrap().get(name).cloned()
+    }
+
     /// Whether `name` is a template this node registered that none of
-    /// `wanted` (template names) is.
+    /// `wanted` (template names) is: one under its own stem, or one it made
+    /// for peers.
     pub fn is_stale(&self, name: &str, wanted: &HashSet<String>) -> bool {
-        name.starts_with(&self.stem) && !wanted.contains(name)
+        let ours = name.starts_with(&self.stem)
+            || (name.starts_with(&self.team) && self.shared.holds(name));
+        ours && !wanted.contains(name)
     }
 
     /// Find `image`'s template, registering it (and first building and
@@ -310,6 +412,11 @@ impl Templates {
         if !self.serves(image) {
             return Err(DoError::Invalid(format!(
                 "DigitalOcean has no template for {image}"
+            )));
+        }
+        if let Source::Peer { .. } = self.source {
+            return Err(DoError::Invalid(format!(
+                "{image}'s template is a peer's to make"
             )));
         }
         let name = self.name_for(image).map_err(DoError::Invalid)?;
@@ -333,6 +440,7 @@ impl Templates {
                 }
                 let source = match &self.source {
                     Source::Given(image) => Ok(image.clone()),
+                    Source::Peer { .. } => Err("a peer's template is the peer's to make".into()),
                     Source::Built {
                         registry,
                         prefix,
@@ -531,6 +639,78 @@ mod tests {
         assert_eq!(t.kept(SNAPSHOT), std::slice::from_ref(&new));
         assert!(t.is_stale(&old, &t.kept(SNAPSHOT).into_iter().collect()));
         assert_eq!(t.services_of(&new), Some(vec!["browser".to_string()]));
+    }
+
+    /// An image a peer asked for is named for the peer's key while what the
+    /// node adds to it is unchanged, so the builder's own sessions share
+    /// that template; a moved bundle names it the node's own again. Only a
+    /// team template this node registered is ever stale here.
+    #[test]
+    fn an_image_a_peer_asked_for_is_named_for_its_key() {
+        const KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let tmp = tempfile::tempdir().unwrap();
+        let browser = tmp.path().join("browser");
+        let t = Templates::new(
+            Source::Built {
+                registry: "r".into(),
+                prefix: "tracon".into(),
+                bundle: tmp.path().join("bundle"),
+                services: vec![(browser.clone(), "/opt/tracon-services/browser".into())],
+            },
+            "coding-base",
+            "tracon-tabcd1234",
+        )
+        .unwrap()
+        .with_team("tracon-tp-");
+        let own = t.name_for(SNAPSHOT).unwrap();
+        t.shared().ask(t.team_stem(), KEY, "github.com/acme/app", 1);
+        assert_eq!(t.name_for(SNAPSHOT).unwrap(), own, "not built from it yet");
+        t.shared()
+            .adopt(KEY, SNAPSHOT, &t.own_name_for(SNAPSHOT).unwrap());
+        let team = t.name_for(SNAPSHOT).unwrap();
+        assert_eq!(team, "tracon-tp-0123456789abcdef");
+        assert_eq!(t.name_for(IMAGE).unwrap(), t.own_name_for(IMAGE).unwrap());
+
+        std::fs::create_dir_all(&browser).unwrap();
+        assert_eq!(
+            t.name_for(SNAPSHOT).unwrap(),
+            t.own_name_for(SNAPSHOT).unwrap()
+        );
+
+        let wanted = HashSet::new();
+        assert!(t.is_stale(&team, &wanted));
+        assert!(
+            !t.is_stale("tracon-tp-ffffffffffffffff", &wanted),
+            "another node's"
+        );
+        assert!(!t.is_stale(&team, &[team.clone()].into()));
+    }
+
+    /// A node that takes its templates from a peer names each by its
+    /// portable key, serves only portable images, and makes none itself.
+    #[tokio::test]
+    async fn a_peers_template_is_named_for_its_portable_key() {
+        let key = "abcdef0123456789".repeat(4);
+        let image = super::super::portable::image("base", &key);
+        let t = Templates::new(
+            Source::Peer {
+                builder: None,
+                services: vec!["browser".into()],
+            },
+            "coding-base",
+            "tracon-tabcd1234",
+        )
+        .unwrap()
+        .with_team("tracon-tp-");
+        assert_eq!(t.name_for(&image).unwrap(), "tracon-tp-abcdef0123456789");
+        assert!(t.serves(&image));
+        assert!(!t.serves(SNAPSHOT));
+        assert_eq!(t.default_image(Some(image.clone())), Some(image.clone()));
+        assert_eq!(t.services_of("anything"), Some(vec!["browser".to_string()]));
+        assert_eq!(t.current_services(), Some(vec!["browser".to_string()]));
+        let client = crate::do_harness::Client::with_base_url("http://127.0.0.1:9", "t").unwrap();
+        assert!(t.ensure(&client, "t", &image).await.is_err());
+        assert!(!t.is_stale("tracon-tp-abcdef0123456789", &HashSet::new()));
     }
 
     #[test]

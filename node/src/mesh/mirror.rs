@@ -38,7 +38,21 @@ pub enum Applied {
 impl Mirror {
     pub fn apply(&self, sender: &str, channel: &str, payload: Payload) -> Applied {
         match payload {
-            Payload::Hello { node, contract } => self.apply_node(sender, &node, Some(contract)),
+            Payload::Hello { node, contract } => {
+                let applied = self.apply_node(sender, &node, Some(contract));
+                // The templates a DigitalOcean builder holds, in its own
+                // verified word; a hello without them says it holds none.
+                if applied == Applied::Stored {
+                    let name = node["name"].as_str().map(super::recipe::without_hidden);
+                    crate::provider::digitalocean::peers::record(
+                        sender,
+                        name.as_deref().unwrap_or(sender),
+                        node.get("do_templates"),
+                        now_ms(),
+                    );
+                }
+                applied
+            }
             Payload::Node(node) => self.apply_node(sender, &node, None),
             Payload::Session(v) => match serde_json::from_value::<SessionRow>(v) {
                 Ok(row) if row.node_id == sender => {

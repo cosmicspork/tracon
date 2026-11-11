@@ -419,6 +419,8 @@ pub const KEYS: &[KeySpec] = &[
     restart("digitalocean.node_addr"),
     restart("digitalocean.server_name"),
     restart("digitalocean.relay"),
+    restart("digitalocean.templates"),
+    restart("digitalocean.builder"),
     // [auth]
     restart("auth.public_origin"),
     restart("auth.trusted_proxies"),
