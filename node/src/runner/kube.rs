@@ -31,6 +31,11 @@ mod secret;
 pub use secret::{secret_name, SecretRights, PID_LABEL, RUN_LABEL, SWEEP_GRACE};
 
 pub const ROLE_LABEL: &str = "tracon.dev/role";
+/// Which node a pod is, or was made by: its `[boundary] resource_prefix`.
+/// The node's own pod carries it beside `tracon.dev/role: node`, and so does
+/// every pod it makes, so two nodes in one namespace each select their own
+/// (a sandbox's affinity and NetworkPolicy, a sweep) and never the other's.
+pub const NODE_LABEL: &str = "tracon.dev/node";
 pub const SESSION_LABEL: &str = "tracon.dev/session";
 pub const PROBE_GATE: &str = "tracon.dev/probe";
 /// What the pod is for: `RunKind`, else its sizing.
@@ -76,6 +81,15 @@ impl PodEnv {
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
             })
+    }
+
+    /// The node's own pod's name: `TRACON_POD_NAME` (downward API
+    /// `metadata.name`), else `HOSTNAME`, which a pod's hostname is unless
+    /// its spec sets another.
+    pub fn own_pod_name() -> Option<String> {
+        ["TRACON_POD_NAME", "HOSTNAME"]
+            .into_iter()
+            .find_map(|name| std::env::var(name).ok().filter(|v| !v.is_empty()))
     }
 
     pub fn detect(cfg: &Config) -> Result<Self, String> {
@@ -170,6 +184,10 @@ pub(crate) fn pod_labels(
 ) -> std::collections::BTreeMap<String, String> {
     let mut out = std::collections::BTreeMap::new();
     out.insert(ROLE_LABEL.to_string(), "harness".to_string());
+    out.insert(
+        NODE_LABEL.to_string(),
+        crate::config::resource_prefix().to_string(),
+    );
     out.insert(SESSION_LABEL.to_string(), name.to_string());
     out.insert(
         KIND_LABEL.to_string(),

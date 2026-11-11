@@ -383,18 +383,9 @@ pub async fn ensure(cfg: &Config) -> Result<Option<Ensured>, BundleError> {
     if !managed(cfg) {
         return Ok(None);
     }
-    let arch =
-        host_arch().ok_or_else(|| BundleError::UnsupportedArch(std::env::consts::ARCH.into()))?;
-    let client = reqwest::Client::builder()
-        .timeout(FETCH_TIMEOUT)
-        .build()
-        .map_err(|e| BundleError::Fetch {
-            url: cfg.sandbox.release_url(),
-            error: e.to_string(),
-        })?;
+    let ensured = ensure_release(cfg).await?;
     let state = Config::state_dir();
     let version = env!("CARGO_PKG_VERSION");
-    let ensured = ensure_at(&client, &cfg.sandbox.release_url(), &state, version, arch).await?;
     for old in superseded(&state, version) {
         match std::fs::remove_dir_all(&old) {
             Ok(()) => {
@@ -406,6 +397,30 @@ pub async fn ensure(cfg: &Config) -> Result<Option<Ensured>, BundleError> {
         }
     }
     Ok(Some(ensured))
+}
+
+/// This release's bundle for this host, fetched into the node's own place
+/// for it if it has to be, whether or not the node's sandboxes run it yet:
+/// what `tracon sandbox probe` runs when it is given no bundle.
+pub async fn ensure_release(cfg: &Config) -> Result<Ensured, BundleError> {
+    let arch =
+        host_arch().ok_or_else(|| BundleError::UnsupportedArch(std::env::consts::ARCH.into()))?;
+    let client = reqwest::Client::builder()
+        .timeout(FETCH_TIMEOUT)
+        .build()
+        .map_err(|e| BundleError::Fetch {
+            url: cfg.sandbox.release_url(),
+            error: e.to_string(),
+        })?;
+    let version = env!("CARGO_PKG_VERSION");
+    ensure_at(
+        &client,
+        &cfg.sandbox.release_url(),
+        &Config::state_dir(),
+        version,
+        arch,
+    )
+    .await
 }
 
 #[cfg(test)]

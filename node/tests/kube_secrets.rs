@@ -426,6 +426,12 @@ async fn reconcile_sweeps_orphaned_run_secrets() {
         Some(Time(old)),
     ));
     api.insert_secret(secret("someone-elses", None, Some(Time(old))));
+    // Another node's in the same namespace, its pod gone: its to sweep.
+    api.insert_secret(secret(
+        "spike-w-gone-1-env",
+        Some("spike-w-gone-1"),
+        Some(Time(old)),
+    ));
 
     let state = tempfile::tempdir().unwrap();
     let mut cfg = config();
@@ -452,6 +458,7 @@ async fn reconcile_sweeps_orphaned_run_secrets() {
         live,
         vec![
             "someone-elses".to_string(),
+            "spike-w-gone-1-env".to_string(),
             "tracon-w-new-1-env".to_string(),
             "tracon-w-pulling-1-env".to_string()
         ]

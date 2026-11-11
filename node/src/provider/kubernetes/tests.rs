@@ -90,10 +90,17 @@ async fn a_sandbox_pod_holds_nothing_of_the_claim_and_sits_beside_the_node() {
         .unwrap()[0];
     assert_eq!(term.topology_key, "kubernetes.io/hostname");
     assert_eq!(term.namespaces, Some(vec!["tracon-node".to_string()]));
+    // This node's pod alone: another node in the namespace has the role too.
     assert_eq!(
         term.label_selector.as_ref().unwrap().match_labels,
-        Some(BTreeMap::from([(ROLE_LABEL.into(), "node".into())]))
+        Some(BTreeMap::from([
+            (ROLE_LABEL.into(), "node".into()),
+            (NODE_LABEL.into(), "tracon".into()),
+        ]))
     );
+    let labels = pod.metadata.labels.clone().unwrap();
+    assert_eq!(labels[ROLE_LABEL], SANDBOX_ROLE);
+    assert_eq!(labels[NODE_LABEL], "tracon");
     assert!(spec.volumes.iter().flatten().all(|v| v.empty_dir.is_some()));
     // Every directory the run names is an emptyDir at its target.
     let mounted: Vec<&str> = spec.containers[0]
@@ -446,4 +453,22 @@ async fn connections_go_to_the_run_expected_at_their_address() {
     );
     drop(expected);
     assert!(dispatcher.state.lock().unwrap().waiting.is_empty());
+}
+
+/// The node's own pod is found by its role and its prefix: one with only
+/// the role, or another node's prefix, is not this node's.
+#[test]
+fn the_node_pod_is_found_by_its_role_and_its_prefix() {
+    assert_eq!(node_pod_unlabelled(&node_pod_labels()), None);
+    let mut more = node_pod_labels();
+    more.insert("app".into(), "tracon".into());
+    assert_eq!(node_pod_unlabelled(&more), None);
+    let why = node_pod_unlabelled(&BTreeMap::from([(ROLE_LABEL.into(), "node".into())])).unwrap();
+    assert!(why.contains("tracon.dev/node: tracon"), "{why}");
+    assert!(!why.contains("tracon.dev/role"), "{why}");
+    let another = BTreeMap::from([
+        (ROLE_LABEL.into(), "node".into()),
+        (NODE_LABEL.into(), "spike".into()),
+    ]);
+    assert!(node_pod_unlabelled(&another).is_some());
 }

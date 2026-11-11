@@ -13,6 +13,13 @@ spec:
     metadata:
       labels:
         tracon.dev/role: node
+        # Which node this is: its `[boundary] resource_prefix` (`tracon` by
+        # default). Its sandboxes are placed beside, and may reach, only the
+        # pod that carries both labels, so a second node in the namespace
+        # (another prefix, another Deployment whose selector names its own
+        # value) is never taken for this one. Not in the selector above, which
+        # a Deployment cannot change.
+        tracon.dev/node: tracon
     spec:
       serviceAccountName: tracon-node
       securityContext:
@@ -64,6 +71,11 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            # The node reads its own pod back to check the labels above.
+            - name: TRACON_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             - name: TRACON_POD_IP
               valueFrom:
                 fieldRef:

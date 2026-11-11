@@ -16,12 +16,16 @@
 //! names is an emptyDir of the pod's own, filled and read back over the
 //! protocol's files channel (`runner::sandbox_files`), so a harness pod never
 //! holds a subPath of the node's ReadWriteOnce volume and needs no `nodeName`
-//! to share it. It is kept beside the node pod by pod affinity instead.
+//! to share it. It is kept beside the node pod by pod affinity instead: this
+//! node's pod, by its role and its `tracon.dev/node` label (its `[boundary]
+//! resource_prefix`), so a second node in the namespace is never mistaken
+//! for it.
 //!
 //! **Carrier.** The sandbox dials the node pod's address on `sandbox_port`
 //! over TLS, pinned to the node's certificate. Its NetworkPolicy
-//! (`tracon-sandbox`, prefixed per node) allows that one destination and
-//! nothing else: no DNS, no ingress. The MCP and model gateway and both
+//! (`tracon-sandbox`, prefixed per node, selecting this node's sandboxes by
+//! the same label) allows that one destination and nothing else: no DNS, no
+//! ingress. The MCP and model gateway and both
 //! proxies are tunnels over the connection (`runner::tunnels::kube_tunnels`),
 //! the gateway's name mapped to the pod's loopback.
 //!
@@ -69,8 +73,8 @@ use super::{
 };
 use crate::runner::kube::{
     harness_status, normalize_image_id, pending_reason, pod_labels, quota_refused, refusal,
-    refusal_error, KubeSpec, Refusal, Sizing, HARNESS_CONTAINER, PROBE_GATE, ROLE_LABEL,
-    SCRATCH_MOUNT, SESSION_LABEL, SHM_VOLUME,
+    refusal_error, KubeSpec, Refusal, Sizing, HARNESS_CONTAINER, NODE_LABEL, PROBE_GATE,
+    ROLE_LABEL, SCRATCH_MOUNT, SESSION_LABEL, SHM_VOLUME,
 };
 use crate::runner::podman::BUNDLE_TARGET;
 use crate::runner::RunnerError;
@@ -111,6 +115,49 @@ const HOLD_MAX: usize = 64;
 /// The NetworkPolicy a sandbox pod is selected by: `<prefix>-sandbox`.
 pub fn sandbox_policy() -> String {
     crate::config::resource_name("sandbox")
+}
+
+/// What this node's own pod carries, and is selected by: its role and which
+/// node it is (`[boundary] resource_prefix`). A sandbox's affinity and its
+/// NetworkPolicy's one route name both, so a second node in the namespace is
+/// neither where a sandbox is placed nor what it can reach.
+pub fn node_pod_labels() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (ROLE_LABEL.to_string(), "node".to_string()),
+        (
+            NODE_LABEL.to_string(),
+            crate::config::resource_prefix().to_string(),
+        ),
+    ])
+}
+
+/// What every sandbox pod of this node carries, and its policy selects.
+pub fn sandbox_pod_labels() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (ROLE_LABEL.to_string(), SANDBOX_ROLE.to_string()),
+        (
+            NODE_LABEL.to_string(),
+            crate::config::resource_prefix().to_string(),
+        ),
+    ])
+}
+
+/// What is missing from the labels of the node's own pod for its sandboxes
+/// to find it, in a sentence naming what to add; `None` when nothing is.
+pub fn node_pod_unlabelled(labels: &BTreeMap<String, String>) -> Option<String> {
+    let missing: Vec<String> = node_pod_labels()
+        .into_iter()
+        .filter(|(key, value)| labels.get(key) != Some(value))
+        .map(|(key, value)| format!("{key}: {value}"))
+        .collect();
+    (!missing.is_empty()).then(|| {
+        format!(
+            "the node's own pod is not labelled {}; its sandboxes are placed beside it, and \
+             reach it, by those labels: add them to the Deployment's pod template \
+             (deploy/kubernetes/base/deployment.yaml)",
+            missing.join(", ")
+        )
+    })
 }
 
 /// What the provider is configured with.
@@ -626,7 +673,7 @@ impl KubeSandboxProvider {
         let k = &self.options.spec;
         let sizing = sizing(spec.shape);
         let mut labels = pod_labels(name, spec.labels, sizing);
-        labels.insert(ROLE_LABEL.into(), SANDBOX_ROLE.into());
+        labels.extend(sandbox_pod_labels());
         let image = match spec.image.is_empty() {
             true => k.image.clone(),
             false => spec.image.to_string(),
@@ -729,8 +776,10 @@ impl KubeSandboxProvider {
             run_as_non_root: Some(true),
             ..Default::default()
         };
+        // This node's pod, not any node's: another in the namespace carries
+        // the role too.
         let node_selector = LabelSelector {
-            match_labels: Some(BTreeMap::from([(ROLE_LABEL.into(), "node".into())])),
+            match_labels: Some(node_pod_labels()),
             ..Default::default()
         };
         Ok(Pod {
@@ -1378,9 +1427,10 @@ impl SandboxProvider for KubeSandboxProvider {
             .map_err(|e| failed(format!("get pod {}: {e}", handle.0)))?
             .ok_or_else(|| ProviderError::NotFound(handle.0.clone()))?;
         let labels = pod.metadata.labels.clone().unwrap_or_default();
-        if labels.get(ROLE_LABEL).map(String::as_str) != Some(SANDBOX_ROLE)
-            || labels.get(SESSION_LABEL) != Some(&handle.0)
-        {
+        let ours = sandbox_pod_labels()
+            .iter()
+            .all(|(key, value)| labels.get(key) == Some(value));
+        if !ours || labels.get(SESSION_LABEL) != Some(&handle.0) {
             return Err(failed(format!(
                 "{} was not made by this provider",
                 handle.0
@@ -1423,9 +1473,14 @@ impl SandboxProvider for KubeSandboxProvider {
     }
 
     async fn capacity(&self) -> Result<Capacity, ProviderError> {
+        let selector = sandbox_pod_labels()
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join(",");
         let listed = self
             .pods()
-            .list(&ListParams::default().labels(&format!("{ROLE_LABEL}={SANDBOX_ROLE}")))
+            .list(&ListParams::default().labels(&selector))
             .await
             .map_err(|e| failed(format!("list pods: {e}")))?;
         let own = format!("{}-", crate::config::resource_prefix());

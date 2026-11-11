@@ -27,6 +27,7 @@ spec:
         - podSelector:
             matchLabels:
               tracon.dev/role: sandbox
+              tracon.dev/node: tracon
       ports:
         - protocol: TCP
           port: 7426

@@ -753,21 +753,31 @@ async fn network(
     (CheckResult::ok(CheckId::NetworkIsolated, detail), egress)
 }
 
+/// `labels` as a selector reads: `k=v,k=v`.
+fn selector_words(labels: &std::collections::BTreeMap<String, String>) -> String {
+    labels
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Whether a policy is the single route a sandbox pod is allowed (the
 /// shape shipped in `deploy/kubernetes/sandbox-protocol`): it selects exactly
-/// the sandbox role, governs both directions, admits nothing in, and lets
-/// out only TCP to the node pod on `port`. No rule for DNS, the node pod's
-/// other ports, the API server or anything else.
+/// this node's sandboxes (their role and this node's `tracon.dev/node`),
+/// governs both directions, admits nothing in, and lets out only TCP to this
+/// node's own pod on `port`. No rule for DNS, the node pod's other ports,
+/// another node's pod, the API server or anything else.
 pub fn sandbox_policy_shape(policy: &NetworkPolicy, port: i32) -> Result<(), String> {
     let name = crate::provider::kubernetes::sandbox_policy();
-    let role = crate::provider::kubernetes::SANDBOX_ROLE;
+    let sandboxes = crate::provider::kubernetes::sandbox_pod_labels();
+    let node = crate::provider::kubernetes::node_pod_labels();
     let spec = policy
         .spec
         .as_ref()
         .ok_or_else(|| format!("{name} has no spec"))?;
     let selector = spec.pod_selector.clone().unwrap_or_default();
-    let exactly = selector.match_labels.clone().unwrap_or_default()
-        == std::collections::BTreeMap::from([(ROLE_LABEL.to_string(), role.to_string())])
+    let exactly = selector.match_labels.clone().unwrap_or_default() == sandboxes
         && selector
             .match_expressions
             .as_deref()
@@ -775,7 +785,8 @@ pub fn sandbox_policy_shape(policy: &NetworkPolicy, port: i32) -> Result<(), Str
             .is_empty();
     if !exactly {
         return Err(format!(
-            "{name} does not select exactly {ROLE_LABEL}={role}"
+            "{name} does not select exactly {}: this node's sandboxes, and no other node's",
+            selector_words(&sandboxes)
         ));
     }
     let types = spec.policy_types.clone().unwrap_or_default();
@@ -806,15 +817,16 @@ pub fn sandbox_policy_shape(policy: &NetworkPolicy, port: i32) -> Result<(), Str
                         .as_deref()
                         .unwrap_or_default()
                         .is_empty()
-                        && s.match_labels
-                            .as_ref()
-                            .and_then(|l| l.get(ROLE_LABEL))
-                            .is_some_and(|v| v == "node")
+                        && s.match_labels.as_ref().is_some_and(|labels| {
+                            node.iter()
+                                .all(|(key, value)| labels.get(key) == Some(value))
+                        })
                 });
             if !to_node {
                 return Err(format!(
-                    "{name} lets a sandbox reach beyond the node pod (another pod, a \
-                     namespace or an address block)"
+                    "{name} lets a sandbox reach beyond this node's pod ({}): another \
+                     node's, another pod, a namespace or an address block",
+                    selector_words(&node)
                 ));
             }
         }
@@ -909,7 +921,7 @@ async fn sandbox_runtime(
         Ok(c) => c,
         Err(e) => return CheckResult::fail(CheckId::Runtime, e),
     };
-    let reviews: Api<SelfSubjectAccessReview> = Api::all(client);
+    let reviews: Api<SelfSubjectAccessReview> = Api::all(client.clone());
     match first_refused(&reviews, &spec.env.namespace, PROTOCOL_RIGHTS).await {
         Ok(None) => {}
         Ok(Some(refused)) => {
@@ -922,6 +934,9 @@ async fn sandbox_runtime(
             )
         }
         Err(e) => return CheckResult::fail(CheckId::Runtime, format!("access review: {e}")),
+    }
+    if let Err(why) = own_pod_labelled(client, &provider.options().node_namespace).await {
+        return CheckResult::fail(CheckId::Runtime, why);
     }
     let dispatcher = match provider.dispatcher().await {
         Ok(d) => d,
@@ -943,14 +958,37 @@ async fn sandbox_runtime(
         format!(
             "api reachable; pods, pods/log and networkpolicies granted in {}; sandboxes over \
              the protocol dial {} and fetch the bundle {} (sha256 {}) there, and no run keeps \
-             anything in a Secret; node {}",
+             anything in a Secret; node {}; the node's pod is labelled {}",
             spec.env.namespace,
             provider.advertise(&dispatcher),
             provider.options().bundle.display(),
             &bundle.sha256[..12],
-            spec.env.node_name
+            spec.env.node_name,
+            selector_words(&crate::provider::kubernetes::node_pod_labels()),
         ),
     )
+}
+
+/// Whether the node's own pod carries the labels its sandboxes' affinity
+/// and policy find it by. Without them every sandbox would wait, unplaced,
+/// until its start timed out; with another node's, it would be placed by
+/// that one.
+async fn own_pod_labelled(client: kube::Client, namespace: &str) -> Result<(), String> {
+    let name = crate::runner::kube::PodEnv::own_pod_name().ok_or(
+        "the node's own pod is unknown (set TRACON_POD_NAME from metadata.name), so the \
+         labels its sandboxes find it by cannot be checked",
+    )?;
+    let pods: Api<Pod> = Api::namespaced(client, namespace);
+    let pod = pods
+        .get_opt(&name)
+        .await
+        .map_err(|e| format!("read the node's own pod {name}: {e}"))?
+        .ok_or_else(|| format!("the node's own pod {name} is not in {namespace}"))?;
+    match crate::provider::kubernetes::node_pod_unlabelled(&pod.metadata.labels.unwrap_or_default())
+    {
+        Some(why) => Err(why),
+        None => Ok(()),
+    }
 }
 
 /// The provider's own rendering of a sandbox, gated so it is admitted and
@@ -1517,9 +1555,7 @@ mod tests {
             spec: Some(k8s_openapi::api::networking::v1::NetworkPolicySpec {
                 pod_selector: Some(
                     k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
-                        match_labels: Some(
-                            [(ROLE_LABEL.to_string(), "sandbox".to_string())].into(),
-                        ),
+                        match_labels: Some(crate::provider::kubernetes::sandbox_pod_labels()),
                         ..Default::default()
                     },
                 ),
@@ -1530,15 +1566,50 @@ mod tests {
         }
     }
 
-    /// A sandbox's one route: egress only to the node pod, only on the
+    /// Egress to this node's own pod, by its role and its node label.
+    fn egress_to_own_node(ports: &[i32]) -> NetworkPolicyEgressRule {
+        NetworkPolicyEgressRule {
+            to: Some(vec![k8s_openapi::api::networking::v1::NetworkPolicyPeer {
+                pod_selector: Some(
+                    k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
+                        match_labels: Some(crate::provider::kubernetes::node_pod_labels()),
+                        ..Default::default()
+                    },
+                ),
+                ..Default::default()
+            }]),
+            ports: Some(ports.iter().map(|p| port(*p)).collect()),
+        }
+    }
+
+    /// A sandbox's one route: egress only to this node's pod, only on the
     /// sandbox port, nothing in. DNS, the node pod's old ports, a range, a
-    /// wider peer, an ingress rule or a wider selector are each refused.
+    /// wider peer, any node's pod, an ingress rule or a wider selector are
+    /// each refused.
     #[test]
     fn the_sandbox_policy_allows_one_route_and_nothing_else() {
+        let egress_to_node = egress_to_own_node;
         assert_eq!(
             sandbox_policy_shape(&sandbox_policy(vec![egress_to_node(&[7426])]), 7426),
             Ok(())
         );
+        // Any node's pod, or every sandbox in the namespace, is another
+        // node's too.
+        let why = sandbox_policy_shape(
+            &sandbox_policy(vec![super::tests::egress_to_node(&[7426])]),
+            7426,
+        )
+        .unwrap_err();
+        assert!(why.contains("tracon.dev/node=tracon"), "{why}");
+        let mut every_sandbox = sandbox_policy(vec![egress_to_node(&[7426])]);
+        every_sandbox.spec.as_mut().unwrap().pod_selector = Some(
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
+                match_labels: Some([(ROLE_LABEL.to_string(), "sandbox".to_string())].into()),
+                ..Default::default()
+            },
+        );
+        let why = sandbox_policy_shape(&every_sandbox, 7426).unwrap_err();
+        assert!(why.contains("no other node's"), "{why}");
         let why = sandbox_policy_shape(&sandbox_policy(vec![egress_to_node(&[7426, 7421])]), 7426)
             .unwrap_err();
         assert!(why.contains("port 7421"), "{why}");
@@ -1634,6 +1705,19 @@ mod tests {
         ] {
             assert!(policy.contains(said), "{said}:\n{policy}");
         }
+        // This node's sandboxes and this node's pod, by the default prefix,
+        // which the deployment's pod carries.
+        assert_eq!(
+            policy.matches("tracon.dev/node: tracon").count(),
+            2,
+            "both the sandboxes it selects and the pod they reach:\n{policy}"
+        );
+        let deployment = file("deployment.yaml");
+        assert!(
+            deployment.contains("tracon.dev/node: tracon"),
+            "{deployment}"
+        );
+        assert!(deployment.contains("TRACON_POD_NAME"), "{deployment}");
         let ports: Vec<&str> = policy.lines().filter(|l| l.contains("port:")).collect();
         assert_eq!(ports.len(), 1, "{policy}");
         assert!(file("networkpolicy-node.yaml").contains(&format!("port: {port}")));
@@ -1684,6 +1768,7 @@ mod tests {
         assert_eq!(granted, asserted);
         let node = overlay("networkpolicy-node.yaml");
         assert!(node.contains("tracon.dev/role: sandbox"), "{node}");
+        assert!(node.contains("tracon.dev/node: tracon"), "{node}");
         assert!(!node.contains("tracon.dev/role: harness"), "{node}");
         let kustomization = overlay("kustomization.yaml");
         assert!(

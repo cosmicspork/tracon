@@ -134,16 +134,19 @@ enum SandboxCommand {
     /// Make one sandbox, connect to it, run a command in it, read its
     /// isolation back from the provider, and remove it.
     Probe {
-        /// The provider to probe (apple, podman).
+        /// The provider to probe (apple, kubernetes, podman). Kubernetes is
+        /// probed from inside the node's pod, before `sandbox_protocol` is on.
         #[arg(long)]
         provider: String,
         /// The harness bundle for the sandbox's architecture, with
-        /// bin/tracon-sandbox in it.
+        /// bin/tracon-sandbox in it. Left out, this release's for this host,
+        /// fetched and checked as the node fetches its own.
         #[arg(long)]
-        bundle: std::path::PathBuf,
-        /// The image to run.
-        #[arg(long, default_value = "ubuntu:24.04")]
-        image: String,
+        bundle: Option<std::path::PathBuf>,
+        /// The image to run. Left out: ubuntu:24.04, or on Kubernetes the
+        /// stock sandbox base, whose own tools fetch the bundle.
+        #[arg(long)]
+        image: Option<String>,
         /// Leave the sandbox running afterwards.
         #[arg(long)]
         keep: bool,
@@ -853,9 +856,12 @@ async fn main() -> Result<()> {
         } => {
             let provider = match provider.as_str() {
                 "apple" => tracon::provider::ProviderKind::Apple,
+                "kubernetes" => tracon::provider::ProviderKind::Kubernetes,
                 "podman" => tracon::provider::ProviderKind::Podman,
                 other => {
-                    anyhow::bail!("unknown provider {other:?}; the probe knows apple and podman")
+                    anyhow::bail!(
+                        "unknown provider {other:?}; the probe knows apple, kubernetes and podman"
+                    )
                 }
             };
             tracon::provider::probe::run(tracon::provider::probe::ProbeOptions {

@@ -147,6 +147,10 @@ pub fn render(namespace: &str, pod: &str, cmd: &RunnerCommand) -> Secret {
             labels: Some(BTreeMap::from([
                 (RUN_LABEL.to_string(), pod.to_string()),
                 (PID_LABEL.to_string(), std::process::id().to_string()),
+                (
+                    super::NODE_LABEL.to_string(),
+                    crate::config::resource_prefix().to_string(),
+                ),
             ])),
             ..Default::default()
         },
@@ -358,7 +362,9 @@ impl KubeRunner {
     /// Remove the run Secrets nothing needs any more: those whose pod has
     /// started (the kubelet read them then) and those whose pod is gone and
     /// that are older than `SWEEP_GRACE`. Returns how many it removed. A
-    /// node that may not list Secrets has made none to sweep.
+    /// node that may not list Secrets has made none to sweep. Only this
+    /// node's, by the prefix its pods' names carry: another node in the same
+    /// namespace sweeps its own.
     pub async fn sweep_run_secrets(&self) -> usize {
         let secrets = self.secrets();
         let listed = match secrets
@@ -382,6 +388,9 @@ impl KubeRunner {
             ) else {
                 continue;
             };
+            if !crate::gc::is_own(&pod) {
+                continue;
+            }
             let old = meta
                 .creation_timestamp
                 .as_ref()

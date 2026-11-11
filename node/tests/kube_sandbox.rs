@@ -244,6 +244,7 @@ async fn kubernetes_sandboxes_over_the_protocol() {
     let pod = created.last().unwrap();
     let labels = pod.metadata.labels.clone().unwrap();
     assert_eq!(labels[ROLE_LABEL], SANDBOX_ROLE);
+    assert_eq!(labels["tracon.dev/node"], "tracon");
     assert_eq!(labels["tracon.dev/kind"], "check");
     assert_eq!(labels["tracon.dev/sizing"], "command");
     assert_eq!(labels["tracon.dev/repo"], "app");
@@ -321,10 +322,68 @@ async fn kubernetes_sandboxes_over_the_protocol() {
         tracon::provider::capabilities::Route::Unverified
     );
     assert_eq!(caps.dns, tracon::provider::capabilities::Dns::None);
+
+    // With this node's policy in place, the route is claimed: it selects
+    // this node's sandboxes and reaches this node's pod alone.
+    let port = provider.dispatcher().await.unwrap().local_addr().port();
+    api.insert_policy(own_sandbox_policy(i32::from(port)));
+    let caps = provider.verify_isolation(&handle).await.unwrap();
+    assert_eq!(caps.route, tracon::provider::capabilities::Route::NodeOnly);
     let _ = provider.destroy(&handle).await;
+
+    // A sandbox pod of another node in the namespace is not this one's.
+    let mut theirs = session_pod(&provider, "spike-h-1");
+    theirs
+        .metadata
+        .labels
+        .as_mut()
+        .unwrap()
+        .insert("tracon.dev/node".into(), "spike".into());
+    api.insert_pod(theirs, Script::default());
+    let refused = provider
+        .verify_isolation(&tracon::provider::Handle("spike-h-1".into()))
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("not made by this provider"));
 
     kubelet.task.abort();
     kubelet.settle().await;
+}
+
+/// `<prefix>-sandbox` as the deployment ships it, on `port`.
+fn own_sandbox_policy(port: i32) -> k8s_openapi::api::networking::v1::NetworkPolicy {
+    use k8s_openapi::api::networking::v1::{
+        NetworkPolicy, NetworkPolicyEgressRule, NetworkPolicyPeer, NetworkPolicyPort,
+        NetworkPolicySpec,
+    };
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
+    use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
+    let select = |labels| LabelSelector {
+        match_labels: Some(labels),
+        ..Default::default()
+    };
+    NetworkPolicy {
+        metadata: ObjectMeta {
+            name: Some(tracon::provider::kubernetes::sandbox_policy()),
+            ..Default::default()
+        },
+        spec: Some(NetworkPolicySpec {
+            pod_selector: Some(select(tracon::provider::kubernetes::sandbox_pod_labels())),
+            policy_types: Some(vec!["Ingress".into(), "Egress".into()]),
+            ingress: Some(vec![]),
+            egress: Some(vec![NetworkPolicyEgressRule {
+                to: Some(vec![NetworkPolicyPeer {
+                    pod_selector: Some(select(tracon::provider::kubernetes::node_pod_labels())),
+                    ..Default::default()
+                }]),
+                ports: Some(vec![NetworkPolicyPort {
+                    port: Some(IntOrString::Int(port)),
+                    protocol: Some("TCP".into()),
+                    ..Default::default()
+                }]),
+            }]),
+        }),
+    }
 }
 
 /// A sandbox pod as the provider renders it, for a read-back.
