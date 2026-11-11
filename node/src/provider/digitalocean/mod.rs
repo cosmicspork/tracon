@@ -122,7 +122,9 @@ pub struct Settings {
     /// is all the runtime runs: for a node that cannot build them (Apple).
     pub templates: TemplateSource,
     /// With `templates = "peer"`, the one peer (by node name or id) to take
-    /// templates from; empty for any that builds them.
+    /// templates from; empty for any that builds them. Left out of a saved
+    /// file when empty, as `[runtime.kubernetes] builder` is.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub builder: String,
 }
 
