@@ -782,3 +782,78 @@ fn a_snapshot_is_staged_only_within_what_the_volume_can_spare() {
     assert!(why.contains("make room"), "{why}");
     assert!(snapshot_budget(Some(0)).is_err());
 }
+
+/// A provider whose API serves one pod, `tracon-h-1`, whose harness status
+/// names `image_id` from the `ready`th read on (counting from 1); before
+/// that the container's `imageID` is empty, as the kubelet leaves it
+/// before it posts the running container's status. Returns the read count.
+fn pod_gaining_image_id(
+    ready: usize,
+    image_id: &'static str,
+) -> (KubeSandboxProvider, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let reads = Arc::new(AtomicUsize::new(0));
+    let counter = reads.clone();
+    let router = axum::Router::new().route(
+        "/api/v1/namespaces/tracon-node/pods/tracon-h-1",
+        axum::routing::get(move || {
+            let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
+            let id = if n >= ready { image_id } else { "" };
+            async move {
+                axum::Json(serde_json::json!({
+                    "apiVersion": "v1",
+                    "kind": "Pod",
+                    "metadata": {"name": "tracon-h-1", "namespace": "tracon-node"},
+                    "status": {
+                        "phase": "Running",
+                        "containerStatuses": [{
+                            "name": "harness",
+                            "image": "registry.example/app@sha256:aa",
+                            "imageID": id,
+                            "ready": true,
+                            "restartCount": 0,
+                        }],
+                    },
+                }))
+            }
+        }),
+    );
+    let client = kube::Client::new(router, "tracon-node");
+    (KubeSandboxProvider::new(client, options()), reads)
+}
+
+/// The kubelet posts the container's `imageID` a moment after the sandbox
+/// can say hello: the read waits for it instead of failing at once.
+#[tokio::test(start_paused = true)]
+async fn image_identity_waits_for_the_kubelet_to_report_the_digest() {
+    let (provider, reads) = pod_gaining_image_id(
+        2,
+        "containerd://ghcr.io/cosmicspork/tracon-sandbox-base@sha256:50b8",
+    );
+    let identity = provider
+        .image_identity(&Handle("tracon-h-1".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        identity,
+        ImageIdentity::Exact {
+            digest: "sha256:50b8".into()
+        }
+    );
+    assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+/// A digest that never comes is still an error, after a bounded wait.
+#[tokio::test(start_paused = true)]
+async fn image_identity_gives_up_when_no_digest_comes() {
+    let (provider, reads) = pod_gaining_image_id(usize::MAX, "unused");
+    let start = tokio::time::Instant::now();
+    let error = provider
+        .image_identity(&Handle("tracon-h-1".into()))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("reports no image digest"), "{error}");
+    assert!(start.elapsed() <= IMAGE_ID_WAIT, "{:?}", start.elapsed());
+    assert!(reads.load(std::sync::atomic::Ordering::SeqCst) > 2);
+}

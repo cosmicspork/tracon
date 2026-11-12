@@ -131,6 +131,9 @@ const SUPERVISOR: &str = "/opt/tracon/bin/tracon-sandbox";
 
 /// How often a pod on its way up is read.
 const POLL: Duration = Duration::from_millis(500);
+/// How long `image_identity` re-reads a pod whose status does not name its
+/// container's image digest yet: the kubelet posts it shortly after start.
+const IMAGE_ID_WAIT: Duration = Duration::from_secs(30);
 /// Reads in a row that may fail before a start is given up.
 const READ_FAILURES: u32 = 10;
 /// How long a connection from an address no sandbox is expected at yet is
@@ -1767,18 +1770,34 @@ impl SandboxProvider for KubeSandboxProvider {
     }
 
     async fn image_identity(&self, handle: &Handle) -> Result<ImageIdentity, ProviderError> {
-        let pod = self
-            .pods()
-            .get_opt(&handle.0)
-            .await
-            .map_err(|e| failed(format!("get pod {}: {e}", handle.0)))?
-            .ok_or_else(|| ProviderError::NotFound(handle.0.clone()))?;
-        let id = pod
-            .status
-            .as_ref()
-            .and_then(harness_status)
-            .and_then(|c| normalize_image_id(&c.image_id))
-            .ok_or_else(|| failed(format!("{} reports no image digest yet", handle.0)))?;
+        // The kubelet posts the running container's `imageID` a moment after
+        // the container starts, so a sandbox can say hello before its pod's
+        // status names the digest: re-read the pod for a bounded while.
+        let deadline = tokio::time::Instant::now() + IMAGE_ID_WAIT;
+        let id = loop {
+            let pod = self
+                .pods()
+                .get_opt(&handle.0)
+                .await
+                .map_err(|e| failed(format!("get pod {}: {e}", handle.0)))?
+                .ok_or_else(|| ProviderError::NotFound(handle.0.clone()))?;
+            if let Some(id) = pod
+                .status
+                .as_ref()
+                .and_then(harness_status)
+                .and_then(|c| normalize_image_id(&c.image_id))
+            {
+                break id;
+            }
+            if tokio::time::Instant::now() + POLL > deadline {
+                return Err(failed(format!(
+                    "{} reports no image digest after {} s",
+                    handle.0,
+                    IMAGE_ID_WAIT.as_secs()
+                )));
+            }
+            tokio::time::sleep(POLL).await;
+        };
         let digest = id
             .split_once('@')
             .map(|(_, digest)| digest.to_string())
