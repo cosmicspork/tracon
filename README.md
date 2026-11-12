@@ -1270,7 +1270,8 @@ and revoked the moment the hub loses that key.
 
 Most commands talk to the running node over its API, and `TRACON_URL` and
 `TRACON_TOKEN` point them at a remote node. The ones that act on this machine itself
-ignore both: `setup`, `check-boundary`, `service`, `enroll`, `mesh id`,
+ignore both: `setup`, `check-boundary` (which asks this machine's node only when that
+node holds the Kubernetes sandbox port), `service`, `enroll`, `mesh id`,
 `credential import|ls|rm`, `policy keygen|init|sign|show`, and `session show`,
 which reads a file and needs no node at all. `--help` on any of them says more.
 
@@ -2221,7 +2222,10 @@ replaced), takes its connection on the sandbox port, runs a command in it, reads
 isolation back (the admitted pod, `<prefix>-sandbox` and the namespace's other
 policies) and removes it, on Ctrl-C too. It needs the sandbox port free, so it is for a
 pod whose node is not serving yet; once it is, the boundary check covers the same
-ground.
+ground: `tracon check-boundary [--deep]` in the node's pod finds the sandbox port taken
+and asks the serving node on its loopback API (`POST /api/boundary/check`, with
+`{"deep": true}` for `--deep`) to run the checks, and prints its answer and exits as a
+check run in the pod's own process would.
 
 #### Images on Kubernetes
 

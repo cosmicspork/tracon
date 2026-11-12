@@ -7341,14 +7341,36 @@ impl crate::mesh::forward::CommandExecutor for AppState {
 // Settings: standing a node up without a shell on it.
 // ---------------------------------------------------------------------------
 
+/// What `POST /api/boundary/check` may ask: `deep` also probes egress from
+/// inside the boundary, as `tracon check-boundary --deep` does.
+#[derive(Debug, Default, Deserialize)]
+pub struct BoundaryCheckBody {
+    #[serde(default)]
+    pub deep: bool,
+}
+
 /// Re-run the boundary checks and record the verdict.
 ///
 /// The refusal is a snapshot taken at startup, and an operator who has just
 /// started the runtime or run setup should not have to restart the node to be
-/// believed. Publishing the node frame is what clears the banner live.
-pub async fn recheck_boundary(State(s): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+/// believed. Publishing the node frame is what clears the banner live. It is
+/// also how `tracon check-boundary` reaches a serving node whose runtime it
+/// cannot share (a Kubernetes node holds the sandbox port).
+pub async fn recheck_boundary(
+    State(s): State<AppState>,
+    body: Option<Json<BoundaryCheckBody>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let deep = body.map(|Json(b)| b.deep).unwrap_or(false);
+    recheck_boundary_with(s, deep).await
+}
+
+/// [`recheck_boundary`], `deep` or not.
+pub(crate) async fn recheck_boundary_with(
+    s: AppState,
+    deep: bool,
+) -> ApiResult<Json<serde_json::Value>> {
     let backend = s.manager.backend().clone();
-    let report = backend.check_all(&s.cfg, false).await;
+    let report = backend.check_all(&s.cfg, deep).await;
     let row = reverify(&s)
         .await
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -7429,7 +7451,7 @@ pub async fn run_setup(
     })?
     .and_then(|r| r)
     .map_err(|e| ApiError(StatusCode::CONFLICT, e.to_string()))?;
-    recheck_boundary(State(s)).await
+    recheck_boundary_with(s, false).await
 }
 
 #[derive(Deserialize)]

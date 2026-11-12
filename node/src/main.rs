@@ -921,38 +921,110 @@ async fn main() -> Result<()> {
         } => enroll_command(invitation, name, hub).await,
         Command::Mesh(cmd) => mesh_command(cmd).await,
         Command::Channel(cmd) => channel_command(cmd).await,
-        Command::CheckBoundary { deep } => {
-            let cfg = boundary_config()?;
-            let backend = boundary::backend_for(&cfg).await;
-            let report = backend.check_all(&cfg, deep).await;
-            for c in &report.checks {
-                println!(
-                    "{} {:<22} {}",
-                    if c.ok { "ok  " } else { "FAIL" },
-                    c.id.as_str(),
-                    c.detail
+        Command::CheckBoundary { deep } => check_boundary(deep).await,
+    }
+}
+
+/// `tracon check-boundary`: the checks run here, or, where this host's
+/// serving node holds what they need (a Kubernetes node's sandbox port), by
+/// that node, which is asked over its loopback API. Either way the same
+/// lines and the same exit status.
+async fn check_boundary(deep: bool) -> Result<()> {
+    let cfg = boundary_config()?;
+    let checked = match sandbox_port_held(&cfg) {
+        Some(port) => match running_node().await {
+            Some(url) => {
+                eprintln!(
+                    "port {port} is taken by the node serving its sandboxes here: \
+                     asking it ({url}) to run the checks"
                 );
+                node_call(
+                    reqwest::Method::POST,
+                    "/api/boundary/check",
+                    Some(serde_json::json!({ "deep": deep })),
+                    None,
+                )
+                .await?
             }
-            if let Some(caps) = tracon::provider::backend_report(backend.kind(), &report) {
-                println!(
-                    "\ncapabilities ({}, reported, not enforced):",
-                    caps.provider.as_str()
-                );
-                for line in &caps.lines {
-                    println!(
-                        "  {:<16} {}",
-                        line.capability,
-                        line.value.unwrap_or("not established")
-                    );
-                }
-            }
-            match report.first_failure() {
-                None => Ok(()),
-                // Refusal is the honest state: name the check and exit non-zero.
-                Some(f) => anyhow::bail!("boundary check failed: {}", f.id.as_str()),
-            }
+            None => local_boundary_check(&cfg, deep).await,
+        },
+        None => local_boundary_check(&cfg, deep).await,
+    };
+    let (lines, failed) = boundary_lines(&checked);
+    for line in lines {
+        println!("{line}");
+    }
+    match failed {
+        None => Ok(()),
+        // Refusal is the honest state: name the check and exit non-zero.
+        Some(id) => anyhow::bail!("boundary check failed: {id}"),
+    }
+}
+
+/// The checks run in this process, shaped as `POST /api/boundary/check`
+/// answers them.
+async fn local_boundary_check(cfg: &config::Config, deep: bool) -> serde_json::Value {
+    let backend = boundary::backend_for(cfg).await;
+    let report = backend.check_all(cfg, deep).await;
+    let providers: Vec<_> = tracon::provider::backend_report(backend.kind(), &report)
+        .into_iter()
+        .collect();
+    serde_json::json!({ "checks": report, "providers": providers })
+}
+
+/// The sandbox port a serving node on this host holds, which this process
+/// can then not listen on to run the checks itself. Only Kubernetes listens
+/// on a fixed port: Podman's and Apple's sandboxes each get a socket of
+/// their own, which a serving node does not hold.
+fn sandbox_port_held(cfg: &config::Config) -> Option<u16> {
+    if cfg.runtime.kind != config::RuntimeKind::Kubernetes {
+        return None;
+    }
+    let port = cfg.runtime.kubernetes.sandbox_port;
+    port_in_use(SocketAddr::from(([0, 0, 0, 0], port))).then_some(port)
+}
+
+fn port_in_use(addr: SocketAddr) -> bool {
+    addr.port() != 0
+        && matches!(
+            std::net::TcpListener::bind(addr),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse
+        )
+}
+
+/// The lines `check-boundary` prints for a check's answer (`checks`, then
+/// each provider's capabilities), and the first failed check's id.
+fn boundary_lines(checked: &serde_json::Value) -> (Vec<String>, Option<String>) {
+    let mut lines = Vec::new();
+    let mut failed = None;
+    for c in checked["checks"]["checks"].as_array().into_iter().flatten() {
+        let ok = c["ok"].as_bool().unwrap_or(false);
+        let id = c["id"].as_str().unwrap_or("?");
+        if !ok && failed.is_none() {
+            failed = Some(id.to_string());
+        }
+        lines.push(format!(
+            "{} {:<22} {}",
+            if ok { "ok  " } else { "FAIL" },
+            id,
+            c["detail"].as_str().unwrap_or_default()
+        ));
+    }
+    for caps in checked["providers"].as_array().into_iter().flatten() {
+        lines.push(String::new());
+        lines.push(format!(
+            "capabilities ({}, reported, not enforced):",
+            caps["provider"].as_str().unwrap_or("?")
+        ));
+        for line in caps["lines"].as_array().into_iter().flatten() {
+            lines.push(format!(
+                "  {:<16} {}",
+                line["capability"].as_str().unwrap_or("?"),
+                line["value"].as_str().unwrap_or("not established")
+            ));
         }
     }
+    (lines, failed)
 }
 
 fn policy_command(cmd: PolicyCommand) -> Result<()> {
@@ -3353,6 +3425,57 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::resolve_prefix;
+
+    /// A serving node's answer prints as a check run here does, and its
+    /// first failed check is what the command exits on.
+    #[test]
+    fn a_nodes_boundary_answer_prints_as_a_local_check_does() {
+        let checked = serde_json::json!({
+            "state": "refused",
+            "checks": {"checks": [
+                {"id": "runtime", "ok": true, "detail": "kubernetes 1.35"},
+                {"id": "egress", "ok": false, "detail": "reached example.com"},
+                {"id": "network_isolated", "ok": false, "detail": "later"},
+            ]},
+            "providers": [{
+                "provider": "kubernetes",
+                "lines": [
+                    {"capability": "tier", "value": "container"},
+                    {"capability": "route", "value": null},
+                ],
+            }],
+        });
+        let (lines, failed) = super::boundary_lines(&checked);
+        assert_eq!(
+            lines,
+            [
+                "ok   runtime                kubernetes 1.35",
+                "FAIL egress                 reached example.com",
+                "FAIL network_isolated       later",
+                "",
+                "capabilities (kubernetes, reported, not enforced):",
+                "  tier             container",
+                "  route            not established",
+            ]
+        );
+        assert_eq!(failed.as_deref(), Some("egress"));
+
+        let passed = serde_json::json!({"checks": {"checks": [
+            {"id": "runtime", "ok": true, "detail": "ok"},
+        ]}, "providers": []});
+        assert_eq!(super::boundary_lines(&passed).1, None);
+    }
+
+    /// A port something listens on is in use; a free one, or port 0, is not.
+    #[test]
+    fn a_held_sandbox_port_is_seen_as_held() {
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = held.local_addr().unwrap();
+        assert!(super::port_in_use(addr));
+        drop(held);
+        assert!(!super::port_in_use(addr));
+        assert!(!super::port_in_use("127.0.0.1:0".parse().unwrap()));
+    }
 
     const IDS: [&str; 3] = ["45abb223aa", "45abc001bb", "0f80343ccc"];
 
