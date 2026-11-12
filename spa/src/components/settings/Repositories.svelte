@@ -98,6 +98,10 @@
     return loaded?.entries.find((item) => item.entry.path === path)?.refused ?? null
   }
 
+  function unbuiltOf(path: string) {
+    return loaded?.entries.find((item) => item.entry.path === path)?.unbuilt ?? []
+  }
+
   async function startHeld(path: string, lendingHash: string) {
     if (busy) return
     busy = `start:${path}`
@@ -276,6 +280,7 @@
       {@const built = builds(form.path)}
       {@const hold = holdOf(form.path)}
       {@const refused = refusalOf(form.path)}
+      {@const unbuilt = unbuiltOf(form.path)}
       {@const uploads = acceptsUploads(words(form.egress), presets)}
       <details class="entry" open={!form.path || forms.length <= 2}>
         <summary>
@@ -367,6 +372,11 @@
 
         {#each entryErrors(index) as message (message)}<p class="error" role="alert">{message}</p>{/each}
         {#if refused}<p class="error" role="alert">Refused on this node: {refused}</p>{/if}
+        {#each unbuilt as note (note.repo_path)}
+          <p class="error" role="alert">
+            Not built{built.length > 1 || unbuilt.length > 1 ? ` (${note.repo_path})` : ''}: {note.reason}{note.using ? ` · runs keep using ${note.using}` : ''}
+          </p>
+        {/each}
 
         {#if hold}
           <div class="held" role="status">

@@ -1857,8 +1857,31 @@ export interface RepoEnvironments {
   hash: string
   /** Preset name, and the hosts it opens. */
   presets: [string, string[]][]
-  /** `refused`: why this node runs nothing for the entry (an image off its stock base). */
-  entries: { entry: RepoEntry; builds: RepoImageBuild[]; hold?: CredentialHold | null; refused?: string | null }[]
+  /**
+   * `refused`: why this node runs nothing for the entry (an image off its stock base).
+   * `unbuilt`: repositories whose last attempt built nothing a build shows, and why.
+   * `ensuring`: repositories the node is building for, or waiting to.
+   */
+  entries: {
+    entry: RepoEntry
+    builds: RepoImageBuild[]
+    hold?: CredentialHold | null
+    refused?: string | null
+    unbuilt?: RepoUnbuilt[]
+    ensuring?: string[]
+  }[]
+}
+
+/**
+ * Why a repository's last attempt built nothing a build row shows: the
+ * builder was unavailable, say. Cleared once an image builds.
+ */
+export interface RepoUnbuilt {
+  repo_path: string
+  reason: string
+  /** The earlier image runs keep using, if one stands. */
+  using: string | null
+  at_ms: number
 }
 
 /**

@@ -20,6 +20,8 @@ pub async fn list(State(s): State<AppState>) -> ApiResult<Json<Value>> {
     let hash = crate::config::edit::file_hash(&Config::config_path())?;
     let builds = s.store().repo_images()?;
     let repos = s.cfg.repos();
+    let unbuilt = repo_image::unbuilt();
+    let ensuring = repo_image::ensuring();
     let mut entries: Vec<Value> = Vec::with_capacity(repos.len());
     for (index, entry) in repos.iter().enumerate() {
         // The first matching entry wins, here as everywhere else.
@@ -36,7 +38,32 @@ pub async fn list(State(s): State<AppState>) -> ApiResult<Json<Value>> {
         // peer's recipe changed builds nothing until it is started.
         let hold = crate::mesh::recipe::held(s.store(), entry);
         let refused = refused(entry, builds.first().map(|b| b.repo_path.as_str())).await;
-        entries.push(json!({ "entry": entry, "builds": builds, "hold": hold, "refused": refused }));
+        let ours = |path: &str| {
+            repos
+                .iter()
+                .position(|entry| entry.matches(Path::new(path)))
+                == Some(index)
+        };
+        // Why a repository's last attempt built nothing, unless a build
+        // started since says more.
+        let unbuilt: Vec<_> = unbuilt
+            .iter()
+            .filter(|note| ours(&note.repo_path))
+            .filter(|note| {
+                !builds
+                    .iter()
+                    .any(|build| build.repo_path == note.repo_path && build.started_ms > note.at_ms)
+            })
+            .collect();
+        let ensuring: Vec<_> = ensuring.iter().filter(|path| ours(path)).collect();
+        entries.push(json!({
+            "entry": entry,
+            "builds": builds,
+            "hold": hold,
+            "refused": refused,
+            "unbuilt": unbuilt,
+            "ensuring": ensuring,
+        }));
     }
     Ok(Json(json!({
         "can_build": s.manager.backend().image_builder().is_some(),
@@ -236,11 +263,21 @@ pub async fn build(
         )
         .into());
     }
-    if s.manager.backend().image_builder().is_none() {
+    let Some(builder) = s.manager.backend().image_builder() else {
         return Err(unprocessable(format!(
             "the {} runtime cannot build images",
             s.manager.backend().kind()
         ))
+        .into());
+    };
+    // A builder that cannot build now would build nothing and record
+    // nothing, leaving the caller to poll for a build that never starts.
+    if let Some(why) = builder.unavailable().await {
+        tracing::warn!(repo = %repo.display(), reason = %why, "repository image build refused: the image builder is unavailable");
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("the image builder is unavailable, so nothing was built: {why}"),
+        )
         .into());
     }
     if let Some(identity) = &uncloned {

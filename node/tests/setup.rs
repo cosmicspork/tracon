@@ -265,6 +265,9 @@ async fn a_trial_runs_each_check_and_names_what_it_could_not_reach() {
 #[derive(Default)]
 struct Building {
     built: Mutex<Vec<String>>,
+    /// What `unavailable` says, one answer per question; `None` once
+    /// these run out.
+    down: Mutex<std::collections::VecDeque<Option<String>>>,
 }
 
 impl Building {
@@ -291,6 +294,9 @@ impl ImageBuilder for Building {
         None
     }
     async fn remove(&self, _image: &str) {}
+    async fn unavailable(&self) -> Option<String> {
+        self.down.lock().unwrap().pop_front().flatten()
+    }
 }
 
 #[async_trait]
@@ -712,4 +718,106 @@ async fn a_trial_that_times_out_after_a_refusal_names_the_refused_host() {
         said.contains("timed out after 2s; egress refused refused.example, which the repository's egress does not name"),
         "{said}"
     );
+}
+
+/// A host checkout whose default branch holds a Dockerfile on the stock
+/// base, and an entry that builds it.
+fn buildable(h: &Harness, name: &str) -> std::path::PathBuf {
+    let dir = state::scratch(name);
+    let sh = |script: &str| {
+        let ok = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "{script}");
+    };
+    sh(
+        "git init -q -b main . && git config user.email t@e && git config user.name t \
+        && git config commit.gpgsign false && mkdir .devcontainer \
+        && printf 'FROM ${TRACON_SANDBOX_BASE}\\n' > .devcontainer/Dockerfile \
+        && git add -A && git commit -qm one \
+        && git update-ref refs/remotes/origin/main HEAD \
+        && git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main",
+    );
+    h.manager.cfg().live_repo.set(vec![tracon::config::Repo {
+        path: dir.clone(),
+        dockerfile: Some(".devcontainer/Dockerfile".into()),
+        ..Default::default()
+    }]);
+    dir
+}
+
+/// `tracon repo build` while the builder cannot build is refused with the
+/// builder's reason, rather than accepted for a build that never starts.
+#[tokio::test]
+async fn a_build_asked_of_an_unavailable_builder_is_refused_with_its_reason() {
+    let _guard = state::config_lock().await;
+    let backend = Arc::new(Building::default());
+    let h = harness_on(Config::default(), backend.clone()).await;
+    let dir = buildable(&h, "unavailable-builder-refused");
+    let said = "the token service answered 403 Forbidden, so a repository's image cannot be built";
+    backend.down.lock().unwrap().push_back(Some(said.into()));
+
+    let (status, v) = support::http::call_local(
+        &h.operator,
+        "POST",
+        "/api/repos/environments/build",
+        Some(json!({ "repo": dir.to_string_lossy() })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+    assert!(v.to_string().contains(said), "{v}");
+    assert!(backend.builds().is_empty());
+}
+
+/// A builder that goes away after the build was accepted leaves a reason
+/// where the list shows it, which is what the CLI and Settings wait on,
+/// rather than no row and nothing to wait for.
+#[tokio::test]
+async fn a_builder_lost_after_the_build_was_accepted_leaves_its_reason() {
+    let _guard = state::config_lock().await;
+    let backend = Arc::new(Building::default());
+    let h = harness_on(Config::default(), backend.clone()).await;
+    let dir = buildable(&h, "unavailable-builder-later");
+    let path = dir.to_string_lossy().to_string();
+    let said = "buildkitd stopped answering";
+    backend
+        .down
+        .lock()
+        .unwrap()
+        .extend([None, Some(said.to_string())]);
+
+    let (status, started) = support::http::call_local(
+        &h.operator,
+        "POST",
+        "/api/repos/environments/build",
+        Some(json!({ "repo": path })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{started}");
+    let since = started["since_ms"].as_i64().unwrap();
+    let mut seen = Value::Null;
+    for _ in 0..200 {
+        let (status, v) =
+            support::http::call_local(&h.operator, "GET", "/api/repos/environments", None).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        let entry = &v["entries"][0];
+        if let Some(note) = entry["unbuilt"]
+            .as_array()
+            .and_then(|notes| notes.iter().find(|note| note["repo_path"] == json!(path)))
+        {
+            seen = note.clone();
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        seen["reason"].as_str().unwrap_or("").starts_with(said),
+        "{seen}"
+    );
+    assert!(seen["at_ms"].as_i64().unwrap() >= since, "{seen}");
+    assert!(backend.builds().is_empty());
 }

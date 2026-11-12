@@ -91,6 +91,134 @@ impl Ensured {
     }
 }
 
+/// Why `repo`'s image was last not built, when no build row says so: the
+/// builder was unavailable or cooling down, the entry was refused or held,
+/// or a build the builder failed was dropped rather than recorded. Without
+/// it, a `tracon repo build` that built nothing has nothing to read back.
+/// Kept in memory: what a restart forgets, the next attempt says again.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Unbuilt {
+    pub repo_path: String,
+    pub reason: String,
+    /// The earlier image runs still use, if one stands.
+    pub using: Option<String>,
+    pub at_ms: i64,
+}
+
+#[derive(Default)]
+struct Attempts {
+    /// The last attempt for each repository that built nothing a row shows.
+    unbuilt: HashMap<PathBuf, Unbuilt>,
+    /// How many `ensure_base` calls are under way for each repository,
+    /// waiting for the build lock included.
+    ensuring: HashMap<PathBuf, usize>,
+}
+
+fn attempts() -> &'static StdMutex<Attempts> {
+    static ATTEMPTS: std::sync::LazyLock<StdMutex<Attempts>> =
+        std::sync::LazyLock::new(Default::default);
+    &ATTEMPTS
+}
+
+/// Every repository whose last attempt built nothing a row shows, and why.
+pub fn unbuilt() -> Vec<Unbuilt> {
+    let mut notes: Vec<Unbuilt> = attempts()
+        .lock()
+        .unwrap()
+        .unbuilt
+        .values()
+        .cloned()
+        .collect();
+    notes.sort_by(|a, b| a.repo_path.cmp(&b.repo_path));
+    notes
+}
+
+/// The repositories an `ensure_base` is under way for: one asked for now
+/// may be waiting behind another build before its own row appears.
+pub fn ensuring() -> Vec<String> {
+    let mut paths: Vec<String> = attempts()
+        .lock()
+        .unwrap()
+        .ensuring
+        .keys()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// Counts an `ensure_base` under way for `repo` until dropped.
+struct Ensuring(PathBuf);
+
+impl Ensuring {
+    fn start(repo: &Path) -> Self {
+        *attempts()
+            .lock()
+            .unwrap()
+            .ensuring
+            .entry(repo.to_path_buf())
+            .or_default() += 1;
+        Ensuring(repo.to_path_buf())
+    }
+}
+
+impl Drop for Ensuring {
+    fn drop(&mut self) {
+        let mut attempts = attempts().lock().unwrap();
+        if let Some(count) = attempts.ensuring.get_mut(&self.0) {
+            *count -= 1;
+            if *count == 0 {
+                attempts.ensuring.remove(&self.0);
+            }
+        }
+    }
+}
+
+/// Say what an `ensure_base` that began at `begun_ms` came to. One that
+/// leaves `repo` without its current image is logged, and noted for `repo
+/// ls` and Settings unless a failed build row already says it.
+fn settle_outcome(store: &Store, repo: &Path, begun_ms: i64, ensured: &Ensured) {
+    let (reason, using) = match ensured {
+        Ensured::Stale { using, error } => (error, Some(using.clone())),
+        Ensured::Unavailable { reason } => (reason, None),
+        Ensured::Unconfigured | Ensured::Current(_) | Ensured::Rebuilt(_) => {
+            attempts().lock().unwrap().unbuilt.remove(repo);
+            return;
+        }
+    };
+    let latest = store
+        .latest_repo_image(&repo.to_string_lossy(), BASE)
+        .ok()
+        .flatten()
+        .filter(|row| {
+            row.status == "failed" && !row.error.is_empty() && reason.contains(&row.error)
+        });
+    if let Some(row) = latest {
+        // A recorded failure shows itself; one that finished during this
+        // call was logged as it failed.
+        attempts().lock().unwrap().unbuilt.remove(repo);
+        if row.finished_ms.unwrap_or(0) < begun_ms {
+            tracing::warn!(repo = %repo.display(), %reason, "repository image not built");
+        }
+        return;
+    }
+    match &using {
+        Some(image) => {
+            tracing::warn!(repo = %repo.display(), %reason, using = %image, "repository image not built; the earlier image stands")
+        }
+        None => tracing::warn!(repo = %repo.display(), %reason, "repository image not built"),
+    }
+    attempts().lock().unwrap().unbuilt.insert(
+        repo.to_path_buf(),
+        Unbuilt {
+            repo_path: repo.to_string_lossy().into_owned(),
+            reason: reason.clone(),
+            using,
+            at_ms: crate::store::now_ms(),
+        },
+    );
+}
+
 /// One build at a time per repository: two sessions starting together wait
 /// for one image rather than building it twice.
 fn build_lock(repo: &Path) -> Arc<AsyncMutex<()>> {
@@ -770,6 +898,20 @@ fn count_build(
 /// every check would otherwise repeat a build that takes minutes to fail the
 /// same way. The last image that built keeps the repository usable meanwhile.
 pub async fn ensure_base(
+    backend: &dyn Backend,
+    cfg: &Config,
+    store: &Store,
+    repo: &Path,
+    force: bool,
+) -> Ensured {
+    let _ensuring = Ensuring::start(repo);
+    let begun_ms = crate::store::now_ms();
+    let ensured = resolve_base(backend, cfg, store, repo, force).await;
+    settle_outcome(store, repo, begun_ms, &ensured);
+    ensured
+}
+
+async fn resolve_base(
     backend: &dyn Backend,
     cfg: &Config,
     store: &Store,
@@ -2630,6 +2772,77 @@ mod tests {
         let checks = environment(backend.as_ref(), &cfg, &store, Some(tmp.path())).await;
         assert_eq!(checks.err(), Some(refused));
         assert!(pulling.builder.builds.lock().unwrap().is_empty());
+    }
+
+    /// An attempt that builds nothing a row shows leaves its reason where
+    /// `repo ls`, Settings and a waiting `tracon repo build` read it; a failed
+    /// build's row speaks for itself, and an image that builds clears it.
+    #[tokio::test]
+    async fn an_attempt_that_built_nothing_says_why() {
+        let tmp = checkout();
+        let repo = tmp.path();
+        let mut cfg = Config::pod_hosted();
+        cfg.repo = vec![entry(repo)];
+        let store = Store::open_in_memory().unwrap();
+        let pulling = Pulling {
+            builder: FakeBuilder::default(),
+        };
+        let note = || {
+            unbuilt()
+                .into_iter()
+                .find(|note| note.repo_path == repo.to_string_lossy())
+        };
+
+        let refused = "the token service answered 403 Forbidden, so no";
+        *pulling.builder.down.lock().unwrap() = Some(refused.into());
+        let before = crate::store::now_ms();
+        let ensured = ensure_base(&pulling, &cfg, &store, repo, true).await;
+        assert!(
+            matches!(&ensured, Ensured::Unavailable { .. }),
+            "{ensured:?}"
+        );
+        let said = note().expect("an unavailable builder is noted");
+        assert!(said.reason.starts_with(refused), "{said:?}");
+        assert!(said.at_ms >= before && said.using.is_none(), "{said:?}");
+        assert!(store
+            .latest_repo_image(&repo.to_string_lossy(), BASE)
+            .unwrap()
+            .is_none());
+        assert!(!ensuring().contains(&repo.to_string_lossy().into_owned()));
+
+        // A failure the builder had mid-build is dropped, not recorded: noted.
+        *pulling.builder.down.lock().unwrap() = None;
+        *pulling.builder.broken.lock().unwrap() = true;
+        ensure_base(&pulling, &cfg, &store, repo, true).await;
+        assert!(note()
+            .unwrap()
+            .reason
+            .starts_with("buildkitd did not answer"));
+
+        // A recipe that fails is recorded, and the row says it.
+        *pulling.builder.broken.lock().unwrap() = false;
+        *pulling.builder.fail.lock().unwrap() = true;
+        ensure_base(&pulling, &cfg, &store, repo, true).await;
+        assert_eq!(note(), None);
+        assert_eq!(
+            store
+                .latest_repo_image(&repo.to_string_lossy(), BASE)
+                .unwrap()
+                .unwrap()
+                .status,
+            "failed"
+        );
+
+        // Built, nothing is left to say; down again with an image standing,
+        // the image runs keep using is named.
+        *pulling.builder.fail.lock().unwrap() = false;
+        let Ensured::Rebuilt(image) = ensure_base(&pulling, &cfg, &store, repo, true).await else {
+            panic!("it builds");
+        };
+        assert_eq!(note(), None);
+        *pulling.builder.down.lock().unwrap() = Some(refused.into());
+        ensure_base(&pulling, &cfg, &store, repo, true).await;
+        assert_eq!(note().unwrap().using, Some(image));
     }
 
     /// A sandbox is never root: the node's layer gives the base's user the
