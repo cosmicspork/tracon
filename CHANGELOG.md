@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.51.1](https://github.com/cosmicspork/tracon/compare/v0.51.0...v0.51.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* **kubernetes:** keep building when the registry is at its repository limit ([#893](https://github.com/cosmicspork/tracon/issues/893)) ([6080e3c](https://github.com/cosmicspork/tracon/commit/6080e3c2e0c127cc2c9dcbf0f49346687b115523))
+
 ## [0.51.0](https://github.com/cosmicspork/tracon/compare/v0.50.0...v0.51.0) (2026-11-12)
 
 
