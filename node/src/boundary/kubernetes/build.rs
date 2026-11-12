@@ -53,7 +53,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::boundary::registry::{Reference, Registry};
+use crate::boundary::registry::{PushCheck, Reference, Registry};
 use crate::boundary::{BuildFailure, BuiltImage, ImageBuild, ImageBuilder};
 use crate::config::KubeBuilder;
 
@@ -477,8 +477,16 @@ impl BuildKitBuilder {
             self.settings.addr,
             self.prefix,
             match confirmed {
-                true => "grants the credential push",
-                false => "accepts the credential (push not confirmed: the token does not say)",
+                PushCheck::Granted => "grants the credential push".to_string(),
+                PushCheck::Unsaid =>
+                    "accepts the credential (push not confirmed: the token does not say)"
+                        .to_string(),
+                // Builds into the repositories already there go ahead; one
+                // that needs a new repository fails at its push, saying so.
+                PushCheck::NoNewRepositories(said) => format!(
+                    "takes pushes to its existing repositories but no new one ({said}): an \
+                     image whose repository is not there yet fails at its push"
+                ),
             }
         ))
     }

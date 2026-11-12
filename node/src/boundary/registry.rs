@@ -444,12 +444,26 @@ impl Registry {
         scope: Option<&str>,
         credential: Option<(String, String)>,
     ) -> Result<String, RegistryError> {
+        self.token_or_refusal(realm, service, scope, credential)
+            .await
+            .map_err(|refused| refused.error)
+    }
+
+    /// `token`, saying whether a refusal was the registry's repository limit.
+    async fn token_or_refusal(
+        &self,
+        realm: &str,
+        service: Option<&str>,
+        scope: Option<&str>,
+        credential: Option<(String, String)>,
+    ) -> Result<String, TokenRefused> {
         if !realm.starts_with("https://")
             && !(self.scheme == "http" && realm.starts_with("http://"))
         {
             return Err(RegistryError(format!(
                 "refusing a token service that is not HTTPS: {realm}"
-            )));
+            ))
+            .into());
         }
         let mut query = Vec::new();
         if let Some(service) = service {
@@ -462,28 +476,37 @@ impl Registry {
         if let Some((user, password)) = &credential {
             request = request.basic_auth(user, Some(password));
         }
-        let response = request.send().await?;
+        let response = request.send().await.map_err(RegistryError::from)?;
         let status = response.status();
         if !status.is_success() {
-            return Err(RegistryError(format!(
-                "the token service {realm} answered {status}{}",
-                match credential {
-                    Some(_) => "",
-                    None => " (the Docker config holds no credential for this registry)",
-                }
-            )));
+            let said = refusal_message(&response.text().await.unwrap_or_default());
+            let at_repository_limit = status == StatusCode::FORBIDDEN
+                && said.as_deref().is_some_and(names_a_repository_limit);
+            return Err(TokenRefused {
+                error: RegistryError(format!(
+                    "the token service {realm} answered {status}{}{}",
+                    match credential {
+                        Some(_) => "",
+                        None => " (the Docker config holds no credential for this registry)",
+                    },
+                    said.map(|said| format!(": {said}")).unwrap_or_default()
+                )),
+                at_repository_limit,
+            });
         }
         #[derive(serde::Deserialize)]
         struct Token {
             token: Option<String>,
             access_token: Option<String>,
         }
-        let token: Token = response.json().await?;
+        let token: Token = response.json().await.map_err(RegistryError::from)?;
         token
             .token
             .or(token.access_token)
             .filter(|token| !token.is_empty())
-            .ok_or_else(|| RegistryError(format!("the token service {realm} returned no token")))
+            .ok_or_else(|| {
+                RegistryError(format!("the token service {realm} returned no token")).into()
+            })
     }
 
     /// The digest `image` names in its registry, or `None` where the registry
@@ -689,7 +712,12 @@ impl Registry {
     /// repository without push. `Ok(false)` where the credential is accepted
     /// but the token does not say (an opaque token, a JWT without an `access`
     /// claim or naming the repository otherwise, or a Basic registry).
-    pub async fn check_push(&self, prefix: &str) -> Result<bool, RegistryError> {
+    ///
+    /// The probe repository does not exist, so a registry at its repository
+    /// limit (DOCR's plans cap them) refuses it although every repository
+    /// already there takes pushes: that is [`PushCheck::NoNewRepositories`],
+    /// not a refusal, or a full registry would stop every build.
+    pub async fn check_push(&self, prefix: &str) -> Result<PushCheck, RegistryError> {
         let host = prefix.split('/').next().unwrap_or(prefix);
         let credential = self.credentials(host)?.ok_or_else(|| {
             RegistryError(format!(
@@ -704,7 +732,7 @@ impl Registry {
         let first = self.http.get(&url).send().await?;
         match first.status() {
             StatusCode::UNAUTHORIZED => {}
-            status if status.is_success() => return Ok(false),
+            status if status.is_success() => return Ok(PushCheck::Unsaid),
             status => return Err(RegistryError(format!("{host} answered {status}"))),
         }
         let challenge = first
@@ -726,7 +754,7 @@ impl Registry {
                     .send()
                     .await?;
                 match response.status() {
-                    status if status.is_success() => Ok(false),
+                    status if status.is_success() => Ok(PushCheck::Unsaid),
                     status => Err(refused(status)),
                 }
             }
@@ -737,9 +765,16 @@ impl Registry {
                     false => format!("{namespace}/tracon-repo-probe"),
                 };
                 let scope = format!("repository:{repository}:push,pull");
-                let token = self
-                    .token(&realm, service.as_deref(), Some(&scope), Some(credential))
-                    .await?;
+                let token = match self
+                    .token_or_refusal(&realm, service.as_deref(), Some(&scope), Some(credential))
+                    .await
+                {
+                    Ok(token) => token,
+                    Err(refused) if refused.at_repository_limit => {
+                        return Ok(PushCheck::NoNewRepositories(refused.error.0))
+                    }
+                    Err(refused) => return Err(refused.error),
+                };
                 let response = self.http.get(&url).bearer_auth(&token).send().await?;
                 if !response.status().is_success() {
                     return Err(refused(response.status()));
@@ -754,12 +789,78 @@ impl Registry {
                             }
                         )))
                     }
-                    Some(_) => Ok(true),
-                    None => Ok(false),
+                    Some(_) => Ok(PushCheck::Granted),
+                    None => Ok(PushCheck::Unsaid),
                 }
             }
         }
     }
+}
+
+/// What [`Registry::check_push`] could tell of the credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PushCheck {
+    /// The token grants push on the probe repository.
+    Granted,
+    /// The credential is accepted, but nothing says whether it may push.
+    Unsaid,
+    /// The registry is at its repository limit: it refuses the probe
+    /// repository, as it will any repository not already there, in its
+    /// own words.
+    NoNewRepositories(String),
+}
+
+/// A token request the token service refused, and whether its reason was the
+/// registry's repository limit rather than the credential.
+struct TokenRefused {
+    error: RegistryError,
+    at_repository_limit: bool,
+}
+
+impl From<RegistryError> for TokenRefused {
+    fn from(error: RegistryError) -> Self {
+        Self {
+            error,
+            at_repository_limit: false,
+        }
+    }
+}
+
+/// The message in a registry's error body (`{"errors":[{"code","message"}]}`,
+/// the Docker registry API's), `CODE: message`, or the body itself when it is
+/// short plain text.
+fn refusal_message(body: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Errors {
+        errors: Vec<Error>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Error {
+        code: Option<String>,
+        message: Option<String>,
+    }
+    if let Ok(parsed) = serde_json::from_str::<Errors>(body) {
+        let said: Vec<String> = parsed
+            .errors
+            .into_iter()
+            .filter_map(|error| match (error.code, error.message) {
+                (Some(code), Some(message)) => Some(format!("{code}: {message}")),
+                (None, Some(message)) => Some(message),
+                (Some(code), None) => Some(code),
+                (None, None) => None,
+            })
+            .collect();
+        return (!said.is_empty()).then(|| said.join("; "));
+    }
+    let body = body.trim();
+    (!body.is_empty() && body.len() <= 200 && !body.starts_with('<')).then(|| body.to_string())
+}
+
+/// Whether a refusal says the registry holds as many repositories as it may
+/// (DOCR: "registry contains 5 repositories, limit is 5").
+fn names_a_repository_limit(said: &str) -> bool {
+    let said = said.to_ascii_lowercase();
+    said.contains("repositor") && said.contains("limit")
 }
 
 /// The OCI name of this host's architecture, as an index names a platform.
@@ -856,6 +957,9 @@ pub(crate) mod tests {
         /// Name this repository in the JWT's claim instead of the scope's;
         /// an empty name leaves the `access` claim out.
         pub jwt_name: Mutex<Option<String>>,
+        /// Refuse every token as DOCR does once the registry holds as many
+        /// repositories as its plan allows.
+        pub repository_limit: Mutex<bool>,
         pub base: Mutex<String>,
         /// digest → the manifest served for it; empty where not set.
         pub bodies: Mutex<HashMap<String, Vec<u8>>>,
@@ -901,6 +1005,16 @@ pub(crate) mod tests {
                 .unwrap_or_default(),
         );
         fake.scopes.lock().unwrap().push(scope.clone());
+        if *fake.repository_limit.lock().unwrap() {
+            return (
+                StatusCode::FORBIDDEN,
+                axum::Json(serde_json::json!({ "errors": [{
+                    "code": "DENIED",
+                    "message": "registry contains 5 repositories, limit is 5"
+                }]})),
+            )
+                .into_response();
+        }
         if let Some(actions) = fake.jwt_actions.lock().unwrap().clone() {
             let named = fake.jwt_name.lock().unwrap().clone();
             let repository = named
@@ -1236,7 +1350,10 @@ pub(crate) mod tests {
             registry.identity(&format!("{host}/ns/app:t1")).await,
             Some(format!("{host}/ns/app@{DIGEST}"))
         );
-        assert_eq!(registry.check_push(&format!("{host}/ns")).await, Ok(false));
+        assert_eq!(
+            registry.check_push(&format!("{host}/ns")).await,
+            Ok(PushCheck::Unsaid)
+        );
         registry.remove(&format!("{host}/ns/app:t1")).await.unwrap();
         assert!(!registry.exists(&format!("{host}/ns/app@{DIGEST}")).await);
         assert!(fake.scopes.lock().unwrap().is_empty());
@@ -1275,6 +1392,44 @@ pub(crate) mod tests {
         );
     }
 
+    /// A registry at its repository limit refuses the probe repository, which
+    /// does not exist; that leaves pushes to the repositories already there,
+    /// so the check says so rather than failing every build. Any other
+    /// refusal of the token still fails it, and says the registry's reason.
+    #[tokio::test]
+    async fn a_full_registry_is_no_refusal_of_the_credential() {
+        let (fake, host) = serve().await;
+        let config = docker_config(&host);
+        let registry =
+            Registry::new(Some(config.path().to_path_buf())).for_test("unused", "unused");
+        let prefix = format!("{host}/cs");
+        *fake.repository_limit.lock().unwrap() = true;
+        let Ok(PushCheck::NoNewRepositories(said)) = registry.check_push(&prefix).await else {
+            panic!("a full registry is not a refusal");
+        };
+        assert!(
+            said.contains("answered 403") && said.contains("DENIED: registry contains 5"),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn a_refusal_says_the_registrys_own_words() {
+        assert_eq!(
+            refusal_message(r#"{"errors":[{"code":"DENIED","message":"no"}]}"#).as_deref(),
+            Some("DENIED: no")
+        );
+        assert_eq!(refusal_message("forbidden\n").as_deref(), Some("forbidden"));
+        assert_eq!(refusal_message("<html>…</html>"), None);
+        assert_eq!(refusal_message(""), None);
+        assert!(names_a_repository_limit(
+            "DENIED: registry contains 5 repositories, limit is 5"
+        ));
+        assert!(!names_a_repository_limit(
+            "DENIED: requested access to the resource is denied"
+        ));
+    }
+
     /// The push check asks for push and refuses a token that does not grant
     /// it; one that cannot be read is accepted without the claim.
     #[tokio::test]
@@ -1285,7 +1440,7 @@ pub(crate) mod tests {
             Registry::new(Some(config.path().to_path_buf())).for_test("unused", "unused");
         let prefix = format!("{host}/cs");
 
-        assert_eq!(registry.check_push(&prefix).await, Ok(false));
+        assert_eq!(registry.check_push(&prefix).await, Ok(PushCheck::Unsaid));
         *fake.jwt_actions.lock().unwrap() = Some(vec!["pull".into()]);
         let error = registry.check_push(&prefix).await.unwrap_err();
         assert!(
@@ -1295,12 +1450,12 @@ pub(crate) mod tests {
         // A token that does not say, or says it of another name, is not a
         // refusal: push is not confirmed, and builds are not blocked on it.
         *fake.jwt_name.lock().unwrap() = Some("cs/something-else".into());
-        assert_eq!(registry.check_push(&prefix).await, Ok(false));
+        assert_eq!(registry.check_push(&prefix).await, Ok(PushCheck::Unsaid));
         *fake.jwt_name.lock().unwrap() = Some(String::new());
-        assert_eq!(registry.check_push(&prefix).await, Ok(false));
+        assert_eq!(registry.check_push(&prefix).await, Ok(PushCheck::Unsaid));
         *fake.jwt_name.lock().unwrap() = None;
         *fake.jwt_actions.lock().unwrap() = Some(vec!["pull".into(), "push".into()]);
-        assert_eq!(registry.check_push(&prefix).await, Ok(true));
+        assert_eq!(registry.check_push(&prefix).await, Ok(PushCheck::Granted));
         // A token service that refuses the credential is a refusal.
         let wrong = tempfile::tempdir().unwrap();
         let auth = base64::engine::general_purpose::STANDARD.encode("pusher:wrong");
