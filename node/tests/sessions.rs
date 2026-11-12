@@ -4547,11 +4547,10 @@ impl tracon::boundary::Backend for RecordingBackend {
     }
 }
 
-/// A node that restarts under a session removes the services the session
-/// started beside it as well as its container: nothing else would, once the
-/// session is closed.
+/// A node that restarts under a session removes its sandbox, and with it
+/// the services running inside: there is nothing beside it to remove.
 #[tokio::test]
-async fn a_restart_removes_a_sessions_services_with_its_container() {
+async fn a_restart_removes_a_sessions_sandbox_with_its_services() {
     state::isolate();
     let store = Arc::new(Store::open_in_memory().unwrap());
     store.ensure_peer_node("n1").unwrap();
@@ -4571,7 +4570,9 @@ async fn a_restart_removes_a_sessions_services_with_its_container() {
             work_item_id: None,
             kind: tracon::session::state::event_kind::SERVICE.into(),
             ref_id: None,
-            payload: json!({ "name": "browser", "container": "tracon-h-x-svc-browser", "state": "ready" }),
+            payload: json!({
+                "name": "browser", "in_sandbox": true, "sandbox": "tracon-h-x", "state": "ready",
+            }),
             at_ms: now_ms(),
             mono_ms: 0,
         })
@@ -4584,10 +4585,7 @@ async fn a_restart_removes_a_sessions_services_with_its_container() {
     tracon::session::reconcile_after_restart(&store, "n1", &backend).await;
     assert_eq!(
         killed.lock().unwrap().clone(),
-        vec![
-            "tracon-h-x-svc-browser".to_string(),
-            "tracon-h-x".to_string()
-        ]
+        vec!["tracon-h-x".to_string()]
     );
 }
 

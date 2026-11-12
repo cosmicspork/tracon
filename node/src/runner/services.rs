@@ -1,6 +1,6 @@
 //! Catalogue services inside a session's sandbox, on every runtime: the
 //! sandbox's own supervisor starts
-//! the service from its mounted bundle, watches its readiness, restarts it by
+//! the service from its bundle, watches its readiness, restarts it by
 //! its policy and stops it with the sandbox. Nothing is started beside the
 //! session, so the service has exactly the sandbox's network: reached on its
 //! loopback, reaching what it reaches.
@@ -295,11 +295,9 @@ mod tests {
         let sidecar = Sidecar {
             name: sidecar_name("tracon-h-s1", "browser"),
             session_container: "tracon-h-s1".into(),
-            image: String::new(),
-            command: Vec::new(),
             port: 9222,
             ready: ready.map(str::to_string),
-            in_sandbox: Some(spec.clone()),
+            in_sandbox: spec.clone(),
         };
         (sidecar, spec)
     }

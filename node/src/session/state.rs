@@ -359,10 +359,10 @@ pub mod event_kind {
     /// `bytes_out`, `duration_ms`, `reason`, and `output` only when output
     /// capture was deliberately turned on).
     pub const PTY_CLOSED: &str = "pty_closed";
-    /// A catalogue service beside the session changed state (`name`,
-    /// `container`, `state` — `started`, `ready`, `failed` or `stopped` —
+    /// A catalogue service in the session's sandbox changed state (`name`,
+    /// `sandbox`, `state` — `started`, `ready`, `failed` or `stopped` —
     /// and `detail` for a failure). The events are also how everything that
-    /// removes a session's container finds the services to remove with it.
+    /// removes a session's sandbox finds the services to stop first.
     pub const SERVICE: &str = "service";
     /// The change a review of this session publishes to was marked ready
     /// or turned back into a draft, about the review (`ref_id`): its

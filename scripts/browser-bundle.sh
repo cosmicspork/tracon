@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Assemble the `browser` service bundle for one architecture: headless Chrome
 # and everything it loads beyond glibc, which a sandbox's supervisor runs from
-# a read-only mount on the stock base image instead of as a sidecar container.
+# a read-only copy on the stock base image.
 #
 #   scripts/browser-bundle.sh --arch amd64|arm64 [--out DIR]
 #
@@ -26,8 +26,8 @@
 #   ready = "/json/version"
 #
 # Source: the chromedp/headless-shell image named, by tag and index digest, on
-# the FROM line of containers/browser/Containerfile, so the sidecar image and
-# this bundle move together (Dependabot moves that line). It is a Debian
+# the FROM line of containers/browser/Containerfile, which is only that pin
+# (Dependabot moves it; node/build.rs reads it too). It is a Debian
 # image; its own libraries are copied rather than relying on the base image's,
 # and every one is held to the glibc of the stock base (Ubuntu 24.04, 2.39),
 # so a Debian bump that needs a newer glibc fails here and not in a session.
@@ -170,10 +170,11 @@ cat > "$dest/fonts/fonts.conf" <<'EOF'
 </fontconfig>
 EOF
 
-# The flags are the sidecar image's (containers/browser/Containerfile), and
-# its reasons hold here: the sandbox is the container, with no capabilities
-# for Chrome's own sandbox and a small /dev/shm. Loopback only: services are
-# reached on the sandbox's loopback and nowhere else.
+# --no-sandbox: Chrome's sandbox needs namespaces a capability-less sandbox
+# cannot make; the sandbox is the boundary. --disable-dev-shm-usage: a
+# container's /dev/shm can be small, which Chrome otherwise warns about and
+# can crash on. Loopback only: services are reached on the sandbox's loopback
+# and nowhere else.
 cat > "$dest/run" <<'EOF'
 #!/bin/sh
 # Headless Chrome from this bundle, answering CDP on 127.0.0.1:9222 only.

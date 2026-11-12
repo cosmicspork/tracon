@@ -106,7 +106,7 @@ pub async fn run(options: ProbeOptions) -> Result<()> {
         ProviderKind::Podman => {
             let mut cfg = cfg.clone();
             cfg.sandbox.bundle = Some(bundle.clone());
-            let spec = crate::runner::podman::RunSpec::from_config(&cfg, false);
+            let spec = crate::runner::podman::RunSpec::from_config(&cfg);
             Box::new(PodmanProvider::from_config(&cfg, spec))
         }
         ProviderKind::Kubernetes => Box::new(kubernetes(&cfg, &bundle).await?),

@@ -276,7 +276,6 @@ fn parse_transfer_list(out: &str) -> Result<Vec<super::TransferInfo>, BoundaryEr
 
 pub struct PodmanBackend {
     cfg: Config,
-    selinux: bool,
     /// Who may leave through the node's proxy, and to where. Issued here,
     /// honoured by the listener the node serves behind the gateway's forward.
     grants: crate::gateway::proxy::Grants,
@@ -284,18 +283,17 @@ pub struct PodmanBackend {
 
 impl PodmanBackend {
     pub async fn detect(cfg: &Config) -> Self {
-        // Before the first spawn: everything after this, `selinux_enabled`
-        // included, goes through `podman()`.
+        // Before the first spawn: everything after this goes through
+        // `podman()`.
         let _ = PODMAN_BIN.set(resolve_podman_env(cfg));
         Self {
             cfg: cfg.clone(),
-            selinux: selinux_enabled().await,
             grants: Default::default(),
         }
     }
 
     pub fn spec(&self) -> RunSpec {
-        RunSpec::from_config(&self.cfg, self.selinux)
+        RunSpec::from_config(&self.cfg)
     }
 
     /// The node's own store when it keeps `volume`, or when it is to keep a
@@ -366,8 +364,7 @@ impl PodmanBackend {
 /// provider takes the boundary; the runner keeps `spec`'s mounts, image and
 /// working directory, sends the trees in and takes them back over the files
 /// channel, opens the gateway's tunnels, runs bundled services under the
-/// supervisor, and hands image identity and image-only services (sidecars)
-/// on to a `PodmanRunner`.
+/// supervisor, and hands image identity on to a `PodmanRunner`.
 pub fn protocol_runner(cfg: &Config, spec: RunSpec) -> Arc<dyn Runner> {
     let mounts = spec.extra_mounts.clone();
     let image = spec.image.clone();
@@ -427,7 +424,7 @@ impl Backend for PodmanBackend {
     }
 
     async fn check_all(&self, cfg: &Config, deep: bool) -> BoundaryReport {
-        checks::check_all(cfg, self.selinux, deep).await
+        checks::check_all(cfg, deep).await
     }
 
     async fn harness_images(&self, cfg: &Config) -> Vec<crate::boundary::HarnessImage> {
@@ -439,7 +436,7 @@ impl Backend for PodmanBackend {
     }
 
     fn runner_for(&self, harness_id: &str, extra_mounts: Vec<Mount>) -> Arc<dyn Runner> {
-        let mut spec = RunSpec::for_harness(&self.cfg, harness_id, self.selinux);
+        let mut spec = RunSpec::for_harness(&self.cfg, harness_id);
         spec.extra_mounts = extra_mounts;
         self.runner_with(spec)
     }
@@ -450,7 +447,7 @@ impl Backend for PodmanBackend {
         image: &str,
         extra_mounts: Vec<Mount>,
     ) -> Arc<dyn Runner> {
-        let mut spec = RunSpec::for_harness(&self.cfg, harness_id, self.selinux);
+        let mut spec = RunSpec::for_harness(&self.cfg, harness_id);
         spec.image = image.to_string();
         spec.extra_mounts = extra_mounts;
         self.runner_with(spec)
@@ -477,7 +474,7 @@ impl Backend for PodmanBackend {
         Some(crate::sandbox_images::Preparer {
             provider: Arc::new(crate::provider::podman::PodmanProvider::from_config(
                 cfg,
-                crate::runner::podman::RunSpec::from_config(cfg, false),
+                crate::runner::podman::RunSpec::from_config(cfg),
             )),
             // A preparation's tree goes over the files channel into the
             // sandbox's own filesystem, so its commit carries it.
@@ -1063,15 +1060,6 @@ pub(crate) async fn podman_json(args: &[&str]) -> Result<serde_json::Value, Boun
     Ok(serde_json::from_str(&text)?)
 }
 
-/// Whether the container host enforces SELinux (Podman needs `label=disable`
-/// for bind mounts when it does).
-pub async fn selinux_enabled() -> bool {
-    podman(&["info", "--format", "{{.Host.Security.SELinuxEnabled}}"])
-        .await
-        .map(|s| s.trim() == "true")
-        .unwrap_or(false)
-}
-
 #[cfg(test)]
 mod tests {
     use super::resolve_podman;
@@ -1147,7 +1135,7 @@ mod tests {
             env: Vec::new(),
             service_bundles: Vec::new(),
         };
-        let spec = super::RunSpec::from_config(&crate::config::Config::default(), false);
+        let spec = super::RunSpec::from_config(&crate::config::Config::default());
         let mounts = vec![
             Mount::volume(
                 crate::session::materialize::harness_state_volume(),
@@ -1175,18 +1163,24 @@ mod tests {
     }
 
     #[test]
-    fn a_bundled_service_is_mounted_and_an_image_one_stays_a_sidecar() {
+    fn every_service_bundle_is_mounted_under_its_name() {
         let catalogue = "[[service]]\nname = \"browser\"\nport = 9222\n\
                          bundle = \"/srv/browser/amd64\"\n\
                          [[service]]\nname = \"db\"\nport = 5432\n\
-                         image = \"pg@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n";
+                         bundle = \"/srv/pg/amd64\"\n";
         let on: crate::config::Config = toml::from_str(catalogue).unwrap();
         assert_eq!(
             crate::provider::podman::service_bundles(&on),
-            [(
-                PathBuf::from("/srv/browser/amd64"),
-                "/opt/tracon-services/browser".to_string()
-            )]
+            [
+                (
+                    PathBuf::from("/srv/browser/amd64"),
+                    "/opt/tracon-services/browser".to_string()
+                ),
+                (
+                    PathBuf::from("/srv/pg/amd64"),
+                    "/opt/tracon-services/db".to_string()
+                )
+            ]
         );
     }
 

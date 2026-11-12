@@ -3,8 +3,8 @@
 //! A session asks for a service by name and is offered only what the
 //! operator's catalogue holds. The policy bundle decides each service on its
 //! own: the browser runs unattended, anything else waits for the operator. A
-//! runtime that cannot put a service in the session's network says so rather
-//! than starting it somewhere the session cannot reach.
+//! runner that runs no services says so rather than starting one somewhere
+//! the session cannot reach.
 
 #[path = "support/mod.rs"]
 mod support;
@@ -17,8 +17,6 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 
 use tracon::config::{Config, Service};
-
-const PINNED: &str = "img@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 async fn mcp(h: &Harness, token: &str, body: Value) -> Value {
     let req = Request::builder()
@@ -49,7 +47,7 @@ async fn tool(h: &Harness, token: &str, name: &str, args: Value) -> Value {
 fn service(name: &str, port: u16) -> Service {
     Service {
         name: name.into(),
-        image: PINNED.into(),
+        bundle: Some(format!("/srv/{name}/amd64").into()),
         port,
         ..Service::default()
     }
@@ -91,7 +89,8 @@ async fn a_service_is_asked_for_by_name_and_decided_by_name() {
         json!(["browser", "postgres"])
     );
 
-    // The browser is allowed; this node's runtime cannot place it, and says so.
+    // The browser is allowed; this test's runner runs no services, and says
+    // so.
     let v = tool(
         &h,
         &token,
@@ -100,7 +99,13 @@ async fn a_service_is_asked_for_by_name_and_decided_by_name() {
     )
     .await;
     assert_eq!(v["state"], "failed", "{v}");
-    assert!(v["detail"].as_str().unwrap().contains("podman"), "{v}");
+    assert!(
+        v["detail"]
+            .as_str()
+            .unwrap()
+            .contains("runs no catalogue services"),
+        "{v}"
+    );
 
     // A database waits for the operator.
     let v = tool(&h, &token, "service_start", json!({ "name": "postgres" })).await;

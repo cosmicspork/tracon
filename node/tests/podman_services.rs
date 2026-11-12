@@ -99,7 +99,7 @@ impl Rig {
     }
 
     fn runner(&self, mounts: Vec<Mount>) -> Arc<dyn Runner> {
-        let mut spec = RunSpec::from_config(&self.cfg, true);
+        let mut spec = RunSpec::from_config(&self.cfg);
         spec.image = self.image.clone();
         spec.extra_mounts = mounts;
         tracon::boundary::podman::protocol_runner(&self.cfg, spec)
@@ -320,8 +320,7 @@ async fn the_browser_runs_in_the_session_sandbox_and_show_work_carries_its_scree
     eprintln!("service_start: {view} in {:?}", started.elapsed());
     assert_eq!(view["state"], "ready", "{view}");
     assert_eq!(view["url"], "http://127.0.0.1:9222/json/version");
-    // In the sandbox, not beside it, and recorded so.
-    assert!(sidecars::containers(&h.store, "s1").is_empty());
+    // In the sandbox, and recorded so.
     let recorded = sidecars::recorded(&h.store, "s1")
         .remove("browser")
         .unwrap();

@@ -222,17 +222,15 @@ async fn the_template_image_runs_a_session_as_a_digitalocean_sandbox_would() {
     let echo = tracon::runner::Sidecar {
         name: tracon::runner::sidecar_name("spike-p8-h-1", "echo"),
         session_container: "spike-p8-h-1".into(),
-        image: String::new(),
-        command: Vec::new(),
         port: echo_port,
         ready: None,
-        in_sandbox: Some(tracon::runner::InSandbox {
+        in_sandbox: tracon::runner::InSandbox {
             service: "echo".into(),
             argv: vec!["/opt/tracon-services/echo/run".into()],
             env: [("ECHO_PORT".to_string(), echo_port.to_string())].into(),
             restart: tracon::config::ServiceRestart::Never,
             ready_within: Duration::from_secs(20),
-        }),
+        },
     };
     runner.start_sidecar(&echo).await.unwrap();
     let mut ready = false;

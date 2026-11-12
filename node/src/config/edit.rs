@@ -2121,17 +2121,17 @@ checks = []
             "[[service]]\nname = \"a\" # first\nport = 1\n\n[[service]]\nname = \"c\"\nport = 3\n",
             "service = [{ name = \"a\", port = 1 }, { name = \"c\", port = 3 }] # inline\n",
         ] {
-            let image = format!("img@sha256:{}", "a".repeat(64));
+            let bundle = "/srv/bundle/amd64";
             let entry = |name: &str, port: i64| {
                 let mut t = toml::Table::new();
                 t.insert("name".into(), name.into());
-                t.insert("image".into(), image.clone().into());
+                t.insert("bundle".into(), bundle.into());
                 t.insert("port".into(), port.into());
                 t
             };
             let ops = [
-                set("service[0].image", image.as_str()),
-                set("service[1].image", image.as_str()),
+                set("service[0].bundle", bundle),
+                set("service[1].bundle", bundle),
                 Op::Insert {
                     array: KeyPath::keys(&["service"]),
                     index: Some(1),
@@ -2339,10 +2339,7 @@ path = "/srv/notes"
         let store = store();
         let mut entry = toml::Table::new();
         entry.insert("name".into(), "browser".into());
-        entry.insert(
-            "image".into(),
-            format!("img@sha256:{}", "a".repeat(64)).into(),
-        );
+        entry.insert("bundle".into(), "release".into());
         entry.insert("port".into(), 9222_i64.into());
         entry.insert("token".into(), "hunter2".into());
         edit_at(

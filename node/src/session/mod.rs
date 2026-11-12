@@ -4868,10 +4868,7 @@ pub async fn reconcile_after_restart(
             continue;
         }
         if let Some(container) = &s.container_name {
-            // Its services first, by the names its events recorded.
-            let mut names = crate::sidecars::containers(store, &s.id);
-            names.push(container.clone());
-            backend.reconcile(&names).await;
+            backend.reconcile(std::slice::from_ref(container)).await;
         }
         // Between turns, waiting only on the operator: nothing of it was
         // running to be lost. It is put away with what it waits on, and

@@ -319,7 +319,7 @@ impl Tools {
         // The item under review and its neighbours, read-only.
         work::WORK_LIST,
         work::WORK_SHOW,
-        // Running the candidate: a browser beside the session, decided by
+        // Running the candidate: a browser in the session's sandbox, decided by
         // the policy bundle by name, and what it saw shown to the operator,
         // bound to the candidate.
         services::START,

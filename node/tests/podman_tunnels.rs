@@ -270,7 +270,7 @@ impl Rig {
     }
 
     fn spec(&self, mounts: Vec<Mount>) -> RunSpec {
-        let mut spec = RunSpec::from_config(&self.cfg, true);
+        let mut spec = RunSpec::from_config(&self.cfg);
         spec.image = self.image.clone();
         spec.extra_mounts = mounts;
         spec
@@ -639,7 +639,7 @@ async fn the_checks_verify_the_single_route() {
         tracon::boundary::podman::checks::probe_checks(&rig.cfg, &spec, &rig.name("probe")).await;
     // The deep check runs in the configured harness image.
     let egress =
-        tracon::boundary::podman::checks::check_egress(&rig.cfg, true, &rig.name("egress")).await;
+        tracon::boundary::podman::checks::check_egress(&rig.cfg, &rig.name("egress")).await;
     checks.push(egress);
     for check in &checks {
         eprintln!("{:?}: {} {}", check.id, check.ok, check.detail);

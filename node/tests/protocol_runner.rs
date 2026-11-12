@@ -522,10 +522,7 @@ async fn the_podman_provider_takes_the_supervisors_connection_past_a_bad_one() {
     std::fs::write(bundle.join("bin/tracon-sandbox"), b"").unwrap();
     let provider = PodmanProvider::with_cli(
         PodmanOptions {
-            spec: tracon::runner::podman::RunSpec::from_config(
-                &tracon::config::Config::default(),
-                false,
-            ),
+            spec: tracon::runner::podman::RunSpec::from_config(&tracon::config::Config::default()),
             bundle,
             socket_dir: dir.path().join("s"),
             init: false,

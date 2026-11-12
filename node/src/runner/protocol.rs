@@ -231,9 +231,7 @@ pub struct ProtocolRunner {
     /// mount provides it.
     workdir: String,
     connect_within: Duration,
-    /// What this runner hands on rather than does: the image identity, and
-    /// the services beside a session, which stay containers of their own
-    /// joined to the sandbox's network.
+    /// What this runner hands on rather than does: the image identity.
     delegate: Option<Arc<dyn Runner>>,
     /// Where the volumes it sends over the files channel are kept, rather
     /// than mounted (`sandbox_files`).
@@ -243,8 +241,8 @@ pub struct ProtocolRunner {
     /// Start a harness from the mounted bundle, where its adapter names the
     /// path a harness image had it at (`sandbox_images`).
     bundled_harness: bool,
-    /// Run a catalogue service that has a bundle inside the session's
-    /// sandbox, under its supervisor, rather than handing it to `delegate`.
+    /// Run catalogue services inside a session's sandbox, under its
+    /// supervisor. Without it, this runner runs none.
     sandbox_services: bool,
     /// What each sandbox's isolation, read back from the provider once it
     /// has connected, must satisfy before anything is sent into it.
@@ -297,14 +295,18 @@ impl ProtocolRunner {
     }
 
     /// Why `sidecar` cannot run with this runner, before anything reaches
-    /// its sandbox: the provider refuses it, it would run as a container
-    /// beside a sandbox that has none, or it would listen where one of the
-    /// sandbox's tunnels does.
+    /// its sandbox: the runner runs no services, the provider refuses it, or
+    /// it would listen where one of the sandbox's tunnels does.
     fn service_refusal(&self, sidecar: &Sidecar) -> Option<String> {
         let service = sidecar
             .name
             .strip_prefix(&format!("{}-svc-", sidecar.session_container))
             .unwrap_or(&sidecar.name);
+        if !self.sandbox_services {
+            return Some(format!(
+                "service {service}: this runner runs no catalogue services"
+            ));
+        }
         if let Some(refusal) = &self.service_refusal {
             let handle = running()
                 .lock()
@@ -315,8 +317,6 @@ impl ProtocolRunner {
                 return Some(why);
             }
         }
-        // A tunnel's port matters only to a service inside the sandbox.
-        self.in_sandbox(sidecar)?;
         self.tunnels
             .iter()
             .find(|tunnel| {
@@ -369,15 +369,6 @@ impl ProtocolRunner {
     pub fn with_sandbox_services(mut self, on: bool) -> Self {
         self.sandbox_services = on;
         self
-    }
-
-    /// How `sidecar` runs in its session's sandbox, when this runner runs it
-    /// there.
-    fn in_sandbox<'a>(&self, sidecar: &'a Sidecar) -> Option<&'a super::InSandbox> {
-        sidecar
-            .in_sandbox
-            .as_ref()
-            .filter(|_| self.sandbox_services)
     }
 
     /// Accept sandboxes with `server` rather than this process's own.
@@ -954,41 +945,23 @@ impl Runner for ProtocolRunner {
         if let Some(why) = self.service_refusal(sidecar) {
             return Err(RunnerError::Other(why));
         }
-        if let Some(spec) = self.in_sandbox(sidecar) {
-            if self.env.is_empty() {
-                return super::services::start(sidecar, spec).await;
-            }
-            let mut spec = spec.clone();
-            spec.env = self
-                .env
-                .iter()
-                .cloned()
-                .chain(std::mem::take(&mut spec.env))
-                .collect();
-            return super::services::start(sidecar, &spec).await;
-        }
-        match &self.delegate {
-            Some(delegate) => delegate.start_sidecar(sidecar).await,
-            None => Err(RunnerError::Other(super::SIDECARS_UNSUPPORTED.into())),
-        }
-    }
-
-    fn supervises_sidecar(&self, sidecar: &Sidecar) -> bool {
-        self.in_sandbox(sidecar).is_some()
-    }
-
-    fn sidecar_in_sandbox(&self, sidecar: &Sidecar) -> bool {
-        self.in_sandbox(sidecar).is_some()
+        let mut spec = sidecar.in_sandbox.clone();
+        spec.env = self
+            .env
+            .iter()
+            .cloned()
+            .chain(std::mem::take(&mut spec.env))
+            .collect();
+        super::services::start(sidecar, &spec).await
     }
 
     async fn probe_sidecar(&self, sidecar: &Sidecar) -> Result<bool, RunnerError> {
-        if let Some(spec) = self.in_sandbox(sidecar) {
-            return super::services::probe(sidecar, spec).await;
+        if !self.sandbox_services {
+            return Err(RunnerError::Other(
+                "this runner runs no catalogue services".into(),
+            ));
         }
-        match &self.delegate {
-            Some(delegate) => delegate.probe_sidecar(sidecar).await,
-            None => Err(RunnerError::Other(super::SIDECARS_UNSUPPORTED.into())),
-        }
+        super::services::probe(sidecar, &sidecar.in_sandbox).await
     }
 }
 

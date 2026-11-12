@@ -117,29 +117,18 @@ async fn services_run_inside_with_the_sandboxs_own_egress(
     let mut cfg = cfg.clone();
     let port = free_port();
     let seen = tmp.path().join("service-env");
-    let service = |name: &str, port: u16, bundle: bool| tracon::config::Service {
+    let service = |name: &str, port: u16| tracon::config::Service {
         name: name.into(),
-        image: if bundle {
-            String::new()
-        } else {
-            "pg@sha256:1".into()
-        },
-        bundle: bundle.then(|| "/srv/bundles/x".into()),
+        bundle: Some("/srv/bundles/x".into()),
         port,
         ..Default::default()
     };
     cfg.service = vec![
-        service("web", port, true),
-        service("pg", free_port(), false),
-        service("clash", cfg.gateway.forward_port, true),
+        service("web", port),
+        service("clash", cfg.gateway.forward_port),
     ];
     let support = runtime.service_support(&cfg);
     assert!(support[0].1.is_ok(), "{support:?}");
-    assert!(support[1]
-        .1
-        .as_ref()
-        .unwrap_err()
-        .contains("DigitalOcean runs nothing beside"));
 
     let runner = runtime.runner_with(
         &cfg,
@@ -171,32 +160,30 @@ async fn services_run_inside_with_the_sandboxs_own_egress(
         )
     );
 
-    let sidecar = |name: &str, port: u16, argv: Option<Vec<String>>| tracon::runner::Sidecar {
+    let sidecar = |name: &str, port: u16, argv: Vec<String>| tracon::runner::Sidecar {
         name: tracon::runner::sidecar_name("tracon-h-do3", name),
         session_container: "tracon-h-do3".into(),
-        image: String::new(),
-        command: Vec::new(),
         port,
         ready: None,
-        in_sandbox: argv.map(|argv| tracon::runner::InSandbox {
+        in_sandbox: tracon::runner::InSandbox {
             service: name.into(),
             argv,
             env: [("ONLY_MINE".to_string(), "yes".to_string())].into(),
             restart: tracon::config::ServiceRestart::Never,
             ready_within: Duration::from_secs(20),
-        }),
+        },
     };
     let web = sidecar(
         "web",
         port,
-        Some(vec![
+        vec![
             "sh".into(),
             "-c".into(),
             format!(
                 r#"echo "$HOME|$HTTPS_PROXY|$ONLY_MINE" > {}; exec python3 -m http.server {port} --bind 127.0.0.1"#,
                 s(&seen)
             ),
-        ]),
+        ],
     );
     runner.start_sidecar(&web).await.unwrap();
     let mut ready = false;
@@ -213,17 +200,11 @@ async fn services_run_inside_with_the_sandboxs_own_egress(
         format!("/home/harness|{proxy}|yes\n")
     );
 
-    let pg = runner
-        .start_sidecar(&sidecar("pg", free_port(), None))
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(pg.contains("give it a bundle"), "{pg}");
     let clash = runner
         .start_sidecar(&sidecar(
             "clash",
             cfg.gateway.forward_port,
-            Some(vec!["true".into()]),
+            vec!["true".into()],
         ))
         .await
         .unwrap_err()

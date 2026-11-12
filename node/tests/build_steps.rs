@@ -228,7 +228,7 @@ async fn a_repository_built_from_steps_prepares_snapshots_and_starts() {
 
     // A session sandbox from the snapshot, as the base's user: the build's
     // tools and the preparation's cache are both there.
-    let mut spec = RunSpec::for_harness(&cfg, "claude", true);
+    let mut spec = RunSpec::for_harness(&cfg, "claude");
     spec.image = snapshot.clone();
     let runner: Arc<dyn Runner> = tracon::boundary::podman::protocol_runner(&cfg, spec);
     let began = Instant::now();

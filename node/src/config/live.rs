@@ -404,7 +404,7 @@ mod tests {
              [docs]\nexport_dir = \"/state/docs\"\n\
              [embed]\nenabled = true\n\
              [mesh]\nhub_url = \"https://hub.example.com\"\n\
-             [[service]]\nname = \"pg\"\nimage = \"postgres@sha256:0000000000000000000000000000000000000000000000000000000000000000\"\nport = 5432\n\
+             [[service]]\nname = \"pg\"\nbundle = \"/srv/pg/amd64\"\nport = 5432\n\
              [supervision]\nchecks = [\"just check\"]\n[supervision.dependency_inputs]\nlock = \"Cargo.lock\"\n",
         ] {
             let cfg = load(text);

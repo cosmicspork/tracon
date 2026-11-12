@@ -1367,9 +1367,6 @@ resource_prefix = "tracon"          # every runtime volume and container this no
                                     # node on the same container host (see "A scratch node"); set
                                     # it before that node first runs, since a change strands the
                                     # volumes the old one named. It may not begin with "tracon-"
-# selinux_label_disable = true      # an image-only [[service]]'s container, beside the session's
-                                    # sandbox, runs with label=disable; unset, wherever SELinux
-                                    # is enforcing
 
 [gateway]
 allow_hosts = ['^api\.anthropic\.com$', '^api\.openai\.com$', '^chatgpt\.com$',
@@ -1419,8 +1416,7 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
                                     # is refused), as the base's user 65532, mapped to the node's own
                                     # (--userns=keep-id), with HOME=/home/harness; a repository's
                                     # prepare runs once and is snapshotted (podman commit). Each
-                                    # [[service]] with a bundle runs inside the session's sandbox;
-                                    # one with only an image is a container beside it. The
+                                    # [[service]] runs inside the session's sandbox. The
                                     # sandbox_protocol, sandbox_files, sandbox_tunnels,
                                     # sandbox_images and sandbox_services switches that chose this
                                     # are gone: one set to false is refused at load
@@ -1644,30 +1640,21 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
                                     # one is named in the provider's health and DigitalOcean is not used
 # server_name = ""                  # SNI to send otherwise; empty is tracon-node
 
-# [[service]]                       # something a session may start beside itself by name
-                                    # (`service_start`), never by image or command. It joins the
-                                    # session's network: reached on its 127.0.0.1, reaching only what
-                                    # the session does, removed with the session's container. The
-                                    # policy bundle decides each by `name`; the shipped one runs
-                                    # `browser` unattended and asks about any other
+# [[service]]                       # something a session may start in its sandbox by name
+                                    # (`service_start`), never by path or command. The sandbox's
+                                    # supervisor runs it on the sandbox's loopback: reached on its
+                                    # 127.0.0.1, reaching only what the session does, stopped with the
+                                    # session's sandbox. The policy bundle decides each by `name`; the
+                                    # shipped one runs `browser` unattended and asks about any other
 # name = "browser"
-# image = "ghcr.io/cosmicspork/tracon-browser@sha256:…"  # digest-pinned, as a repository image is;
-                                    # each publish's digest is in its `browser` workflow run summary.
-                                    # Headless Chrome bound to loopback, which is the session
-                                    # sandbox's alone. Upstream chromedp/headless-shell puts socat on 0.0.0.0
-# command = []                      # the image's arguments, when another image needs them
-# port = 9222                       # where the session reaches it
-# ready = "/json/version"           # an HTTP path answering 2xx once ready; left out, a TCP connect
-# timeout_secs = 60                 # how long it may take to answer before it is reported failed
-# bundle = "release"                # on Podman, Apple and Kubernetes: what is
-                                    # mounted read-only at /opt/tracon-services/<name> in every
-                                    # sandbox, whose supervisor runs it on the sandbox's loopback
-                                    # instead of a container from `image`, which may then be left out.
-                                    # On Kubernetes a session's pod copies it in from the node, into
-                                    # the same place ("As a Kubernetes pod"). On DigitalOcean it is
-                                    # baked into the templates the node builds
-                                    # and runs the same way. A port one of the sandbox's tunnels
-                                    # listens on is refused at service_start.
+# bundle = "release"                # required: what is at /opt/tracon-services/<name>, read-only, in
+                                    # every sandbox (mounted on Podman and Apple; on Kubernetes a
+                                    # session's pod copies it in from the node, "As a Kubernetes
+                                    # pod"; on DigitalOcean it is baked into the templates the node
+                                    # builds). A port one of the sandbox's tunnels listens on is
+                                    # refused at service_start. An entry with only an `image`, which
+                                    # ran as a container beside the sandbox, is refused at load; an
+                                    # `image` beside a bundle is ignored, with a line in the log.
                                     # "release", on `browser` only: the browser bundle of the node's
                                     # own release (tracon-browser-<chrome>-<arch>.tar.gz, <chrome> the
                                     # headless-shell containers/browser/Containerfile pins), which the
@@ -1677,11 +1664,15 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
                                     # Otherwise an absolute path to a directory of binaries for this
                                     # host (one <version>/<arch> of scripts/browser-bundle.sh, say).
                                     # Set at the node only
-# run = []                          # with bundle: what to start; default /opt/tracon-services/<name>/run,
+# command = []                      # arguments after `run`
+# port = 9222                       # where the session reaches it
+# ready = "/json/version"           # an HTTP path answering 2xx once ready; left out, a TCP connect
+# timeout_secs = 60                 # how long each start may take to answer before the supervisor
+                                    # counts it failed
+# run = []                          # what to start; default /opt/tracon-services/<name>/run,
                                     # followed by `command`
-# env = {}                          # with bundle: environment added to the sandbox's own
-# restart = "on-failure"            # with bundle: "never", "on-failure" or "always"; `timeout_secs`
-                                    # then bounds each start, and a restart is not a failure
+# env = {}                          # environment added to the sandbox's own
+# restart = "on-failure"            # "never", "on-failure" or "always"; a restart is not a failure
 
 # [[mcp_server]]                    # an MCP server outside the node (streamable HTTP). Sessions see
                                     # its tools on the node's own MCP endpoint as `<name>__<tool>`,
@@ -2067,8 +2058,7 @@ one that does not redial within `resume_within_secs`, or one the provider report
 leaves its session closed as `node_restart`, to be continued as before. A node that does
 not come back is never waited for: each sandbox ends itself once its redials run out
 (twice `resume_within_secs`), and the next start removes what is left. A node started
-with `resume_within_secs = 0` leaves nothing running when it stops. Services that run beside a
-sandbox as containers of their own (an image-only `[[service]]`) are stopped as before.
+with `resume_within_secs = 0` leaves nothing running when it stops.
 
 ### The hub
 
@@ -2135,7 +2125,7 @@ and an emptyDir at `/tmp` that `TMPDIR` names.
   one: the browser is about 280 MB of the pod's ephemeral storage and a few seconds of
   its start. A browser's shared memory is the pod's `/dev/shm` (`[runtime.kubernetes]
   shm_size`, 1 GiB by default), counted against the session's memory limit (4 GiB by
-  default). A `[[service]]` with only an `image` does not run here.
+  default).
 - **Files.** Nothing of the state claim is mounted, so the claim is the node's alone.
   Every directory a run names is an emptyDir of the pod's own, filled over the
   protocol and, for a session's workspace and own harness state, taken back at each

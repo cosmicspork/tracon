@@ -80,7 +80,6 @@ const SENSITIVE: &[&str] = &[
     "repo.build",
     "repo.image",
     "repo.checks",
-    "service.image",
     "service.command",
     "supervision.checks",
     "embed.base_url",
@@ -905,7 +904,7 @@ mod tests {
             line,
             "Change node.toml: repo[0] (\"/src/app\").path: \"/src/app\" -> \"/src/other\""
         );
-        let file = "[[service]]\nname = \"db\"\nport = 5432\nimage = \"postgres@sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n";
+        let file = "[[service]]\nname = \"db\"\nport = 5432\nbundle = \"/srv/pg/amd64\"\n";
         let line = prompt(file, &[set("service[0].name", "cache")]).unwrap();
         assert!(
             line.contains("service[0] (\"db\").name: \"db\" -> \"cache\""),

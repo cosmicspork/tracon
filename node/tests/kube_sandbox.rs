@@ -354,11 +354,9 @@ async fn kubernetes_sandboxes_over_the_protocol() {
     let web = tracon::runner::Sidecar {
         name: tracon::runner::sidecar_name("tracon-h-1", "web"),
         session_container: "tracon-h-1".into(),
-        image: String::new(),
-        command: Vec::new(),
         port: web_port,
         ready: None,
-        in_sandbox: Some(tracon::runner::InSandbox {
+        in_sandbox: tracon::runner::InSandbox {
             service: "web".into(),
             // The supervisor would run `/opt/tracon-services/web/run`; this
             // sandbox's paths are the test's.
@@ -372,9 +370,8 @@ async fn kubernetes_sandboxes_over_the_protocol() {
             env: Default::default(),
             restart: tracon::config::ServiceRestart::Never,
             ready_within: Duration::from_secs(20),
-        }),
+        },
     };
-    assert!(runner.sidecar_in_sandbox(&web));
     runner.start_sidecar(&web).await.unwrap();
     let mut ready = false;
     for _ in 0..200 {
