@@ -327,3 +327,33 @@ async fn a_run_the_node_ends_while_away_stops_waiting_at_once() {
     let support::Sandbox { mut child, .. } = sandbox;
     assert_eq!(child.wait().await.unwrap().code(), Some(3));
 }
+
+/// A sandbox the node asks to shut down once its command has exited closes
+/// its connection as it exits: that is the end of the run, with nothing left
+/// waiting for a redial, while a connection cut mid-command still waits.
+#[tokio::test]
+async fn a_sandbox_that_shuts_down_ends_its_run_rather_than_being_awaited() {
+    let sandbox = start().await;
+    assert!(sandbox.conn.is_resumable());
+    let process = sandbox.conn.spawn(sh("true")).await.unwrap();
+    assert!(process.wait().await.unwrap().success());
+    let conn = sandbox.conn.clone();
+    assert!(sandbox.finish().await.success());
+    tokio::time::timeout(Duration::from_secs(5), conn.closed())
+        .await
+        .expect("the run ended with its sandbox, not at the end of the resume window");
+    assert!(!conn.is_connected());
+    assert_eq!(conn.connections(), 1);
+
+    // Cut while its command runs, the run waits for the sandbox.
+    let sandbox = start().await;
+    let process = sandbox.conn.spawn(sh("sleep 1")).await.unwrap();
+    sandbox.conn.sever();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!sandbox.conn.is_connected());
+    assert!(!sandbox.conn.is_closed());
+    let _back = taken_back(&sandbox.node.server, &sandbox.node.listener).await;
+    assert!(process.wait().await.unwrap().success());
+    assert_eq!(sandbox.conn.connections(), 2);
+    assert!(sandbox.finish().await.success());
+}
