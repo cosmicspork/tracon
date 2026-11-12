@@ -180,7 +180,7 @@ says so instead of silently failing. The easiest HTTPS in front of a laptop is
 
 ```sh
 tailscale serve --bg 7420                                # HTTPS at https://<machine>.<tailnet>.ts.net
-tracon auth issue --url https://<machine>.<tailnet>.ts.net
+tracon auth issue --public-url https://<machine>.<tailnet>.ts.net
 ```
 
 Tell the node the name it now answers to, in `node.toml`:
@@ -206,7 +206,7 @@ operator port at layer 4 (`tailscale serve --tcp`, `socat`, `ssh -R`, `kubectl
 port-forward --address 0.0.0.0`): a TCP relay adds no header, and a non-browser
 client at the far end chooses its own `Host`, so it would be local.
 
-`auth issue` prints the operator token once — and, given `--url`, a QR code. Scan it
+`auth issue` prints the operator token once — and, given `--public-url`, a QR code. Scan it
 with the phone's camera: the token rides the URL fragment (never sent to any server,
 stripped from the address bar before login), the browser exchanges it for a cookie,
 and you are in.
@@ -271,7 +271,9 @@ the new key the next time it loads or the toggle is turned on.
 Any ingress or reverse proxy that terminates TLS works the same way; `localhost`
 counts as secure, which is why the laptop needed no ceremony. Issuing a token again
 rotates it and logs every client out. `tracon auth revoke` returns the node to
-loopback-only.
+loopback-only. Both name the node they are about to change and ask first; without a
+terminal they need `--yes`. `--public-url` only sets the address in the login link and
+QR: it never chooses the node (see [Commands](#commands) for how one is chosen).
 
 ### Start on the phone, pick it up on the laptop
 
@@ -1254,7 +1256,7 @@ and revoked the moment the hub loses that key.
 | `tracon serve [--listen]` | run the node |
 | `tracon setup`, `check-boundary [--deep]` | the boundary: the base image and harness bundle, and an older release's gateway removed |
 | `tracon service install\|uninstall\|status\|restart` | the platform supervisor (the desktop app runs these for you) |
-| `tracon auth issue [--url]\|revoke\|sessions` | off-machine access; `--url` prints the login QR |
+| `tracon auth issue [--public-url] [--yes]\|revoke [--yes]\|sessions` | off-machine access; `--public-url` prints the login QR; issue and revoke say which node they change and ask first |
 | `tracon external show\|detach\|stop\|clear <channel>` | a harness you run yourself, using this node's tools |
 | `tracon push ls\|rm <id>\|test` | the phones this node pushes to |
 | `tracon mesh id\|init\|invite\|members\|remove\|admit`, `enroll` | the mesh |
@@ -1272,10 +1274,18 @@ and revoked the moment the hub loses that key.
 | `tracon metrics [--channel] [--days]`, `provenance <sha>` | what happened |
 | `tracon gc [--apply] [--caches] [--legacy] [--adopt-unlabelled] [--all]` | runtime storage and images whose owner is over |
 
-Most commands talk to the running node over its API, and `TRACON_URL` and
-`TRACON_TOKEN` point them at a remote node. The ones that act on this machine itself
-ignore both: `setup`, `check-boundary` (which asks this machine's node only when that
-node holds the Kubernetes sandbox port), `service`, `enroll`, `mesh id`,
+Most commands talk to the running node over its API. The node is `TRACON_URL` when it
+is set; else `http://` and `TRACON_LISTEN`, the address `serve` binds; else the address
+the node serving this state directory recorded in `<state dir>/serve.json` (ignored, with
+a warning, when the process it names is gone); else `http://127.0.0.1:7420`. Before
+anything is changed, the node must be the one whose identity is in the state directory;
+one that is not is refused, with its name. The check is skipped only for a node named by
+`TRACON_URL` with `TRACON_STATE_DIR` left unset, which is how another node (through a
+port-forward, say) is driven from a machine that runs its own; with `TRACON_STATE_DIR`
+set and no identity in it, only an explicit `TRACON_URL` is written to. `TRACON_URL` and
+`TRACON_TOKEN` point the commands at a remote node. The ones that act on this machine
+itself ignore both: `setup`, `check-boundary` (which asks this machine's node only when
+that node holds the Kubernetes sandbox port), `service`, `enroll`, `mesh id`,
 `credential import|ls|rm`, `policy keygen|init|sign|show`, and `session show`,
 which reads a file and needs no node at all. `--help` on any of them says more.
 

@@ -97,7 +97,7 @@
         No passkey is enrolled.{#if list.enrollment.open && list.enrollment.closes_ms}
           This browser was just paired, so it can add the first one without confirming for another {Math.max(1, Math.ceil((list.enrollment.closes_ms - clock.now) / 60_000))} min.
         {:else if !list.local}
-          Pair this browser again (<code>tracon auth issue --url</code> on the node) to add the first one.
+          Pair this browser again (<code>tracon auth issue --public-url</code> on the node) to add the first one.
         {/if}
       </div>
     {/if}

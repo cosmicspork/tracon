@@ -231,7 +231,7 @@ every caller who can reach that port the operator.
 1. At the node, list them: `curl -s http://127.0.0.1:7420/api/passkeys`.
 2. Remove each one, at the node:
    `curl -s -X DELETE http://127.0.0.1:7420/api/passkeys/<id>`.
-3. Pair again: `tracon auth issue --url https://<public origin>` and scan the QR
+3. Pair again: `tracon auth issue --public-url https://<public origin>` and scan the QR
    within 15 minutes. With none enrolled, the freshly paired browser may add the
    first passkey without one.
 
