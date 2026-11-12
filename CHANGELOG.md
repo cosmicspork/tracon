@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.51.0](https://github.com/cosmicspork/tracon/compare/v0.50.0...v0.51.0) (2026-11-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* **node:** retire image-only services ([#891](https://github.com/cosmicspork/tracon/issues/891))
+* retire the layered harness images ([#890](https://github.com/cosmicspork/tracon/issues/890))
+* **node:** run Kubernetes over the sandbox protocol only ([#886](https://github.com/cosmicspork/tracon/issues/886))
+
+### Features
+
+* **digitalocean:** run sessions and build templates on a Kubernetes node ([#884](https://github.com/cosmicspork/tracon/issues/884)) ([b9f4c4d](https://github.com/cosmicspork/tracon/commit/b9f4c4d546909914da1d3303e7d10bbadb05af7c))
+* **kubernetes:** run catalogue services in the sandbox ([#889](https://github.com/cosmicspork/tracon/issues/889)) ([b85b0f0](https://github.com/cosmicspork/tracon/commit/b85b0f083443751f5b2a266a0e12cc4c08cebc20))
+* **node:** retire image-only services ([#891](https://github.com/cosmicspork/tracon/issues/891)) ([16dfca9](https://github.com/cosmicspork/tracon/commit/16dfca9b4e23165ef1a8b9fbd4ca8f0ed0fa910b))
+* **node:** run Kubernetes over the sandbox protocol only ([#886](https://github.com/cosmicspork/tracon/issues/886)) ([33d6b28](https://github.com/cosmicspork/tracon/commit/33d6b28819923f2ea1f56de02217014a0556cf86))
+
+
+### Code Refactoring
+
+* retire the layered harness images ([#890](https://github.com/cosmicspork/tracon/issues/890)) ([9761c84](https://github.com/cosmicspork/tracon/commit/9761c84b4ce201ce0fd5fc6f13a41bc79c71e641))
+
 ## [0.50.0](https://github.com/cosmicspork/tracon/compare/v0.49.0...v0.50.0) (2026-11-11)
 
 
