@@ -1762,7 +1762,8 @@ timeout_secs = 900
 
 [review]
 max_diff_lines = 10000              # added lines (removed ones do not count, though the whole diff is held to
-                                    # ten times this); a bigger submission is refused before any check runs
+                                    # ten times this); a bigger submission is refused before any check runs.
+                                    # An update to an open change counts only what it adds to the change's branch
 max_files = 200
 
 [notify]

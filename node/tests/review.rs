@@ -5434,6 +5434,51 @@ async fn an_update_pushes_to_the_open_change_and_sends_what_was_asked() {
     );
 }
 
+/// A change whose branch already holds more than the cap takes a small
+/// follow-up: what the branch holds is published, so the review shows, and
+/// the cap measures, only what this push adds to it. The same worktree
+/// submitted as a new change is still measured from its base and refused.
+#[tokio::test]
+async fn an_update_is_capped_by_what_it_adds_to_the_change() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| c.review.max_diff_lines = 5).await;
+    let wt = std::path::Path::new(&f.worktree);
+    sh(
+        wt,
+        "seq 1 50 > big.txt && git add -A && git commit -qm 'the published rewrite'",
+    );
+    let change_head = sh_out(wt, "git rev-parse HEAD");
+    f.forge_holds(&change_head);
+    gh_forge(&f, pull_seven(&change_head));
+
+    // Nothing added yet: a push that only comments has nothing to cap.
+    let v = f
+        .submit_update(json!({ "forge": { "comment": "nothing new" } }))
+        .await;
+    assert!(v["review_id"].is_string(), "{v}");
+
+    sh(
+        wt,
+        "echo follow-up > ci.txt && git add -A && git commit -qm 'ci: the follow-up'",
+    );
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let err = v["error"].as_str().unwrap_or_default();
+    assert!(err.contains("the cap is 5 added lines"), "{v}");
+
+    let submitted = f.submit_update(json!({})).await;
+    let id = review_id(&submitted);
+    assert_eq!(submitted["added"], 1, "{submitted}");
+    assert_eq!(submitted["files"], 1, "{submitted}");
+    let review = f.store.get_review(&id).unwrap().unwrap();
+    assert!(review.diff.contains("+follow-up"), "{}", review.diff);
+    assert!(
+        !review.diff.contains("big.txt"),
+        "what the change already holds is not this review's: {}",
+        review.diff
+    );
+    assert_eq!(review.added, 1);
+}
+
 /// The note a submission carries for the operator never leaves tracon:
 /// publication sends the forge the title, the body, the comment and the
 /// commit message, and nothing of the note.
