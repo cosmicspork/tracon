@@ -1902,10 +1902,17 @@ async fn session_command(cmd: SessionCommand) -> Result<()> {
                 .cloned()
                 .unwrap_or_default();
             if !kept.is_empty() {
-                println!("\nWorkspaces kept ({}):", kept.len());
+                println!("\nWorkspaces kept on this node ({}):", kept.len());
                 for path in kept.iter().take(20) {
                     println!("  {}", path.as_str().unwrap_or(""));
                 }
+            }
+            let elsewhere = v["workspaces_elsewhere"].as_u64().unwrap_or_default();
+            if elsewhere > 0 {
+                println!(
+                    "\n{elsewhere} more workspace(s) recorded for these sessions are not on this node \
+                     (held by another node, or gone)."
+                );
             }
             println!(
                 "\nThese sessions stay readable and can never be launched again.\n\

@@ -1949,7 +1949,27 @@ pub async fn archive_legacy(
         archived.approvals_closed += one.approvals_closed;
         archived.workspaces.extend(one.workspaces);
     }
-    let harness = harnesses.join(", ");
+    // Named by what was archived, not by every retired harness searched:
+    // the header says which harnesses these sessions ran.
+    let mut ran: Vec<&str> = archived
+        .sessions
+        .iter()
+        .map(|row| row.harness_id.as_str())
+        .collect();
+    ran.sort_unstable();
+    ran.dedup();
+    let harness = match ran.is_empty() {
+        true => harnesses.join(", "),
+        false => ran.join(", "),
+    };
+    // A session that moved between meshed nodes carries the path its
+    // workspace had on whichever node last held it: only one here, under
+    // this node's own state, is a workspace this node kept.
+    let state_dir = crate::config::Config::state_dir();
+    let (retained, elsewhere): (Vec<String>, Vec<String>) = archived
+        .workspaces
+        .into_iter()
+        .partition(|path| kept_here(std::path::Path::new(path), &state_dir));
     for row in &archived.sessions {
         s.manager
             .bus()
@@ -1966,8 +1986,20 @@ pub async fn archive_legacy(
             "state": row.state,
         })).collect::<Vec<_>>(),
         "approvals_closed": archived.approvals_closed,
-        "workspaces_retained": archived.workspaces,
+        "workspaces_retained": retained,
+        "workspaces_elsewhere": elsewhere.len(),
     })))
+}
+
+/// Whether `path` is a workspace this node holds: under its state directory,
+/// and there.
+fn kept_here(path: &std::path::Path, state_dir: &std::path::Path) -> bool {
+    path.is_absolute()
+        && !path
+            .components()
+            .any(|part| part == std::path::Component::ParentDir)
+        && path.starts_with(state_dir)
+        && path.exists()
 }
 
 #[derive(Deserialize)]

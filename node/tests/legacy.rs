@@ -194,12 +194,17 @@ impl Harness {
 async fn archiving_the_retired_harness_keeps_the_sessions_and_ends_them() {
     state::isolate();
     let h = Harness::fake().await;
-    h.store
-        .insert_session(&session_row("legacy-1", "omp", "closed"))
-        .unwrap();
-    h.store
-        .insert_session(&session_row("legacy-2", "omp", "waiting_on_you"))
-        .unwrap();
+    let workspaces = Config::state_dir().join("workspaces");
+    let here = |id: &str| workspaces.join(id).to_string_lossy().into_owned();
+    std::fs::create_dir_all(here("legacy-1")).unwrap();
+    std::fs::create_dir_all(here("legacy-2")).unwrap();
+    let mut one = session_row("legacy-1", "omp", "closed");
+    one.worktree_path = Some(here("legacy-1"));
+    h.store.insert_session(&one).unwrap();
+    let mut two = session_row("legacy-2", "omp", "waiting_on_you");
+    two.worktree_path = Some(here("legacy-2"));
+    h.store.insert_session(&two).unwrap();
+    // Moved here from a peer: the path is the peer's.
     h.store
         .insert_session(&session_row("legacy-3", "opencode", "closed"))
         .unwrap();
@@ -217,13 +222,10 @@ async fn archiving_the_retired_harness_keeps_the_sessions_and_ends_them() {
     assert_eq!(body["approvals_closed"], 1);
     assert_eq!(
         body["workspaces_retained"],
-        json!([
-            "/state/workspaces/legacy-1",
-            "/state/workspaces/legacy-2",
-            "/state/workspaces/legacy-3"
-        ]),
+        json!([here("legacy-1"), here("legacy-2")]),
         "workspaces are retained, and the operator is told where they are"
     );
+    assert_eq!(body["workspaces_elsewhere"], 1, "{body}");
 
     let one = h.store.get_session("legacy-1").unwrap().unwrap();
     assert!(one.legacy_ms.is_some());
@@ -233,10 +235,7 @@ async fn archiving_the_retired_harness_keeps_the_sessions_and_ends_them() {
     assert_eq!(one.harness_id, "omp");
     assert_eq!(one.harness_version, "18.0.4");
     assert_eq!(one.harness_agent.as_deref(), Some("oh-my-pi"));
-    assert_eq!(
-        one.worktree_path.as_deref(),
-        Some("/state/workspaces/legacy-1")
-    );
+    assert_eq!(one.worktree_path, Some(here("legacy-1")));
 
     // A session that had already ended keeps what it ended for, which here is
     // nothing: saying the retirement ended it would be a plausible-looking lie
@@ -268,6 +267,54 @@ async fn archiving_the_retired_harness_keeps_the_sessions_and_ends_them() {
     // Idempotent.
     let (_, again) = h.post("/api/sessions/archive-legacy", None).await;
     assert_eq!(again["archived"], 0);
+}
+
+/// The header names the harnesses the archived sessions ran, not every
+/// retired one searched, and only the workspaces this node holds are listed
+/// as kept: a session that moved between meshed nodes names a peer's path,
+/// and one whose workspace has gone names nothing to keep.
+#[tokio::test]
+async fn the_report_names_what_was_archived_and_what_is_kept_here() {
+    state::isolate();
+    let h = Harness::fake().await;
+    let workspaces = Config::state_dir().join("workspaces");
+    let kept = workspaces.join("transfer-01a0ed2d");
+    std::fs::create_dir_all(&kept).unwrap();
+    let mut here = session_row("oc-here", "opencode", "closed");
+    here.worktree_path = Some(kept.to_string_lossy().into_owned());
+    h.store.insert_session(&here).unwrap();
+    let mut gone = session_row("oc-gone", "opencode", "closed");
+    gone.worktree_path = Some(workspaces.join("oc-gone").to_string_lossy().into_owned());
+    h.store.insert_session(&gone).unwrap();
+    let mut peer = session_row("oc-peer", "opencode", "closed");
+    peer.worktree_path = Some("/home/jd/.local/state/tracon/workspaces/oc-peer".into());
+    h.store.insert_session(&peer).unwrap();
+    let mut climbing = session_row("oc-climbing", "opencode", "closed");
+    climbing.worktree_path = Some(format!("{}/../../etc", kept.display()));
+    h.store.insert_session(&climbing).unwrap();
+    let mut none = session_row("oc-none", "opencode", "closed");
+    none.worktree_path = None;
+    h.store.insert_session(&none).unwrap();
+    assert!(
+        tracon::adapter::RETIRED.len() > 1,
+        "several retired harnesses are searched"
+    );
+
+    let (status, body) = h.post("/api/sessions/archive-legacy", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["archived"], 5);
+    assert_eq!(body["harness"], "opencode", "{body}");
+    assert_eq!(
+        body["workspaces_retained"],
+        json!([kept.to_string_lossy()]),
+        "{body}"
+    );
+    assert_eq!(body["workspaces_elsewhere"], 3, "{body}");
+
+    // Nothing left: the reply names what was searched.
+    let (_, again) = h.post("/api/sessions/archive-legacy", None).await;
+    assert_eq!(again["archived"], 0);
+    assert_eq!(again["harness"], tracon::adapter::RETIRED.join(", "));
 }
 
 /// Archiving a harness the node still runs would take every live session with
