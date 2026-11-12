@@ -3585,7 +3585,7 @@ dependencies = [
 
 [[package]]
 name = "tracon"
-version = "0.50.0"
+version = "0.51.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3657,7 +3657,7 @@ dependencies = [
 
 [[package]]
 name = "tracon-acp"
-version = "0.50.0"
+version = "0.51.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3668,7 +3668,7 @@ dependencies = [
 
 [[package]]
 name = "tracon-agent"
-version = "0.50.0"
+version = "0.51.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3696,7 +3696,7 @@ dependencies = [
 
 [[package]]
 name = "tracon-hub"
-version = "0.50.0"
+version = "0.51.0"
 dependencies = [
  "axum",
  "clap",
@@ -3724,7 +3724,7 @@ dependencies = [
 
 [[package]]
 name = "tracon-proto"
-version = "0.50.0"
+version = "0.51.0"
 dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
@@ -3742,7 +3742,7 @@ dependencies = [
 
 [[package]]
 name = "tracon-sandbox"
-version = "0.50.0"
+version = "0.51.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3774,7 +3774,7 @@ dependencies = [
 
 [[package]]
 name = "tracon-sync"
-version = "0.50.0"
+version = "0.51.0"
 dependencies = [
  "hex",
  "rusqlite",
