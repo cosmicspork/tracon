@@ -855,8 +855,12 @@ unless asked, at most 64) are unattended, and so is waiting for one to move (`ru
 started: retrying the failed jobs (`run_rerun` / `pipeline_retry`), starting a run on a
 branch (`run_dispatch` / `pipeline_run`), and on GitLab playing a manual job (`job_play`)
 or, under a scoped grant, a deployment job at an exact commit (`deploy`). Starting a run
-never takes a tag or a value naming production, and `run_dispatch` starts only a
-workflow you list for the repository:
+never takes a tag or a value naming production. `pipeline_run` also takes the
+pipeline's `spec:inputs` as `inputs` (name to string, boolean or number, sent with
+their types, e.g. `{"build-dev-images": true}`), which variables cannot set; the
+card shows each input's value, and one whose name or value names production is
+refused before you are asked. `run_dispatch` starts only a workflow you list for
+the repository:
 
 ```toml
 [github.dispatch]                   # what run_dispatch may start; anything else is refused before you are asked

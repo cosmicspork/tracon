@@ -223,14 +223,15 @@ pub fn definitions() -> Vec<Value> {
         json!({
             "name": PIPELINE_RUN,
             "description": "Run a pipeline on a branch, as the web UI's Run pipeline does. Never a \
-                            tag, and never with a variable naming production: those deploys are \
-                            run by hand. The operator is asked before this runs. An asked call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
+                            tag, and never with a variable or input naming production: those \
+                            deploys are run by hand. The operator is asked before this runs. An asked call returns `awaiting_operator` with an `approval_id` at once, and approval_status reports the outcome.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "project": { "type": "string", "description": PROJECT },
                     "ref": { "type": "string", "description": "The branch." },
                     "variables": { "type": "object", "description": "Pipeline variables, name to string value. Values are sent as given; a number or boolean is refused, so quote it." },
+                    "inputs": { "type": "object", "description": "The pipeline's spec:inputs, name to string, boolean or number, sent with their types (e.g. {\"build-dev-images\": true}). An input left out takes its default from .gitlab-ci.yml, which variables cannot override. Needs a GitLab recent enough to take inputs on its create-pipeline API." },
                 },
                 "required": ["project", "ref"],
             },
@@ -634,6 +635,7 @@ pub async fn call(
                 .filter(|r| !r.is_empty())
                 .ok_or("ref is required (a branch)")?;
             let variables = pipeline_variables(args.get("variables"))?;
+            let inputs = pipeline_inputs(args.get("inputs"))?;
             let tag = http
                 .get(format!("{project_url}/repository/tags/{}", urlencode(r)))
                 .header("PRIVATE-TOKEN", token)
@@ -648,7 +650,7 @@ pub async fn call(
             let res = http
                 .post(format!("{project_url}/pipeline"))
                 .header("PRIVATE-TOKEN", token)
-                .json(&json!({ "ref": r, "variables": variables }))
+                .json(&run_body(r, variables, inputs))
                 .send()
                 .await
                 .map_err(|e| format!("gitlab: {e}"))?;
@@ -677,7 +679,10 @@ pub async fn call(
                 ));
             }
             // A retry runs with the variables the pipeline was started with,
-            // so they are held to what pipeline_run would have accepted.
+            // so they are held to what pipeline_run would have accepted. Its
+            // spec:inputs are kept too, but GitLab's API has no read of them;
+            // a pipeline started with a production input came from the web
+            // UI, since pipeline_run refuses one.
             let variables = get(
                 http,
                 token,
@@ -1057,6 +1062,57 @@ fn pipeline_variables(v: Option<&Value>) -> Result<Vec<Value>, String> {
         .collect()
 }
 
+/// A `pipeline_run` call's variables and inputs checked before the operator
+/// is asked, by the rules it is held to again when it runs.
+pub fn run_refusal(args: &Value) -> Option<String> {
+    pipeline_variables(args.get("variables"))
+        .and(pipeline_inputs(args.get("inputs")))
+        .err()
+}
+
+/// A pipeline's `spec:inputs` as GitLab takes them: name to string, boolean
+/// or number, kept as typed, since an input declared `type: boolean` refuses
+/// the string "true". An input whose name or value names production is
+/// refused, as a variable is: `environment: production` is the deploy that is
+/// run by hand.
+fn pipeline_inputs(v: Option<&Value>) -> Result<serde_json::Map<String, Value>, String> {
+    let Some(v) = v.filter(|v| !v.is_null()) else {
+        return Ok(serde_json::Map::new());
+    };
+    let map = v
+        .as_object()
+        .ok_or("inputs is an object of name to value")?;
+    for (k, v) in map {
+        let value = match v {
+            Value::String(s) => s.clone(),
+            Value::Bool(_) | Value::Number(_) => v.to_string(),
+            _ => {
+                return Err(format!(
+                    "input {k} must be a string, boolean or number, not {v}"
+                ))
+            }
+        };
+        if k.to_ascii_lowercase().contains("production")
+            || value.to_ascii_lowercase().contains("production")
+        {
+            return Err(format!(
+                "input {k} names production; a production deploy is run by hand"
+            ));
+        }
+    }
+    Ok(map.clone())
+}
+
+/// The create-pipeline request. `inputs` is sent only when there are some, so
+/// a call without them reads as it did to a GitLab that predates them.
+fn run_body(r: &str, variables: Vec<Value>, inputs: serde_json::Map<String, Value>) -> Value {
+    let mut body = json!({ "ref": r, "variables": variables });
+    if !inputs.is_empty() {
+        body["inputs"] = Value::Object(inputs);
+    }
+    body
+}
+
 /// The first of a pipeline's variables (GitLab's `[{key, value}]`) whose
 /// value names production.
 fn names_production(variables: &Value) -> Option<&str> {
@@ -1320,6 +1376,54 @@ mod tests {
         }
         let ok = pipeline_variables(Some(&json!({ "N": " 2 " }))).unwrap();
         assert_eq!(ok, vec![json!({ "key": "N", "value": " 2 " })]);
+    }
+
+    #[test]
+    fn pipeline_inputs_keep_their_types_and_are_sent_only_when_given() {
+        let args = json!({ "project": "g/p", "ref": "feat/x",
+                           "inputs": { "build-dev-images": true, "replicas": 2, "region": "us" } });
+        let inputs = pipeline_inputs(args.get("inputs")).unwrap();
+        let body = run_body("feat/x", Vec::new(), inputs);
+        assert_eq!(body["inputs"]["build-dev-images"], json!(true));
+        assert_eq!(body["inputs"]["replicas"], json!(2));
+        assert_eq!(body["inputs"]["region"], json!("us"));
+        assert_eq!(body["ref"], "feat/x");
+        assert_eq!(run_refusal(&args), None);
+
+        let plain = run_body("main", Vec::new(), pipeline_inputs(None).unwrap());
+        assert_eq!(plain, json!({ "ref": "main", "variables": [] }));
+        assert!(pipeline_inputs(Some(&Value::Null)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_input_naming_production_is_refused_by_name_or_value() {
+        for inputs in [
+            json!({ "environment": "Production" }),
+            json!({ "deploy-production": true }),
+        ] {
+            let e = pipeline_inputs(Some(&inputs)).unwrap_err();
+            assert!(e.contains("names production"), "{e}");
+            let e = run_refusal(&json!({ "ref": "main", "inputs": inputs })).unwrap();
+            assert!(e.contains("names production"), "{e}");
+        }
+        let e = pipeline_inputs(Some(
+            &json!({ "environment": "staging", "target": "eu-PRODUCTION" }),
+        ))
+        .unwrap_err();
+        assert!(e.contains("input target"), "{e}");
+        // A variable is held to its rule before the operator is asked too.
+        let e =
+            run_refusal(&json!({ "ref": "main", "variables": { "ENV": "production" } })).unwrap();
+        assert!(e.contains("variable ENV"), "{e}");
+    }
+
+    #[test]
+    fn an_input_that_is_not_a_scalar_is_refused() {
+        for value in [json!({ "a": 1 }), json!(["x"])] {
+            let e = pipeline_inputs(Some(&json!({ "N": value }))).unwrap_err();
+            assert!(e.contains("N must be a string, boolean or number"), "{e}");
+        }
+        assert!(pipeline_inputs(Some(&json!("x"))).is_err());
     }
 
     /// Feeds a scripted run of pipeline reads through `pipeline_wait`'s

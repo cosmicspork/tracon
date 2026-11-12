@@ -152,6 +152,22 @@ GitHub's REST API cannot clear `draft`, so the GitHub side goes through the
 GraphQL mutations; GitLab's REST update has no draft field either, so the
 GitLab side rewrites the title's `Draft:` prefix, as GitLab's own button does.
 
+**A pipeline could only take its default inputs.** `pipeline_run` sent a ref
+and variables, and GitLab does not let a variable set `spec:inputs`, so a
+project whose `.gitlab-ci.yml` gates jobs on an input (a component's
+`build-dev-images`, say) could only be started with its defaults, which under
+the standard-deployment component deploy the branch to staging. `pipeline_run`
+now takes `inputs`, name to string, boolean or number, sent as the create
+pipeline API's `inputs` with their types kept: an input declared `type:
+boolean` refuses the string `"true"`, which is why variables, which are
+always strings, are not reused for it. The operator's card names each input
+with its value beside the ref and the variables' names, since the value is what
+decides which jobs run. An input whose name or value names production is
+refused as a variable is, and both are now refused before the operator is
+asked rather than after. `pipeline_retry` takes none: a retry runs the
+original pipeline's jobs with the inputs it was created with. GitLab takes
+`inputs` on this API only in recent releases.
+
 **A resubmission can retarget its base until the change opens.** A stacked
 review whose base branch was squash-merged and deleted pushed its branch, then
 failed to open, and the resubmission against main kept the stale base and
