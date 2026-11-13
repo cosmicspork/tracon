@@ -38,7 +38,7 @@ use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -474,6 +474,7 @@ impl SandboxServer {
             link,
             ended: CancellationToken::new(),
             connections: AtomicU64::new(0),
+            closing: AtomicBool::new(false),
             driver: Mutex::new(None),
             tokens: self.tokens.clone(),
             runs: Arc::downgrade(&self.runs),
@@ -701,6 +702,9 @@ struct Inner {
     /// Cancelled once the run is over: lost, or every handle dropped.
     ended: CancellationToken,
     connections: AtomicU64,
+    /// The node asked the sandbox to shut down: the connection that ends
+    /// next ends the run, and nothing waits for it to redial.
+    closing: AtomicBool,
     driver: Mutex<Option<JoinHandle<()>>>,
     tokens: TokenRegistry,
     runs: Weak<Mutex<HashMap<String, Weak<Inner>>>>,
@@ -758,12 +762,15 @@ impl Inner {
         true
     }
 
-    /// The connection of `generation` has ended.
+    /// The connection of `generation` has ended. One that ends after the
+    /// node asked the sandbox to shut down is the end of the run, as it is
+    /// for a sandbox that cannot resume: the sandbox is exiting, not away.
     fn dropped(self: &Arc<Self>, generation: u64) {
+        let closing = self.closing.load(Ordering::SeqCst);
         let mut now = None;
         self.link.send_if_modified(|link| match link {
             Link::Up(live) if live.generation == generation => {
-                *link = match self.resumable {
+                *link = match self.resumable && !closing {
                     true => Link::Down(generation),
                     false => Link::Lost,
                 };
@@ -773,7 +780,12 @@ impl Inner {
             _ => false,
         });
         match now {
-            Some(Link::Lost) => self.end(),
+            Some(Link::Lost) => {
+                if closing {
+                    tracing::debug!(run = %self.run, "a sandbox closed its connection as it shut down");
+                }
+                self.end()
+            }
             Some(_) => {
                 tracing::warn!(run = %self.run, within_s = self.resume_within.as_secs(), "lost a sandbox's connection; waiting for it to redial");
                 self.await_return(generation);
@@ -1333,8 +1345,11 @@ impl SandboxConn {
         Ok(BufReader::new(H2Reader::new(checked(response).await?)))
     }
 
-    /// Ask the sandbox to stop its services and processes and exit.
+    /// Ask the sandbox to stop its services and processes and exit. Its
+    /// connection closing from now on ends the run rather than waiting for
+    /// a redial.
     pub async fn shutdown(&self) -> Result<(), SandboxError> {
+        self.inner.closing.store(true, Ordering::SeqCst);
         let _: serde_json::Value = self.post_json(path::SHUTDOWN, &()).await?;
         Ok(())
     }
