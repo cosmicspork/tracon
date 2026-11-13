@@ -103,7 +103,7 @@ if [ -n "${TRACON_ENROLL:-}" ]; then
 
 enrolled. next, on this machine:
   tracon check-boundary --deep          prove the boundary
-  tracon auth issue --url <https url>   to reach this node from a phone
+  tracon auth issue --public-url <url>  to reach this node from a phone
 EOF
   exit 0
 fi
@@ -120,5 +120,5 @@ next, on this machine:
   tracon credential import <file>       seal a credential (or connect a provider on the Nodes screen)
   tracon check-boundary --deep          prove the boundary
   tracon service install                run the node under systemd or launchd
-  tracon auth issue                     to reach this node from a phone or another machine
+  tracon auth issue --public-url <url>  to reach this node from a phone or another machine
 EOF

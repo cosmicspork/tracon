@@ -1001,6 +1001,17 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("bind {listen}"))?;
+    // Where this node answers, so a CLI on the same state directory reaches
+    // it and not whatever holds the default port. Removed on a clean exit.
+    let bound = listener.local_addr().unwrap_or(listen);
+    let _serve_file =
+        match crate::node_target::write_serve_file(&Config::state_dir(), bound, &state.node_id) {
+            Ok(guard) => Some(guard),
+            Err(error) => {
+                tracing::warn!(%error, "could not record this node's address in serve.json");
+                None
+            }
+        };
     // A claim measures attention. One left behind by a client that vanished
     // would report a review as attended forever, so claims lapse.
     //

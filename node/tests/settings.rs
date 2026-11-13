@@ -45,6 +45,25 @@ fn node() -> Node {
 }
 
 fn node_with(cfg: Config) -> Node {
+    node_as(cfg, "n1")
+}
+
+/// This state directory's own identity, which a CLI run here checks the node
+/// it changes against: a node it reaches must be the one whose state it is.
+fn this_node_id() -> String {
+    state::isolate();
+    tracon::mesh::identity::load_or_generate()
+        .unwrap()
+        .0
+        .node_id()
+}
+
+/// The node a CLI on this state directory changes: under its identity.
+fn this_node() -> Node {
+    node_as(Config::default(), &this_node_id())
+}
+
+fn node_as(cfg: Config, node_id: &str) -> Node {
     // Before anything can reach the credential store or node.toml.
     state::isolate();
     let store = Arc::new(Store::open_in_memory().unwrap());
@@ -61,7 +80,7 @@ fn node_with(cfg: Config) -> Node {
         store.clone(),
         Bus::new(),
         cfg.clone(),
-        "n1".into(),
+        node_id.into(),
         tools.clone(),
         Default::default(),
         Arc::new(tracon::runner::local::LocalBackend),
@@ -75,7 +94,7 @@ fn node_with(cfg: Config) -> Node {
             tx: Arc::new(tokio::sync::Mutex::new(None)),
             tokens: Arc::new(tokio::sync::Mutex::new(0)),
         }),
-        node_id: "n1".into(),
+        node_id: node_id.into(),
         tools,
         mesh: None,
         auth: Arc::new(AuthState::load(&store, "127.0.0.1".into())),
@@ -245,7 +264,7 @@ fn private_state(name: &str) -> std::path::PathBuf {
 async fn a_cli_import_reaches_the_running_node() {
     use std::os::unix::fs::PermissionsExt;
     let _credentials = state::credentials_lock().await;
-    let n = node();
+    let n = this_node();
     let dir = state::scratch("a_cli_import_reaches_the_running_node");
     let own = private_state("a_cli_import_reaches_the_running_node");
     let file = dir.join("credentials.toml");
@@ -327,11 +346,14 @@ fn sealed() -> Broker {
 async fn a_cli_rm_reaches_the_running_node() {
     use std::os::unix::fs::PermissionsExt;
     let _credentials = state::credentials_lock().await;
-    let n = node();
+    let n = this_node();
     let own = private_state("a_cli_rm_reaches_the_running_node");
-    let toml = "[credentials.vega]\nchannels = [\"personal\"]\n\
-                nodes = [\"n1\", \"peer-b\"]\n\
-                [credentials.vega.env]\nVEGA_KEY = \"not-a-real-key\"\n";
+    let toml = format!(
+        "[credentials.vega]\nchannels = [\"personal\"]\n\
+         nodes = [\"{}\", \"peer-b\"]\n\
+         [credentials.vega.env]\nVEGA_KEY = \"not-a-real-key\"\n",
+        this_node_id()
+    );
     let seal = || async {
         let (s, v) = call(
             &n,
@@ -364,7 +386,7 @@ async fn a_cli_rm_reaches_the_running_node() {
     // Not `credentials.toml`: in a state directory that name is the old
     // plaintext store, which the CLI would seal and rename from under us.
     let file = state::scratch("a_cli_rm_reaches_the_running_node").join("vega.toml");
-    std::fs::write(&file, toml).unwrap();
+    std::fs::write(&file, &toml).unwrap();
     std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
     let out = here(&["credential", "import", file.to_str().unwrap()])
         .output()
@@ -1875,7 +1897,7 @@ fn a_command_whose_output_is_cut_off_ends_without_a_panic() {
 #[tokio::test]
 async fn the_repo_commands_save_against_the_version_they_read() {
     let _guard = state::config_lock().await;
-    let n = node();
+    let n = this_node();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let app = n.app.clone();
@@ -1952,7 +1974,7 @@ async fn the_repo_commands_save_against_the_version_they_read() {
 #[tokio::test]
 async fn a_realistic_build_list_is_saved_in_one_repo_set() {
     let _guard = state::config_lock().await;
-    let n = node();
+    let n = this_node();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let app = n.app.clone();
@@ -2010,21 +2032,26 @@ async fn a_repo_save_against_a_changed_file_is_reported_and_not_retried() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let puts = Arc::new(AtomicUsize::new(0));
     let counted = puts.clone();
-    let app = axum::Router::new().route(
-        "/api/repos/environments",
-        axum::routing::get(|| async { axum::Json(json!({ "entries": [], "hash": "read" })) }).put(
-            move || async move {
-                counted.fetch_add(1, Ordering::SeqCst);
-                (
-                    StatusCode::CONFLICT,
-                    axum::Json(json!({
-                        "error": { "code": 409, "kind": "conflict", "message": "stale" },
-                        "hash": "now",
-                    })),
-                )
-            },
-        ),
-    );
+    let id = this_node_id();
+    let app = axum::Router::new()
+        .route(
+            "/api/node",
+            axum::routing::get(move || async move { axum::Json(json!({ "id": id })) }),
+        )
+        .route(
+            "/api/repos/environments",
+            axum::routing::get(|| async { axum::Json(json!({ "entries": [], "hash": "read" })) })
+                .put(move || async move {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    (
+                        StatusCode::CONFLICT,
+                        axum::Json(json!({
+                            "error": { "code": 409, "kind": "conflict", "message": "stale" },
+                            "hash": "now",
+                        })),
+                    )
+                }),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });

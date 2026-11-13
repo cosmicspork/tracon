@@ -381,14 +381,28 @@ enum AuthCommand {
     /// Issue an operator token, printed once. Until one exists this node
     /// answers only to loopback; with one, a client that presents it gets a
     /// cookie and can reach the node from anywhere.
+    ///
+    /// The node changed is the one `TRACON_URL` names, else `TRACON_LISTEN`,
+    /// else the one serving this state directory, else 127.0.0.1:7420.
     Issue {
-        /// Where clients reach this node (an ingress, a tailnet HTTPS name).
-        /// With one, a login link and a QR to scan are printed as well.
-        #[arg(long)]
+        /// The address clients use to reach this node (an ingress, a tailnet
+        /// HTTPS name), printed in the login link and QR; it does not choose
+        /// which node is changed (set TRACON_URL for that).
+        #[arg(long, value_name = "URL")]
+        public_url: Option<String>,
+        /// The old name of --public-url, kept for one release.
+        #[arg(long, hide = true, conflicts_with = "public_url")]
         url: Option<String>,
+        /// Change the token without asking; needed without a terminal.
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
     /// Remove the operator token and log every client out: loopback only again.
-    Revoke,
+    Revoke {
+        /// Remove the token without asking; needed without a terminal.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
     /// What is logged in, and whether a token is set at all.
     Sessions,
 }
@@ -932,7 +946,7 @@ async fn main() -> Result<()> {
 async fn check_boundary(deep: bool) -> Result<()> {
     let cfg = boundary_config()?;
     let checked = match sandbox_port_held(&cfg) {
-        Some(port) => match running_node().await {
+        Some(port) => match running_node().await? {
             Some(url) => {
                 eprintln!(
                     "port {port} is taken by the node serving its sandboxes here: \
@@ -1217,7 +1231,7 @@ async fn admission_handoff(
     if minted.is_empty() {
         return Ok(handoff);
     }
-    if running_node().await.is_some() {
+    if running_node().await?.is_some() {
         handoff.retain(|(name, _)| !minted.contains(name));
         eprintln!(
             "not handed over now: {}; with the node running, share {} with `tracon credential share <name> --to {}`",
@@ -1882,29 +1896,30 @@ fn unbuilt_line(note: &serde_json::Value) -> String {
     )
 }
 
-/// The node at [`node_url`], when it is on this machine and answers: the
-/// one whose credential store a command acting on this machine also writes.
-async fn running_node() -> Option<String> {
-    let url = node_url();
-    let parsed = url::Url::parse(&url).ok()?;
-    let loopback = match parsed.host()? {
-        url::Host::Domain(name) => name == "localhost",
-        url::Host::Ipv4(ip) => ip.is_loopback(),
-        url::Host::Ipv6(ip) => ip.is_loopback(),
-    };
-    if !loopback {
-        return None;
+/// The node at [`node_url`], when it is on this machine, answers, and is the
+/// node this state directory belongs to: the one whose credential store a
+/// command acting on this machine also writes. A different node answering
+/// there (a port-forward, another state directory's node) holds some other
+/// store, so the command acts on this one itself.
+async fn running_node() -> Result<Option<String>> {
+    let url = node_url()?;
+    if !tracon::node_target::is_loopback(&url) {
+        return Ok(None);
     }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .ok()?;
-    client
-        .get(format!("{url}/api/awake"))
-        .send()
-        .await
-        .ok()
-        .map(|_| url)
+        .build()?;
+    if client.get(format!("{url}/api/awake")).send().await.is_err() {
+        return Ok(None);
+    }
+    if let Some(local) = tracon::mesh::identity::load()? {
+        if let Ok(facts) = node_facts().await {
+            if facts.id != local.node_id() {
+                return Ok(None);
+            }
+        }
+    }
+    Ok(Some(url))
 }
 
 /// A request the node answered with an error status, and the message it gave.
@@ -1933,8 +1948,118 @@ impl std::fmt::Display for NodeRefusal {
 
 impl std::error::Error for NodeRefusal {}
 
-fn node_url() -> String {
-    std::env::var("TRACON_URL").unwrap_or_else(|_| "http://127.0.0.1:7420".into())
+/// The node this command talks to: `TRACON_URL`, then `TRACON_LISTEN`, then
+/// the state directory's `serve.json`, then the default (see
+/// [`tracon::node_target`]). Resolved once, so a warning is given once.
+fn node_target() -> Result<&'static tracon::node_target::Target> {
+    static TARGET: std::sync::OnceLock<Result<tracon::node_target::Target, String>> =
+        std::sync::OnceLock::new();
+    let target = TARGET.get_or_init(|| {
+        let env = |name: &str| std::env::var(name).ok();
+        let target = tracon::node_target::resolve(
+            env("TRACON_URL").as_deref(),
+            env("TRACON_LISTEN").as_deref(),
+            &config::Config::state_dir(),
+            tracon::node_target::pid_alive,
+        )?;
+        for warning in &target.warnings {
+            eprintln!("warning: {warning}");
+        }
+        Ok(target)
+    });
+    target.as_ref().map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+fn node_url() -> Result<String> {
+    Ok(node_target()?.url.clone())
+}
+
+/// What the target node says it is (`GET /api/node`).
+struct NodeFacts {
+    id: String,
+    name: Option<String>,
+}
+
+impl NodeFacts {
+    /// "node <name> (<id8>)", or "node <id8>" when it has no name.
+    fn describe(&self) -> String {
+        let id8 = tracon::node_target::short_id(&self.id);
+        match &self.name {
+            Some(name) if !name.is_empty() => format!("node {name} ({id8})"),
+            _ => format!("node {id8}"),
+        }
+    }
+}
+
+async fn node_facts() -> Result<NodeFacts> {
+    let v = node_request(reqwest::Method::GET, "/api/node", None, None).await?;
+    let id = v["id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{}: /api/node named no node id",
+                node_url().unwrap_or_default()
+            )
+        })?;
+    Ok(NodeFacts {
+        id: id.to_string(),
+        name: v["name"].as_str().map(str::to_string),
+    })
+}
+
+/// Before the first write: the node about to be changed must be the one this
+/// state directory belongs to. Two cases have nothing to compare: a node named
+/// by `TRACON_URL` (or off this machine) with the state directory left at its
+/// default, which is how another node is driven, through a port-forward say,
+/// from a machine that runs its own; and a state directory with no identity
+/// (a CLI used remotely with `TRACON_TOKEN`). A state directory that was
+/// named but holds no identity writes only to a node `TRACON_URL` names, so
+/// a scratch directory whose node never started doesn't fall through to the
+/// default node.
+///
+/// The identity is only read, never generated: a check must not create the
+/// thing it checks against.
+async fn check_target_identity() -> Result<()> {
+    static CHECKED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+    CHECKED
+        .get_or_try_init(|| async {
+            let target = node_target()?;
+            let state_dir_named =
+                std::env::var_os("TRACON_STATE_DIR").is_some_and(|v| !v.is_empty());
+            let named_by_url = target.source == tracon::node_target::Source::Url;
+            let Some(local) = tracon::mesh::identity::load()? else {
+                if state_dir_named && !named_by_url {
+                    anyhow::bail!(
+                        "the state directory {} holds no node identity, so {} ({}) can't be checked as its node: set TRACON_URL to the node you mean",
+                        config::Config::state_dir().display(),
+                        target.url,
+                        target.source,
+                    );
+                }
+                return Ok(());
+            };
+            if !state_dir_named
+                && (named_by_url || !tracon::node_target::is_loopback(&target.url))
+            {
+                return Ok(());
+            }
+            let facts = node_facts().await?;
+            let ours = local.node_id();
+            if facts.id != ours {
+                anyhow::bail!(
+                    "{} points at {} at {}, but the state directory {} is node {}: set TRACON_URL to the node you mean",
+                    target.source,
+                    facts.describe(),
+                    target.url,
+                    config::Config::state_dir().display(),
+                    tracon::node_target::short_id(&ours),
+                );
+            }
+            Ok(())
+        })
+        .await
+        .map(|_| ())
 }
 
 async fn node_call(
@@ -1943,7 +2068,20 @@ async fn node_call(
     body: Option<serde_json::Value>,
     if_match: Option<&str>,
 ) -> Result<serde_json::Value> {
-    let url = format!("{}{path}", node_url());
+    if !matches!(method, reqwest::Method::GET | reqwest::Method::HEAD) {
+        check_target_identity().await?;
+    }
+    node_request(method, path, body, if_match).await
+}
+
+/// One request to the target node, unchecked: [`node_call`] is the way in.
+async fn node_request(
+    method: reqwest::Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+    if_match: Option<&str>,
+) -> Result<serde_json::Value> {
+    let url = format!("{}{path}", node_url()?);
     let mut req = reqwest::Client::new().request(method, &url);
     // A node on this machine knows the caller is the operator by the loopback
     // address. One reached over the network wants the token; the CLI holds no
@@ -1959,10 +2097,12 @@ async fn node_call(
     if let Some(h) = if_match {
         req = req.header("if-match", h);
     }
-    let res = req
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("{url}: {e} (is `tracon serve` running? set TRACON_URL)"))?;
+    let res = req.send().await.map_err(|e| {
+        let source = node_target()
+            .map(|t| t.source.to_string())
+            .unwrap_or_default();
+        anyhow::anyhow!("{url} (from {source}): {e} (is `tracon serve` running? set TRACON_URL)")
+    })?;
     let status = res.status();
     let text = res.text().await.unwrap_or_default();
     let v: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
@@ -2199,7 +2339,7 @@ async fn external_command(cmd: ExternalCommand) -> Result<()> {
                 );
                 return Ok(());
             }
-            let base = node_url();
+            let base = node_url()?;
             // The variable, never its value: a token is shown once, where it
             // is issued, and this line is meant to be pasted and shared.
             let header = std::env::var("TRACON_TOKEN")
@@ -2303,11 +2443,51 @@ async fn external_command(cmd: ExternalCommand) -> Result<()> {
     }
 }
 
+/// Say which node's operator token is about to change, and ask. Without a
+/// terminal to ask on, only `--yes` goes ahead. The identity check runs first,
+/// so a node this state directory is not is refused before anything is asked.
+async fn confirm_token_change(verb: &str, yes: bool) -> Result<()> {
+    use std::io::{BufRead, IsTerminal, Write};
+    check_target_identity().await?;
+    let facts = node_facts().await?;
+    eprintln!(
+        "{verb} the operator token of {} at {}; every logged-in client is logged out.",
+        facts.describe(),
+        node_url()?
+    );
+    if yes {
+        return Ok(());
+    }
+    if !std::io::stdin().is_terminal() {
+        anyhow::bail!("nothing changed: there is no terminal to confirm on; pass --yes");
+    }
+    eprint!("Continue? [y/N] ");
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        Ok(())
+    } else {
+        anyhow::bail!("nothing changed")
+    }
+}
+
 async fn auth_command(cmd: AuthCommand) -> Result<()> {
     use reqwest::Method;
     match cmd {
-        AuthCommand::Issue { url } => {
+        AuthCommand::Issue {
+            public_url,
+            url,
+            yes,
+        } => {
             use base64::Engine;
+            if url.is_some() {
+                eprintln!(
+                    "warning: --url is now --public-url; it only sets the login link's address and never chooses the node (TRACON_URL does)"
+                );
+            }
+            let public_url = public_url.or(url);
+            confirm_token_change("Rotating", yes).await?;
             use rand::RngCore;
             let mut raw = [0u8; 32];
             rand::rng().fill_bytes(&mut raw);
@@ -2332,8 +2512,8 @@ async fn auth_command(cmd: AuthCommand) -> Result<()> {
             // A phone types this badly; a QR carries it. The token rides the
             // URL fragment, which browsers never send, so it stays out of
             // server and proxy logs.
-            let base = url.or_else(|| {
-                let u = node_url();
+            let base = public_url.or_else(|| {
+                let u = node_url().ok()?;
                 (!["127.0.0.1", "localhost", "[::1]", "::1"]
                     .iter()
                     .any(|h| u.contains(h)))
@@ -2350,12 +2530,13 @@ async fn auth_command(cmd: AuthCommand) -> Result<()> {
                     println!("{login}");
                 }
                 None => {
-                    println!("For a login QR a phone can scan, pass --url https://<how clients reach this node>.");
+                    println!("For a login QR a phone can scan, pass --public-url https://<how clients reach this node>.");
                 }
             }
             Ok(())
         }
-        AuthCommand::Revoke => {
+        AuthCommand::Revoke { yes } => {
+            confirm_token_change("Removing", yes).await?;
             node_call(Method::DELETE, "/api/auth/token", None, None).await?;
             println!("token removed; this node answers only to loopback again");
             Ok(())
@@ -3301,7 +3482,7 @@ async fn credential_command(cmd: CredentialCommand) -> Result<()> {
             // A running node reads the store once, at start: sealing around
             // it would leave it brokering the old copy until it restarts.
             // Handed to it instead, it seals them itself and uses them now.
-            if let Some(url) = running_node().await {
+            if let Some(url) = running_node().await? {
                 let v = node_call(
                     reqwest::Method::POST,
                     "/api/credentials/import",
@@ -3350,7 +3531,7 @@ async fn credential_command(cmd: CredentialCommand) -> Result<()> {
             // As with import: a running node brokers the copy it read at
             // start, and would write it back the next time it saved. Removed
             // through it, it stops brokering the credential now.
-            if let Some(url) = running_node().await {
+            if let Some(url) = running_node().await? {
                 let v = node_call(
                     reqwest::Method::DELETE,
                     &format!("/api/credentials/{}", urlencoding(&name)),
@@ -3472,7 +3653,7 @@ async fn credential_command(cmd: CredentialCommand) -> Result<()> {
             // A running node holds the store and would write its own copy
             // over one sealed around it, so it shares; it names the sign-in
             // this share is, as it would here.
-            if running_node().await.is_some() {
+            if running_node().await?.is_some() {
                 node_call(
                     reqwest::Method::POST,
                     &format!("/api/credentials/{}/share", urlencoding(&name)),

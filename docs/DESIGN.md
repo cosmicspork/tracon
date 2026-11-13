@@ -173,7 +173,7 @@ node's fingerprint, expiry) → received (the other node's name and fingerprint;
 "fingerprints match, admit" or "they differ — cancel") → enrolled. The confirm is
 reading two short strings, so the phone does it too.
 
-**Pair a phone.** `tracon auth issue --url` on the node prints a QR → the phone
+**Pair a phone.** `tracon auth issue --public-url` on the node prints a QR → the phone
 opens it, the token in the fragment is spent for a cookie and stripped → the app
 offers a passkey straight away ("Add a passkey for this device?"), which this
 browser may add without already having one for fifteen minutes, and only while

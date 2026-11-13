@@ -5,7 +5,7 @@
 //! meshes with: off this machine, each such action ([`AdminAction`]) must be
 //! confirmed by a passkey assertion made for that action and no other.
 //!
-//! - **Pairing.** Spending the operator token (`tracon auth issue --url`)
+//! - **Pairing.** Spending the operator token (`tracon auth issue --public-url`)
 //!   gives a browser its cookie and opens a short window
 //!   ([`ENROLL_WINDOW_MS`]) in which that session may enroll the node's
 //!   *first* passkey without one. After that, adding or removing a passkey is
@@ -789,7 +789,7 @@ pub async fn register_options(
                 return Err(Refusal::unavailable(
                     "enrollment_closed",
                     "the window to enroll this node's first passkey has closed: pair again \
-                     (`tracon auth issue --url` on the node) and enroll within 15 minutes",
+                     (`tracon auth issue --public-url` on the node) and enroll within 15 minutes",
                 ));
             } else {
                 authorize(&s, &parts, &body).await?;
