@@ -860,6 +860,27 @@ mod tests {
         assert_eq!(d.verdict, Verdict::Ask);
     }
 
+    /// The shipped bundle as its version names it. A node refuses a different
+    /// bundle under the version it runs, and is offered the shipped one only
+    /// when that version is higher: `doc_edit` joined the working-notes allow
+    /// under v23 unchanged, so a node that had installed v23 kept asking for
+    /// every note edit and was never told a newer bundle shipped (#887).
+    /// Changing the bundle means raising `version` and pinning the new hash
+    /// here.
+    #[test]
+    fn a_changed_shipped_bundle_carries_a_new_version() {
+        use sha2::{Digest, Sha256};
+        let sha = hex::encode(Sha256::digest(WORKING_AGREEMENTS.as_bytes()));
+        assert_eq!(
+            (policy().version, sha.as_str()),
+            (
+                24,
+                "dc5e5ba52e6323aa028839ad53966b3fd6ca4ff8bfe52b2293781b7cdaedc875"
+            ),
+            "working-agreements.toml changed: raise its version and pin the new hash"
+        );
+    }
+
     #[test]
     fn a_working_note_is_whatever_the_configuration_says_it_is() {
         let p = policy();
