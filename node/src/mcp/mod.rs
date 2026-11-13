@@ -1534,6 +1534,9 @@ impl Tools {
             docs::DOC_EDIT => docs::refusal_before_asking(name, args)
                 .or_else(|| docs::edit_refusal(&self.session.get()?.store, &ctx.channel, args)),
             github::RUN_DISPATCH => github::dispatch_refusal(&self.cfg.live().github, args),
+            // A variable or input naming production is never run, so the
+            // operator is not asked about it.
+            gitlab::PIPELINE_RUN => gitlab::run_refusal(args),
             // The card names the direction, so a `ready` it cannot read is
             // refused before it is shown.
             github::PR_READY | gitlab::MR_READY => github::ready_arg(args).err(),
@@ -2889,7 +2892,21 @@ fn prose_title(name: &str, args: &Value) -> Option<String> {
         gitlab::JOB_PLAY => {
             with_variables(format!("{name} {}: job {}", id("project"), id("job_id")))
         }
-        gitlab::PIPELINE_RUN => with_variables(format!("{name} {}: {}", id("project"), id("ref"))),
+        gitlab::PIPELINE_RUN => {
+            let head = with_variables(format!("{name} {}: {}", id("project"), id("ref")));
+            // Unlike a variable's, an input's value is short and typed, and
+            // it is what decides which jobs the pipeline has, so it is named.
+            let inputs: Vec<String> = args
+                .get("inputs")
+                .and_then(Value::as_object)
+                .map(|v| v.iter().map(|(k, v)| format!("{k}={v}")).collect())
+                .unwrap_or_default();
+            if inputs.is_empty() {
+                head
+            } else {
+                format!("{head}; inputs {}", inputs.join(", "))
+            }
+        }
         gitlab::PIPELINE_LIST_BY_SHA => format!("{name} {}: {}", id("project"), short("sha")),
         gitlab::DEPLOY => format!(
             "{name} {}: {} from job {} of pipeline {} at {}",
@@ -3121,6 +3138,12 @@ mod tests {
         assert_eq!(
             summarize(gitlab::PIPELINE_RUN, &run),
             "pipeline_run g/p: main"
+        );
+        let run = json!({ "project": "g/p", "ref": "feat/x", "variables": { "TARGET": "qa" },
+                          "inputs": { "build-dev-images": true, "environment": "staging" } });
+        assert_eq!(
+            summarize(gitlab::PIPELINE_RUN, &run),
+            "pipeline_run g/p: feat/x with TARGET; inputs build-dev-images=true, environment=\"staging\""
         );
         let deploy = json!({ "project": "g/p", "pipeline_id": 12, "job_id": 7, "environment": "qa", "source_sha": "abcdef12", "operation_id": "op" });
         assert_eq!(
