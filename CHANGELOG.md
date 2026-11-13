@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.51.2](https://github.com/cosmicspork/tracon/compare/v0.51.1...v0.51.2) (2026-11-13)
+
+
+### Bug Fixes
+
+* **cli:** ask the serving node to run check-boundary when it holds the Kubernetes sandbox port ([#903](https://github.com/cosmicspork/tracon/issues/903)) ([bd7e2f9](https://github.com/cosmicspork/tracon/commit/bd7e2f9f8615827234bf5a001ea729eb90334ea0))
+* **cli:** resolve the node from the state dir and check its identity before writing ([#898](https://github.com/cosmicspork/tracon/issues/898)) ([47ba1c1](https://github.com/cosmicspork/tracon/commit/47ba1c13c6e20c1fd8b7e0397f4f32d64fa26a2a))
+* **node:** archive-legacy lists only this node's workspaces and the harnesses it archived ([#906](https://github.com/cosmicspork/tracon/issues/906)) ([c2164f4](https://github.com/cosmicspork/tracon/commit/c2164f497ffc40ec25bf9489a99c0eb105c3edaa))
+* **node:** cap an update to an open change by what it adds ([#896](https://github.com/cosmicspork/tracon/issues/896)) ([307564f](https://github.com/cosmicspork/tracon/commit/307564f0a88746d6ff5b3df40e93e15e6d503030))
+* **node:** let pipeline_run pass GitLab spec:inputs ([#894](https://github.com/cosmicspork/tracon/issues/894)) ([64d3d68](https://github.com/cosmicspork/tracon/commit/64d3d68cf868ee16711d6a8f8e0b5603174983f4))
+* **node:** let submit_review's note and commit message mention a push ([#897](https://github.com/cosmicspork/tracon/issues/897)) ([ad62330](https://github.com/cosmicspork/tracon/commit/ad623309097953ab2e3cd28d0249a8f5cb760f3a))
+* **node:** mount only the harness state directory in Kubernetes sandboxes, not the whole home ([#902](https://github.com/cosmicspork/tracon/issues/902)) ([fc2a48f](https://github.com/cosmicspork/tracon/commit/fc2a48f889553ac0139a5d0e4a7f17c92552b1ed))
+* **node:** refuse an approval-gated call missing a required argument before asking ([#899](https://github.com/cosmicspork/tracon/issues/899)) ([f2b8fbf](https://github.com/cosmicspork/tracon/commit/f2b8fbf793a79d0a2627133e0b44a23bbd9dc92f))
+* **node:** say why a repository build never started instead of hanging ([#904](https://github.com/cosmicspork/tracon/issues/904)) ([816a18d](https://github.com/cosmicspork/tracon/commit/816a18dca1101cdf8f3ce3059e1a534a246a5c5e))
+* **node:** ship the working agreements as v24 so doc_edit on notes is unattended ([#900](https://github.com/cosmicspork/tracon/issues/900)) ([8468c93](https://github.com/cosmicspork/tracon/commit/8468c93c23b3383c5b7d6f485aacf5bd791b6075))
+* **node:** wait for the kubelet's image digest before reading a Kubernetes sandbox's identity ([#901](https://github.com/cosmicspork/tracon/issues/901)) ([7f0b8b3](https://github.com/cosmicspork/tracon/commit/7f0b8b34b7cbc07c8ef9e98d1d28ffc5e85c58fc))
+* **sandbox:** end a run when its sandbox closes after a shutdown, without a WARN ([#905](https://github.com/cosmicspork/tracon/issues/905)) ([b030ca2](https://github.com/cosmicspork/tracon/commit/b030ca246cb731f0dc736174e8f0695aab77b7d6))
+
 ## [0.51.1](https://github.com/cosmicspork/tracon/compare/v0.51.0...v0.51.1) (2026-11-12)
 
 
