@@ -672,7 +672,7 @@ pub async fn boundary_check(
     _local: Loopback,
     State(s): State<AppState>,
 ) -> ApiResult<Json<Value>> {
-    api::recheck_boundary(State(s)).await
+    api::recheck_boundary_with(s, false).await
 }
 
 fn schedule_lifecycle(
