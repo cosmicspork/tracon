@@ -666,9 +666,16 @@ async fn submit(
     // the review shows, and the cap measures, only what this push adds to it.
     // A rewrite replaces that history, so it is still measured from the base.
     // A push that adds nothing (it only describes or comments) has nothing to
-    // cap, and its review still shows the change it describes.
+    // cap, and its review still shows the change it describes. A push that
+    // merged the base in (to resolve a conflict, say) is measured from the
+    // base too: over what the branch held it would carry everything the base
+    // gained since, which is not this change's.
     let mut adds_nothing = false;
-    if let Some(on_change) = review::OnChange::of(&target, &intent).filter(|c| !c.rewrite) {
+    let on_change = match review::OnChange::of(&target, &intent).filter(|c| !c.rewrite) {
+        Some(on_change) if merges_base(&worktree, range_base.as_deref(), &on_change).await => None,
+        on_change => on_change,
+    };
+    if let Some(on_change) = on_change {
         match review::capture_over(&worktree, Some(&on_change.held), &branch).await {
             Ok(added) => capture = added,
             Err(review::ReviewError::Empty { .. }) => adds_nothing = true,
@@ -2488,6 +2495,23 @@ async fn forge_intent(
         held,
         ..Intent::default()
     })
+}
+
+/// Whether `HEAD` brings base commits the change's branch did not hold: its
+/// merge base with the base is not something `held` already descends from.
+/// Unknown counts as yes, so the capture falls back to the base's.
+async fn merges_base(
+    worktree: &str,
+    range_base: Option<&str>,
+    on_change: &review::OnChange,
+) -> bool {
+    let Some(range_base) = range_base else {
+        return false;
+    };
+    match review::merge_base(worktree, range_base, "HEAD").await {
+        Ok(fork) => !review::descends_from(worktree, &on_change.held, &fork).await,
+        Err(_) => true,
+    }
 }
 
 /// Refuse a capture over the configured size cap, recording why.

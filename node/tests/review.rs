@@ -5479,6 +5479,46 @@ async fn an_update_is_capped_by_what_it_adds_to_the_change() {
     assert_eq!(review.added, 1);
 }
 
+/// An update that merged the base in, as an agent does to resolve a
+/// conflict, is measured from the base: over what the branch held it would
+/// carry everything the base gained since, which is not this change's.
+#[tokio::test]
+async fn an_update_that_merged_its_base_is_capped_by_the_change_alone() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| c.review.max_diff_lines = 5).await;
+    let wt = std::path::Path::new(&f.worktree);
+    let change_head = sh_out(wt, "git rev-parse HEAD");
+    f.forge_holds(&change_head);
+    gh_forge(&f, pull_seven(&change_head));
+
+    // The base moves on by far more than the cap.
+    sh(
+        &f.dir.join("wt"),
+        "git checkout -q main && seq 1 50 > moved.txt && git add -A \
+         && git commit -qm moved && git push -q origin main",
+    );
+    sh(
+        wt,
+        &format!(
+            "git fetch -q {} main:refs/remotes/origin/main \
+             && git merge -q --no-edit origin/main \
+             && echo fix > fix.txt && git add -A && git commit -qm 'fix: small'",
+            f.dir.join("origin.git").display()
+        ),
+    );
+
+    let submitted = f.submit_update(json!({})).await;
+    let id = review_id(&submitted);
+    let review = f.store.get_review(&id).unwrap().unwrap();
+    assert!(review.diff.contains("+fix"), "{}", review.diff);
+    assert!(
+        !review.diff.contains("moved.txt"),
+        "what the base gained is not this review's: {}",
+        review.diff
+    );
+    assert_eq!(review.added, 2, "{}", review.diff);
+}
+
 /// The note a submission carries for the operator never leaves tracon:
 /// publication sends the forge the title, the body, the comment and the
 /// commit message, and nothing of the note.
