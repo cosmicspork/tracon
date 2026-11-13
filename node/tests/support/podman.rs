@@ -1,11 +1,14 @@
 //! Tests that build and run real containers.
 //!
-//! They run only when asked for, with `TRACON_PODMAN_TESTS=1`. A machine with
-//! Podman is often one running a node, and a test left to find Podman for
-//! itself shares that node's Podman machine while its sessions are working. Asked
-//! for, a test borrows nothing of the node's: it names its image, and every
-//! name it gives a runtime resource is its own. Each suite says at its top
-//! what it needs and how to run it.
+//! They are `#[ignore]`d, so a run that did not make them reports them as
+//! ignored rather than passed, and they run only when asked for, with
+//! `TRACON_PODMAN_TESTS=1` beside `--ignored`: `--ignored` alone also names
+//! every other test that needs something a machine may not have. A machine
+//! with Podman is often one running a node, and a test left to find Podman
+//! for itself shares that node's Podman machine while its sessions are
+//! working. Asked for, a test borrows nothing of the node's: it names its
+//! image, and every name it gives a runtime resource is its own. Each suite
+//! says at its top what it needs and how to run it.
 
 use std::process::Command;
 

@@ -12,7 +12,7 @@
 //! TRACON_PODMAN_TESTS=1 \
 //!   TRACON_SANDBOX_BASE=<the stock base image, in the local store> \
 //!   TRACON_SANDBOX_BUNDLE=<an unpacked bundle: bin/tracon-sandbox from this tree> \
-//!   cargo test -p tracon --test prepare_from_snapshot -- --nocapture
+//!   cargo test -p tracon --test prepare_from_snapshot -- --ignored --nocapture
 //! ```
 //!
 //! Everything it makes is removed again; the base image is only read.
@@ -187,6 +187,7 @@ async fn start(
 }
 
 #[tokio::test]
+#[ignore = "needs real Podman; run with TRACON_PODMAN_TESTS=1"]
 async fn a_session_at_its_snapshots_commit_skips_prepare_and_another_prepares_on_it() {
     if !requested() {
         return;

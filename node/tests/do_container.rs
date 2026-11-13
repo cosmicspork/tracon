@@ -11,7 +11,7 @@
 //! supervisor, as that user too.
 //!
 //! Opt-in: `TRACON_PODMAN_TESTS=1 TRACON_SANDBOX_BUNDLE=<dir holding
-//! bin/tracon-sandbox>`, optionally `TRACON_DO_TEST_BASE` (default
+//! bin/tracon-sandbox>` and `-- --ignored`, optionally `TRACON_DO_TEST_BASE` (default
 //! `docker.io/library/ubuntu:24.04`, which must be present locally). Every
 //! container and image it makes is named `spike-p8-…` and removed.
 
@@ -72,6 +72,7 @@ fn free_port() -> u16 {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs real Podman; run with TRACON_PODMAN_TESTS=1"]
 async fn the_template_image_runs_a_session_as_a_digitalocean_sandbox_would() {
     if std::env::var_os("TRACON_PODMAN_TESTS").is_none() {
         eprintln!("skipped: set TRACON_PODMAN_TESTS=1 and TRACON_SANDBOX_BUNDLE");

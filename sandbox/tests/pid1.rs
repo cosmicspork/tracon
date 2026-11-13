@@ -6,7 +6,8 @@
 //!
 //! ```sh
 //! TRACON_SANDBOX_CONTAINER_RUNTIME=podman \
-//!   cargo test --release --target x86_64-unknown-linux-musl -p tracon-sandbox --test pid1
+//!   cargo test --release --target x86_64-unknown-linux-musl -p tracon-sandbox --test pid1 \
+//!   -- --ignored
 //! ```
 //!
 //! `TRACON_SANDBOX_STATIC_BIN` names the binary when it is not this build's,
@@ -60,6 +61,7 @@ fn proc_state(stat: &str) -> Option<(i32, char, i32)> {
 }
 
 #[tokio::test]
+#[ignore = "needs Docker or Podman; run with TRACON_SANDBOX_CONTAINER_RUNTIME set"]
 async fn runs_as_pid_1_in_a_container() {
     let Ok(runtime) = std::env::var("TRACON_SANDBOX_CONTAINER_RUNTIME") else {
         eprintln!("skipped: set TRACON_SANDBOX_CONTAINER_RUNTIME to docker or podman");

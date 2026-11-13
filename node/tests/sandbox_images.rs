@@ -9,7 +9,7 @@
 //! TRACON_PODMAN_TESTS=1 \
 //!   TRACON_SANDBOX_RELEASE=<dir holding tracon-bundle-<version>-amd64.tar.gz and its .sha256> \
 //!   TRACON_SANDBOX_BASE=<the stock base image, in the local store> \
-//!   cargo test -p tracon --test sandbox_images -- --test-threads 1
+//!   cargo test -p tracon --test sandbox_images -- --ignored --test-threads 1
 //! ```
 //!
 //! The release's bundle must be this tree's version, with `tracon-sandbox`
@@ -222,6 +222,7 @@ async fn serve(dir: PathBuf) -> String {
 }
 
 #[tokio::test]
+#[ignore = "needs real Podman; run with TRACON_PODMAN_TESTS=1"]
 async fn the_node_fetches_its_bundle_and_runs_harnesses_from_it_in_the_base_image() {
     let Some(mut rig) = Rig::new("fetch") else {
         return;
@@ -469,6 +470,7 @@ async fn prepare(rig: &mut Rig, repo: &Path, round: &str) -> (String, String, st
 }
 
 #[tokio::test]
+#[ignore = "needs real Podman; run with TRACON_PODMAN_TESTS=1"]
 async fn a_repository_prepares_once_and_its_sessions_fork_from_the_snapshot() {
     let Some(mut rig) = Rig::new("snap") else {
         return;
@@ -669,6 +671,7 @@ async fn a_repository_prepares_once_and_its_sessions_fork_from_the_snapshot() {
 /// the sandbox's user owns whatever the image made of it (a local mount
 /// holding what the image had there), and `$HOME` is that home.
 #[tokio::test]
+#[ignore = "needs real Podman; run with TRACON_PODMAN_TESTS=1"]
 async fn a_session_on_the_stock_base_has_its_home_and_its_gitconfig() {
     let Some(mut rig) = Rig::new("home") else {
         return;

@@ -342,4 +342,4 @@ jobs:
       - name: tracon-sandbox as a container's PID 1
         env:
           TRACON_SANDBOX_CONTAINER_RUNTIME: docker
-        run: cargo test --release --target x86_64-unknown-linux-musl -p tracon-sandbox --test pid1 -- --nocapture
+        run: cargo test --release --target x86_64-unknown-linux-musl -p tracon-sandbox --test pid1 -- --ignored --nocapture

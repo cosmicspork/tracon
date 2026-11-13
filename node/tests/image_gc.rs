@@ -9,7 +9,7 @@
 //! scratch` or one of the test's own):
 //!
 //! ```sh
-//! TRACON_PODMAN_TESTS=1 cargo test -p tracon --test image_gc -- --test-threads 1
+//! TRACON_PODMAN_TESTS=1 cargo test -p tracon --test image_gc -- --ignored --test-threads 1
 //! ```
 //!
 //! Everything it makes is named `localhost/spike-b4-…` (the test's resource
@@ -148,6 +148,7 @@ fn claim_resource_prefix() {
 }
 
 #[tokio::test]
+#[ignore = "needs real Podman; run with TRACON_PODMAN_TESTS=1"]
 async fn a_sweep_removes_exactly_this_node_s_unused_images() {
     if !requested() {
         return;

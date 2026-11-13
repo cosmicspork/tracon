@@ -7,7 +7,7 @@
 //!
 //! ```sh
 //! TRACON_PODMAN_TESTS=1 TRACON_SANDBOX_BUNDLE=<bundle>/<version>/amd64 \
-//!   cargo test -p tracon --test podman_resume -- --test-threads 1
+//!   cargo test -p tracon --test podman_resume -- --ignored --test-threads 1
 //! ```
 //!
 //! The bundle needs `bin/tracon-sandbox` built from this tree. The image is
@@ -148,6 +148,7 @@ fn ticks_from(first: u32) -> String {
 }
 
 #[tokio::test]
+#[ignore = "needs real Podman; run with TRACON_PODMAN_TESTS=1"]
 async fn a_long_command_carries_on_through_a_dropped_connection() {
     let Some(rig) = Rig::new("resume") else {
         return;
@@ -186,6 +187,7 @@ async fn a_long_command_carries_on_through_a_dropped_connection() {
 /// run again by its secret's digest, sets the carrier up again and finds
 /// the command by its id, reading on from where the first had got to.
 #[tokio::test]
+#[ignore = "needs real Podman; run with TRACON_PODMAN_TESTS=1"]
 async fn a_long_command_carries_on_when_the_node_side_is_made_again() {
     let Some(rig) = Rig::new("restart") else {
         return;
