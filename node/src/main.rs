@@ -1484,6 +1484,9 @@ async fn repo_command(command: RepoCommand) -> Result<()> {
                 for build in item["builds"].as_array().into_iter().flatten() {
                     println!("  {}", build_line(build));
                 }
+                for note in item["unbuilt"].as_array().into_iter().flatten() {
+                    println!("  {}", unbuilt_line(note));
+                }
             }
             Ok(())
         }
@@ -1505,6 +1508,9 @@ async fn repo_command(command: RepoCommand) -> Result<()> {
                         command.as_str().unwrap_or("")
                     );
                 }
+            }
+            for note in item["unbuilt"].as_array().into_iter().flatten() {
+                println!("\n{}", unbuilt_line(note));
             }
             Ok(())
         }
@@ -1625,20 +1631,37 @@ async fn repo_command(command: RepoCommand) -> Result<()> {
                 started["source_ref"].as_str().unwrap_or(""),
                 started["source_commit"].as_str().unwrap_or("")
             );
+            let mut idle = std::time::Duration::ZERO;
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                tokio::time::sleep(BUILD_POLL).await;
                 let v = list().await?;
-                let build = v["entries"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .flat_map(|item| item["builds"].as_array().into_iter().flatten())
-                    .find(|build| {
-                        build["repo_path"].as_str() == Some(repo.as_str())
-                            && build["started_ms"].as_i64().unwrap_or(0) >= since
-                    })
-                    .cloned();
-                let Some(build) = build else { continue };
+                let build = match awaited_build(&v, &repo, since) {
+                    AwaitedBuild::Row(build) => build,
+                    AwaitedBuild::Waiting => {
+                        idle = std::time::Duration::ZERO;
+                        continue;
+                    }
+                    AwaitedBuild::Unbuilt(note) => {
+                        if let Some(image) = note["using"].as_str() {
+                            eprintln!("runs keep using {image}");
+                        }
+                        anyhow::bail!(
+                            "nothing was built: {}",
+                            note["reason"].as_str().unwrap_or("the node gave no reason")
+                        );
+                    }
+                    AwaitedBuild::Nothing => {
+                        idle += BUILD_POLL;
+                        if idle >= BUILD_START_WITHIN {
+                            anyhow::bail!(
+                                "the node recorded no build of {repo} within {}s and is not \
+                                 working on one; see the node's log",
+                                BUILD_START_WITHIN.as_secs()
+                            );
+                        }
+                        continue;
+                    }
+                };
                 match build["status"].as_str() {
                     Some("building") => continue,
                     Some("ready") => {
@@ -1658,6 +1681,60 @@ async fn repo_command(command: RepoCommand) -> Result<()> {
                 }
             }
         }
+    }
+}
+
+/// How often `tracon repo build` reads the build back.
+const BUILD_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long `tracon repo build` waits for a build the node is neither
+/// recording nor working on before it gives up.
+const BUILD_START_WITHIN: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// What `/api/repos/environments` says of a build asked for at `since`.
+#[derive(Debug, PartialEq)]
+enum AwaitedBuild {
+    /// Its row, building or settled.
+    Row(serde_json::Value),
+    /// No row yet, and nothing built: why, as the node noted it.
+    Unbuilt(serde_json::Value),
+    /// No row yet, but the node is working on the repository: waiting for
+    /// the build lock behind another build, say.
+    Waiting,
+    /// No row, no reason, and nothing under way.
+    Nothing,
+}
+
+fn awaited_build(v: &serde_json::Value, repo: &str, since: i64) -> AwaitedBuild {
+    let items: Vec<&serde_json::Value> = v["entries"].as_array().into_iter().flatten().collect();
+    let ours = |item: &serde_json::Value| item["repo_path"].as_str() == Some(repo);
+    let at_or_after =
+        |item: &serde_json::Value, key: &str| item[key].as_i64().unwrap_or(0) >= since;
+    if let Some(build) = items
+        .iter()
+        .flat_map(|item| item["builds"].as_array().into_iter().flatten())
+        .find(|build| ours(build) && at_or_after(build, "started_ms"))
+    {
+        return AwaitedBuild::Row(build.clone());
+    }
+    // Waiting is asked before the note: a note is the repository's, not this
+    // request's, and another attempt that settled while this one waits for
+    // the build lock writes one too. This one's own outcome shows once it
+    // stops ensuring, which it does as soon as it has settled.
+    let working = items
+        .iter()
+        .flat_map(|item| item["ensuring"].as_array().into_iter().flatten())
+        .any(|path| path.as_str() == Some(repo));
+    if working {
+        return AwaitedBuild::Waiting;
+    }
+    match items
+        .iter()
+        .flat_map(|item| item["unbuilt"].as_array().into_iter().flatten())
+        .find(|note| ours(note) && at_or_after(note, "at_ms"))
+    {
+        Some(note) => AwaitedBuild::Unbuilt(note.clone()),
+        None => AwaitedBuild::Nothing,
     }
 }
 
@@ -1785,6 +1862,23 @@ fn build_line(build: &serde_json::Value) -> String {
         text("status"),
         text("kind"),
         text("repo_path"),
+    )
+}
+
+/// A repository whose last attempt built nothing, as `repo ls` lists it
+/// beside its builds.
+fn unbuilt_line(note: &serde_json::Value) -> String {
+    let text = |key: &str| note[key].as_str().unwrap_or("");
+    let using = match note["using"].as_str() {
+        Some(image) => format!(" (runs use {image})"),
+        None => String::new(),
+    };
+    format!(
+        "{:<8} {:<14} {}  {}{using}",
+        "unbuilt",
+        "base",
+        text("repo_path"),
+        text("reason"),
     )
 }
 
@@ -3432,6 +3526,75 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::resolve_prefix;
+    use super::{awaited_build, AwaitedBuild};
+    use serde_json::json;
+
+    /// `tracon repo build` follows its build's row, stops with the node's
+    /// reason when nothing was built, waits while the node is still working
+    /// on the repository, and otherwise has nothing to wait for.
+    #[test]
+    fn a_build_that_never_started_is_reported_not_awaited() {
+        let list = |item: serde_json::Value| json!({ "entries": [item] });
+        let repo = "/src/app";
+
+        let row = json!({ "repo_path": repo, "status": "building", "started_ms": 100 });
+        assert_eq!(
+            awaited_build(&list(json!({ "builds": [row.clone()] })), repo, 100),
+            AwaitedBuild::Row(row)
+        );
+
+        let note = json!({ "repo_path": repo, "reason": "the token service answered 403", "using": null, "at_ms": 101 });
+        // An earlier build's row is not this one's; the note is.
+        let earlier = json!({ "repo_path": repo, "status": "ready", "started_ms": 50 });
+        assert_eq!(
+            awaited_build(
+                &list(json!({ "builds": [earlier.clone()], "unbuilt": [note.clone()] })),
+                repo,
+                100
+            ),
+            AwaitedBuild::Unbuilt(note.clone())
+        );
+        // A note from before the request, or for another repository, is not.
+        assert_eq!(
+            awaited_build(
+                &list(json!({ "builds": [earlier.clone()], "unbuilt": [note.clone()] })),
+                repo,
+                200
+            ),
+            AwaitedBuild::Nothing
+        );
+        assert_eq!(
+            awaited_build(
+                &list(json!({ "unbuilt": [note], "ensuring": ["/src/other"] })),
+                "/src/other",
+                100
+            ),
+            AwaitedBuild::Waiting
+        );
+        assert_eq!(
+            awaited_build(
+                &list(json!({ "builds": [earlier], "ensuring": [repo] })),
+                repo,
+                100
+            ),
+            AwaitedBuild::Waiting
+        );
+        // A note written since the request by another attempt doesn't end
+        // the wait while this one is still working on the repository.
+        let other = json!({ "repo_path": repo, "reason": "the registry could not be asked", "using": "ghcr.io/o/app:1", "at_ms": 150 });
+        assert_eq!(
+            awaited_build(
+                &list(json!({ "unbuilt": [other], "ensuring": [repo] })),
+                repo,
+                100
+            ),
+            AwaitedBuild::Waiting
+        );
+        assert_eq!(
+            awaited_build(&json!({ "entries": [] }), repo, 100),
+            AwaitedBuild::Nothing
+        );
+    }
 
     /// A serving node's answer prints as a check run here does, and its
     /// first failed check is what the command exits on.
