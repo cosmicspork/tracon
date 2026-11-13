@@ -40,5 +40,9 @@ libc = "0.2"
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = "5"
 
+# As the node's workspace does, and for its reason: see the root Cargo.toml.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 strip = true

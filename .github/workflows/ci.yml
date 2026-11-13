@@ -17,12 +17,6 @@ concurrency:
   group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-env:
-  # Full debuginfo for the workspace crates is a third of the test build, and
-  # nothing here opens a debugger. Line tables keep file and line in a
-  # backtrace, which is the part a failed run is read for.
-  CARGO_PROFILE_DEV_DEBUG: line-tables-only
-
 jobs:
   # A PR title without a conventional-commit type squash-merges as a subject
   # release-please does not count, and the release silently does not happen
