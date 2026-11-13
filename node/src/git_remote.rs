@@ -178,6 +178,13 @@ mod tests {
             .collect()
     }
 
+    /// The fixtures' own `git`, which inherits this process's environment
+    /// rather than the one `base` builds.
+    #[test]
+    fn a_tests_own_git_reads_no_operator_or_machine_config() {
+        assert_eq!(crate::test_git_env::ambient_scopes(), Vec::<String>::new());
+    }
+
     #[test]
     fn anonymous_still_discards_every_helper_a_config_file_could_name() {
         let env = env_of(&git("git", "publish-home", &Credential::Anonymous).unwrap());

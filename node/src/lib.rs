@@ -53,5 +53,7 @@ pub mod sidecars;
 pub mod store;
 pub mod stream;
 pub mod telemetry;
+#[cfg(test)]
+mod test_git_env;
 pub mod transfers;
 pub mod workspace;

@@ -17,6 +17,11 @@ pub mod rows;
 pub mod soft_passkey;
 pub mod state;
 
+/// What keeps the operator's Git configuration out of every test binary. The
+/// library's unit tests compile the same file.
+#[path = "../../src/test_git_env.rs"]
+pub mod git_env;
+
 /// The node's side for a loopback sandbox, with a short resume window: a
 /// loopback sandbox is a thread, which a cut connection cannot kill, so it
 /// ends only once its redials run out; with the node's default that is four
