@@ -1717,20 +1717,24 @@ fn awaited_build(v: &serde_json::Value, repo: &str, since: i64) -> AwaitedBuild 
     {
         return AwaitedBuild::Row(build.clone());
     }
-    if let Some(note) = items
-        .iter()
-        .flat_map(|item| item["unbuilt"].as_array().into_iter().flatten())
-        .find(|note| ours(note) && at_or_after(note, "at_ms"))
-    {
-        return AwaitedBuild::Unbuilt(note.clone());
-    }
+    // Waiting is asked before the note: a note is the repository's, not this
+    // request's, and another attempt that settled while this one waits for
+    // the build lock writes one too. This one's own outcome shows once it
+    // stops ensuring, which it does as soon as it has settled.
     let working = items
         .iter()
         .flat_map(|item| item["ensuring"].as_array().into_iter().flatten())
         .any(|path| path.as_str() == Some(repo));
-    match working {
-        true => AwaitedBuild::Waiting,
-        false => AwaitedBuild::Nothing,
+    if working {
+        return AwaitedBuild::Waiting;
+    }
+    match items
+        .iter()
+        .flat_map(|item| item["unbuilt"].as_array().into_iter().flatten())
+        .find(|note| ours(note) && at_or_after(note, "at_ms"))
+    {
+        Some(note) => AwaitedBuild::Unbuilt(note.clone()),
+        None => AwaitedBuild::Nothing,
     }
 }
 
@@ -3570,6 +3574,17 @@ mod tests {
         assert_eq!(
             awaited_build(
                 &list(json!({ "builds": [earlier], "ensuring": [repo] })),
+                repo,
+                100
+            ),
+            AwaitedBuild::Waiting
+        );
+        // A note written since the request by another attempt doesn't end
+        // the wait while this one is still working on the repository.
+        let other = json!({ "repo_path": repo, "reason": "the registry could not be asked", "using": "ghcr.io/o/app:1", "at_ms": 150 });
+        assert_eq!(
+            awaited_build(
+                &list(json!({ "unbuilt": [other], "ensuring": [repo] })),
                 repo,
                 100
             ),
