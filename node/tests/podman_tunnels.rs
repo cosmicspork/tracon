@@ -9,7 +9,7 @@
 //! ```sh
 //! TRACON_PODMAN_TESTS=1 TRACON_SANDBOX_BUNDLE=<bundle>/<version>/amd64 \
 //!   TRACON_SANDBOX_TEST_IMAGE=<an image with curl> \
-//!   cargo test -p tracon --test podman_tunnels -- --test-threads 1
+//!   cargo test -p tracon --test podman_tunnels -- --ignored --test-threads 1
 //! ```
 //!
 //! The bundle needs `bin/tracon-sandbox` and `bin/claude`. The image needs
@@ -378,6 +378,7 @@ impl Runner for FromBundle {
 /// From inside: loopback is the only interface and nothing resolves, yet
 /// the node answers through the gateway tunnel.
 #[tokio::test]
+#[ignore = "needs real Podman; run with TRACON_PODMAN_TESTS=1"]
 async fn a_sandbox_has_no_network_but_loopback_and_reaches_the_node_through_its_tunnel() {
     let Some(rig) = Rig::new("route").await else {
         return;
@@ -409,6 +410,7 @@ async fn a_sandbox_has_no_network_but_loopback_and_reaches_the_node_through_its_
 /// tunnel, where the node swaps the placeholder for the credential, and it
 /// connects to the MCP gateway and calls a tool there.
 #[tokio::test]
+#[ignore = "needs real Podman; run with TRACON_PODMAN_TESTS=1"]
 async fn a_claude_code_session_uses_the_model_and_mcp_gateways_through_tunnels() {
     use tracon::adapter::{claude::ClaudeAdapter, HarnessAdapter, HarnessEvent, LaunchSpec};
 
@@ -570,6 +572,7 @@ async fn a_claude_code_session_uses_the_model_and_mcp_gateways_through_tunnels()
 /// declared upstream is sent its credential by the node. The allowlist
 /// proxy refuses what is not on the list.
 #[tokio::test]
+#[ignore = "needs real Podman; run with TRACON_PODMAN_TESTS=1"]
 async fn egress_grants_and_upstreams_hold_through_the_egress_tunnel() {
     let Some(rig) = Rig::new("egress").await else {
         return;
@@ -629,6 +632,7 @@ async fn egress_grants_and_upstreams_hold_through_the_egress_tunnel() {
 /// the deep check proves it from inside over the protocol, and the
 /// capabilities say so.
 #[tokio::test]
+#[ignore = "needs real Podman; run with TRACON_PODMAN_TESTS=1"]
 async fn the_checks_verify_the_single_route() {
     let Some(mut rig) = Rig::new("checks").await else {
         return;

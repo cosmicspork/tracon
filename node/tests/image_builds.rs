@@ -9,7 +9,7 @@
 //! ```sh
 //! TRACON_PODMAN_TESTS=1 \
 //!   TRACON_SANDBOX_BASE=<the stock base image, in the local store> \
-//!   cargo test -p tracon --test image_builds
+//!   cargo test -p tracon --test image_builds -- --ignored
 //! ```
 //!
 //! Everything the test makes is named with `TRACON_IMAGE_TEST_PREFIX`
@@ -93,6 +93,7 @@ fn run(_cfg: &Config, image: &str, name: &str) -> (bool, String, Duration) {
 }
 
 #[tokio::test]
+#[ignore = "needs real Podman; run with TRACON_PODMAN_TESTS=1"]
 async fn runs_asked_for_together_build_once_and_a_removed_image_is_never_pulled() {
     if !requested() {
         return;

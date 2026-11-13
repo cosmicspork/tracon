@@ -5,7 +5,7 @@
 //! Runs only when asked for, and pulls from ghcr.io:
 //!
 //! ```sh
-//! TRACON_PODMAN_TESTS=1 cargo test -p tracon --test base_platform
+//! TRACON_PODMAN_TESTS=1 cargo test -p tracon --test base_platform -- --ignored
 //! ```
 //!
 //! Podman is pointed at a store of the test's own (`CONTAINERS_STORAGE_CONF`),
@@ -70,6 +70,7 @@ impl Drop for Store {
 }
 
 #[tokio::test]
+#[ignore = "needs real Podman; run with TRACON_PODMAN_TESTS=1"]
 async fn releases_with_the_same_base_pin_the_same_manifest_and_pull_only_this_arch() {
     if !requested() {
         return;

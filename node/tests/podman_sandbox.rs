@@ -8,7 +8,7 @@
 //!
 //! ```sh
 //! TRACON_PODMAN_TESTS=1 TRACON_SANDBOX_BUNDLE=<bundle>/<version>/amd64 \
-//!   cargo test -p tracon --test podman_sandbox -- --test-threads 1
+//!   cargo test -p tracon --test podman_sandbox -- --ignored --test-threads 1
 //! ```
 //!
 //! The bundle needs `bin/tracon-sandbox` built from this tree
@@ -127,6 +127,7 @@ fn text(bytes: &[u8]) -> String {
 }
 
 #[tokio::test]
+#[ignore = "needs real Podman; run with TRACON_PODMAN_TESTS=1"]
 async fn a_command_runs_confined_with_the_bundle_read_only_and_the_supervisor_as_pid_1() {
     let Some(mut rig) = Rig::new("cmd") else {
         return;
@@ -176,6 +177,7 @@ async fn a_command_runs_confined_with_the_bundle_read_only_and_the_supervisor_as
 }
 
 #[tokio::test]
+#[ignore = "needs real Podman; run with TRACON_PODMAN_TESTS=1"]
 async fn under_init_the_supervisor_is_a_child_and_still_runs_the_command() {
     let Some(mut rig) = Rig::new("init") else {
         return;
@@ -204,6 +206,7 @@ async fn under_init_the_supervisor_is_a_child_and_still_runs_the_command() {
 }
 
 #[tokio::test]
+#[ignore = "needs real Podman; run with TRACON_PODMAN_TESTS=1"]
 async fn a_harness_streams_stdio_with_backpressure_and_ends_when_killed() {
     let Some(rig) = Rig::new("stdio") else {
         return;

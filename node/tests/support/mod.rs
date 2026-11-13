@@ -4,6 +4,7 @@
 
 #![allow(dead_code)]
 
+pub mod browser;
 pub mod do_api;
 pub mod events;
 pub mod fake;

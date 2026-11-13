@@ -10,7 +10,7 @@
 //!   TRACON_BROWSER_BUNDLE=<browser>/<version>/amd64 \
 //!   TRACON_BROWSER_RELEASE=<dir holding tracon-browser-<chrome>-amd64.tar.gz and its .sha256> \
 //!   TRACON_SANDBOX_TEST_IMAGE=ghcr.io/cosmicspork/tracon-sandbox-base:<version> \
-//!   cargo test -p tracon --test podman_services -- --test-threads 1
+//!   cargo test -p tracon --test podman_services -- --ignored --test-threads 1
 //! ```
 //!
 //! The harness bundle needs `bin/tracon-sandbox` built from this tree; the
@@ -259,6 +259,7 @@ async fn mcp_tool(h: &support::harness::Harness, token: &str, name: &str, args: 
 /// Chrome, the session drives it over CDP on its loopback, and `show_work`
 /// carries the screenshot out of the workspace the node exports.
 #[tokio::test]
+#[ignore = "needs real Podman; run with TRACON_PODMAN_TESTS=1"]
 async fn the_browser_runs_in_the_session_sandbox_and_show_work_carries_its_screenshot() {
     let Some(mut rig) = Rig::new("browser") else {
         return;
@@ -424,6 +425,7 @@ async fn serve_release(dir: PathBuf) -> (String, Arc<std::sync::Mutex<Vec<String
 /// it under its state directory, and a session's sandbox runs Chrome from
 /// it, answering CDP on its loopback.
 #[tokio::test]
+#[ignore = "needs real Podman; run with TRACON_PODMAN_TESTS=1"]
 async fn the_release_browser_is_fetched_and_runs_in_the_session_sandbox() {
     let Some(mut rig) = Rig::new("release") else {
         return;
@@ -579,6 +581,7 @@ fn flaky_bundle(fail_first: u32) -> tempfile::TempDir {
 }
 
 #[tokio::test]
+#[ignore = "needs real Podman; run with TRACON_PODMAN_TESTS=1"]
 async fn a_crashing_service_restarts_by_its_policy_and_goes_with_its_sandbox() {
     let Some(mut rig) = Rig::new("restart") else {
         return;

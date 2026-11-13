@@ -13,11 +13,19 @@
 //! The phone's authenticator is Chromium's virtual one, driven over CDP by
 //! `spa/tests/device-driver.mjs`; the "desktop" is a page with WebAuthn
 //! removed, as the desktop app's webview is against a remote node. The
-//! verifier is the node's. Skipped, saying why, where there is no built SPA,
-//! no `bun`, or no Chromium.
+//! verifier is the node's.
+//!
+//! Run only when asked for, against an interface built from this tree
+//! (`support/browser.rs`):
+//!
+//! ```sh
+//! just spa
+//! TRACON_BROWSER_TESTS=1 cargo test -p tracon --test device_pwa -- --ignored
+//! ```
 
 #[path = "support/mod.rs"]
 mod support;
+use support::browser;
 use support::fake::FakeAdapter;
 use support::state;
 
@@ -25,7 +33,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{extract::Request, http::HeaderValue, middleware::Next, response::Response};
-use serde_json::Value;
 
 use tracon::{
     broker::Broker,
@@ -49,34 +56,13 @@ async fn through_a_proxy(mut req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
-fn which(binary: &str) -> Option<std::path::PathBuf> {
-    std::env::split_paths(&std::env::var_os("PATH")?)
-        .map(|dir| dir.join(binary))
-        .find(|c| c.is_file())
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a browser and the built interface; run with TRACON_BROWSER_TESTS=1"]
 async fn a_window_without_passkeys_signs_in_and_confirms_an_admin_action_through_a_phone() {
-    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    let spa = repo.join("spa");
-    if !spa.join("node_modules/playwright-core").is_dir() {
-        eprintln!(
-            "skipped: the SPA's dev dependencies are not installed; run `bun install` in spa/"
-        );
+    if !browser::requested() {
         return;
     }
-    let index = std::fs::read_to_string(spa.join("dist/index.html")).unwrap_or_default();
-    if !index.contains("/assets/") {
-        eprintln!("skipped: spa/dist is the placeholder page; run `just spa`");
-        return;
-    }
-    let Some(bun) = which("bun") else {
-        eprintln!("skipped: bun is not on PATH");
-        return;
-    };
+    let (bun, spa) = browser::bun_and_spa();
 
     state::isolate();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -145,16 +131,7 @@ async fn a_window_without_passkeys_signs_in_and_confirms_an_admin_action_through
         .await
         .expect("the driver runs");
     server.abort();
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    if let Some(why) = stdout.lines().find_map(|l| l.strip_prefix("SKIP ")) {
-        eprintln!("skipped: {why}");
-        return;
-    }
-    let Some(line) = stdout.lines().find_map(|l| l.strip_prefix("RESULT ")) else {
-        panic!("the driver printed no result\nstdout:\n{stdout}\nstderr:\n{stderr}");
-    };
-    let saw: Value = serde_json::from_str(line).unwrap();
+    let saw = browser::result(&out);
     let ctx = serde_json::to_string_pretty(&saw).unwrap();
 
     assert!(

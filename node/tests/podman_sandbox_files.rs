@@ -12,7 +12,7 @@
 //! TRACON_PODMAN_TESTS=1 TRACON_SANDBOX_BUNDLE=<bundle>/<version>/amd64 \
 //!   [TRACON_SANDBOX_TEST_IMAGE=<default: this version's tracon-sandbox-base>] \
 //!   [TRACON_FILES_BENCH_REPO=/path/to/a/repo] \
-//!   cargo test -p tracon --test podman_sandbox_files -- --test-threads 1 --nocapture
+//!   cargo test -p tracon --test podman_sandbox_files -- --ignored --test-threads 1 --nocapture
 //! ```
 //!
 //! The bundle needs `bin/tracon-sandbox`, `bin/tracon-agent` and `bin/claude`
@@ -194,6 +194,7 @@ fn workspace(id: &str, volume: &str) -> tracon::workspace::Workspace {
 
 /// The files path end to end on Podman, timed.
 #[tokio::test]
+#[ignore = "needs real Podman; run with TRACON_PODMAN_TESTS=1"]
 async fn a_workspace_lives_on_the_sandboxs_own_disk() {
     let Some(rig) = Rig::new("disk") else {
         return;
@@ -374,6 +375,7 @@ async fn a_workspace_lives_on_the_sandboxs_own_disk() {
 /// A harness writes into its workspace and its own state, the sandbox goes,
 /// and both are there for the next one.
 #[tokio::test]
+#[ignore = "needs real Podman; run with TRACON_PODMAN_TESTS=1"]
 async fn what_a_session_changed_is_there_for_the_next_sandbox() {
     let Some(rig) = Rig::new("next") else {
         return;
@@ -443,6 +445,7 @@ async fn what_a_session_changed_is_there_for_the_next_sandbox() {
 /// Needs an image with Python's venv module (`ghcr.io/cosmicspork/
 /// tracon-sandbox-base` has it, without `ensurepip`) or uv.
 #[tokio::test]
+#[ignore = "needs real Podman; run with TRACON_PODMAN_TESTS=1"]
 async fn a_prepared_virtualenv_is_there_for_the_next_sandbox() {
     let Some(rig) = Rig::new("venv") else {
         return;
@@ -574,6 +577,7 @@ fn openai_answer(text: &str) -> String {
 /// exit; a new sandbox loads it with `session/load`, and the model sees the
 /// first conversation again.
 #[tokio::test]
+#[ignore = "needs real Podman; run with TRACON_PODMAN_TESTS=1"]
 async fn a_tracon_agent_session_resumes_after_its_sandbox_ended() {
     use serde_json::json;
     use tracon::adapter::{native::NativeAdapter, HarnessAdapter, LaunchSpec, Resume};
@@ -746,6 +750,7 @@ fn anthropic_answer(text: &str) -> String {
 /// session's own and comes back at the turn's end; after the sandbox has
 /// gone, the conversation is found and `--resume` carries it on.
 #[tokio::test]
+#[ignore = "needs real Podman; run with TRACON_PODMAN_TESTS=1"]
 async fn a_claude_code_session_resumes_after_its_sandbox_ended() {
     use tracon::adapter::{claude::ClaudeAdapter, HarnessAdapter, LaunchSpec, Resume};
 

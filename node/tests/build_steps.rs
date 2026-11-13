@@ -10,7 +10,7 @@
 //! TRACON_PODMAN_TESTS=1 \
 //!   TRACON_SANDBOX_BASE=<the stock base image, in the local store> \
 //!   TRACON_SANDBOX_BUNDLE=<a harness bundle's <version>/<arch> directory> \
-//!   cargo test -p tracon --test build_steps -- --test-threads 1
+//!   cargo test -p tracon --test build_steps -- --ignored --test-threads 1
 //! ```
 //!
 //! Everything it makes is named from `TRACON_BUILD_STEPS_TEST_PREFIX`
@@ -99,6 +99,7 @@ impl Drop for Cleanup {
 }
 
 #[tokio::test]
+#[ignore = "needs real Podman; run with TRACON_PODMAN_TESTS=1"]
 async fn a_repository_built_from_steps_prepares_snapshots_and_starts() {
     if !requested() {
         return;
