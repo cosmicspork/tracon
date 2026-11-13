@@ -181,6 +181,14 @@ fn assert_only_the_brokered_credential(offered: &Offered, marker: &Path, what: &
     }
 }
 
+/// The fixtures' own `git` is a child of this process, not of the node's
+/// isolation, and still reads nothing the operator or the machine configured:
+/// the suite must not sign with a real key or pass on one machine only.
+#[test]
+fn a_tests_own_git_reads_no_operator_or_machine_config() {
+    assert_eq!(support::git_env::ambient_scopes(), Vec::<String>::new());
+}
+
 /// `clone`, against a host that demands a credential. The URL is `http` only
 /// because a test cannot hold a trusted certificate; `forge::clone` pins
 /// `https` and builds its command through the same builder, which is what
