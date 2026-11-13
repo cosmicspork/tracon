@@ -85,7 +85,7 @@ pub fn definitions() -> Vec<Value> {
                              Defaults to {MAX_WAIT_SECS}. The checks run on either way."
                         ),
                     },
-                    "change": { "type": "integer", "description": "The open pull request number or merge request iid this branch already has (pr_for_branch or mr_for_branch finds it), to push to instead of opening a new one. Fixed by a review's first submit; a review that opened its change needs no `change`." },
+                    "change": { "type": "integer", "description": "The open pull request number or merge request iid this branch already has (pr_for_branch or mr_for_branch finds it), to push to instead of opening a new one. Fixed by a review's first submit; a review that opened its change needs no `change`. The review shows, and the size cap measures, only what this push adds to what the change's branch holds." },
                     "forge": {
                         "type": "object",
                         "description": "What the forge shows besides the commits. Omit for a new change to describe it with title and body; omit for an existing change to push only.",
@@ -475,7 +475,7 @@ async fn submit(
     let range_base = review::range_base(&worktree, &base)
         .await
         .map_err(|e| e.to_string())?;
-    let capture = review::capture_over(&worktree, range_base.as_deref(), &branch)
+    let mut capture = review::capture_over(&worktree, range_base.as_deref(), &branch)
         .await
         .map_err(|e| e.to_string())?;
     let asked_change = match args.get("change") {
@@ -487,25 +487,17 @@ async fn submit(
                 .ok_or("change is the pull request number or merge request iid")?,
         ),
     };
-    let files = serde_json::to_string(&capture.files).unwrap_or_else(|_| "[]".into());
-
     // The cap, before anything else: complexity accretes because nothing says
-    // no at submission time. A resubmission is capped the same way.
-    let limits = manager.cfg().live().review.clone();
-    if let Some(reason) = limits.refusal(capture.added, capture.removed, capture.files.len()) {
-        manager.record_for(
-            ctx,
-            ek::REVIEW_REJECTED,
-            None,
-            json!({
-                "reason": reason,
-                "lines": capture.added + capture.removed,
-                "added": capture.added,
-                "removed": capture.removed,
-                "files": capture.files.len(),
-            }),
-        );
-        return Err(review::ReviewError::Rejected(reason).to_string());
+    // no at submission time. A resubmission is capped the same way. One that
+    // updates a change already on the forge is capped once the forge has said
+    // what that change's branch holds, since only what it adds is this
+    // submission's.
+    let updates_change = asked_change.is_some()
+        || stored
+            .as_ref()
+            .is_some_and(|target| target.change.is_some());
+    if !updates_change {
+        within_cap(manager, ctx, &capture)?;
     }
     // The repository an external review answers to, for its reviewer and the
     // checks the node runs on its candidate.
@@ -670,6 +662,30 @@ async fn submit(
     )
     .await?;
     intent.commits = commits;
+    // On a change already on the forge, what its branch holds is published:
+    // the review shows, and the cap measures, only what this push adds to it.
+    // A rewrite replaces that history, so it is still measured from the base.
+    // A push that adds nothing (it only describes or comments) has nothing to
+    // cap, and its review still shows the change it describes. A push that
+    // merged the base in (to resolve a conflict, say) is measured from the
+    // base too: over what the branch held it would carry everything the base
+    // gained since, which is not this change's.
+    let mut adds_nothing = false;
+    let on_change = match review::OnChange::of(&target, &intent).filter(|c| !c.rewrite) {
+        Some(on_change) if merges_base(&worktree, range_base.as_deref(), &on_change).await => None,
+        on_change => on_change,
+    };
+    if let Some(on_change) = on_change {
+        match review::capture_over(&worktree, Some(&on_change.held), &branch).await {
+            Ok(added) => capture = added,
+            Err(review::ReviewError::Empty { .. }) => adds_nothing = true,
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    if updates_change && !adds_nothing {
+        within_cap(manager, ctx, &capture)?;
+    }
+    let files = serde_json::to_string(&capture.files).unwrap_or_else(|_| "[]".into());
     // Who the commits are by, against the account the review publishes as.
     // Named, never rewritten: re-authoring is the agent's or operator's step.
     // On an existing change, only what this submission adds over what the
@@ -2479,6 +2495,48 @@ async fn forge_intent(
         held,
         ..Intent::default()
     })
+}
+
+/// Whether `HEAD` brings base commits the change's branch did not hold: its
+/// merge base with the base is not something `held` already descends from.
+/// Unknown counts as yes, so the capture falls back to the base's.
+async fn merges_base(
+    worktree: &str,
+    range_base: Option<&str>,
+    on_change: &review::OnChange,
+) -> bool {
+    let Some(range_base) = range_base else {
+        return false;
+    };
+    match review::merge_base(worktree, range_base, "HEAD").await {
+        Ok(fork) => !review::descends_from(worktree, &on_change.held, &fork).await,
+        Err(_) => true,
+    }
+}
+
+/// Refuse a capture over the configured size cap, recording why.
+fn within_cap(
+    manager: &Manager,
+    ctx: &CallContext,
+    capture: &review::Capture,
+) -> Result<(), String> {
+    let limits = manager.cfg().live().review.clone();
+    let Some(reason) = limits.refusal(capture.added, capture.removed, capture.files.len()) else {
+        return Ok(());
+    };
+    manager.record_for(
+        ctx,
+        ek::REVIEW_REJECTED,
+        None,
+        json!({
+            "reason": reason,
+            "lines": capture.added + capture.removed,
+            "added": capture.added,
+            "removed": capture.removed,
+            "files": capture.files.len(),
+        }),
+    );
+    Err(review::ReviewError::Rejected(reason).to_string())
 }
 
 /// Submit a standalone report without touching a worktree, Git, a provider, or
