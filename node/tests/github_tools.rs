@@ -652,6 +652,56 @@ async fn pr_ready_refuses_a_ready_that_is_not_a_boolean_before_asking() {
     assert!(seen.lock().unwrap().is_empty(), "nothing reached GitHub");
 }
 
+/// A held call missing an argument its definition requires could never run,
+/// so it is refused at once and the operator never sees a card for it
+/// (#874). A session on a GitHub repository still need not name it: the
+/// default is written in before the check.
+#[tokio::test]
+async fn pr_ready_missing_a_required_argument_is_refused_before_asking() {
+    state::isolate();
+    let (t, seen) = session_rig(r#""run_status""#).await;
+    let access = t.session.get().unwrap();
+    let cards = || access.store.open_approval_cards("").unwrap().len();
+
+    let external = CallContext::external(None, "work", "n1");
+    let (err, v) = call(
+        &t,
+        &external,
+        "pr_ready",
+        json!({ "change": 859, "project": "cosmicspork/tracon" }),
+    )
+    .await;
+    assert!(err, "{v}");
+    let said = v.as_str().unwrap_or_default();
+    assert!(said.contains("pr_ready requires repo, number"), "{v}");
+    assert!(said.contains("does not take change, project"), "{v}");
+    assert!(!said.contains("awaiting_operator"), "{v}");
+    assert_eq!(cards(), 0, "no approval row was inserted");
+
+    // A null is a value left out.
+    let (err, v) = call(
+        &t,
+        &external,
+        "pr_ready",
+        json!({ "repo": null, "number": 8 }),
+    )
+    .await;
+    assert!(err, "{v}");
+    assert!(
+        v.as_str().unwrap_or_default().contains("requires repo"),
+        "{v}"
+    );
+    assert_eq!(cards(), 0);
+
+    // The session's own repository satisfies `repo`: that call is asked.
+    let session = CallContext::session("s2", "work", "n1");
+    let (err, v) = call(&t, &session, "pr_ready", json!({ "number": 8 })).await;
+    assert!(!err, "{v}");
+    assert_eq!(v["state"], "awaiting_operator", "{v}");
+    assert_eq!(cards(), 1);
+    assert!(seen.lock().unwrap().is_empty(), "nothing reached GitHub");
+}
+
 #[tokio::test]
 async fn pr_ready_is_an_error_when_github_still_reads_a_draft_after_the_mutation() {
     state::isolate();

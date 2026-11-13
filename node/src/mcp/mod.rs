@@ -766,6 +766,9 @@ impl Tools {
                 // Nothing waits on the operator: the call is held as an
                 // approval and the caller is told so at once.
                 Verdict::Allow | Verdict::Ask => {
+                    if let Some(refusal) = self.missing_required(ctx, name, args) {
+                        return Err(refusal);
+                    }
                     let pinned = match name {
                         docs::DOC_WRITE | docs::DOC_DELETE => self
                             .session
@@ -1545,6 +1548,47 @@ impl Tools {
             jira::ISSUE_CREATE if args.get("issues").is_some() => jira::create_plan(args).err(),
             _ => None,
         }
+    }
+
+    /// Why a call cannot be asked as it stands: an argument its tool's own
+    /// definition requires is missing or null once the defaults are written
+    /// in. The operator is not asked to decide a call that could never run
+    /// (#874). Arguments the definition does not name are said alongside, as
+    /// the likely mistake, but do not refuse a call on their own.
+    fn missing_required(&self, ctx: &CallContext, name: &str, args: &Value) -> Option<String> {
+        let tool = self
+            .list(&ctx.channel, &ctx.node_id)
+            .into_iter()
+            .find(|t| t["name"] == name)?;
+        let schema = tool.get("inputSchema")?;
+        let missing: Vec<&str> = schema
+            .get("required")
+            .and_then(Value::as_array)?
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|key| args.get(*key).is_none_or(Value::is_null))
+            .collect();
+        if missing.is_empty() {
+            return None;
+        }
+        let mut refusal = format!(
+            "{name} requires {}, which this call does not give; nothing was asked or run",
+            missing.join(", ")
+        );
+        if let (Some(properties), Some(given)) = (
+            schema.get("properties").and_then(Value::as_object),
+            args.as_object(),
+        ) {
+            let unknown: Vec<&str> = given
+                .keys()
+                .map(String::as_str)
+                .filter(|key| !properties.contains_key(*key))
+                .collect();
+            if !unknown.is_empty() {
+                refusal.push_str(&format!(". {name} does not take {}", unknown.join(", ")));
+            }
+        }
+        Some(refusal)
     }
 
     /// Whose list the caller is read against: its session's phase as the
