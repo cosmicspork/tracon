@@ -418,9 +418,13 @@ pub struct Request<'a> {
 fn prose_fields(action: &str) -> &'static [&'static str] {
     use crate::mcp::{docs, github, gitlab, jira, review, work};
     match action {
+        // The note and the commit message are the agent's account of the
+        // work, which may well say what it did not push.
         review::SUBMIT => &[
             "title",
             "body",
+            "note",
+            "message",
             "forge.description.title",
             "forge.description.body",
             "forge.comment",
@@ -977,6 +981,17 @@ mod tests {
         let args = serde_json::json!({
             "title": "fix", "body": "x", "provider": "github",
             "project": "o/r", "base": "main", "forge": forge,
+        });
+        let d = p.decide(&tool("submit_review", &args, "submit_review"));
+        assert_ne!(d.verdict, Verdict::Deny, "{:?}", d.rule_id);
+        // So are the note for the operator and the commit message: an
+        // account of the work that says nothing was pushed is not a push.
+        let args = serde_json::json!({
+            "title": "fix", "body": "x", "provider": "github",
+            "project": "cosmicspork/tracon", "base": "main", "branch": "feat/kube-protocol-only",
+            "worktree": "/var/home/jd/src/tracon/.claude/worktrees/agent-a1b2c3",
+            "note": "Committed only; I did not git push or gh pr create.",
+            "message": "fix: drop the git push step",
         });
         let d = p.decide(&tool("submit_review", &args, "submit_review"));
         assert_ne!(d.verdict, Verdict::Deny, "{:?}", d.rule_id);
