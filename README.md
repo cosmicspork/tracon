@@ -2118,7 +2118,10 @@ and an emptyDir at `/tmp` that `TMPDIR` names.
   spec, and unpacks it into an emptyDir mounted read-only at `/opt/tracon`.
   `tracon-sandbox` from it is the pod's only process, and the harness it starts over
   the protocol is the bundle's. Pods run as uid 65532 with home `/home/harness`, the
-  stock base's own user.
+  stock base's own user. The home is the image's, in the container's writable layer, as
+  on Podman: only the harness's state directory (`/home/harness/.claude`) is an emptyDir
+  of the pod's, so what a recipe installs under the home (`~/.cache/ms-playwright`,
+  `~/.local`) is there in the sandbox.
 - **Services.** A session's sandbox runs each `[[service]]` with a bundle under its
   supervisor, on its loopback, as on Podman and Apple. The node serves each bundle
   (`bundle = "release"`'s browser, which it fetches into `<state>/bundles` as it

@@ -118,7 +118,10 @@ else wget -q -O \"$f\" \"$TRACON_BUNDLE_URL\"; fi; \
 echo \"$TRACON_BUNDLE_SHA256  $f\" | sha256sum -c - >/dev/null; \
 tar -xf \"$f\" -C \"$TRACON_BUNDLE_DIR\"; rm -f \"$f\"";
 pub const BUNDLE_VOLUME: &str = "bundle";
-pub const HOME_VOLUME: &str = "home";
+/// The harness's state directory under the home. Only it is a volume: the
+/// rest of the home is the image's, in the container's writable layer, as
+/// on Podman and Apple, so what a recipe installed there is kept.
+pub const STATE_VOLUME: &str = "harness-state";
 /// The init container that copies the bundle in.
 pub const BUNDLE_CONTAINER: &str = "bundle";
 /// The init container, and the volume, that a catalogue service's bundle is
@@ -988,11 +991,14 @@ impl KubeSandboxProvider {
             read_only,
             ..Default::default()
         };
-        let mut volumes = vec![empty(BUNDLE_VOLUME), empty(HOME_VOLUME)];
-        let mut mounts = vec![
-            mount(BUNDLE_VOLUME, BUNDLE_TARGET, Some(true)),
-            mount(HOME_VOLUME, &k.home, None),
-        ];
+        let mut volumes = vec![empty(BUNDLE_VOLUME)];
+        let mut mounts = vec![mount(BUNDLE_VOLUME, BUNDLE_TARGET, Some(true))];
+        // The harness's state directory, and nothing else of the home.
+        let state = (!k.state_dir.is_empty()).then(|| format!("{}/{}", k.home, k.state_dir));
+        if let Some(state) = &state {
+            volumes.push(empty(STATE_VOLUME));
+            mounts.push(mount(STATE_VOLUME, state, None));
+        }
         // Each bundle an init container fetches: its volume (which names the
         // container too), where it is mounted, where it is served, its digest.
         let mut fetches = vec![(
@@ -1029,6 +1035,7 @@ impl KubeSandboxProvider {
             if !target.starts_with('/')
                 || target.split('/').any(|part| part == "..")
                 || target == k.home
+                || state.as_deref() == Some(target)
                 || target == SCRATCH_MOUNT
                 || fetches.iter().any(|(_, bundle, _, _)| bundle == target)
                 || targets.contains(&target)

@@ -129,7 +129,6 @@ async fn a_sandbox_pod_holds_nothing_of_the_claim_and_sits_beside_the_node() {
         .collect();
     for target in [
         "/opt/tracon",
-        "/home/harness",
         "/dev/shm",
         "/tmp",
         "/work",
@@ -138,7 +137,82 @@ async fn a_sandbox_pod_holds_nothing_of_the_claim_and_sits_beside_the_node() {
     ] {
         assert!(mounted.contains(&target), "{target} in {mounted:?}");
     }
+    // The home is the image's: nothing is mounted over it.
+    assert!(!mounted.contains(&"/home/harness"), "{mounted:?}");
     assert!(breaches(&pod, "tracon-gw").is_empty());
+}
+
+/// As on Podman and Apple, the home is the image's own, so what a recipe
+/// installed there (`~/.cache`, `~/.local`) is not hidden: only the
+/// harness's state directory is a volume of the pod's, once, whatever shape
+/// the pod has and whether or not the run names it too.
+#[tokio::test]
+async fn only_the_harness_state_directory_of_the_home_is_a_volume() {
+    for shape in [Shape::Probe, Shape::Command, Shape::Session] {
+        let pod = render(shape, &RunLabels::default(), false);
+        let spec = pod.spec.unwrap();
+        let mounts: Vec<&VolumeMount> = spec.containers[0].volume_mounts.iter().flatten().collect();
+        let under_home: Vec<&str> = mounts
+            .iter()
+            .map(|m| m.mount_path.as_str())
+            .filter(|path| path.starts_with("/home/harness"))
+            .filter(|path| *path != "/home/harness/.state")
+            .collect();
+        assert_eq!(under_home, ["/home/harness/.claude"], "{shape:?}");
+        let state = mounts
+            .iter()
+            .find(|m| m.mount_path == "/home/harness/.claude")
+            .unwrap();
+        assert_eq!(state.name, STATE_VOLUME);
+        assert_ne!(state.read_only, Some(true));
+        let volume = spec
+            .volumes
+            .iter()
+            .flatten()
+            .find(|v| v.name == STATE_VOLUME)
+            .unwrap();
+        assert!(volume.empty_dir.is_some(), "{volume:?}");
+        assert_eq!(
+            env_of(&spec.containers[0])["CLAUDE_CONFIG_DIR"],
+            "/home/harness/.claude"
+        );
+    }
+
+    // A harness with no state directory gets no volume in the home at all.
+    let mut options = options();
+    options.spec.state_dir = "";
+    options.spec.state_env = "";
+    let pod = KubeSandboxProvider::new(
+        kube::Client::new(axum::Router::new(), "tracon-node"),
+        options,
+    )
+    .render(
+        "tracon-h-1",
+        &CreateSpec {
+            name: Some("tracon-h-1"),
+            image: "",
+            resources: &Resources::default(),
+            mounts: &[],
+            bootstrap: &bootstrap(),
+            labels: &RunLabels::default(),
+            shape: Shape::Probe,
+        },
+        "10.244.0.9:7426",
+        &BundleDigests::harness("cd".repeat(32)),
+        false,
+    )
+    .unwrap();
+    let spec = pod.spec.unwrap();
+    assert!(spec.containers[0]
+        .volume_mounts
+        .iter()
+        .flatten()
+        .all(|m| !m.mount_path.starts_with("/home")));
+    assert!(spec
+        .volumes
+        .iter()
+        .flatten()
+        .all(|v| v.name != STATE_VOLUME));
 }
 
 /// The supervisor is the container's command, from the node's own bundle,
