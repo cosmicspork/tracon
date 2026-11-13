@@ -45,6 +45,14 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v7"] }
 
+# Full debuginfo was most of what a test build wrote and most of what its
+# hundred-odd binaries took to link: a rebuild after a one-line change to the
+# node took 69 seconds with it and 36 without, and nothing here is usually
+# under a debugger. Line tables keep file and line in a backtrace. For a
+# debugger session, `CARGO_PROFILE_DEV_DEBUG=true` puts the rest back.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 strip = true
 lto = "thin"
