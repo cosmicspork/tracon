@@ -1,4 +1,9 @@
-use std::{fs, path::Path, process::Command};
+use std::{
+    fs,
+    path::Path,
+    process::Command,
+    time::{Duration, SystemTime},
+};
 
 // rust-embed refuses to compile when its folder is missing. The SPA is built by
 // `just spa`, never by cargo, so a fresh clone and CI's Rust job get a placeholder
@@ -13,9 +18,24 @@ fn main() {
             "<!doctype html><title>tracon</title><p>SPA not built. Run <code>just spa</code>.</p>\n",
         )
         .expect("write placeholder index.html");
+        // Cargo reruns this script when `dist` is newer than the script's last
+        // run, and a page written during that run always is: the build after
+        // the first one in a fresh checkout compiled the node a second time.
+        // A placeholder as old as the tree's first commit is never the change.
+        backdate(&dist.join("index.html"));
+        backdate(&dist);
     }
     build_id();
     browser_version();
+}
+
+/// Best effort: a placeholder left with today's date costs a rebuild, not a
+/// wrong build.
+fn backdate(path: &Path) {
+    let long_ago = SystemTime::UNIX_EPOCH + Duration::from_secs(946_684_800);
+    if let Ok(file) = fs::File::open(path) {
+        let _ = file.set_modified(long_ago);
+    }
 }
 
 /// `TRACON_BROWSER_VERSION`: the Chrome version of the `browser` service
@@ -53,7 +73,17 @@ fn browser_version() {
 /// is the release's own tag, so a build of unreleased code never reads as the
 /// release whose version it carries. Empty for a release, and for a source
 /// tree without git (the container builds exclude `.git`).
+///
+/// A debug build says `debug` and nothing else. The commit is compiled into
+/// the library, so naming it meant every commit and every branch switch
+/// recompiled the node and linked every test binary again, to tell a build
+/// run from the tree in front of it which tree that was. `just node-dev` and
+/// the releases build the release profile, and still say.
 fn build_id() {
+    if std::env::var("PROFILE").as_deref() != Ok("release") {
+        println!("cargo:rustc-env=TRACON_BUILD=debug");
+        return;
+    }
     let git = |args: &[&str]| {
         Command::new("git")
             .args(args)

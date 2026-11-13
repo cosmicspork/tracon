@@ -145,10 +145,6 @@ jobs:
       # one after another, and this runs their tests across all of them at
       # once, each in its own process and so its own state directory.
       - run: cargo nextest run --no-fail-fast
-      # build.rs has just written the placeholder SPA, which is newer than the
-      # build script's own run, so the next cargo invocation would take it for
-      # a change and compile the node a second time. Backdating it stops that.
-      - run: touch -d 2000-01-01 spa/dist spa/dist/index.html
       # nextest does not run doctests. There are none today; this is what makes
       # the first one written count.
       - run: cargo test --doc
