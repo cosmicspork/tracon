@@ -946,7 +946,7 @@ async fn main() -> Result<()> {
 async fn check_boundary(deep: bool) -> Result<()> {
     let cfg = boundary_config()?;
     let checked = match sandbox_port_held(&cfg) {
-        Some(port) => match running_node().await {
+        Some(port) => match running_node().await? {
             Some(url) => {
                 eprintln!(
                     "port {port} is taken by the node serving its sandboxes here: \
@@ -1231,7 +1231,7 @@ async fn admission_handoff(
     if minted.is_empty() {
         return Ok(handoff);
     }
-    if running_node().await.is_some() {
+    if running_node().await?.is_some() {
         handoff.retain(|(name, _)| !minted.contains(name));
         eprintln!(
             "not handed over now: {}; with the node running, share {} with `tracon credential share <name> --to {}`",
@@ -1896,23 +1896,30 @@ fn unbuilt_line(note: &serde_json::Value) -> String {
     )
 }
 
-/// The node at [`node_url`], when it is on this machine and answers: the
-/// one whose credential store a command acting on this machine also writes.
-async fn running_node() -> Option<String> {
-    let url = node_url().ok()?;
+/// The node at [`node_url`], when it is on this machine, answers, and is the
+/// node this state directory belongs to: the one whose credential store a
+/// command acting on this machine also writes. A different node answering
+/// there (a port-forward, another state directory's node) holds some other
+/// store, so the command acts on this one itself.
+async fn running_node() -> Result<Option<String>> {
+    let url = node_url()?;
     if !tracon::node_target::is_loopback(&url) {
-        return None;
+        return Ok(None);
     }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .ok()?;
-    client
-        .get(format!("{url}/api/awake"))
-        .send()
-        .await
-        .ok()
-        .map(|_| url)
+        .build()?;
+    if client.get(format!("{url}/api/awake")).send().await.is_err() {
+        return Ok(None);
+    }
+    if let Some(local) = tracon::mesh::identity::load()? {
+        if let Ok(facts) = node_facts().await {
+            if facts.id != local.node_id() {
+                return Ok(None);
+            }
+        }
+    }
+    Ok(Some(url))
 }
 
 /// A request the node answered with an error status, and the message it gave.
@@ -2002,11 +2009,14 @@ async fn node_facts() -> Result<NodeFacts> {
 }
 
 /// Before the first write: the node about to be changed must be the one this
-/// state directory belongs to, when it holds an identity. Without one (a CLI
-/// used remotely with `TRACON_TOKEN`) there is nothing to compare. Neither is
-/// there for a node on another machine named by URL alone, with the state
-/// directory left at its default: that is how a node is driven remotely from
-/// a machine that runs its own.
+/// state directory belongs to. Two cases have nothing to compare: a node named
+/// by `TRACON_URL` (or off this machine) with the state directory left at its
+/// default, which is how another node is driven, through a port-forward say,
+/// from a machine that runs its own; and a state directory with no identity
+/// (a CLI used remotely with `TRACON_TOKEN`). A state directory that was
+/// named but holds no identity writes only to a node `TRACON_URL` names, so
+/// a scratch directory whose node never started doesn't fall through to the
+/// default node.
 ///
 /// The identity is only read, never generated: a check must not create the
 /// thing it checks against.
@@ -2014,12 +2024,24 @@ async fn check_target_identity() -> Result<()> {
     static CHECKED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
     CHECKED
         .get_or_try_init(|| async {
+            let target = node_target()?;
+            let state_dir_named =
+                std::env::var_os("TRACON_STATE_DIR").is_some_and(|v| !v.is_empty());
+            let named_by_url = target.source == tracon::node_target::Source::Url;
             let Some(local) = tracon::mesh::identity::load()? else {
+                if state_dir_named && !named_by_url {
+                    anyhow::bail!(
+                        "the state directory {} holds no node identity, so {} ({}) can't be checked as its node: set TRACON_URL to the node you mean",
+                        config::Config::state_dir().display(),
+                        target.url,
+                        target.source,
+                    );
+                }
                 return Ok(());
             };
-            let target = node_target()?;
-            let state_dir_named = std::env::var_os("TRACON_STATE_DIR").is_some_and(|v| !v.is_empty());
-            if !state_dir_named && !tracon::node_target::is_loopback(&target.url) {
+            if !state_dir_named
+                && (named_by_url || !tracon::node_target::is_loopback(&target.url))
+            {
                 return Ok(());
             }
             let facts = node_facts().await?;
@@ -3460,7 +3482,7 @@ async fn credential_command(cmd: CredentialCommand) -> Result<()> {
             // A running node reads the store once, at start: sealing around
             // it would leave it brokering the old copy until it restarts.
             // Handed to it instead, it seals them itself and uses them now.
-            if let Some(url) = running_node().await {
+            if let Some(url) = running_node().await? {
                 let v = node_call(
                     reqwest::Method::POST,
                     "/api/credentials/import",
@@ -3509,7 +3531,7 @@ async fn credential_command(cmd: CredentialCommand) -> Result<()> {
             // As with import: a running node brokers the copy it read at
             // start, and would write it back the next time it saved. Removed
             // through it, it stops brokering the credential now.
-            if let Some(url) = running_node().await {
+            if let Some(url) = running_node().await? {
                 let v = node_call(
                     reqwest::Method::DELETE,
                     &format!("/api/credentials/{}", urlencoding(&name)),
@@ -3631,7 +3653,7 @@ async fn credential_command(cmd: CredentialCommand) -> Result<()> {
             // A running node holds the store and would write its own copy
             // over one sealed around it, so it shares; it names the sign-in
             // this share is, as it would here.
-            if running_node().await.is_some() {
+            if running_node().await?.is_some() {
                 node_call(
                     reqwest::Method::POST,
                     &format!("/api/credentials/{}/share", urlencoding(&name)),

@@ -342,3 +342,65 @@ async fn a_serve_json_naming_a_dead_pid_is_ignored_with_a_warning() {
     assert_eq!(scratch.hits.load(Ordering::SeqCst), 0);
     assert!(!has_token(&scratch).await);
 }
+
+/// Driving another node through a port-forward from a machine that runs its
+/// own: `TRACON_URL` names it, the state directory is left at its default,
+/// and the write goes through though the ids differ.
+#[tokio::test]
+async fn an_explicit_tracon_url_from_the_default_state_dir_is_not_checked() {
+    let home = state::scratch("cli-target-default-home");
+    let default_dir = home.join("state").join("tracon");
+    std::fs::create_dir_all(&default_dir).unwrap();
+    tracon::mesh::identity::load_or_generate_at(&default_dir.join("node-identity.seed")).unwrap();
+    let forwarded = serve_node(&"e".repeat(64)).await;
+
+    let out = tracon(&home, &["auth", "issue", "--yes"])
+        .env_remove("TRACON_STATE_DIR")
+        .env("XDG_STATE_HOME", home.join("state"))
+        .env("HOME", &home)
+        .env("TRACON_URL", &forwarded.url)
+        .output()
+        .await
+        .unwrap();
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "{stderr}");
+    assert!(stdout.starts_with("trc1."), "{stdout}");
+    assert!(has_token(&forwarded).await);
+}
+
+/// A named state directory with no identity (its node never started, or the
+/// path is mistyped) doesn't fall through to whatever node answers: only a
+/// node `TRACON_URL` names is written to.
+#[tokio::test]
+async fn a_state_dir_with_no_identity_writes_only_to_tracon_url() {
+    let dir = state::scratch("cli-target-no-identity");
+    let other = serve_node(&"d".repeat(64)).await;
+
+    let out = tracon(&dir, &["auth", "issue", "--yes"])
+        .env("TRACON_LISTEN", other.addr.to_string())
+        .output()
+        .await
+        .unwrap();
+    let (stdout, stderr) = text(&out);
+    assert!(!out.status.success());
+    assert!(!stdout.contains("trc1."), "{stdout}");
+    assert!(
+        stderr.contains("holds no node identity") && stderr.contains("set TRACON_URL"),
+        "{stderr}"
+    );
+    assert!(!has_token(&other).await);
+    assert!(
+        !dir.join("node-identity.seed").exists(),
+        "the check created no identity"
+    );
+
+    // A CLI used remotely, with TRACON_URL and TRACON_TOKEN, still works.
+    let out = tracon(&dir, &["auth", "issue", "--yes"])
+        .env("TRACON_URL", &other.url)
+        .output()
+        .await
+        .unwrap();
+    let (_, stderr) = text(&out);
+    assert!(out.status.success(), "{stderr}");
+    assert!(has_token(&other).await);
+}
