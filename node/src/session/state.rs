@@ -50,12 +50,6 @@ impl SessionState {
     /// `is_terminal`, and tested against it, so a new terminal state cannot
     /// be added to one and forgotten in the other.
     pub const TERMINAL: &'static [&'static str] = &["closed", "killed_budget", "failed"];
-
-    /// Prompts are only accepted while the harness is idle and waiting on the
-    /// operator for input rather than for a decision.
-    pub fn accepts_prompt(&self) -> bool {
-        matches!(self, Self::Running)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -325,13 +319,6 @@ pub mod event_kind {
     /// answer are refused: a second prompt would duplicate a turn that may
     /// already be running. Never presented as success or failure.
     pub const UNCERTAIN: &str = "uncertain";
-    /// The harness created a session of its own — a fork, a background
-    /// subagent — naming one of this node's as its parent (`child`, `parent`,
-    /// `untracked`). Recorded with its lineage and surfaced; never driven,
-    /// because there is no route to register a child session yet and an
-    /// untracked worker the node cannot supervise is worse than a visible
-    /// refusal.
-    pub const CHILD_SESSION: &str = "child_session";
     /// The gateway refused a model call before it reached the provider,
     /// because the method and path are not on the inference allowlist the
     /// credential is lent for (`provider`, `method`, `reason`, `attempt`).
@@ -343,22 +330,6 @@ pub mod event_kind {
     /// (#188): a tree that moved under a verified candidate has to be visible
     /// to whatever decides whether that verification still holds.
     pub const WORKSPACE_CHANGED: &str = "workspace_changed";
-    /// A terminal was opened under the `terminal` capability: the shell that
-    /// was spawned and where (`phase` — `spawn` or `attach` — `pty_id`,
-    /// `command`, `args`, `cwd`, `env_kept`, `env_dropped`, `grant`).
-    ///
-    /// A PTY is an interactive shell, not a per-command ledger. What the
-    /// operator authorised is *a terminal in this workspace*, once; every
-    /// command typed at that prompt afterwards runs without a further
-    /// decision and leaves no tool-call record, because the harness raises
-    /// none for a PTY (finding 7). The event says what was opened, not what
-    /// was run in it.
-    pub const PTY_OPENED: &str = "pty_opened";
-    /// A terminal was closed, or a proxied terminal connection ended
-    /// (`phase` — `removed` or `detached` — `pty_id`, `bytes_in`,
-    /// `bytes_out`, `duration_ms`, `reason`, and `output` only when output
-    /// capture was deliberately turned on).
-    pub const PTY_CLOSED: &str = "pty_closed";
     /// A catalogue service in the session's sandbox changed state (`name`,
     /// `sandbox`, `state` — `started`, `ready`, `failed` or `stopped` —
     /// and `detail` for a failure). The events are also how everything that
@@ -378,23 +349,6 @@ pub mod event_kind {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn only_running_accepts_a_prompt() {
-        assert!(SessionState::Running.accepts_prompt());
-        // A session waiting on a decision takes the decision, not a prompt.
-        assert!(!SessionState::WaitingOnYou.accepts_prompt());
-        assert!(!SessionState::Starting.accepts_prompt());
-        assert!(!SessionState::Paused.accepts_prompt());
-        for s in [
-            SessionState::Closed,
-            SessionState::KilledBudget,
-            SessionState::Failed,
-        ] {
-            assert!(!s.accepts_prompt());
-            assert!(s.is_terminal());
-        }
-    }
 
     /// The guarded writes exclude states by their stored spelling, so the
     /// list has to say exactly what `is_terminal` says.
