@@ -33,17 +33,3 @@ pub fn podman(args: &[&str]) -> Option<String> {
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
-
-/// The image named in `var`, which has to be set and present: the node's own
-/// images are never picked up in its place.
-pub fn named_image(var: &str) -> String {
-    let image = std::env::var(var)
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| panic!("{OPT_IN}=1 needs the image under test named in {var}"));
-    assert!(
-        podman(&["image", "exists", &image]).is_some(),
-        "{var} names {image}, which is not in the local store"
-    );
-    image
-}
