@@ -9,9 +9,7 @@ use std::time::Duration;
 
 use hub::store::{FrameStore, Member, MemberStore, MemoryFrames, MemoryMembers};
 use hub::HubConfig;
-use proto::envelope::DataKey;
 use proto::frame::MESH_CHANNEL;
-use proto::keyring::Keyring;
 use proto::keys::Identity;
 
 /// Long enough for a slow CI runner to relay through the hub several times;
@@ -101,26 +99,6 @@ pub async fn start_hub_personal(admitted: &[&Identity]) -> String {
     let channels: &[&str] = &[MESH_CHANNEL, "personal"];
     let admitted: Vec<(&Identity, &[&str])> = admitted.iter().map(|id| (*id, channels)).collect();
     start_hub(&admitted).await
-}
-
-/// Keyrings for a pair: A holds genesis rings, B holds A's handoffs of them.
-pub struct Rings {
-    pub a: Vec<(String, Keyring)>,
-    pub b: Vec<(String, Keyring)>,
-}
-
-pub fn rings_for(a: &Identity, b: &Identity, channels: &[&str]) -> Rings {
-    let mut out = Rings {
-        a: Vec::new(),
-        b: Vec::new(),
-    };
-    for c in std::iter::once(&MESH_CHANNEL).chain(channels) {
-        let ring = Keyring::genesis(&a.x25519_public(), &DataKey::generate());
-        out.b
-            .push((c.to_string(), ring.wrap_for(a, &b.x25519_public()).unwrap()));
-        out.a.push((c.to_string(), ring));
-    }
-    out
 }
 
 /// Poll `f` until it holds or `WAIT` elapses.

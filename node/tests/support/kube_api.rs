@@ -1,10 +1,8 @@
 //! A fake Kubernetes API, enough of `pods` for the sandbox provider: create,
 //! get, list, delete and logs, with each pod's life told by a `Script` rather
-//! than by a kubelet. And `selfsubjectaccessreviews`, allowing everything a
-//! test has not denied. And `networkpolicies` get and list, from what a test
-//! put in place, with a gate a test can hold reads at and names it can make
-//! unreadable. Any request for `secrets` is recorded and refused: the node
-//! makes none.
+//! than by a kubelet. And `selfsubjectaccessreviews`, allowing everything.
+//! And `networkpolicies` get and list, from what a test put in place. Any
+//! request for `secrets` is recorded and refused: the node makes none.
 //!
 //! The client is handed the router itself as its transport (`client`), so no
 //! socket is opened and a `start_paused` test drives a pod through minutes of
@@ -66,49 +64,13 @@ impl Default for Script {
 }
 
 impl Script {
-    pub fn exits(code: i32) -> Self {
-        Self {
-            exit_code: Some(code),
-            ..Default::default()
-        }
-    }
-
-    /// A pod that stays `Pending` for good, waiting for `reason`.
-    pub fn never_starts(reason: &str) -> Self {
-        Self {
-            pending: Duration::MAX,
-            waiting: Some((reason.into(), String::new())),
-            ..Default::default()
-        }
-    }
-
-    pub fn pending(mut self, pending: Duration) -> Self {
-        self.pending = pending;
-        self
-    }
-
     pub fn running(mut self, running: Duration) -> Self {
         self.running = running;
         self
     }
 
-    pub fn logs(mut self, logs: &str) -> Self {
-        self.logs = logs.into();
-        self
-    }
-
-    pub fn image_id(mut self, image_id: &str) -> Self {
-        self.image_id = image_id.into();
-        self
-    }
-
     pub fn pod_ip(mut self, ip: &str) -> Self {
         self.pod_ip = ip.into();
-        self
-    }
-
-    pub fn evicted(mut self) -> Self {
-        self.exit_code = None;
         self
     }
 }
@@ -160,52 +122,10 @@ impl KubeApi {
         self
     }
 
-    /// The life of pods whose name starts with `prefix`.
-    pub fn script(self, prefix: &str, script: Script) -> Self {
-        self.inner
-            .lock()
-            .unwrap()
-            .scripts
-            .push((prefix.into(), script));
-        self
-    }
-
-    /// Access reviews answer no to `verb` on `resource`.
-    pub fn deny(self, resource: &str, verb: &str) -> Self {
-        self.inner
-            .lock()
-            .unwrap()
-            .denied
-            .push((resource.into(), verb.into()));
-        self
-    }
-
     /// Put a NetworkPolicy in place under its name.
     pub fn insert_policy(&self, policy: NetworkPolicy) {
         let name = policy.metadata.name.clone().unwrap_or_default();
         self.inner.lock().unwrap().policies.insert(name, policy);
-    }
-
-    /// Reads of this policy answer 403.
-    pub fn forbid_policy(self, name: &str) -> Self {
-        self.inner
-            .lock()
-            .unwrap()
-            .policies_forbidden
-            .push(name.into());
-        self
-    }
-
-    /// Hold every policy read until a permit is added to the returned gate.
-    pub fn hold_policy_reads(&self) -> Arc<tokio::sync::Semaphore> {
-        let gate = Arc::new(tokio::sync::Semaphore::new(0));
-        self.inner.lock().unwrap().policy_gate = Some(gate.clone());
-        gate
-    }
-
-    /// How many policy reads have arrived.
-    pub fn policy_reads(&self) -> usize {
-        self.inner.lock().unwrap().policy_reads
     }
 
     pub fn router(&self) -> Router {
@@ -264,11 +184,6 @@ impl KubeApi {
     /// Every pod as it was created, in order.
     pub fn created(&self) -> Vec<Pod> {
         self.inner.lock().unwrap().created.clone()
-    }
-
-    /// The names of the pods that existed and were deleted, in order.
-    pub fn deleted(&self) -> Vec<String> {
-        self.inner.lock().unwrap().deleted.clone()
     }
 
     /// The names of the pods that exist now.
