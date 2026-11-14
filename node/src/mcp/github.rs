@@ -15,6 +15,7 @@
 
 use serde_json::{json, Value};
 
+use super::tail;
 use crate::{broker::SharedBroker, forge::Forge, mcp::CallContext};
 
 pub const CREDENTIAL: &str = "gh";
@@ -1117,18 +1118,6 @@ fn jobs_summary(v: &Value) -> Vec<Value> {
             })
         })
         .collect()
-}
-
-/// The last `max` bytes of a log, cut on a character boundary.
-fn tail(log: &str, max: usize) -> (&str, bool) {
-    if log.len() <= max {
-        return (log, false);
-    }
-    let mut start = log.len() - max;
-    while !log.is_char_boundary(start) {
-        start += 1;
-    }
-    (&log[start..], true)
 }
 
 fn number(args: &Value) -> Result<i64, String> {
