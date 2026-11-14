@@ -47,9 +47,6 @@ export TRACON_SANDBOX_TOKEN_FILE=/run/tracon/token
 exec /opt/tracon/bin/tracon-sandbox
 "#;
 
-/// Where the template's image installs [`RUN_SCRIPT`] as an s6 service.
-pub const SERVICE_DIR: &str = "/etc/services.d/tracon-sandbox";
-
 /// The exec that delivers a run's bootstrap. Positional arguments: the
 /// variable the dial goes in (`ADDR` or `RELAY_URL`), the dial, the
 /// certificate pin, the server name, the token, the gateway's name, the run

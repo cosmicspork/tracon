@@ -294,13 +294,6 @@ impl DoRuntime {
         let _ = self.mesh.set(mesh);
     }
 
-    /// Take templates from a peer, keying the stock base's on `base`: what
-    /// `start` does with `templates = "peer"`, for a test's stand-ins.
-    #[doc(hidden)]
-    pub fn set_peer_base(&self, base: PeerBase) {
-        let _ = self.peer_base.set(base);
-    }
-
     fn takes_from_peer(&self) -> bool {
         matches!(self.provider.templates().source(), Source::Peer { .. })
     }
@@ -597,15 +590,6 @@ impl DoRuntime {
             }
             runtime.preparing.lock().unwrap().remove(&image);
         });
-    }
-
-    /// Prepare `image`'s template, when this node has a DigitalOcean
-    /// provider: what a repository's preparation calls once it has made a
-    /// snapshot.
-    pub fn prepare_if_running(image: &str) {
-        if let Some(runtime) = global() {
-            runtime.prepare(image.to_string());
-        }
     }
 
     /// The templates this node keeps: the default image's, each current

@@ -99,17 +99,6 @@ impl KubeBackend {
         Self::built(cfg, PodEnv::detect(cfg), tokio::sync::OnceCell::new())
     }
 
-    /// A backend for a pod whose facts and client are given rather than
-    /// detected: a test's fake API.
-    #[doc(hidden)]
-    pub fn with_client(cfg: &Config, env: PodEnv, client: kube::Client) -> Self {
-        Self::built(
-            cfg,
-            Ok(env),
-            tokio::sync::OnceCell::new_with(Some(Ok(client))),
-        )
-    }
-
     fn built(
         cfg: &Config,
         env: Result<PodEnv, String>,
