@@ -305,55 +305,6 @@ impl PodmanBackend {
         keeps.then_some(store)
     }
 
-    /// Copy a staging tree into a volume the node keeps. A check's copy of
-    /// an immutable snapshot is the snapshot itself, sent straight into its
-    /// sandbox; nothing reads a check's changes back.
-    fn files_import(
-        store: &crate::runner::sandbox_files::FilesStore,
-        volume: &str,
-        source: &Path,
-    ) -> Result<(), BoundaryError> {
-        use crate::runner::sandbox_files as files;
-        if files::is_live(volume) {
-            return Err(BoundaryError::Other(format!(
-                "volume {volume} is in use by a running sandbox"
-            )));
-        }
-        let done = match files::is_check(volume) {
-            true => crate::workspace::validate_tree(source)
-                .map_err(files::FilesError::from)
-                .and_then(|()| store.alias(volume, source)),
-            false => store.import(volume, source),
-        };
-        done.map_err(|e| BoundaryError::Other(format!("copy into {volume}: {e}")))
-    }
-
-    /// Export a volume the node keeps: from the sandbox holding it while one
-    /// runs, else the node's copy.
-    async fn files_export(
-        store: &crate::runner::sandbox_files::FilesStore,
-        volume: &str,
-        destination: &Path,
-        checkout: bool,
-    ) -> Result<(), BoundaryError> {
-        let failed = |e: crate::runner::sandbox_files::FilesError| {
-            BoundaryError::Other(format!("copy out of {volume}: {e}"))
-        };
-        match crate::runner::sandbox_files::export_live(volume, destination, checkout).await {
-            Some(exported) => exported.map(|_| ()).map_err(failed)?,
-            None => {
-                let store = store.clone();
-                let (volume, destination) = (volume.to_string(), destination.to_path_buf());
-                tokio::task::spawn_blocking(move || store.export(&volume, &destination, checkout))
-                    .await
-                    .map_err(|e| BoundaryError::Other(e.to_string()))?
-                    .map_err(failed)?
-            }
-        }
-        crate::workspace::validate_tree(destination)
-            .map_err(|e| BoundaryError::Other(e.to_string()))
-    }
-
     /// The runner for `spec`: a sandbox per command, over the protocol.
     fn runner_with(&self, spec: RunSpec) -> Arc<dyn Runner> {
         protocol_runner(&self.cfg, spec)
@@ -485,7 +436,7 @@ impl Backend for PodmanBackend {
 
     async fn import_volume(&self, volume: &str, source: &Path) -> Result<(), BoundaryError> {
         if let Some(store) = self.files_for(volume) {
-            return Self::files_import(&store, volume, source);
+            return crate::boundary::import_into_store(&store, volume, source);
         }
         let _images = super::reconcile::images_in_use().await;
         let (image, user) = utility_image(&self.cfg);
@@ -502,7 +453,7 @@ impl Backend for PodmanBackend {
         // The node's copy carries only whether a file is executable, so a
         // tree it keeps is writable already.
         if let Some(store) = self.files_for(volume) {
-            return Self::files_import(&store, volume, source);
+            return crate::boundary::import_into_store(&store, volume, source);
         }
         let _images = super::reconcile::images_in_use().await;
         let (image, user) = utility_image(&self.cfg);
@@ -536,7 +487,7 @@ impl Backend for PodmanBackend {
 
     async fn export_volume(&self, volume: &str, destination: &Path) -> Result<(), BoundaryError> {
         if let Some(store) = self.files_for(volume).filter(|s| s.holds(volume)) {
-            return Self::files_export(&store, volume, destination, false).await;
+            return crate::boundary::export_from_store(&store, volume, destination, false).await;
         }
         let _images = super::reconcile::images_in_use().await;
         let (image, user) = utility_image(&self.cfg);
@@ -555,7 +506,7 @@ impl Backend for PodmanBackend {
         destination: &Path,
     ) -> Result<(), BoundaryError> {
         if let Some(store) = self.files_for(volume).filter(|s| s.holds(volume)) {
-            return Self::files_export(&store, volume, destination, true).await;
+            return crate::boundary::export_from_store(&store, volume, destination, true).await;
         }
         let _images = super::reconcile::images_in_use().await;
         let (image, user) = utility_image(&self.cfg);
@@ -613,11 +564,7 @@ impl Backend for PodmanBackend {
         let store = crate::runner::sandbox_files::FilesStore::for_node();
         if store.holds(volume) {
             // As Podman refuses to remove a volume a container mounts.
-            if crate::runner::sandbox_files::is_live(volume) {
-                return Err(BoundaryError::Other(format!(
-                    "volume {volume} is in use by a running sandbox"
-                )));
-            }
+            crate::boundary::refuse_live(volume)?;
             return store
                 .remove(volume)
                 .map_err(|e| BoundaryError::Other(e.to_string()));

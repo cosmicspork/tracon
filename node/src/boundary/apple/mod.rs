@@ -335,40 +335,6 @@ impl AppleBackend {
     fn store_error(volume: &str, error: files::FilesError) -> BoundaryError {
         BoundaryError::Other(format!("{volume}: {error}"))
     }
-
-    fn refuse_live(volume: &str) -> Result<(), BoundaryError> {
-        match files::is_live(volume) {
-            true => Err(BoundaryError::Other(format!(
-                "volume {volume} is in use by a running sandbox"
-            ))),
-            false => Ok(()),
-        }
-    }
-
-    /// Export a volume: from the sandbox holding it while one runs, else the
-    /// node's copy. Checked either way before anything reads it.
-    async fn export(
-        &self,
-        volume: &str,
-        destination: &Path,
-        checkout: bool,
-    ) -> Result<(), BoundaryError> {
-        let failed =
-            |e: files::FilesError| BoundaryError::Other(format!("copy out of {volume}: {e}"));
-        match files::export_live(volume, destination, checkout).await {
-            Some(exported) => exported.map(|_| ()).map_err(failed)?,
-            None => {
-                let store = self.files_store();
-                let (volume, destination) = (volume.to_string(), destination.to_path_buf());
-                tokio::task::spawn_blocking(move || store.export(&volume, &destination, checkout))
-                    .await
-                    .map_err(|e| BoundaryError::Other(e.to_string()))?
-                    .map_err(failed)?
-            }
-        }
-        crate::workspace::validate_tree(destination)
-            .map_err(|e| BoundaryError::Other(e.to_string()))
-    }
 }
 
 /// One `container` shared by the backend and every provider it makes.
@@ -740,22 +706,11 @@ impl Backend for AppleBackend {
     }
 
     async fn import_volume(&self, volume: &str, source: &Path) -> Result<(), BoundaryError> {
-        Self::refuse_live(volume)?;
-        let store = self.files_store();
-        // A check's copy of an immutable snapshot is the snapshot itself,
-        // sent straight into its sandbox; nothing reads a check's changes
-        // back.
-        let done = match files::is_check(volume) {
-            true => crate::workspace::validate_tree(source)
-                .map_err(files::FilesError::from)
-                .and_then(|()| store.alias(volume, source)),
-            false => store.import(volume, source),
-        };
-        done.map_err(|e| BoundaryError::Other(format!("copy into {volume}: {e}")))
+        crate::boundary::import_into_store(&self.files_store(), volume, source)
     }
 
     async fn export_volume(&self, volume: &str, destination: &Path) -> Result<(), BoundaryError> {
-        self.export(volume, destination, false).await
+        crate::boundary::export_from_store(&self.files_store(), volume, destination, false).await
     }
 
     async fn export_workspace(
@@ -763,7 +718,7 @@ impl Backend for AppleBackend {
         volume: &str,
         destination: &Path,
     ) -> Result<(), BoundaryError> {
-        self.export(volume, destination, true).await
+        crate::boundary::export_from_store(&self.files_store(), volume, destination, true).await
     }
 
     fn harness_host(&self) -> String {
@@ -845,7 +800,7 @@ impl Backend for AppleBackend {
     }
 
     async fn remove_volume(&self, volume: &str) -> Result<(), BoundaryError> {
-        Self::refuse_live(volume)?;
+        crate::boundary::refuse_live(volume)?;
         self.files_store()
             .remove(volume)
             .map_err(|e| Self::store_error(volume, e))
