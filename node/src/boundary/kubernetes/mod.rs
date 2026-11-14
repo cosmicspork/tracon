@@ -524,7 +524,7 @@ impl Backend for KubeBackend {
         source: &std::path::Path,
     ) -> Result<(), BoundaryError> {
         crate::workspace::validate_tree(source).map_err(|e| BoundaryError::Other(e.to_string()))?;
-        refuse_live(volume)?;
+        crate::boundary::refuse_live(volume)?;
         let root = self.cfg.runtime.kubernetes.state_mount.join(volume);
         let staged = root.with_extension(format!("staging-{}", uuid::Uuid::now_v7()));
         let _ = std::fs::remove_dir_all(&staged);
@@ -655,7 +655,7 @@ impl Backend for KubeBackend {
     }
 
     async fn remove_volume(&self, volume: &str) -> Result<(), BoundaryError> {
-        refuse_live(volume)?;
+        crate::boundary::refuse_live(volume)?;
         crate::boundary::remove_directory_volume(&self.cfg.runtime.kubernetes.state_mount, volume)
     }
 
@@ -668,17 +668,6 @@ impl Backend for KubeBackend {
     /// onto its image's own `/work`.
     fn workspace_over_image(&self) -> bool {
         true
-    }
-}
-
-/// A volume a running sandbox holds is its, not the claim's copy: as a
-/// runtime refuses to replace or remove a volume a container mounts.
-fn refuse_live(volume: &str) -> Result<(), BoundaryError> {
-    match crate::runner::sandbox_files::is_live(volume) {
-        true => Err(BoundaryError::Other(format!(
-            "volume {volume} is in use by a running sandbox"
-        ))),
-        false => Ok(()),
     }
 }
 
