@@ -104,12 +104,9 @@ pub fn decide(method: &Method, authority: Option<&str>, allow: &Allowlist) -> De
     Decision::Connect(host)
 }
 
-pub async fn serve(port: u16, allow: Allowlist) {
-    serve_refusing(port, allow, Refusal::nothing()).await
-}
-
-/// `serve`, never dialling what `refusal` refuses: how a pod-hosted node
-/// serves its harnesses' allowlist proxy, beside the cluster's own services.
+/// Serve the allowlist proxy on `port`, never dialling what `refusal`
+/// refuses: how a pod-hosted node serves its harnesses' allowlist proxy,
+/// beside the cluster's own services.
 pub async fn serve_refusing(port: u16, allow: Allowlist, refusal: Refusal) {
     let addr: SocketAddr = ([0, 0, 0, 0], port).into();
     let listener = match TcpListener::bind(addr).await {

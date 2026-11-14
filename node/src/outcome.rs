@@ -268,10 +268,6 @@ pub fn read(store: &Store, session: SessionRow) -> Result<Facts, StoreError> {
     })
 }
 
-pub fn outcome(store: &Store, session: SessionRow) -> Result<Outcome, StoreError> {
-    Ok(derive(&read(store, session)?))
-}
-
 fn passed(check: &CheckRunRow) -> bool {
     check.outcome == PASSED
         || (check.outcome == REUSED && check.source_outcome.as_deref() == Some(PASSED))
