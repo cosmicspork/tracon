@@ -1425,14 +1425,26 @@ mod tests {
     /// the harness.
     #[tokio::test]
     async fn a_failed_send_keeps_its_cause() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener);
-        let e = reqwest::Client::new()
-            .get(format!("http://{addr}/v1/messages?key=secret"))
-            .send()
-            .await
-            .unwrap_err();
+        // A port bound and then freed is refused, unless a test running
+        // alongside takes it in between and answers, which reads as a broken
+        // send instead. Holding the port without listening does not help:
+        // macOS drops the SYN and the connect times out. So a send whose
+        // port was taken tries again on a fresh one.
+        let mut attempts = 0;
+        let e = loop {
+            attempts += 1;
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            drop(listener);
+            let e = reqwest::Client::new()
+                .get(format!("http://{addr}/v1/messages?key=secret"))
+                .send()
+                .await
+                .unwrap_err();
+            if e.is_connect() || attempts == 5 {
+                break e;
+            }
+        };
         assert_eq!(send_failure_kind(&e), "could not connect");
         let chain = error_chain(&e.without_url());
         assert!(chain.contains("error sending request"), "{chain}");
