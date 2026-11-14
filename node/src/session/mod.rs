@@ -1851,26 +1851,6 @@ impl Manager {
     fn session_allows_work(&self, session_id: &str) -> bool {
         self.ensure_active(session_id).is_ok()
     }
-    /// Whether a session may switch to this `provider/model`: the checks
-    /// `create` makes before a session starts, asked again by the gateway when
-    /// a native-UI model switch arrives mid-session. The channel must be able
-    /// to spend on it, and its credential must run on the session's harness;
-    /// the refusal says which.
-    pub fn model_authorized(
-        &self,
-        channel: &str,
-        model: &str,
-        harness: &str,
-    ) -> Result<(), String> {
-        if !self.model_usable(channel, model, &self.bindings(channel)) {
-            return Err(format!(
-                "{model} is not a model channel {channel} is authorised for"
-            ));
-        }
-        self.check_fit(model, self.credential_class(model, Some(channel)), harness)
-            .map_err(|e| e.to_string())
-    }
-
     pub fn probe_token(&self) -> &str {
         &self.probe_token
     }
