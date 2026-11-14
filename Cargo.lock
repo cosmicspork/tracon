@@ -3744,7 +3744,6 @@ dependencies = [
 name = "tracon-sandbox"
 version = "0.51.2"
 dependencies = [
- "anyhow",
  "base64 0.22.1",
  "bytes",
  "futures-util",

@@ -15,7 +15,6 @@ name = "tracon-sandbox"
 path = "src/main.rs"
 
 [dependencies]
-anyhow.workspace = true
 base64.workspace = true
 bytes = "1"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
