@@ -138,13 +138,7 @@ pub fn holds_state(session_id: &str) -> bool {
 //
 // `config_mounts` stages every adapter-declared directory under `harness/` in
 // the session's own scratch volume and mounts it at the harness's state
-// directory. Backup, upgrade and restore all work on the volume rather than on
-// a container path, so they need the volume-relative spelling — and they must
-// not re-derive it from an adapter they were not launched with.
-
-/// The volume-relative root of the staged harness state tree: everything the
-/// harness has under its own state directory, config files included.
-pub const HARNESS_TREE: &str = "harness";
+// directory.
 
 pub struct Scratch {
     /// Node-only staging path. It is copied into `volume` before a runner sees
@@ -380,15 +374,6 @@ pub fn probe_scratch(
         mounts,
         orientation_path: String::new(),
     })
-}
-
-/// Compatibility convenience for callers that only need the mount model.
-pub fn probe_mounts(
-    home: &str,
-    adapter: &dyn HarnessAdapter,
-    wiring: &Wiring,
-) -> std::io::Result<Vec<Mount>> {
-    Ok(probe_scratch(home, adapter, wiring)?.mounts)
 }
 
 /// Build configuration for a single session. `repo` is deliberately ignored:
