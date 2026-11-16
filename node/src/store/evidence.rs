@@ -418,16 +418,6 @@ impl Store {
         Ok(rows)
     }
 
-    pub fn materialize_candidate(
-        &self,
-        candidate_id: &str,
-        destination: &std::path::Path,
-    ) -> Result<()> {
-        let files = self.candidate_files(candidate_id)?;
-        crate::review::materialize_candidate_files(destination, &files)
-            .map_err(|error| StoreError::Invalid(error.to_string()))
-    }
-
     /// Fill a legacy candidate's absent materialization facts from a new,
     /// hardened capture. Existing immutable capture data is never overwritten.
     pub fn record_candidate_snapshot(
@@ -472,33 +462,6 @@ impl Store {
         conn.query_row(
             "SELECT * FROM candidate WHERE id=?1",
             [id],
-            CandidateRow::from_row,
-        )
-        .optional()
-        .map_err(Into::into)
-    }
-
-    /// Candidate association includes owner sessions and pinned requirements.
-    pub fn candidate_for_item(
-        &self,
-        candidate_id: &str,
-        work_item_id: &str,
-        channel: &str,
-    ) -> Result<Option<CandidateRow>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
-        conn.query_row(
-            "SELECT c.* FROM candidate c
-             WHERE c.id=?1 AND c.channel=?3
-               AND (
-                 EXISTS (SELECT 1 FROM session s
-                         WHERE s.id=c.owner_session_id AND s.work_item_id=?2)
-                 OR EXISTS (SELECT 1 FROM review_revision rr
-                            WHERE rr.candidate_id=c.id AND rr.requirements_work_item_id=?2)
-               )",
-            params![candidate_id, work_item_id, channel],
             CandidateRow::from_row,
         )
         .optional()
@@ -822,33 +785,6 @@ impl Store {
                 AND outcome IN ('passed','failed','reused')
              ORDER BY finished_ms DESC LIMIT 1",
             params![candidate_id, reuse_key],
-            CheckRunRow::from_row,
-        )
-        .optional()
-        .map_err(Into::into)
-    }
-
-    /// A direct run against the exact current definition and execution
-    /// configuration. This is used when an image is mutable: it may support
-    /// the submission that just ran, but is never selected as reusable proof.
-    /// The latest terminal direct execution for the exact current inputs.
-    pub fn latest_matching_check(
-        &self,
-        candidate_id: &str,
-        definition_hash: &str,
-        execution_image: Option<&str>,
-        inputs_json: &str,
-    ) -> Result<Option<CheckRunRow>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
-        conn.query_row(
-            "SELECT * FROM check_run
-             WHERE candidate_id=?1 AND definition_hash=?2 AND execution_image IS ?3
-               AND inputs_json=?4 AND outcome <> 'running'
-             ORDER BY finished_ms DESC, id DESC LIMIT 1",
-            params![candidate_id, definition_hash, execution_image, inputs_json],
             CheckRunRow::from_row,
         )
         .optional()
