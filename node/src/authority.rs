@@ -28,10 +28,6 @@ pub fn kind_of(_action: &str) -> &'static str {
     AUTHORITY_KIND
 }
 
-pub fn target(kind: &str, parts: &[&str]) -> String {
-    format!("{kind}:{}", parts.join(":"))
-}
-
 pub fn policy_decision(
     policy: &Policy,
     channel: &str,

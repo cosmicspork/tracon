@@ -447,8 +447,6 @@ pub struct Resume {
 pub enum AdapterError {
     #[error("runner: {0}")]
     Runner(#[from] crate::runner::RunnerError),
-    #[error("harness has no stdio pipe")]
-    NoPipe,
     #[error("version mismatch: found {found}, pinned {pinned}")]
     VersionMismatch { found: String, pinned: String },
     #[error("harness {agent} reports {protocol} protocol {found}; this node supports {supported}")]
@@ -458,8 +456,6 @@ pub enum AdapterError {
         found: String,
         supported: String,
     },
-    #[error("model {0:?} is not offered by the harness")]
-    UnknownModel(String),
     /// The stored credential cannot be renewed in place; only a fresh login
     /// can replace it. A refresh loop has to stop asking rather than retry a
     /// thing that will never succeed.

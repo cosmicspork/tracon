@@ -60,15 +60,6 @@ pub struct PreparedEnvironment {
     pub elapsed_ms: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct Verification {
-    pub command: String,
-    pub ok: bool,
-    pub exit: i32,
-    pub tail: String,
-    pub elapsed_ms: u64,
-}
-
 /// `image_source` for an image the node built from the repository's Dockerfile.
 pub const REPOSITORY_DOCKERFILE: &str = "repository Dockerfile";
 /// An image built from the entry's `build` steps on the stock base.
@@ -940,67 +931,6 @@ pub async fn prepare(
         command: plan.command.clone(),
         elapsed_ms: started.elapsed().as_millis() as u64,
     })
-}
-
-/// Run operator-selected candidate verification in a fresh restricted command.
-/// The caller supplies commands from node policy, never from repository files
-/// or an agent tool request; the candidate workspace gets no broker credential.
-pub async fn verify(
-    backend: &dyn Backend,
-    workspace: &Workspace,
-    prepared: &PreparedEnvironment,
-    commands: &[String],
-) -> Result<Vec<Verification>, EnvironmentError> {
-    let runner = backend.runner(Vec::new());
-    let mut result = Vec::new();
-    for (n, command) in commands.iter().enumerate() {
-        if command.trim().is_empty() {
-            continue;
-        }
-        let started = Instant::now();
-        let output = runner
-            .run_capture(RunnerCommand {
-                argv: vec!["sh".into(), "-lc".into(), command.clone()],
-                env: Vec::new(),
-                secret_env: Default::default(),
-                mounts: vec![
-                    workspace.mount("/work", true),
-                    Mount::volume(prepared.cache_volume.clone(), "/cache", true),
-                ],
-                workdir: Some("/work".into()),
-                image: Some(prepared.image.clone()),
-                name: crate::config::resource_name(&format!("verify-{}-{n}", workspace.id)),
-                labels: RunLabels::of(RunKind::Check),
-            })
-            .await
-            .inspect_err(|_| {
-                crate::telemetry::telemetry().check_finished(
-                    "verify",
-                    None,
-                    "interrupted",
-                    Some(started.elapsed()),
-                )
-            })
-            .map_err(|e| EnvironmentError::Runtime(e.to_string()))?;
-        crate::telemetry::telemetry().check_finished(
-            "verify",
-            None,
-            if output.status.success() {
-                "passed"
-            } else {
-                "failed"
-            },
-            Some(started.elapsed()),
-        );
-        result.push(Verification {
-            command: command.clone(),
-            ok: output.status.success(),
-            exit: output.status.code().unwrap_or(-1),
-            tail: tail(&[output.stdout, output.stderr].concat()),
-            elapsed_ms: started.elapsed().as_millis() as u64,
-        });
-    }
-    Ok(result)
 }
 
 fn inspect_devcontainer(workspace: &Path) -> Result<Option<String>, EnvironmentError> {

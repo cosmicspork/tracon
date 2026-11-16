@@ -167,11 +167,6 @@ impl Config {
         }
     }
 
-    /// [`Config::apply_live_at`] at the node's own `node.toml`.
-    pub fn apply_live(&self, newer: &Config, hash: &str) {
-        self.apply_live_at(&super::Config::config_path(), newer, hash);
-    }
-
     /// What an edit of the file left, applied to this running node.
     pub fn apply_edit(&self, outcome: &edit::EditOutcome) {
         self.apply_edit_at(&super::Config::config_path(), outcome);
