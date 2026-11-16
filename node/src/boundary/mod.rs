@@ -592,6 +592,61 @@ pub fn remove_directory_volume(root: &std::path::Path, volume: &str) -> Result<(
     }
 }
 
+/// A volume a running sandbox holds is its, not the node's copy: as a
+/// runtime refuses to replace or remove a volume a container mounts.
+pub(crate) fn refuse_live(volume: &str) -> Result<(), BoundaryError> {
+    match crate::runner::sandbox_files::is_live(volume) {
+        true => Err(BoundaryError::Other(format!(
+            "volume {volume} is in use by a running sandbox"
+        ))),
+        false => Ok(()),
+    }
+}
+
+/// Copy a staging tree into a volume the node keeps. A check's copy of an
+/// immutable snapshot is the snapshot itself, sent straight into its
+/// sandbox; nothing reads a check's changes back.
+pub(crate) fn import_into_store(
+    store: &crate::runner::sandbox_files::FilesStore,
+    volume: &str,
+    source: &std::path::Path,
+) -> Result<(), BoundaryError> {
+    use crate::runner::sandbox_files as files;
+    refuse_live(volume)?;
+    let done = match files::is_check(volume) {
+        true => crate::workspace::validate_tree(source)
+            .map_err(files::FilesError::from)
+            .and_then(|()| store.alias(volume, source)),
+        false => store.import(volume, source),
+    };
+    done.map_err(|e| BoundaryError::Other(format!("copy into {volume}: {e}")))
+}
+
+/// Export a volume the node keeps: from the sandbox holding it while one
+/// runs, else the node's copy. Checked either way before anything reads it.
+pub(crate) async fn export_from_store(
+    store: &crate::runner::sandbox_files::FilesStore,
+    volume: &str,
+    destination: &std::path::Path,
+    checkout: bool,
+) -> Result<(), BoundaryError> {
+    let failed = |e: crate::runner::sandbox_files::FilesError| {
+        BoundaryError::Other(format!("copy out of {volume}: {e}"))
+    };
+    match crate::runner::sandbox_files::export_live(volume, destination, checkout).await {
+        Some(exported) => exported.map(|_| ()).map_err(failed)?,
+        None => {
+            let store = store.clone();
+            let (volume, destination) = (volume.to_string(), destination.to_path_buf());
+            tokio::task::spawn_blocking(move || store.export(&volume, &destination, checkout))
+                .await
+                .map_err(|e| BoundaryError::Other(e.to_string()))?
+                .map_err(failed)?
+        }
+    }
+    crate::workspace::validate_tree(destination).map_err(|e| BoundaryError::Other(e.to_string()))
+}
+
 fn check_volume_names(names: &[&str]) -> Result<(), BoundaryError> {
     for volume in names {
         if volume.is_empty() || volume.contains('/') || volume.contains("..") {
