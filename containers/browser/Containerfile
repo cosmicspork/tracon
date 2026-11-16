@@ -7,4 +7,4 @@
 # Upstream's entrypoint (`/headless-shell/run.sh`) runs socat on 0.0.0.0:9222
 # in front of Chrome, so the bundle's `run` starts Chrome itself, bound to
 # loopback; `browser.yml` smoke-tests that it listens nowhere else.
-FROM docker.io/chromedp/headless-shell:158.0.8127.2@sha256:84fc19d85ada48c6bfa850cb648f01a9f93153872a9a405ea322d79fcc98ef3a
+FROM docker.io/chromedp/headless-shell:158.0.8127.18@sha256:830fa77e0602cb42e5cb2cbd9237ba27b649ad69d5fb82b54713aac8b7ab4f29
