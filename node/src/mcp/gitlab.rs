@@ -15,6 +15,7 @@
 
 use serde_json::{json, Value};
 
+use super::tail;
 use crate::{broker::SharedBroker, mcp::CallContext};
 
 pub const CREDENTIAL: &str = "glab";
@@ -1126,18 +1127,6 @@ fn names_production(variables: &Value) -> Option<&str> {
                 .is_some_and(|value| value.to_ascii_lowercase().contains("production"))
         })
         .map(|v| v["key"].as_str().unwrap_or("?"))
-}
-
-/// The last `max` bytes of a log, cut on a character boundary.
-fn tail(log: &str, max: usize) -> (&str, bool) {
-    if log.len() <= max {
-        return (log, false);
-    }
-    let mut start = log.len() - max;
-    while !log.is_char_boundary(start) {
-        start += 1;
-    }
-    (&log[start..], true)
 }
 
 fn iid(args: &Value) -> Result<i64, String> {

@@ -3042,6 +3042,18 @@ fn tool_result(value: &Value, is_error: bool) -> Value {
     json!({ "content": [{ "type": "text", "text": text }], "isError": is_error })
 }
 
+/// The last `max` bytes of a log, cut on a character boundary.
+pub(super) fn tail(log: &str, max: usize) -> (&str, bool) {
+    if log.len() <= max {
+        return (log, false);
+    }
+    let mut start = log.len() - max;
+    while !log.is_char_boundary(start) {
+        start += 1;
+    }
+    (&log[start..], true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
