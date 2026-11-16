@@ -60,7 +60,7 @@ Needed for daily use, but not blocking it today.
 **Plugins, first.** Companions run beside the node today: workboard and hoja are loopback
 apps that agents reach around it, so a caller is whoever it claims to be, their approval
 cards sit in a second queue, and the operator starts their processes by hand. Brokered
-tools are compiled in, so the node carries Jira's ADF and wiki markup. A plugin is a
+tools are compiled in, so the node carries Jira's wiki markup and Jira-specific cards. A plugin is a
 separate executable, optionally with a static UI, published as a GitHub release in a
 fixed shape. The node installs and updates one only on the operator's approval, pinned
 by digest; supervises one process per plugin and channel; brokers its tools under policy
@@ -73,7 +73,7 @@ review and publication rest on them.
 - [ ] Jira extracted to its own repository as a standalone CLI that also ships as a
       plugin: writing tools with a preview and a staleness check, formats converted to and
       from Markdown by the plugin that owns them, and one plugin calling another through
-      the node (workboard's refresh). The node's Jira module, ADF handling and wiki
+      the node (workboard's refresh). The node's Jira module and the interface's wiki
       renderer go.
 - [ ] Approval cards raised by a plugin, with a word-diff format (hoja).
 - [ ] Plugin UIs served by the node, isolated from its origin (workboard, hoja).
