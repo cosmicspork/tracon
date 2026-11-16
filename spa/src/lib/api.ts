@@ -33,7 +33,6 @@ import type {
   MeshState,
   ModelOption,
   NodeConfig,
-  RepoEntry,
   RepoEnvironments,
   RecipeOffer,
   RecipeOfferResult,
@@ -343,7 +342,6 @@ export const api = {
     }
     return upload<{ workspace_id: string; files: number }>('/api/workspaces/import', form)
   },
-  exportWorkspace: (id: string) => call<{ workspace_id: string; exported: boolean }>('POST', `/api/workspaces/${id}/export`),
   sessions: () => call<Session[]>('GET', '/api/sessions'),
   session: (id: string) =>
     call<{
@@ -467,7 +465,6 @@ export const api = {
   setBudget: (id: string, budgetTokens: number) =>
     call<void>('POST', `/api/sessions/${id}/budget`, { budget_tokens: budgetTokens }),
   stop: (id: string) => call<void>('POST', `/api/sessions/${id}/stop`),
-  kill: (id: string) => call<void>('POST', `/api/sessions/${id}/kill`),
   /** Refuse every external harness on a channel until started again. */
   externalStop: (channel: string) =>
     call<void>('POST', `/api/external/${encodeURIComponent(channel)}/stop`),
@@ -706,7 +703,6 @@ export const api = {
     ),
   decidePromotion: (id: string, verdicts: Record<string, PromotionVerdict>) =>
     call<{ state: string }>('POST', `/api/promotions/${id}/verdict`, { verdicts }),
-  batchPromotions: () => call<{ created: string[] }>('POST', '/api/promotions/batch'),
   // Providers: connect through the harness's own login, paste the code back.
   credentials: () => call<{ credentials: CredentialSummary[] }>('GET', '/api/credentials'),
   importCredentials: (toml: string) =>
@@ -854,16 +850,6 @@ export const api = {
       its `[mesh] admin_peers`. */
   createProvider: (body: { name: string; upstream: string; shape: string; credential: string; login?: string | null }) =>
     call<{ created: string; restart_required: boolean }>('POST', '/api/providers', body),
-  connectProvider: (name: string, channels: string[], localCallback = false, share = true) =>
-    call<ProviderConnectResult>('POST', `/api/providers/${name}/connect`, {
-      channels,
-      local_callback: localCallback,
-      share,
-    }),
-  providerCode: (name: string, code: string) =>
-    call<void>('POST', `/api/providers/${name}/code`, { code }),
-  disconnectProvider: (name: string) => call<void>('POST', `/api/providers/${name}/disconnect`),
-  /** The channels a connected provider on the serving node serves. */
   /** Change the channels one of a provider's sign-ins serves: the one held
       under `signIn`, or the only one when it is empty. */
   setProviderChannels: (name: string, channels: string[], signIn = '') =>
@@ -908,7 +894,6 @@ export const api = {
   cancelOperatorQuestion: (id: string) =>
     call<{ cancelled: boolean }>('POST', `/api/operator/questions/${id}/cancel`),
   operatorIssues: () => call<{ issues: OperatorIssue[] }>('GET', '/api/operator/issues'),
-  operatorIssue: (id: string) => call<{ issue: OperatorIssue }>('GET', `/api/operator/issues/${id}`),
   publishOperatorIssue: (id: string) =>
     call<{ published: boolean; url: string }>('POST', `/api/operator/issues/${id}/publish`),
   discardOperatorIssue: (id: string, reason?: string) =>
@@ -916,11 +901,6 @@ export const api = {
       'POST',
       `/api/operator/issues/${id}/discard`,
       { reason: reason?.trim() || null },
-    ),
-  operatorNotification: (id: string) =>
-    call<{ notification_id: string; attempts: unknown[]; receipt: string }>(
-      'GET',
-      `/api/operator/notifications/${id}`,
     ),
   reconcileOperatorIssue: (id: string) =>
     call<{ reconciled: boolean; state: string }>('POST', `/api/operator/issues/${id}/reconcile`, {
@@ -952,11 +932,6 @@ export const api = {
   /** The channel's projects by name, and how many items have none. */
   projects: (channel: string) =>
     call<{ projects: Project[]; none: { open: number; total: number } }>('GET', `/api/projects?${new URLSearchParams({ channel })}`),
-  workReady: (channel: string, project_id?: string) => {
-    const q = new URLSearchParams({ channel })
-    if (project_id) q.set('project_id', project_id)
-    return call<{ items: WorkView[] }>('GET', `/api/work/ready?${q}`)
-  },
   workItem: (id: string) =>
     call<{
       item: WorkView | null
