@@ -28,7 +28,7 @@ waits until its absence is felt in real work.
 
 One configuration is what daily use runs on, and what a defect has to be in to enter
 **Now**: the desktop app, on Linux with rootless Podman or on macOS with Apple
-Containerization, Claude Code as the managed harness, a single node. Everything else — the native harness, the Kubernetes runtime, the hub and mesh, the installed phone app, handoff between nodes — is built and
+Containerization, Claude Code as the managed harness, a single node. Everything else — the native harness, the Kubernetes runtime, the DigitalOcean sandbox provider, the hub and mesh, the installed phone app, handoff between nodes — is built and
 tested but *experimental* until that configuration is boring. The homelab node keeps running the
 hub and serving the phone; work on those surfaces is deferred, not removed.
 
@@ -48,36 +48,42 @@ the one exception is `tracon-agent`, a separate harness binary run inside the bo
 
 ## Now — start, build, ship from one node
 
-Everything found on the live runs through 2026-10-08, in the 0.29.0 screen audit and in
-the 2026-10-10 validation of `main` on the node has landed (#419–#434, #439–#446, #449).
-The audit's states stay in `spa/scripts/ui-audit.mjs`; `--state <name>` reproduces one.
-
-The live runs of 2026-10-15 to 2026-10-17 found these, each tracked as an issue with the
-run that hit it:
-
-- [ ] Sessions start from a fresh forge clone of the default branch, and host checkouts
-      stop being a session source (#558). The first part, syncing the managed clone at
-      every start (#557), is in review.
-- [ ] Reviews: authorship judged only on the commits an update adds (#549); a signed commit
-      shipped as written, and the operator shown what ships (#551); a continued session
-      keeping its review in revision (#515); reconciling a review whose PR was opened
-      outside the node (#523); evidence naming the image a check actually ran in (#518).
-- [ ] Credentials and repositories: `credential rm` reaching the running node (#555); a
-      prefix in a credential's `repos` for a forge group (#553); `repo set
-      --prepare-credential` (#554); `pipeline_list_by_sha` allowed with the other reads
-      (#550).
-- [ ] An external harness adding a work item bound to its project (#510), and a peer
-      session's questions answerable from this node (#521).
+Nothing is open. Everything the live runs found through 2026-10-17 has landed, and so
+has the move of every runtime onto the sandbox protocol (0.47.0–0.51.1). Parts of that
+move have not been through a real task yet, such as a session placed on DigitalOcean from
+a template a peer built; each enters here when real work hits it.
 
 ## Next — the working loop, made comfortable
 
 Needed for daily use, but not blocking it today.
+
+**Plugins, first.** Companions run beside the node today: workboard and hoja are loopback
+apps that agents reach around it, so a caller is whoever it claims to be, their approval
+cards sit in a second queue, and the operator starts their processes by hand. Brokered
+tools are compiled in, so the node carries Jira's ADF and wiki markup. A plugin is a
+separate executable, optionally with a static UI, published as a GitHub release in a
+fixed shape. The node installs and updates one only on the operator's approval, pinned
+by digest; supervises one process per plugin and channel; brokers its tools under policy
+with a signed caller context; lends it credentials; and draws every approval card it
+raises. It is not an in-process runtime: a plugin is trusted code the operator chose,
+run on the host as consulta's sidecar is now. `gh` and `glab` stay built in, because
+review and publication rest on them.
+
+- [ ] The contract, install, update and supervision, proven by moving consulta out.
+- [ ] Jira extracted to its own repository as a standalone CLI that also ships as a
+      plugin: writing tools with a preview and a staleness check, formats converted to and
+      from Markdown by the plugin that owns them, and one plugin calling another through
+      the node (workboard's refresh). The node's Jira module, ADF handling and wiki
+      renderer go.
+- [ ] Approval cards raised by a plugin, with a word-diff format (hoja).
+- [ ] Plugin UIs served by the node, isolated from its origin (workboard, hoja).
 
 **Sessions and accounting**
 
 - [ ] While a tool call runs, its transcript line shows the tail of its output. The frame
       carries it (`tool_update.output`, #436), and `tracon-agent` streams its shell's
       (#622); Claude Code does not stream a running call's output yet.
+
 **What the boundary defeats, and what replaces it.** The harnesses offer tools the
 isolation silently breaks — the proxy answers 403, the agent sees a network error and
 retries variations. Each item below is a brokered replacement on the node, shaped like
@@ -129,6 +135,17 @@ hit on a real task.
 
 **Review and publication**
 
+- [ ] **External harnesses run their checks through the node.** An agent outside the
+      boundary tests with the Dev Container CLI today, which keeps a Podman machine
+      running on the Mac and is a second, unbrokered way to run containers. `[external]
+      run_checks` becomes `run_containers` (the old key read, with a warning, for one
+      release), and one switch turns on both the checks behind an external submission and
+      a new external `check_run(worktree, checks?, command?)`. It snapshots the worktree
+      as `submit_review` does and runs the configured checks, or any one command, in the
+      repository's image with the prepared tree, a read-only cache and no network; its
+      output goes back to the caller and is attached to nothing. A failed check shows on
+      the review card and does not refuse the submission. A repository with no `[[repo]]`
+      entry is refused with a pointer to `repo_setup_draft`.
 - [ ] **Checks start warm.** A required check still prepares from the repository's base
       cache, so tracon's `just check` compiles the workspace twice from nothing (clippy, then
       nextest) and runs past five minutes on this machine. The session cache (#390) is not
@@ -160,9 +177,9 @@ runs it, and it stays experimental until it has done a week of real work.
 
 - [x] Phase 0, standalone: the loop, Chat Completions, six tools with hashline anchors,
       accepted against local models (#602).
-- [x] Phase 1, under the node: `adapter/native.rs`, `containers/harness-native/`, the
-      JSON-RPC protocol with `seq`-numbered events, permission requests and per-request
-      `usage` matched against the gateway's count (#603, #604, #609).
+- [x] Phase 1, under the node: `adapter/native.rs`, the JSON-RPC protocol with
+      `seq`-numbered events, permission requests and per-request `usage` matched against
+      the gateway's count (#603, #604, #609).
 - [x] Phase 2, reliability: restore after a kill, retry, compaction (#611, #619, #620).
       Phase 3, the OpenAI API, was dropped: local models and the Codex subscription cover
       the use.
@@ -200,7 +217,8 @@ wait until **Now** and **Next** have made a day's work unremarkable.
 
 **Screens, the rest of the 0.29.0 audit**
 
-- [ ] The polish items and nits left after #436, reproducible from the audit's states: the
+- [ ] The polish items and nits left after #436, reproducible from the audit's states
+      (`spa/scripts/ui-audit.mjs --state <name>`): the
       Settings layouts (the exhaustion policy row, meters, the phone section nav, clipped
       identities), the Documents screens (browser-default inputs on import and transfer,
       grey errors, duplicated actions), text formatting (missing spaces after conditional
@@ -353,19 +371,22 @@ Kept as intent, off the plan until the supported configuration has earned them.
   recipes for recurring procedures; batches with dependencies and one completion report;
   bounded scheduled chores through the existing supervisor; a labelled demonstration mode.
   Sequence when revisited: reliability, then profiles and effective authority, then one
-  proven customization, then triggers. No workflow language, no plugin runtime.
+  proven customization, then triggers. No workflow language, and no plugin runtime in the
+  node: plugins (see Next) are separate processes it supervises.
 - **Retrieval reranker:** when existing retrieval proves insufficient.
 - **Client terminal:** a shell in a session's workspace from the interface. OpenCode's
   PTY capability covered it and went with OpenCode; wait until one is missed.
 - **`cr-sqlite`:** only if real multi-writer convergence requires it.
 - **Stacked MR automation:** decide whether stacks are preferable to feature flags first.
-- **General dashboard/plugin system:** only after isolated reports and views prove
+- **General dashboard system:** only after plugin UIs and isolated reports prove
   insufficient.
 
 ## Out of scope
 
 - Multi-user tenancy or a team product.
 - Federated work marketplaces, reputation scores or agent organization charts as product goals.
+- Plugins loaded into the node's process. A plugin is an executable the node supervises
+  and brokers; it never runs in the node or draws its approval surface.
 - A model/agent loop inside the node. `tracon-agent` runs its loop in the boundary, as
   `claude` does.
 - A general-purpose multi-harness framework: a few concrete adapters behind one trait, not a
