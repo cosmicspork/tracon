@@ -168,12 +168,17 @@ jobs:
   # The stock sandbox base image, for both architectures a sandbox runs on. Each
   # leg builds on a native runner (the toolchain install under emulation takes
   # several times as long) and pushes by digest alone; the job after it ties
-  # the two into one tagged index.
+  # the two into one tagged index. A failed leg leaves the other to finish, so
+  # only the failed one needs a rerun; the index still requires both digests.
+  #
+  # The layer cache lives in the registry beside the image, not in the Actions
+  # cache: this job runs once a release, and the Actions cache, kept full by
+  # the Rust jobs, evicts it in between and forces a cold build.
   sandbox-base:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
           - arch: amd64
@@ -202,8 +207,8 @@ jobs:
           file: containers/sandbox-base/Containerfile
           platforms: linux/${{ matrix.arch }}
           outputs: type=image,name=ghcr.io/cosmicspork/tracon-sandbox-base,push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=tracon-sandbox-base-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=tracon-sandbox-base-${{ matrix.arch }}
+          cache-from: type=registry,ref=ghcr.io/cosmicspork/tracon-sandbox-base:buildcache-${{ matrix.arch }}
+          cache-to: type=registry,ref=ghcr.io/cosmicspork/tracon-sandbox-base:buildcache-${{ matrix.arch }},mode=max,image-manifest=true,oci-mediatypes=true
       - name: Record the digest
         run: |
           mkdir -p "$RUNNER_TEMP/digests"
