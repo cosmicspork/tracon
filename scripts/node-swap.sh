@@ -130,10 +130,15 @@ stopped=0
 trap '[ "$stopped" = 0 ] || echo "node-swap: the node is stopped; \`just node-release\` starts the release again (add \`restore\` to restore the state backup too)" >&2' EXIT
 
 # Sessions the node supervises. External harnesses only lose their MCP
-# connection over a restart, so they do not hold it up.
+# connection over a restart, so they do not hold it up. The queue lists the
+# whole mesh, so only this node's own sessions count; when its id cannot be
+# read, every session does.
 managed_running() {
+  local node
+  node=$(curl -fsS --max-time 3 "$url/api/node" 2>/dev/null | jq -r '.id // empty') || node=""
   curl -fsS --max-time 3 "$url/api/queue" 2>/dev/null |
-    jq '[.running[]? | select(.state != "closed" and .harness_id != "external")] | length' ||
+    jq --arg node "$node" '[.running[]? | select(.state != "closed" and .harness_id != "external")
+      | select($node == "" or .node_id == $node)] | length' ||
     echo 0
 }
 
