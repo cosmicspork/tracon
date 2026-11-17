@@ -105,6 +105,21 @@ const PRESENTATIONS: &[(&str, &str, &[&str], &[&str])] = &[
         &[],
     ),
     (super::services::START, "markdown", &[], &["name"]),
+    // A plugin is installed as published or not: the card's summary is the
+    // node's account of the build, shown, and nothing of it is edited.
+    (
+        crate::store::approvals::PLUGIN_INSTALL_TOOL,
+        "markdown",
+        &["summary"],
+        &[
+            "name",
+            "repo",
+            "version",
+            "digest",
+            "from_version",
+            "summary",
+        ],
+    ),
     // A trial held to build its Dockerfile builds what the card shows.
     (
         super::setup::TRY,

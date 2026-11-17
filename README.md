@@ -999,6 +999,48 @@ the caller, not put to you. `GET /api/mcp-servers` lists each server, whether it
 could be listed, and how a call to each tool is answered now. Only streamable HTTP
 is supported; a stdio server is not.
 
+### Plugins
+
+A plugin is a program, optionally with a static UI, that a repository publishes on
+GitHub in a fixed shape, and that the node installs on your approval. These are the
+node's own, not the harness plugins a channel's launch manifest installs into a
+session. Each GitHub release carries one `<name>-<version>-<target>.tar.gz` per target
+(`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`) and a
+`checksums.txt` that lists them. An archive holds `tracon-plugin.toml`, `bin/`, and
+optionally `ui/`, and nothing else. The manifest (contract 1) gives the plugin's name,
+version, the program it runs under `bin/`, the broker credentials it may be lent, the
+tools it offers, its UI, the hosts it says it reaches, and the document formats it owns.
+An unknown key is refused.
+
+`tracon plugin add owner/repo` fetches the latest release for this node's target and
+checks the archive against `checksums.txt`. It refuses an owner outside `[plugins]
+owners` (`cosmicspork` by default) before asking GitHub anything. It also refuses an
+archive whose entries are not plain files and directories, and a manifest that does not
+validate or does not match the archive's name. Then it stages the build under
+`<state dir>/plugins/bin/<name>/<version>-<digest>/` and raises an **install card** on
+the channel you name with `--channel` (or `[session] default_channel`). The card lists
+the tools, the credentials (marking those lent only to a call from an approved card),
+the UI, the egress it declares (shown, not enforced) and the formats, and pins the
+archive's sha256. Nothing is installed until you allow it. Allowing it is an admin
+action, so from off the node's machine a passkey confirms it. Before the build becomes
+the active one, the node checks it again on disk. `tracon plugin add ./dist/<archive>.tar.gz` stages an archive
+you hold, for testing the shipped shape on a scratch node. It is pinned by its own
+digest and held to no owner, since you are its source. A plugin that declares a format
+another plugin owns is refused, naming the owner. So is one named like an
+`[[mcp_server]]`, since their tools share the `<name>__<tool>` names.
+
+`tracon plugin update [name]` raises a card for a newer release, showing what changed in
+the manifest and the release's notes, while the installed version stays active.
+`tracon plugin rollback <name>` goes back to the version before, which was approved when
+it was installed, so no card is raised. `tracon plugin rm <name>` removes its builds and
+keeps its data under `<state dir>/plugins/data/<name>/`; `--purge` deletes that too.
+Rolling back and removing are admin actions. `tracon plugin ls` lists what is installed,
+the version before it, and any build waiting on a card.
+
+This release installs plugins and runs none of them yet: the node does not start a
+plugin or offer its tools. `[[plugin]]` entries are read and checked now so they are in
+place when it does.
+
 ### Asking, pinging, and complaining
 
 Three tools let an agent reach you without pretending a question is a permission.
@@ -1269,6 +1311,7 @@ and revoked the moment the hub loses that key.
 | `tracon skill import <dir[#git-rev]>\|ls\|rm` | skill packages in a channel's launch manifest |
 | `tracon memory ls\|add\|rm\|recall\|batch` | memories, and the promotion batch on demand |
 | `tracon work add\|ls\|ready\|show\|edit\|close\|dep\|rm` | the ledger; `--project` and `--priority` take names (`[work]` names the priorities) |
+| `tracon plugin add <owner/repo\|archive> [--channel]\|ls\|update [name]\|rollback <name>\|rm <name> [--purge]` | plugins: fetched and staged, then installed once you allow the install card |
 | `tracon repo ls\|show\|set\|rm\|build [repo]` | the `[[repo]]` entries (also **Settings → Repositories**), and building a repository's image from its default-branch Dockerfile |
 | `tracon policy keygen\|init\|sign\|push\|show` | the policy bundle |
 | `tracon metrics [--channel] [--days]`, `provenance <sha>` | what happened |
@@ -1706,6 +1749,18 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
                                     # is asked unless a policy rule allows `<name>__<tool>` by name
 # timeout_secs = 60                 # how long one call may take
 
+# [plugins]
+# owners = ["cosmicspork"]          # GitHub owners whose releases `tracon plugin add` may install;
+                                    # changed at the node only. A local archive is not held to it
+
+# [[plugin]]                        # your settings for an installed plugin, by name; may come before
+                                    # the install. Read and checked now, used once plugins run
+# name = "sql-review"
+# idle_timeout_secs = 900           # how long it may sit idle before it is stopped; 0 is the default
+# allow = ["query"]                 # by the plugin's own tool names, as [[mcp_server]]'s lists
+# ask = []
+# deny = ["drop_*"]
+
 [providers.anthropic]               # anthropic, openai and openai-codex are built in; add others the same way
 credential = "anthropic"
 upstream = "https://api.anthropic.com"
@@ -2011,7 +2066,7 @@ action the node reads it for, not one already dispatched.
 | | macOS | Linux |
 |---|---|---|
 | `node.toml` | `~/Library/Application Support/tracon/` | `~/.config/tracon/` |
-| database, credentials, identity, harness volume, managed repos, scratch | `~/Library/Application Support/tracon/` | `~/.local/state/tracon/` |
+| database, credentials, identity, harness volume, managed repos, plugins, scratch | `~/Library/Application Support/tracon/` | `~/.local/state/tracon/` |
 | harness socket | (TCP `127.0.0.1:7421`) | `$XDG_RUNTIME_DIR/tracon/harness.sock` |
 | the CLI, and the binary the service runs | `~/.local/bin/tracon` | `~/.local/bin/tracon` |
 | the service | `~/Library/LaunchAgents/com.tracon.node.plist`, logs in `~/Library/Logs/tracon.log` | `~/.config/systemd/user/tracon.service` |

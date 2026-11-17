@@ -146,7 +146,7 @@ fn state_of(h: &Harness, id: &str) -> String {
     h.store.get_approval(id).unwrap().unwrap().state
 }
 
-/// The three admin answers: which approval, and the option that allows it.
+/// The admin answers: which approval, and the option that allows it.
 fn admin_answers(h: &Harness) -> Vec<(&'static str, &'static str)> {
     approval(
         h,
@@ -169,10 +169,18 @@ fn admin_answers(h: &Harness) -> Vec<(&'static str, &'static str)> {
         "n1",
         json!({ "host": "example.org" }),
     );
+    approval(
+        h,
+        "plugin",
+        "plugin_install",
+        "n1",
+        json!({ "name": "sql-review", "version": "0.1.0", "repo": "cosmicspork/sql-review" }),
+    );
     vec![
         ("propose", "allow_once"),
         ("trial", "allow_once"),
         ("egress", "allow_repo"),
+        ("plugin", "allow_once"),
     ]
 }
 
@@ -195,6 +203,7 @@ async fn an_admin_answer_from_afar_needs_a_passkey_bound_to_it() {
         let expected = match id {
             "propose" => "Allow repository setup for /work/x",
             "trial" => "Build Dockerfile for /work/x with the network",
+            "plugin" => "Install plugin sql-review 0.1.0 from cosmicspork/sql-review",
             _ => "Save example.org to the repository's egress",
         };
         assert_eq!(summary, expected, "{id}: {refused}");

@@ -10,6 +10,7 @@ mod mcp;
 pub mod metrics;
 pub mod passkey;
 mod peer_admin;
+mod plugins;
 mod policy_admin;
 pub mod preview;
 pub mod push;
@@ -298,6 +299,18 @@ pub fn router(state: AppState) -> Router {
             "/api/channels",
             get(api::list_channels).post(api::create_channel),
         )
+        // Plugins: adding or updating one raises its install card; rolling
+        // back and removing are admin actions (`passkey::AdminAction`).
+        .route("/api/plugins", get(plugins::list).post(plugins::add))
+        .route(
+            "/api/plugins/archive",
+            post(plugins::add_archive).layer(DefaultBodyLimit::max(
+                crate::plugin::install::MAX_ARCHIVE_BYTES,
+            )),
+        )
+        .route("/api/plugins/{name}/update", post(plugins::update))
+        .route("/api/plugins/{name}/rollback", post(plugins::rollback))
+        .route("/api/plugins/{name}", delete(plugins::remove))
         .route("/api/repos/recent", get(api::recent_repos))
         .route("/api/repos/branches", get(api::repo_branches))
         .route("/api/repos/clone", post(api::clone_repo))

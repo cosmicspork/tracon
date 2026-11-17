@@ -38,6 +38,7 @@ pub mod operator;
 pub mod outcome;
 pub mod passkeys;
 pub mod pipeline_follow;
+pub mod plugins;
 pub mod policy_rollouts;
 pub mod publication;
 pub mod queued_prompt;

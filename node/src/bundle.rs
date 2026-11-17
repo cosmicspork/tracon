@@ -245,6 +245,126 @@ fn unpack(tarball: &Path, into: &Path, version: &str, arch: &str) -> Result<(), 
     Ok(())
 }
 
+/// How much one tarball may unpack to: a bound against an archive that
+/// inflates without end.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Limits {
+    pub entries: usize,
+    pub bytes: u64,
+}
+
+impl Limits {
+    /// No bound beyond the disk's: for an archive of the node's own release.
+    pub const NONE: Limits = Limits {
+        entries: usize::MAX,
+        bytes: u64::MAX,
+    };
+}
+
+/// Unpack `tarball` into `into`, refusing anything but directories and
+/// regular files under `root` (empty: anywhere plain), and more than
+/// `limits`. A file `keep_exec` names (by its path in the tarball) keeps
+/// whether the tarball marked it executable; every other file is 0644, and
+/// every directory 0755.
+pub(crate) fn unpack_tree(
+    tarball: &Path,
+    into: &Path,
+    root: &Path,
+    keep_exec: impl Fn(&Path) -> bool,
+    limits: Limits,
+) -> Result<(), BundleError> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let file = std::fs::File::open(tarball)?;
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    let malformed = |e: std::io::Error| BundleError::Malformed(e.to_string());
+    let (mut entries, mut bytes) = (0usize, 0u64);
+    for entry in archive.entries().map_err(malformed)? {
+        let mut entry = entry.map_err(malformed)?;
+        let path = entry.path().map_err(malformed)?.into_owned();
+        let path = path.strip_prefix("./").unwrap_or(&path).to_path_buf();
+        let kind = entry.header().entry_type();
+        if kind.is_pax_local_extensions() || kind.is_pax_global_extensions() {
+            continue;
+        }
+        // `./` itself, as `tar -C dir .` writes it.
+        if path.as_os_str().is_empty() && kind.is_dir() && root.as_os_str().is_empty() {
+            continue;
+        }
+        entries += 1;
+        if entries > limits.entries {
+            return Err(BundleError::Malformed(format!(
+                "the tarball holds more than {} entries",
+                limits.entries
+            )));
+        }
+        if !plain(&path) || !(path.starts_with(root) || root.starts_with(&path)) {
+            return Err(BundleError::Malformed(format!(
+                "the tarball holds {}",
+                path.display()
+            )));
+        }
+        let dest = into.join(&path);
+        if kind.is_dir() {
+            std::fs::create_dir_all(&dest)?;
+            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
+        } else if kind.is_file() {
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut out = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&dest)?;
+            let left = limits.bytes - bytes;
+            let copied = std::io::copy(&mut (&mut entry).take(left.saturating_add(1)), &mut out)?;
+            bytes += copied;
+            if copied > left {
+                return Err(BundleError::Malformed(format!(
+                    "the tarball unpacks to more than {} bytes",
+                    limits.bytes
+                )));
+            }
+            let executable =
+                keep_exec(&path) && entry.header().mode().map_err(malformed)? & 0o111 != 0;
+            let mode = if executable { 0o755 } else { 0o644 };
+            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(mode))?;
+        } else {
+            return Err(BundleError::Malformed(format!(
+                "{} is neither a file nor a directory",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The digest `checksums.txt` gives `name`: one `<sha256>  [*]<name>` line,
+/// and exactly one.
+pub(crate) fn digest_in_checksums(text: &str, name: &str) -> Result<String, BundleError> {
+    let mut found = None;
+    for line in text.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(digest), Some(named)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        if named.trim_start_matches('*') != name {
+            continue;
+        }
+        if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(BundleError::Malformed(format!(
+                "checksums.txt gives {name} no digest"
+            )));
+        }
+        if found.is_some() {
+            return Err(BundleError::Malformed(format!(
+                "checksums.txt lists {name} twice"
+            )));
+        }
+        found = Some(digest.to_ascii_lowercase());
+    }
+    found.ok_or_else(|| BundleError::Malformed(format!("checksums.txt does not list {name}")))
+}
+
 pub(crate) async fn download(
     client: &reqwest::Client,
     url: &str,
@@ -691,6 +811,27 @@ pub(crate) mod tests {
         );
         assert!(expected_digest(&format!("{digest}  other.tar.gz"), "t.tar.gz").is_err());
         assert!(expected_digest("nope", "t.tar.gz").is_err());
+    }
+
+    #[test]
+    fn checksums_txt_must_list_the_asset_once() {
+        let (a, b) = ("a".repeat(64), "B".repeat(64));
+        let text = format!("{a}  x.tar.gz\n{b} *y.tar.gz\n\n");
+        assert_eq!(digest_in_checksums(&text, "x.tar.gz").unwrap(), a);
+        assert_eq!(
+            digest_in_checksums(&text, "y.tar.gz").unwrap(),
+            "b".repeat(64)
+        );
+        assert!(digest_in_checksums(&text, "z.tar.gz")
+            .unwrap_err()
+            .to_string()
+            .contains("does not list z.tar.gz"));
+        let twice = format!("{text}{a}  x.tar.gz\n");
+        assert!(digest_in_checksums(&twice, "x.tar.gz")
+            .unwrap_err()
+            .to_string()
+            .contains("twice"));
+        assert!(digest_in_checksums("nope  x.tar.gz", "x.tar.gz").is_err());
     }
 
     #[test]

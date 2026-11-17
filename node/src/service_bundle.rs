@@ -226,49 +226,8 @@ pub fn verify_dir(dir: &Path, chrome: &str, arch: &str) -> Result<Manifest, Bund
 /// regular files under `<chrome>/<arch>/`. A file keeps whether it was
 /// executable, and nothing else of its mode.
 fn unpack(tarball: &Path, into: &Path, chrome: &str, arch: &str) -> Result<(), BundleError> {
-    use std::os::unix::fs::PermissionsExt as _;
     let root = Path::new(chrome).join(arch);
-    let file = std::fs::File::open(tarball)?;
-    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
-    let malformed = |e: std::io::Error| BundleError::Malformed(e.to_string());
-    for entry in archive.entries().map_err(malformed)? {
-        let mut entry = entry.map_err(malformed)?;
-        let path = entry.path().map_err(malformed)?.into_owned();
-        let path = path.strip_prefix("./").unwrap_or(&path).to_path_buf();
-        let kind = entry.header().entry_type();
-        if kind.is_pax_local_extensions() || kind.is_pax_global_extensions() {
-            continue;
-        }
-        if !crate::bundle::plain(&path) || !(path.starts_with(&root) || root.starts_with(&path)) {
-            return Err(BundleError::Malformed(format!(
-                "the tarball holds {}",
-                path.display()
-            )));
-        }
-        let dest = into.join(&path);
-        if kind.is_dir() {
-            std::fs::create_dir_all(&dest)?;
-            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
-        } else if kind.is_file() {
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let mut out = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&dest)?;
-            std::io::copy(&mut entry, &mut out)?;
-            let executable = entry.header().mode().map_err(malformed)? & 0o111 != 0;
-            let mode = if executable { 0o755 } else { 0o644 };
-            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(mode))?;
-        } else {
-            return Err(BundleError::Malformed(format!(
-                "{} is neither a file nor a directory",
-                path.display()
-            )));
-        }
-    }
-    Ok(())
+    crate::bundle::unpack_tree(tarball, into, &root, |_| true, crate::bundle::Limits::NONE)
 }
 
 /// The browser bundle of `chrome` for `arch` under `state_dir`, fetched from

@@ -486,6 +486,10 @@ pub fn route_summary(method: &Method, path: &str) -> Option<String> {
         ("POST", ["api", "reviews", _, "publication", "reconcile"]) => {
             "Record a review as published at a change opened by hand".to_string()
         }
+        ("POST", ["api", "plugins", name, "rollback"]) => {
+            format!("Roll plugin {name} back to its previous version")
+        }
+        ("DELETE", ["api", "plugins", name]) => format!("Remove plugin {name}"),
         ("POST", ["api", "admin", "restart"]) => "Restart the node".to_string(),
         ("DELETE", ["api", "admin", "restart"]) => "Withdraw the node's restart".to_string(),
         ("POST", ["api", "passkeys", "register", "options"]) => "Add a passkey".to_string(),

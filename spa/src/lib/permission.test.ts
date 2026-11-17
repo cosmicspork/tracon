@@ -61,6 +61,7 @@ test('a peer leaves the answers that need the owning node’s passkey to that no
   const held = (tool: string) => ({ raw_input: JSON.stringify({ tool, arguments: {}, approval_id: 'a1' }) })
   expect(stepUpOptions(held('repo_setup_propose'))).toEqual(['allow_once'])
   expect(stepUpOptions(held('repo_setup_try'))).toEqual(['allow_once'])
+  expect(stepUpOptions(held('plugin_install'))).toEqual(['allow_once'])
   expect(stepUpOptions(held('request_egress'))).toEqual(['allow_repo'])
   expect(stepUpOptions(held('prepare_egress'))).toEqual(['allow_repo'])
   expect(stepUpOptions(held('pr_comment'))).toEqual([])

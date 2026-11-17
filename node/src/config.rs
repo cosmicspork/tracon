@@ -51,6 +51,10 @@ pub struct Config {
     /// MCP servers outside the node whose tools sessions reach through the
     /// node's own MCP endpoint, each tool decided allow, ask or deny.
     pub mcp_server: Vec<McpServer>,
+    /// Where plugins may be installed from.
+    pub plugins: Plugins,
+    /// The operator's settings for each installed plugin, by name.
+    pub plugin: Vec<PluginEntry>,
     /// Model providers the gateway fronts, by name.
     pub providers: std::collections::BTreeMap<String, Provider>,
     /// The providers `node.toml` itself names, as opposed to the ones
@@ -464,6 +468,100 @@ pub fn validate_services(services: &[Service]) -> Result<(), String> {
     Ok(())
 }
 
+/// `[plugins]`: where the node may install plugins from.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct Plugins {
+    /// GitHub owners whose releases `tracon plugin add <owner>/<repo>` may
+    /// install. A local archive the operator hands the node is not held to
+    /// it.
+    pub owners: Vec<String>,
+}
+
+impl Default for Plugins {
+    fn default() -> Self {
+        Self {
+            owners: vec!["cosmicspork".into()],
+        }
+    }
+}
+
+/// One `[[plugin]]`: the operator's settings for an installed plugin, by
+/// its name. An entry may name a plugin not installed yet.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct PluginEntry {
+    pub name: String,
+    /// How long the plugin's process may sit idle before the node stops it.
+    /// Zero takes the default.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub idle_timeout_secs: u64,
+    /// Tools, by the plugin's own names, that run without asking unless a
+    /// signed policy rule denies them. `*` matches any run of characters.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+    /// Tools always put to the operator, even when a policy rule allows them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ask: Vec<String>,
+    /// Tools refused outright. Deny wins over ask, and ask over allow.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<String>,
+}
+
+impl PluginEntry {
+    pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 900;
+
+    pub fn idle_timeout_secs(&self) -> u64 {
+        match self.idle_timeout_secs {
+            0 => Self::DEFAULT_IDLE_TIMEOUT_SECS,
+            n => n,
+        }
+    }
+}
+
+/// A GitHub owner name: letters, digits and single `-`, at most 39.
+fn github_owner_ok(owner: &str) -> bool {
+    (1..=39).contains(&owner.len())
+        && owner
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        && !owner.starts_with('-')
+        && !owner.ends_with('-')
+        && !owner.contains("--")
+}
+
+pub fn validate_plugins(plugins: &Plugins, entries: &[PluginEntry]) -> Result<(), String> {
+    for owner in &plugins.owners {
+        if !github_owner_ok(owner) {
+            return Err(format!(
+                "plugins.owners: {owner:?} is not a GitHub owner name"
+            ));
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for entry in entries {
+        let name = &entry.name;
+        if !namespace_name_ok(name) {
+            return Err(format!(
+                "plugin {name:?}: name must be 1-24 lowercase letters, digits or '-'"
+            ));
+        }
+        if !seen.insert(name) {
+            return Err(format!("plugin {name}: named twice"));
+        }
+        for (list, tools) in [
+            ("allow", &entry.allow),
+            ("ask", &entry.ask),
+            ("deny", &entry.deny),
+        ] {
+            if tools.iter().any(|t| t.trim().is_empty()) {
+                return Err(format!("plugin {name}: {list} has an empty entry"));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// One `[[mcp_server]]`: an MCP server outside the node, spoken to over
 /// streamable HTTP by the node alone. A session never learns its address or
 /// holds its credential; it sees the server's tools on the node's own MCP
@@ -534,19 +632,25 @@ const MCP_RESERVED_HEADERS: &[&str] = &[
     "mcp-protocol-version",
 ];
 
+/// A name tools are offered under as `<name>__<tool>`, an `[[mcp_server]]`'s
+/// or a plugin's: 1-24 lowercase letters, digits or `-`, not starting with
+/// `-`, so the tool's full name splits back.
+pub fn namespace_name_ok(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 24
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !name.starts_with('-')
+}
+
 /// A server's name is the prefix its tools are offered under and split back
 /// off by, so it is held to characters that cannot run into `__`.
 pub fn validate_mcp_servers(servers: &[McpServer]) -> Result<(), String> {
     let mut seen = std::collections::BTreeSet::new();
     for server in servers {
         let name = &server.name;
-        if name.is_empty()
-            || name.len() > 24
-            || !name
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-            || name.starts_with('-')
-        {
+        if !namespace_name_ok(name) {
             return Err(format!(
                 "mcp_server {name:?}: name must be 1-24 lowercase letters, digits or '-'"
             ));
@@ -3027,6 +3131,8 @@ impl Default for Config {
             live: ConfigHandle::default(),
             service: Vec::new(),
             mcp_server: Vec::new(),
+            plugins: Plugins::default(),
+            plugin: Vec::new(),
             providers: default_providers(),
             declared_providers: Default::default(),
             memory: Memory::default(),
@@ -3505,6 +3611,8 @@ impl Config {
         validate_services(&config.service)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_mcp_servers(&config.mcp_server)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        validate_plugins(&config.plugins, &config.plugin)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_doc_kinds(&config.docs.kind)
             .map_err(|error| format!("{}: {error}", path.display()))?;
@@ -4210,6 +4318,44 @@ mod tests {
         let parsed: Config = toml::from_str(text).unwrap();
         assert_eq!(parsed.mcp_server[0].allow, vec!["list_*".to_string()]);
         assert_eq!(parsed.mcp_server[0].timeout_secs(), 60);
+    }
+
+    #[test]
+    fn plugin_settings_are_checked_at_load() {
+        let text = "[plugins]\nowners = [\"cosmicspork\", \"acme-co\"]\n\n[[plugin]]\nname = \"sql-review\"\nallow = [\"query\"]\ndeny = [\"drop_*\"]\n";
+        let parsed: Config = toml::from_str(text).unwrap();
+        validate_plugins(&parsed.plugins, &parsed.plugin).unwrap();
+        assert_eq!(parsed.plugins.owners, ["cosmicspork", "acme-co"]);
+        assert_eq!(parsed.plugin[0].idle_timeout_secs(), 900);
+        assert_eq!(Config::default().plugins.owners, ["cosmicspork"]);
+        let ok = parsed.plugin[0].clone();
+        for (owners, entries, says) in [
+            (vec!["cosmic/spork"], vec![ok.clone()], "not a GitHub owner"),
+            (vec!["-x"], vec![ok.clone()], "not a GitHub owner"),
+            (
+                vec![],
+                vec![PluginEntry {
+                    name: "sql_review".into(),
+                    ..ok.clone()
+                }],
+                "name must be",
+            ),
+            (vec![], vec![ok.clone(), ok.clone()], "named twice"),
+            (
+                vec![],
+                vec![PluginEntry {
+                    ask: vec!["".into()],
+                    ..ok.clone()
+                }],
+                "ask has an empty entry",
+            ),
+        ] {
+            let plugins = Plugins {
+                owners: owners.into_iter().map(String::from).collect(),
+            };
+            let error = validate_plugins(&plugins, &entries).unwrap_err();
+            assert!(error.contains(says), "{error}");
+        }
     }
 
     #[test]
