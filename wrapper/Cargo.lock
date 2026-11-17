@@ -4383,6 +4383,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracon-attest"
+version = "0.51.2"
+dependencies = [
+ "futures-util",
+ "hex",
+ "reqwest 0.12.28",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
 name = "tracon-wrapper"
 version = "0.51.2"
 dependencies = [
@@ -4401,6 +4414,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-plugin-single-instance",
  "tokio",
+ "tracon-attest",
  "zbus",
 ]
 

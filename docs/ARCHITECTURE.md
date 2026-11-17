@@ -1968,6 +1968,12 @@ Every node serves the same embedded SPA; a client is a matter of shell.
   the CLI the unit runs, and after an update moves both onto the version it carries
   once no session is running. A node an earlier version spawned as its child is
   stopped once, before the service takes the port.
+- **An update is installed only with its build provenance verified.** Beside the
+  release digest, the app checks the GitHub attestation that `release.yml` on `main`
+  signed, with a digest-pinned `gh` it carries as a resource. The code around that
+  `gh` (the bundle fetch under a size cap, the exact policy flags, and a lookup of
+  an artifact's attestation by digest) is the `attest/` crate, shared with the node,
+  which is to verify plugin releases the same way.
 - **One window, and it is the privileged one.** The main window is the node's own
   interface, and it holds the commands that install the CLI, install updates and
   restart the node — commands the node itself must never have, because a session

@@ -1,0 +1,14 @@
+#!/bin/sh
+# Stands in for gh in attest/tests/verifier.rs. It records its arguments, one
+# per line, and a copy of the bundle it was given, beside the artifact (its
+# third argument), then behaves as the artifact's name asks.
+artifact=$3
+name=${artifact##*/}
+printf '%s\n' "$@" > "$artifact.argv"
+cp "$5" "$artifact.bundle"
+case "$name" in
+  *reject*) printf '  signature subject mismatch  \n' >&2; exit 1 ;;
+  *silent*) exit 3 ;;
+  *slow*) sleep 30 ;;
+esac
+exit 0

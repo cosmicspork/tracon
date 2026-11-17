@@ -23,6 +23,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tauri::{path::BaseDirectory, AppHandle, Manager};
 use tokio::{fs, io::AsyncWriteExt};
+use tracon_attest::Policy;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -62,11 +63,17 @@ const STAGED_MESSAGE: &str =
     "The downloaded app was not what the release describes; nothing was changed.";
 const PROVENANCE_MISMATCH_MESSAGE: &str =
     "The update provenance could not be verified; nothing was changed.";
-const RELEASE_REPOSITORY: &str = "cosmicspork/tracon";
-const RELEASE_WORKFLOW: &str = "cosmicspork/tracon/.github/workflows/release.yml";
+/// What an update's provenance must prove: built by the release workflow on
+/// `main`, on GitHub's own runners.
+const RELEASE_POLICY: Policy<'static> = Policy {
+    repo: "cosmicspork/tracon",
+    signer_workflow: Some("cosmicspork/tracon/.github/workflows/release.yml"),
+    source_ref: Some("refs/heads/main"),
+    deny_self_hosted_runners: true,
+};
 /// The provenance bundle is signed data but is still bounded before the
 /// bundled verifier parses it.
-const PROVENANCE_MAX_BYTES: u64 = 8 * 1024 * 1024;
+const PROVENANCE_MAX_BYTES: u64 = tracon_attest::BUNDLE_MAX_BYTES;
 const VERIFIER_RESOURCE: &str = "verifier/gh";
 
 /// The bundle being replaced, renamed aside so the running app keeps the code
@@ -824,68 +831,6 @@ where
     finish
 }
 
-/// Store the signed provenance bundle beside its subject. The bundle is not
-/// trusted until `gh` verifies it, so it has a strict size cap and never
-/// replaces an existing file.
-async fn download_provenance_bundle(
-    client: &reqwest::Client,
-    asset: &Asset,
-    path: &Path,
-) -> Result<(), String> {
-    match fs::remove_file(path).await {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(PROVENANCE_MISMATCH_MESSAGE.to_string()),
-    }
-    let mut output = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .await
-        .map_err(|_| PROVENANCE_MISMATCH_MESSAGE.to_string())?;
-
-    let transfer = async {
-        let response = client
-            .get(&asset.provenance_url)
-            .send()
-            .await
-            .map_err(|_| PROVENANCE_MISMATCH_MESSAGE.to_string())?
-            .error_for_status()
-            .map_err(|_| PROVENANCE_MISMATCH_MESSAGE.to_string())?;
-        if response
-            .content_length()
-            .is_some_and(|length| length > PROVENANCE_MAX_BYTES)
-        {
-            return Err(PROVENANCE_MISMATCH_MESSAGE.to_string());
-        }
-        let mut stream = response.bytes_stream();
-        let mut written = 0_u64;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|_| PROVENANCE_MISMATCH_MESSAGE.to_string())?;
-            written = written
-                .checked_add(chunk.len() as u64)
-                .filter(|length| *length <= PROVENANCE_MAX_BYTES)
-                .ok_or_else(|| PROVENANCE_MISMATCH_MESSAGE.to_string())?;
-            output
-                .write_all(&chunk)
-                .await
-                .map_err(|_| PROVENANCE_MISMATCH_MESSAGE.to_string())?;
-        }
-        output
-            .sync_all()
-            .await
-            .map_err(|_| PROVENANCE_MISMATCH_MESSAGE.to_string())?;
-        Ok(())
-    }
-    .await;
-
-    drop(output);
-    if transfer.is_err() {
-        let _ = fs::remove_file(path).await;
-    }
-    transfer
-}
-
 fn bundled_verifier(app: &AppHandle) -> Result<PathBuf, String> {
     let verifier = app
         .path()
@@ -909,36 +854,19 @@ async fn verify_release_provenance(
 ) -> Result<(), String> {
     let bundle = path.with_extension("intoto.jsonl");
     let verified = async {
-        download_provenance_bundle(client, asset, &bundle).await?;
-        let verifier = bundled_verifier(app)?;
-        let output = tokio::time::timeout(
-            CHECK_TIMEOUT,
-            tokio::process::Command::new(verifier)
-                .args(["attestation", "verify"])
-                .arg(&path)
-                .arg("--bundle")
-                .arg(&bundle)
-                .args([
-                    "--hostname",
-                    "github.com",
-                    "--repo",
-                    RELEASE_REPOSITORY,
-                    "--signer-workflow",
-                    RELEASE_WORKFLOW,
-                    "--source-ref",
-                    "refs/heads/main",
-                    "--deny-self-hosted-runners",
-                ])
-                .output(),
+        tracon_attest::download_bundle(
+            client,
+            &asset.provenance_url,
+            &bundle,
+            PROVENANCE_MAX_BYTES,
         )
         .await
-        .map_err(|_| PROVENANCE_MISMATCH_MESSAGE.to_string())?
         .map_err(|_| PROVENANCE_MISMATCH_MESSAGE.to_string())?;
-        output
-            .status
-            .success()
-            .then_some(())
-            .ok_or_else(|| PROVENANCE_MISMATCH_MESSAGE.to_string())
+        let verifier = bundled_verifier(app)?;
+        tracon_attest::Verifier::new(verifier, CHECK_TIMEOUT)
+            .verify_bundle(&path, &bundle, &RELEASE_POLICY)
+            .await
+            .map_err(|_| PROVENANCE_MISMATCH_MESSAGE.to_string())
     }
     .await;
     let _ = fs::remove_file(&bundle).await;
