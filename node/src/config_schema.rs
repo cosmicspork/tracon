@@ -302,6 +302,13 @@ pub const KEYS: &[KeySpec] = &[
     live("mcp_server.ask"),
     live("mcp_server.deny"),
     live("mcp_server.timeout_secs"),
+    // [plugins], [[plugin]]
+    live("plugins.owners").host_only(),
+    live("plugin.name"),
+    live("plugin.idle_timeout_secs"),
+    live("plugin.allow"),
+    live("plugin.ask"),
+    live("plugin.deny"),
     // [providers.<name>]
     restart("providers.*.credential"),
     restart("providers.*.upstream"),
@@ -497,6 +504,9 @@ pub const HOST_ONLY_REASON: &str =
 pub fn host_only_reason(key: &str) -> &'static str {
     match key {
         "runtime.kubernetes.state_mount" => HOST_ONLY_REASON,
+        "plugins.owners" => {
+            "decides whose releases the node may install and run as plugins, so it is changed at the node, not from elsewhere"
+        }
         "sandbox.release_url" => {
             "is where the node downloads the binaries every sandbox runs, so it is changed at the node, not from elsewhere"
         }
@@ -1023,6 +1033,7 @@ mod tests {
                 "digitalocean.api_url",
                 "digitalocean.registry",
                 "gateway.harness_listen",
+                "plugins.owners",
                 "runtime.kubernetes.state_mount",
                 "sandbox.base_image",
                 "sandbox.bundle",

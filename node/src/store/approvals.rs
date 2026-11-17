@@ -64,12 +64,21 @@ pub const PLACE_TOOL: &str = "run_on_digitalocean";
 /// What a placement card offers: run it there, or not at all.
 pub const PLACE_CARD_OPTIONS: &str = r#"[{"option_id":"allow_once","name":"Run on DigitalOcean","kind":"allow_once"},{"option_id":"reject_once","name":"Don't run it","kind":"reject_once"}]"#;
 
+/// The approval the node puts to the operator before it installs or updates
+/// a plugin (`crate::plugin`). Its arguments name the exact build, by
+/// digest; allowing it makes that build the plugin's active one.
+pub const PLUGIN_INSTALL_TOOL: &str = "plugin_install";
+
+/// What an install card offers: install the build as published, or not.
+pub const PLUGIN_CARD_OPTIONS: &str = r#"[{"option_id":"allow_once","name":"Install","kind":"allow_once"},{"option_id":"reject_once","name":"Reject","kind":"reject_once"}]"#;
+
 /// The answers a card for `tool` offers.
 pub fn card_options(tool: &str) -> &'static str {
     match tool {
         EGRESS_TOOL => EGRESS_CARD_OPTIONS,
         PREPARE_EGRESS_TOOL => PREPARE_EGRESS_CARD_OPTIONS,
         PLACE_TOOL => PLACE_CARD_OPTIONS,
+        PLUGIN_INSTALL_TOOL => PLUGIN_CARD_OPTIONS,
         _ => CARD_OPTIONS,
     }
 }
@@ -422,6 +431,18 @@ impl Store {
         )?)
     }
 
+    /// Expire one pending approval before its time, with why: what it asked
+    /// for was superseded. False when it was no longer pending.
+    pub fn expire_approval(&self, id: &str, reason: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE approval SET state='expired', reason=?2, claimed_ms=NULL, finished_ms=?3
+             WHERE id=?1 AND state='pending'",
+            rusqlite::params![id, reason, now_ms()],
+        )?;
+        Ok(n == 1)
+    }
+
     pub fn expire_due_approvals(&self) -> Result<Vec<ApprovalRow>> {
         let conn = self.conn.lock().unwrap();
         let now = now_ms();
@@ -480,7 +501,9 @@ impl Store {
                     session_state: r.get("intent_session_state")?,
                 };
                 let options = match approval.tool.as_str() {
-                    EGRESS_TOOL | PREPARE_EGRESS_TOOL | PLACE_TOOL => card_options(&approval.tool),
+                    EGRESS_TOOL | PREPARE_EGRESS_TOOL | PLACE_TOOL | PLUGIN_INSTALL_TOOL => {
+                        card_options(&approval.tool)
+                    }
                     _ => options,
                 };
                 Ok(approval.as_card(options, intent))

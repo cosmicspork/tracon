@@ -34,6 +34,7 @@ pub mod node_target;
 pub mod notify;
 pub mod oauth;
 pub mod outcome;
+pub mod plugin;
 pub mod policy;
 pub mod preparation;
 pub mod process;

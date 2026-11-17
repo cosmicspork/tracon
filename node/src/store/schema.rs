@@ -1790,6 +1790,25 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX sandbox_usage_open ON sandbox_usage(provider, ended_ms);
     CREATE INDEX sandbox_usage_session ON sandbox_usage(session_id);
     "#,
+    // 79: plugins this node installed (`crate::plugin`). The active build's
+    // version, archive digest, tree digest and manifest, NULL until its
+    // first install is approved; the build before it, kept for rollback;
+    // and one waiting on its install card, as JSON. Per node: never
+    // replicated.
+    r#"
+    CREATE TABLE plugin (
+        name        TEXT PRIMARY KEY,
+        repo        TEXT NOT NULL,
+        version     TEXT,
+        digest      TEXT,
+        tree_digest TEXT,
+        manifest    TEXT,
+        state       TEXT NOT NULL,
+        previous    TEXT,
+        pending     TEXT,
+        updated_ms  INTEGER NOT NULL
+    );
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered
