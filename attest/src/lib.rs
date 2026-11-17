@@ -168,10 +168,8 @@ impl Verifier {
         let Some(name) = artifact.file_name() else {
             return Outcome::Failed("the artifact path has no file name".into());
         };
-        let bundle = artifact.with_file_name(format!(
-            ".{}.attestation.jsonl",
-            name.to_string_lossy()
-        ));
+        let bundle =
+            artifact.with_file_name(format!(".{}.attestation.jsonl", name.to_string_lossy()));
         let verified = async {
             write_new(&bundle, bundles.as_bytes())
                 .await

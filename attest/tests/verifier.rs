@@ -278,7 +278,8 @@ async fn a_release_artifact_without_attestations_is_absent() {
     let (path, digest) = artifact(&dir, "plugin.tar.gz", b"plugin");
     let client = reqwest::Client::new();
 
-    let (base, request) = serve_json("404 Not Found", b"{\"message\":\"Not Found\"}".to_vec()).await;
+    let (base, request) =
+        serve_json("404 Not Found", b"{\"message\":\"Not Found\"}".to_vec()).await;
     let outcome = fake_gh()
         .verify_release_artifact(&client, &base, &path, &digest, &PLUGIN_POLICY)
         .await;
@@ -315,7 +316,10 @@ async fn a_lookup_that_fails_is_never_absent() {
         let outcome = fake_gh()
             .verify_release_artifact(&client, &base, &path, &digest, &PLUGIN_POLICY)
             .await;
-        assert!(matches!(outcome, Outcome::Failed(_)), "{status}: {outcome:?}");
+        assert!(
+            matches!(outcome, Outcome::Failed(_)),
+            "{status}: {outcome:?}"
+        );
     }
 
     // Nothing listening.
@@ -339,7 +343,13 @@ async fn an_artifact_that_does_not_match_its_digest_is_never_looked_up() {
     let base = format!("http://{}", listener.local_addr().unwrap());
 
     let outcome = fake_gh()
-        .verify_release_artifact(&reqwest::Client::new(), &base, &path, &other, &PLUGIN_POLICY)
+        .verify_release_artifact(
+            &reqwest::Client::new(),
+            &base,
+            &path,
+            &other,
+            &PLUGIN_POLICY,
+        )
         .await;
     assert!(matches!(outcome, Outcome::Failed(_)), "{outcome:?}");
     assert!(!dir.join("plugin.tar.gz.argv").exists());
@@ -353,7 +363,13 @@ async fn an_attestation_that_verifies_is_verified_and_its_bundle_is_removed() {
     let (base, _) = serve_json("200 OK", body.to_vec()).await;
 
     let outcome = fake_gh()
-        .verify_release_artifact(&reqwest::Client::new(), &base, &path, &digest, &PLUGIN_POLICY)
+        .verify_release_artifact(
+            &reqwest::Client::new(),
+            &base,
+            &path,
+            &digest,
+            &PLUGIN_POLICY,
+        )
         .await;
     assert_eq!(outcome, Outcome::Verified);
 
@@ -373,7 +389,13 @@ async fn an_attestation_gh_rejects_fails_with_its_detail() {
     let (base, _) = serve_json("200 OK", br#"{"attestations":[{"bundle":{}}]}"#.to_vec()).await;
 
     let outcome = fake_gh()
-        .verify_release_artifact(&reqwest::Client::new(), &base, &path, &digest, &PLUGIN_POLICY)
+        .verify_release_artifact(
+            &reqwest::Client::new(),
+            &base,
+            &path,
+            &digest,
+            &PLUGIN_POLICY,
+        )
         .await;
     assert!(
         matches!(&outcome, Outcome::Failed(detail) if detail.contains("signature subject mismatch")),
@@ -388,13 +410,28 @@ fn real_gh() -> Verifier {
         .with_trusted_root(fixtures().join("trusted_root.jsonl"))
 }
 
-async fn real_gh_outcome(label: &str, contents: &[u8], status: &str) -> Outcome {
+fn recorded_attestations() -> serde_json::Value {
+    let body = std::fs::read(fixtures().join("attestations.json")).unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+async fn real_gh_outcome(
+    label: &str,
+    contents: &[u8],
+    status: &str,
+    attestations: &serde_json::Value,
+) -> Outcome {
     let dir = scratch(label);
     let (path, digest) = artifact(&dir, FIXTURE_ARTIFACT, contents);
-    let body = std::fs::read(fixtures().join("attestations.json")).unwrap();
-    let (base, _) = serve_json(status, body).await;
+    let (base, _) = serve_json(status, attestations.to_string().into_bytes()).await;
     real_gh()
-        .verify_release_artifact(&reqwest::Client::new(), &base, &path, &digest, &RELEASE_POLICY)
+        .verify_release_artifact(
+            &reqwest::Client::new(),
+            &base,
+            &path,
+            &digest,
+            &RELEASE_POLICY,
+        )
         .await
 }
 
@@ -402,7 +439,8 @@ async fn real_gh_outcome(label: &str, contents: &[u8], status: &str) -> Outcome 
 #[ignore = "needs TRACON_TEST_GH"]
 async fn real_gh_verifies_a_release_attestation() {
     let contents = std::fs::read(fixtures().join(FIXTURE_ARTIFACT)).unwrap();
-    let outcome = real_gh_outcome("real-valid", &contents, "200 OK").await;
+    let outcome =
+        real_gh_outcome("real-valid", &contents, "200 OK", &recorded_attestations()).await;
     assert_eq!(outcome, Outcome::Verified);
 }
 
@@ -413,14 +451,53 @@ async fn real_gh_rejects_a_tampered_artifact() {
     contents[0] ^= 1;
     // Looked up by the tampered file's own digest, and answered with the
     // original's attestation, as a lying API would.
-    let outcome = real_gh_outcome("real-tampered", &contents, "200 OK").await;
+    let outcome = real_gh_outcome(
+        "real-tampered",
+        &contents,
+        "200 OK",
+        &recorded_attestations(),
+    )
+    .await;
+    // Refused by gh itself, not by the digest check before it.
+    assert!(
+        matches!(&outcome, Outcome::Failed(detail) if detail.starts_with("the attestation did not verify")),
+        "{outcome:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs TRACON_TEST_GH"]
+async fn real_gh_verifies_when_any_one_attestation_does() {
+    // GitHub can hold several attestations for one digest. One with a broken
+    // signature, listed first, must neither pass alone nor sink the good one.
+    let contents = std::fs::read(fixtures().join(FIXTURE_ARTIFACT)).unwrap();
+    let good = recorded_attestations()["attestations"][0].clone();
+    let mut broken = good.clone();
+    let signature = &mut broken["bundle"]["dsseEnvelope"]["signatures"][0]["sig"];
+    let mut sig = signature.as_str().unwrap().to_string();
+    let first = if sig.starts_with('B') { "C" } else { "B" };
+    sig.replace_range(..1, first);
+    *signature = sig.into();
+
+    let only_broken = serde_json::json!({ "attestations": [broken.clone()] });
+    let outcome = real_gh_outcome("real-broken", &contents, "200 OK", &only_broken).await;
     assert!(matches!(outcome, Outcome::Failed(_)), "{outcome:?}");
+
+    let both = serde_json::json!({ "attestations": [broken, good] });
+    let outcome = real_gh_outcome("real-both", &contents, "200 OK", &both).await;
+    assert_eq!(outcome, Outcome::Verified);
 }
 
 #[tokio::test]
 #[ignore = "needs TRACON_TEST_GH"]
 async fn real_gh_is_not_asked_when_there_is_no_attestation() {
     let contents = std::fs::read(fixtures().join(FIXTURE_ARTIFACT)).unwrap();
-    let outcome = real_gh_outcome("real-absent", &contents, "404 Not Found").await;
+    let outcome = real_gh_outcome(
+        "real-absent",
+        &contents,
+        "404 Not Found",
+        &recorded_attestations(),
+    )
+    .await;
     assert_eq!(outcome, Outcome::Absent);
 }
