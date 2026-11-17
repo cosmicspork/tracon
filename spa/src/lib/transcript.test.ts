@@ -12,6 +12,7 @@ import {
   runFailures,
   runMs,
   runRunning,
+  RUNNING_GRACE_MS,
   transcript,
   unwrapHarnessError,
 } from './transcript'
@@ -207,6 +208,18 @@ test('a running run names its calls still going, and none once they land', () =>
     ...call('b', 'Bash', 'execute', { command: 'just check' }, 200, { ms: 300 }),
   ])
   expect(runRunning(landed, ROOT)).toEqual([])
+})
+
+test('a running call shows under the fold only once it has run past the grace', () => {
+  const going = run([
+    ...call('a', 'Bash', 'execute', { command: 'ls' }, 0, { ms: 100, output: 'x' }),
+    ...call('b', 'Bash', 'execute', { command: 'git status' }, 200),
+  ])
+  // A quick call lands before it would ever be drawn, so it never flashes.
+  expect(runRunning(going, ROOT, T0 + 200 + RUNNING_GRACE_MS - 1)).toEqual([])
+  expect(runRunning(going, ROOT, T0 + 200 + RUNNING_GRACE_MS).map((r) => r.text)).toEqual(['Bash git status'])
+  // Without a clock there is nothing to wait on.
+  expect(runRunning(going, ROOT).map((r) => r.text)).toEqual(['Bash git status'])
 })
 
 test("a call to the node's own tools reads as what it does, with its answer's state", () => {
