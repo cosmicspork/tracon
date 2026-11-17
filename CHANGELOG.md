@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.52.0](https://github.com/cosmicspork/tracon/compare/v0.51.2...v0.52.0) (2026-11-17)
+
+
+### Features
+
+* **node:** track DigitalOcean sandbox cost beside model cost, with a daily infra spend limit ([#945](https://github.com/cosmicspork/tracon/issues/945)) ([c5d3ce5](https://github.com/cosmicspork/tracon/commit/c5d3ce59b36787510488c2cd28aa32c6a5a37309))
+
+
+### Bug Fixes
+
+* **spa:** stop a tool run's calls flashing on screen before the fold takes them ([#943](https://github.com/cosmicspork/tracon/issues/943)) ([6433c7f](https://github.com/cosmicspork/tracon/commit/6433c7f7d9051699e39eb5bd670d605292c739cf))
+
 ## [0.51.2](https://github.com/cosmicspork/tracon/compare/v0.51.1...v0.51.2) (2026-11-13)
 
 
