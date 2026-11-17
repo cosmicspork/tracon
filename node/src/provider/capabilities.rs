@@ -147,6 +147,15 @@ pub struct Elsewhere {
     /// What the last sandbox to connect said of itself; `None` until one
     /// has, so who the harness runs as is not established.
     pub reported: Option<Reported>,
+    /// The size a new sandbox is made at, and its hourly price in the
+    /// runtime's catalog; `None` until the catalog has been read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price_per_hour_usd: Option<f64>,
+    /// Today's sandbox spend against `[spend] infra_usd_per_day`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spend: Option<crate::metrics::InfraSpend>,
 }
 
 /// What a sandbox's supervisor said of itself in its hello.

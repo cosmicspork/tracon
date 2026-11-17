@@ -252,6 +252,33 @@ const usageBody = (byModel) => (req) => ({
   ),
 })
 
+// What sandboxes on DigitalOcean cost, as /api/usage/infra groups them: by
+// day unless the request asks for `group=channel`, `session` or `size`.
+const infraRow = (o) => ({
+  provider: 'digitalocean', channel: null, day: null, session_id: null, size: null, kind: null,
+  sandboxes: 1, hours: 1, cost_usd: null, unpriced: 0, ...o,
+})
+const infraByGroup = {
+  day: [-2, -1, 0].map((d, i) => infraRow({
+    day: new Date(Date.now() + d * 86_400_000).toISOString().slice(0, 10),
+    channel: 'personal', sandboxes: 3 + i, hours: 7.5 + i * 2.25, cost_usd: 0.9 + i * 0.27,
+  })),
+  channel: [infraRow({ channel: 'personal', sandboxes: 12, hours: 29.25, cost_usd: 3.51 })],
+  session: [
+    infraRow({ session_id: '8b4e0d2a-6f1c-4e3a-9d57-0c2b1f7a9e64', kind: 'session', channel: 'personal', size: 'small', hours: 4.6, cost_usd: 0.55 }),
+    infraRow({ kind: 'check', channel: 'personal', size: 'small', sandboxes: 6, hours: 0.75, cost_usd: 0.09 }),
+  ],
+  size: [infraRow({ size: 'small', sandboxes: 12, hours: 29.25, cost_usd: 3.51 })],
+}
+const infraBody = (spend, groups = infraByGroup) => (req) => ({
+  since_ms: Number(req.query.since_ms) || -30 * 86_400_000,
+  until_ms: req.query.until_ms ? Number(req.query.until_ms) : null,
+  totals: groups[req.query.group || 'day'] ?? [],
+  spend,
+})
+const spendUnder = { today_usd: 1.44, limit_usd: 5, state: 'under', running: 1, unpriced: 0 }
+const spendAt = { today_usd: 5.02, limit_usd: 5, state: 'at', running: 2, unpriced: 0 }
+
 const typicalMetrics = [
   metric('personal', {
     accepted_changes: 23,
@@ -261,6 +288,8 @@ const typicalMetrics = [
     tokens_per_accepted_change: 1_184_000,
     tokens: 31_400_000,
     cost_usd: 84.37,
+    infra_cost_usd: 3.51,
+    sandbox_hours: 29.25,
     human_seconds: 14_820,
     agent_seconds: 162_300,
     sessions: 41,
@@ -431,7 +460,18 @@ export default [
     route: '/usage',
     title: 'Usage: two channels',
     note: 'Cards, table, unpriced cost, the node note under the heading.',
-    api: { '/api/metrics': metricsBody(typicalMetrics), '/api/usage': usageBody(usageByModel) },
+    api: { '/api/metrics': metricsBody(typicalMetrics), '/api/usage': usageBody(usageByModel), '/api/usage/infra': infraBody(spendUnder) },
+  },
+  {
+    id: 'insight-metrics-infra-limit',
+    area: 'insight',
+    route: '/usage',
+    title: 'Usage: infrastructure spend at its daily limit',
+    note: 'Infrastructure section per session, the spend line in the limit colour, a check run outside any session.',
+    api: { '/api/metrics': metricsBody(typicalMetrics), '/api/usage': usageBody(usageByModel), '/api/usage/infra': infraBody(spendAt) },
+    act: async (page) => {
+      await page.getByRole('combobox').last().selectOption('session')
+    },
   },
   {
     id: 'insight-metrics-loading',
@@ -439,21 +479,21 @@ export default [
     route: '/usage',
     title: 'Usage: request still in flight',
     note: 'Says it is loading, not that no usage is recorded.',
-    api: { '/api/metrics': hang, '/api/usage': hang },
+    api: { '/api/metrics': hang, '/api/usage': hang, '/api/usage/infra': hang },
   },
   {
     id: 'insight-metrics-empty',
     area: 'insight',
     route: '/usage',
     title: 'Usage: nothing recorded in the window',
-    api: { '/api/metrics': metricsBody([]) },
+    api: { '/api/metrics': metricsBody([]), '/api/usage/infra': infraBody({ ...spendUnder, today_usd: 0, limit_usd: null, state: 'none', running: 0 }, {}) },
   },
   {
     id: 'insight-metrics-error',
     area: 'insight',
     route: '/usage',
     title: 'Usage: request fails',
-    api: { '/api/metrics': err(500, 'metrics query failed: no such column: turn_usage.awake_ms'), '/api/usage': err(500, 'usage query failed: no such column: turn_usage.awake_ms') },
+    api: { '/api/metrics': err(500, 'metrics query failed: no such column: turn_usage.awake_ms'), '/api/usage': err(500, 'usage query failed: no such column: turn_usage.awake_ms'), '/api/usage/infra': err(500, 'infra query failed: no such table: sandbox_usage') },
   },
   {
     id: 'insight-metrics-many',
@@ -463,6 +503,7 @@ export default [
     note: 'Long channel name in card heading and first column, billions of tokens, 1000h+ durations, all-null row.',
     api: {
       '/api/metrics': metricsBody(manyMetrics),
+      '/api/usage/infra': infraBody(spendUnder),
       '/api/usage': usageBody([
         ...usageByModel,
         usageRow('a-channel-name-long-enough-to-crowd-its-column', 'openrouter', 'meta-llama/llama-4-maverick-17b-128e-instruct', 98_412, 4_212_000_000, 381_000_000, 9_870_000_000, 1_402, 18_204.77),
@@ -480,6 +521,7 @@ export default [
       '/api/metrics': (req) =>
         metricsBody(Number(req.query.since_ms) > Date.now() - 8 * 86_400_000 ? [metric('personal', { ...typicalMetrics[0], accepted_changes: 5, sessions: 9, tokens: 6_900_000, cost_usd: 18.02 })] : typicalMetrics),
       '/api/usage': usageBody(usageByModel),
+      '/api/usage/infra': infraBody(spendUnder),
     },
     act: async (page) => {
       await page.getByRole('button', { name: '7d', exact: true }).click()

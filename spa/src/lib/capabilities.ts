@@ -62,6 +62,29 @@ export function elsewhereLines(e: Elsewhere): ElsewhereLine[] {
     },
     userLine(e),
   ]
+  if (e.size) {
+    lines.push({
+      label: 'size',
+      tone: '',
+      text: e.price_per_hour_usd === undefined ? `${e.size} · unpriced` : `${e.size} · $${e.price_per_hour_usd.toFixed(3)}/h`,
+      detail: 'Billed from create to destroy: sandboxes are kept warm, so idle time counts',
+    })
+  }
+  if (e.spend) {
+    const s = e.spend
+    const today = `$${s.today_usd.toFixed(2)}`
+    lines.push({
+      label: 'spend',
+      tone: s.state === 'at' ? 'bad' : s.state === 'near' ? 'warn' : '',
+      text: s.limit_usd === null ? `${today} today · no limit` : `${today} of $${s.limit_usd.toFixed(2)} today`,
+      detail:
+        s.state === 'at'
+          ? 'limit reached: new sessions stay off DigitalOcean until the day turns ([spend] infra_usd_per_day)'
+          : s.limit_usd === null
+            ? 'set [spend] infra_usd_per_day in Configuration to cap it'
+            : undefined,
+    })
+  }
   for (const s of e.services) {
     lines.push(
       s.ok

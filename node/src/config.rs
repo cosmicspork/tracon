@@ -75,6 +75,8 @@ pub struct Config {
     /// Where sessions may run and what each channel and repository requires
     /// of the sandbox provider (`crate::provider`).
     pub placement: crate::provider::requirements::Placement,
+    /// What the node may spend on infrastructure: off unless set.
+    pub spend: Spend,
     pub metrics: Metrics,
     /// What every sandbox is given: the harness bundle.
     pub sandbox: Sandbox,
@@ -184,6 +186,27 @@ pub fn validate_sandbox(config: &Config) -> Result<(), String> {
 #[serde(default)]
 pub struct Metrics {
     pub listen: Option<SocketAddr>,
+}
+
+/// `[spend]`: limits on what the node spends on infrastructure, the
+/// sandboxes an elastic provider (DigitalOcean) runs for it, by the hour.
+/// Inference is held by each channel's token ceiling, not here.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Spend {
+    /// US dollars of sandbox time per local day. Once today's (ended
+    /// sandboxes' plus running ones' so far) reaches it, no new session is
+    /// placed on DigitalOcean until the day turns; running ones are not
+    /// stopped. Unset or 0: no limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub infra_usd_per_day: Option<f64>,
+}
+
+impl Spend {
+    /// The daily infrastructure limit, when one is set.
+    pub fn infra_limit(&self) -> Option<f64> {
+        self.infra_usd_per_day.filter(|l| l.is_finite() && *l > 0.0)
+    }
 }
 
 /// The operator listener's default port (`tracon serve --listen`), which
@@ -3017,6 +3040,7 @@ impl Default for Config {
             work: Work::default(),
             upstreams: Upstreams::default(),
             placement: Default::default(),
+            spend: Spend::default(),
             metrics: Metrics::default(),
             sandbox: Sandbox::default(),
             digitalocean: Default::default(),

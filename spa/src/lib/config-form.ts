@@ -158,6 +158,7 @@ const UNITS: [RegExp, string][] = [
   [/_bytes$/, 'bytes'],
   [/_tokens$/, 'tokens'],
   [/_per_mtok$/, 'per million tokens'],
+  [/_usd_per_day$/, 'US dollars per day'],
 ]
 
 /** A key's own name, in words: `permission_timeout_secs` is "Permission timeout". */
@@ -174,6 +175,14 @@ export function labelOf(name: string): { label: string; unit?: string } {
   }
   const words = base.replace(/[_-]+/g, ' ').trim()
   return { label: words.charAt(0).toUpperCase() + words.slice(1), unit }
+}
+
+/** What a key means where its name alone does not say, by its schema key. */
+const KEY_HELP: Record<string, string> = {
+  'spend.infra_usd_per_day':
+    'The most DigitalOcean sandbox time may cost per local day. At the limit, new sessions stay off DigitalOcean until the day turns; running ones are not stopped. Empty or 0: no limit.',
+  'providers.*.price.input_per_mtok': 'Model price: what input tokens cost. Inference only; sandbox time is priced from DigitalOcean.',
+  'providers.*.price.output_per_mtok': 'Model price: what output tokens cost. Inference only; sandbox time is priced from DigitalOcean.',
 }
 
 const PATH_HELP: Record<string, string> = {
@@ -241,7 +250,7 @@ export function fieldFor(ctx: FieldContext, segs: (string | number)[], value?: u
   const choices = ctx.choices?.(spec.key) ?? (shape?.kind === 'enum' ? shape.choices : undefined)
   const { label, unit } = labelOf(names[names.length - 1])
   const { editable, whyNot } = editability(spec, ctx.local)
-  const help = spec.path ? PATH_HELP[spec.path] : undefined
+  const help = KEY_HELP[spec.key] ?? (spec.path ? PATH_HELP[spec.path] : undefined)
   return {
     key: keyPath(segs),
     segs: names,

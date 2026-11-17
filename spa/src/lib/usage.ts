@@ -4,7 +4,7 @@
 // than reading as an ordinary one.
 
 import { formatTokens } from './format'
-import type { SessionUsage } from './types'
+import type { SessionRuntime, SessionUsage } from './types'
 
 export interface UsageNote {
   warn: boolean
@@ -39,5 +39,21 @@ export function usageNote(usage: SessionUsage | null): UsageNote | null {
     warn: false,
     text: `${both} · reconciled${requests}`,
     title: 'The two usage sources agree within tolerance.',
+  }
+}
+
+/**
+ * What a session's sandboxes cost, for its header beside the model cost:
+ * null for a session that never ran on DigitalOcean.
+ */
+export function runtimeNote(runtime: SessionRuntime | null | undefined): { text: string; title: string } | null {
+  if (!runtime || runtime.sandboxes.length === 0) return null
+  const hours = runtime.hours < 1 ? `${Math.round(runtime.hours * 60)}m` : `${runtime.hours.toFixed(1)}h`
+  const sizes = [...new Set(runtime.sandboxes.map((s) => s.size ?? 'default'))].join(', ')
+  const running = runtime.running ? ', still running' : ''
+  const cost = runtime.cost_usd === null ? 'unpriced' : `$${runtime.cost_usd.toFixed(2)}`
+  return {
+    text: `runtime ${cost}`,
+    title: `DigitalOcean sandbox time: ${hours} at ${sizes}${running}. Billed create to destroy, idle time included.`,
   }
 }

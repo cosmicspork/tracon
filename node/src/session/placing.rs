@@ -78,6 +78,7 @@ pub fn local_candidate(
         },
         capacity: Capacity { running, limit },
         health,
+        closed: None,
     }
 }
 
@@ -227,6 +228,7 @@ mod tests {
                 limit: Some(4),
             },
             health: Ok(()),
+            closed: None,
         }
     }
 

@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import type { SessionUsage } from './types'
-import { usageNote } from './usage'
+import { runtimeNote, usageNote } from './usage'
 
 const base: SessionUsage = {
   state: 'reconciled',
@@ -37,4 +37,26 @@ test('requests matched one by one are counted against all of them', () => {
   })
   expect(note?.warn).toBe(true)
   expect(note?.text).toEndWith('· 1 mismatched · 3 of 4 requests matched')
+})
+
+test('a session that ran on DigitalOcean shows its runtime cost beside the model cost', () => {
+  const sandbox = {
+    sandbox_id: 'do-1',
+    provider: 'digitalocean',
+    name: null,
+    kind: 'session',
+    session_id: 's1',
+    channel: 'work',
+    size: 'small',
+    price_per_hour_usd: 0.1,
+    started_ms: 0,
+    ended_ms: 1,
+    end_reason: 'destroyed',
+  }
+  expect(runtimeNote(null)).toBeNull()
+  expect(runtimeNote({ cost_usd: null, hours: 0, running: false, sandboxes: [] })).toBeNull()
+  const note = runtimeNote({ cost_usd: 0.25, hours: 2.5, running: true, sandboxes: [sandbox] })
+  expect(note?.text).toBe('runtime $0.25')
+  expect(note?.title).toContain('2.5h at small, still running')
+  expect(runtimeNote({ cost_usd: null, hours: 0.5, running: false, sandboxes: [sandbox] })?.text).toBe('runtime unpriced')
 })

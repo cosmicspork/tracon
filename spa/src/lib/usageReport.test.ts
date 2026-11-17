@@ -1,7 +1,59 @@
 import { expect, test } from 'bun:test'
 import { usageView } from './routes'
-import type { UsageTotal } from './types'
-import { usageCost, usageCsvHref, usageHeading, usageKey, usageParams, usageProviders, usageSpan } from './usageReport'
+import type { InfraTotal, UsageTotal } from './types'
+import {
+  formatHours,
+  infraCsvHref,
+  infraKey,
+  infraParams,
+  infraSpendLine,
+  usageCost,
+  usageCsvHref,
+  usageHeading,
+  usageKey,
+  usageParams,
+  usageProviders,
+  usageSpan,
+} from './usageReport'
+
+const infra = (over: Partial<InfraTotal>): InfraTotal => ({
+  provider: 'digitalocean',
+  channel: null,
+  day: null,
+  session_id: null,
+  size: null,
+  kind: null,
+  sandboxes: 1,
+  hours: 1,
+  cost_usd: null,
+  unpriced: 0,
+  ...over,
+})
+
+test('the infrastructure section asks for the same window, grouped its own way', () => {
+  const view = usageView('?since=2026-10-01&until=2026-10-15&provider=openai-codex&group=model')
+  const q = infraParams(view, 'size')
+  expect(Number(q.get('since_ms'))).toBe(new Date('2026-10-01T00:00:00').getTime())
+  expect(Number(q.get('until_ms'))).toBe(new Date('2026-10-16T00:00:00').getTime())
+  expect(q.get('group')).toBe('size')
+  // Sandboxes have no model provider to filter by.
+  expect(q.get('provider')).toBeNull()
+  expect(infraCsvHref(view, 'size')).toBe(`/api/usage/infra.csv?${q}`)
+})
+
+test('an infrastructure row is keyed by its day, channel, size or session', () => {
+  expect(infraKey(infra({ day: '2026-10-02' }), 'day')).toBe('2026-10-02')
+  expect(infraKey(infra({ channel: 'work' }), 'channel')).toBe('work')
+  expect(infraKey(infra({}), 'channel')).toBe('no channel')
+  expect(infraKey(infra({ size: 'small' }), 'size')).toBe('small')
+  expect(infraKey(infra({ session_id: 's1' }), 'session')).toBe('s1')
+  expect(infraKey(infra({ kind: 'check' }), 'session')).toBe('check run')
+  expect(formatHours(0.75)).toBe('45m')
+  expect(formatHours(3.21)).toBe('3.2h')
+  const spend = { today_usd: 1.2, limit_usd: 5, state: 'under' as const, running: 1, unpriced: 0 }
+  expect(infraSpendLine(spend)).toBe('$1.20 of $5.00 today')
+  expect(infraSpendLine({ ...spend, limit_usd: null, state: 'none' })).toBe('$1.20 today, no limit')
+})
 
 const row = (over: Partial<UsageTotal>): UsageTotal => ({
   channel: 'work',

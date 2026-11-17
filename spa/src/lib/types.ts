@@ -1368,7 +1368,12 @@ export interface ChannelMetrics {
   approvals_per_accepted_change: number | null
   tokens_per_accepted_change: number | null
   tokens: number
+  /** Model (inference) cost; null when no provider carries a price. */
   cost_usd: number | null
+  /** What the channel's DigitalOcean sandboxes cost; null when none ran or none was priced. Absent from an older node. */
+  infra_cost_usd?: number | null
+  /** Sandbox wall-clock hours in the window. Absent from an older node. */
+  sandbox_hours?: number
   human_seconds: number
   agent_seconds: number
   sessions: number
@@ -1676,6 +1681,59 @@ export interface Elsewhere {
   expected_uid: number | null
   /** What the last sandbox to connect said of itself; absent until one has. */
   reported: { version: string; uid: number | null } | null
+  /** The size a new sandbox is made at, and its hourly price; absent until the catalog is read. */
+  size?: string
+  price_per_hour_usd?: number
+  /** Today's sandbox spend against the limit. Absent from an older node. */
+  spend?: InfraSpend
+}
+
+/** Today's sandbox spend against `[spend] infra_usd_per_day`. */
+export interface InfraSpend {
+  today_usd: number
+  limit_usd: number | null
+  /** `under`, `near`, `at`, or `none` when no limit is set. */
+  state: 'under' | 'near' | 'at' | 'none'
+  running: number
+  unpriced: number
+}
+
+/** One sandbox's lifetime on an elastic provider. */
+export interface SandboxUsage {
+  sandbox_id: string
+  provider: string
+  name: string | null
+  kind: string
+  session_id: string | null
+  channel: string | null
+  size: string | null
+  price_per_hour_usd: number | null
+  started_ms: number
+  ended_ms: number | null
+  end_reason: string | null
+}
+
+/** What a session's sandboxes cost, beside its model cost. */
+export interface SessionRuntime {
+  cost_usd: number | null
+  hours: number
+  running: boolean
+  sandboxes: SandboxUsage[]
+}
+
+/** One row of `GET /api/usage/infra`. */
+export interface InfraTotal {
+  provider: string
+  channel: string | null
+  day: string | null
+  session_id: string | null
+  size: string | null
+  kind: string | null
+  sandboxes: number
+  hours: number
+  /** Null when no sandbox in the row was priced. */
+  cost_usd: number | null
+  unpriced: number
 }
 
 /**

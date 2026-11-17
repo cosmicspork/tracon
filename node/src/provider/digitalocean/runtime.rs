@@ -286,6 +286,7 @@ impl DoRuntime {
     /// Keep the templates of the prepared snapshots `backend` holds and
     /// `store` has ready: what `start` does, for a test's stand-ins.
     pub fn set_node(&self, backend: Arc<dyn Backend>, store: Arc<crate::store::Store>) {
+        self.provider.meter().set_store(store.clone());
         let _ = self.node.set((backend, store));
     }
 
@@ -710,6 +711,7 @@ impl DoRuntime {
 
     pub async fn sweep(&self) -> Option<upkeep::Swept> {
         let client = self.provider.client().ok()?;
+        self.end_gone_sandboxes(&client).await;
         let wanted = self.wanted().await;
         let swept = upkeep::sweep(
             &client,
@@ -736,6 +738,36 @@ impl DoRuntime {
             Err(error) => tracing::warn!(%error, "could not sweep DigitalOcean"),
         }
         swept.ok()
+    }
+
+    /// End the lifetime of every sandbox noted as running that the runtime
+    /// no longer lists: lost, or removed by a sweep or an earlier process.
+    async fn end_gone_sandboxes(&self, client: &crate::do_harness::Client) {
+        if self.provider.meter().store().is_none() {
+            return;
+        }
+        let owner = &self.provider.options().owner;
+        let listed_ms = crate::store::now_ms();
+        match client
+            .list_sessions(&crate::do_harness::SessionFilter::default())
+            .await
+        {
+            Ok(sessions) => {
+                let live = sessions
+                    .into_iter()
+                    .filter(|s| owner.owns(&s.name) && !s.status.is_terminal())
+                    .map(|s| s.session_id)
+                    .collect();
+                let ended = self.provider.meter().reconcile(&live, listed_ms);
+                if ended > 0 {
+                    tracing::info!(
+                        ended,
+                        "ended the lifetimes of DigitalOcean sandboxes found gone"
+                    );
+                }
+            }
+            Err(error) => tracing::debug!(%error, "could not list DigitalOcean sessions to meter"),
+        }
     }
 
     /// Why sessions cannot run there now, or `Ok`: what the node needs on
@@ -769,6 +801,13 @@ impl DoRuntime {
         Ok(())
     }
 
+    /// Today's spend on sandboxes against `[spend] infra_usd_per_day`, once
+    /// the node's store is known.
+    pub fn spend(&self, cfg: &Config) -> Option<crate::metrics::InfraSpend> {
+        let (_, store) = self.node.get()?;
+        Some(crate::metrics::infra_spend(store, cfg))
+    }
+
     /// The provider as placement sees it now.
     pub async fn candidate(&self, cfg: &Config) -> Candidate {
         let mut health = self.health(cfg);
@@ -794,6 +833,7 @@ impl DoRuntime {
             capabilities: self.provider.capabilities(),
             capacity,
             health,
+            closed: self.spend(cfg).filter(|s| s.at()).map(|s| s.reason()),
         }
     }
 
@@ -803,6 +843,13 @@ impl DoRuntime {
     pub async fn report(&self, cfg: &Config) -> crate::provider::CapabilityReport {
         use crate::provider::capabilities::{CapabilityLine, Elsewhere, Route, ServiceSupport};
         let candidate = self.candidate(cfg).await;
+        let (size, price_per_hour_usd) = match self.provider.client() {
+            Ok(client) => {
+                let sizes = self.provider.meter().sizes(&client).await;
+                super::meter::priced(&sizes, &self.provider.options().settings.size)
+            }
+            Err(_) => (None, None),
+        };
         let caps = candidate.capabilities;
         let options = self.provider.options();
         let (allow_ips, allow_hosts) = options.reach.egress();
@@ -896,6 +943,9 @@ impl DoRuntime {
                         uid: info.uid,
                     }
                 }),
+                size,
+                price_per_hour_usd,
+                spend: self.spend(cfg),
             }),
         }
     }

@@ -1605,6 +1605,9 @@ pub async fn get_session(
             .map(|(review_id, url)| json!({ "review_id": review_id, "url": url }))
             .collect::<Vec<_>>(),
         "usage": usage,
+        // What its sandboxes on an elastic provider cost, beside `cost_usd`
+        // (the model's): kept on the node that ran it, as `usage` is.
+        "runtime": crate::metrics::session_runtime(s.store(), &id),
         "ceiling": ceiling,
         "exhaustion": exhaustion,
         "shown_work": s.store().shown_work_for_session(&id)?,
@@ -6712,6 +6715,146 @@ fn usage_csv_text(rows: &[crate::store::UsageTotal]) -> String {
     out
 }
 
+/// The infrastructure report's query: the usage report's window, channel
+/// and zone, grouped by `day` (the default), `channel`, `session` or `size`.
+struct InfraQuery {
+    channel: Option<String>,
+    since_ms: i64,
+    until_ms: Option<i64>,
+    group: crate::metrics::InfraGroup,
+    tz_offset_minutes: Option<i64>,
+}
+
+fn infra_query(q: &std::collections::HashMap<String, String>) -> ApiResult<InfraQuery> {
+    // The usage report's own window and zone; its grouping is not this one.
+    let mut window = q.clone();
+    window.remove("group");
+    let base = usage_query(&window)?;
+    let group = match q.get("group").map(String::as_str) {
+        None | Some("") => crate::metrics::InfraGroup::Day,
+        Some(g) => crate::metrics::InfraGroup::parse(g).ok_or_else(|| {
+            ApiError(
+                StatusCode::BAD_REQUEST,
+                "group must be day, channel, session or size".into(),
+            )
+        })?,
+    };
+    Ok(InfraQuery {
+        channel: base.channel.map(str::to_string),
+        since_ms: base.since_ms,
+        until_ms: base.until_ms,
+        group,
+        tz_offset_minutes: base.tz_offset_minutes,
+    })
+}
+
+fn infra_totals(s: &AppState, q: &InfraQuery) -> ApiResult<Vec<crate::metrics::InfraTotal>> {
+    Ok(crate::metrics::infra_usage(
+        s.store(),
+        q.channel.as_deref(),
+        q.since_ms,
+        q.until_ms,
+        q.group,
+        q.tz_offset_minutes,
+        crate::store::now_ms(),
+    )?)
+}
+
+/// `GET /api/usage/infra?channel=&since_ms=&until_ms=&group=&tz_offset_minutes=`:
+/// what sandboxes on an elastic provider (DigitalOcean) cost, by the hour at
+/// each one's size's price, beside today's spend against
+/// `[spend] infra_usd_per_day`. Defaults to the last 24 hours, by day.
+pub async fn usage_infra(
+    State(s): State<AppState>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let query = infra_query(&q)?;
+    let totals = infra_totals(&s, &query)?;
+    Ok(Json(json!({
+        "since_ms": query.since_ms,
+        "until_ms": query.until_ms,
+        "totals": totals,
+        "spend": crate::metrics::infra_spend(s.store(), &s.cfg),
+    })))
+}
+
+/// `GET /api/usage/infra.csv`: the rows `GET /api/usage/infra` returns for
+/// the same query, as a CSV file.
+pub async fn usage_infra_csv(
+    State(s): State<AppState>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let rows = infra_query(&q).and_then(|query| Ok((infra_totals(&s, &query)?, query)));
+    let (totals, query) = match rows {
+        Ok(rows) => rows,
+        Err(error) => return error.into_response(),
+    };
+    let offset = query
+        .tz_offset_minutes
+        .unwrap_or_else(crate::corpus::promote::chrono_free::offset_minutes);
+    let date = |ms| crate::corpus::promote::chrono_free::local_date_at(ms, offset);
+    let to = query.until_ms.map_or_else(crate::store::now_ms, |u| {
+        u.max(query.since_ms.saturating_add(1)).saturating_sub(1)
+    });
+    let name = format!(
+        "tracon-infra-{}-{}-{}.csv",
+        safe_download_name(query.channel.as_deref().unwrap_or("all")),
+        date(query.since_ms),
+        date(to)
+    );
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "text/csv; charset=utf-8")
+        .header(
+            axum::http::header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{name}\""),
+        )
+        .header("x-content-type-options", "nosniff")
+        .body(axum::body::Body::from(infra_csv_text(&totals)))
+        .unwrap_or_else(|error| {
+            ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+        })
+}
+
+/// An infrastructure report as CSV, every column always present.
+fn infra_csv_text(rows: &[crate::metrics::InfraTotal]) -> String {
+    fn field(v: &str) -> String {
+        // Channel names and slugs are the operator's, but kept as safe as
+        // the usage report's agent-written titles.
+        let v = if v.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+            format!("'{v}")
+        } else {
+            v.to_string()
+        };
+        if v.contains([',', '"', '\n', '\r']) {
+            format!("\"{}\"", v.replace('"', "\"\""))
+        } else {
+            v
+        }
+    }
+    let mut out = String::from(
+        "provider,channel,day,session_id,kind,size,sandboxes,hours,unpriced,cost_usd\r\n",
+    );
+    for r in rows {
+        let text = |v: &Option<String>| field(v.as_deref().unwrap_or(""));
+        let line = [
+            field(&r.provider),
+            text(&r.channel),
+            text(&r.day),
+            text(&r.session_id),
+            text(&r.kind),
+            text(&r.size),
+            r.sandboxes.to_string(),
+            format!("{:.4}", r.hours),
+            r.unpriced.to_string(),
+            r.cost_usd.map(|c| format!("{c:.6}")).unwrap_or_default(),
+        ];
+        out.push_str(&line.join(","));
+        out.push_str("\r\n");
+    }
+    out
+}
+
 pub async fn health() -> Json<serde_json::Value> {
     Json(json!({
         "ok": true,
@@ -8535,6 +8678,29 @@ mod zip_tests {
 
         std::os::unix::fs::symlink("/etc/passwd", root.join("escape")).unwrap();
         assert!(super::zip_workspace(&root).is_err());
+    }
+}
+
+#[cfg(test)]
+mod infra_csv_tests {
+    #[test]
+    fn an_infra_report_is_csv_with_every_column() {
+        let row = crate::metrics::InfraTotal {
+            provider: "digitalocean".into(),
+            channel: Some("=ch".into()),
+            day: Some("2026-11-17".into()),
+            size: Some("small".into()),
+            sandboxes: 2,
+            hours: 1.5,
+            cost_usd: Some(0.75),
+            ..Default::default()
+        };
+        let csv = super::infra_csv_text(&[row]);
+        assert_eq!(
+            csv,
+            "provider,channel,day,session_id,kind,size,sandboxes,hours,unpriced,cost_usd\r\n\
+             digitalocean,'=ch,2026-11-17,,,small,2,1.5000,0,0.750000\r\n"
+        );
     }
 }
 

@@ -2,7 +2,7 @@
 // file it offers. Pure, so it tests flat.
 
 import { localDate, type UsageView, usageWindow } from './routes'
-import type { UsageTotal } from './types'
+import type { InfraSpend, InfraTotal, UsageTotal } from './types'
 
 /**
  * The `/api/usage` query for `view`; `/api/usage.csv` takes the same one.
@@ -63,4 +63,44 @@ export function usageProviders(known: string[], rows: UsageTotal[], chosen: stri
 /** `$1.23`, or `unpriced` when the provider carries no price. */
 export function usageCost(cost: number | null): string {
   return cost === null ? 'unpriced' : `$${cost.toFixed(2)}`
+}
+
+/** How the Infrastructure section groups its rows. */
+export type InfraGroup = 'day' | 'channel' | 'session' | 'size'
+
+/** The `/api/usage/infra` query: the breakdown's window and zone, grouped by `group`. */
+export function infraParams(view: UsageView, group: InfraGroup, now = Date.now()): URLSearchParams {
+  const { since, until } = usageWindow(view, now)
+  const q = new URLSearchParams({
+    since_ms: String(since),
+    tz_offset_minutes: String(-new Date(since).getTimezoneOffset()),
+    group,
+  })
+  if (until !== null) q.set('until_ms', String(until))
+  return q
+}
+
+/** The address of the Infrastructure section's CSV. */
+export function infraCsvHref(view: UsageView, group: InfraGroup, now = Date.now()): string {
+  return `/api/usage/infra.csv?${infraParams(view, group, now)}`
+}
+
+/** What a row of the Infrastructure section is keyed by. */
+export function infraKey(row: InfraTotal, group: InfraGroup): string {
+  if (group === 'day') return row.day ?? '—'
+  if (group === 'channel') return row.channel || 'no channel'
+  if (group === 'size') return row.size || 'default size'
+  if (row.session_id) return row.session_id
+  return row.kind ? `${row.kind} run` : 'outside a session'
+}
+
+/** Sandbox hours as a person reads them: `45m`, `3.2h`. */
+export function formatHours(hours: number): string {
+  return hours < 1 ? `${Math.round(hours * 60)}m` : `${hours.toFixed(1)}h`
+}
+
+/** Today's spend, against the limit when one is set: `$1.20 of $5.00 today`. */
+export function infraSpendLine(spend: InfraSpend): string {
+  const today = `$${spend.today_usd.toFixed(2)}`
+  return spend.limit_usd === null ? `${today} today, no limit` : `${today} of $${spend.limit_usd.toFixed(2)} today`
 }

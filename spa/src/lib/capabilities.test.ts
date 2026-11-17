@@ -56,6 +56,21 @@ describe('a provider elsewhere', () => {
     expect(elsewhereLines(there({ capacity: { running: 0, limit: null } }))[2].text).toBe('overflow · 0 running')
   })
 
+  test('prices its size and holds today’s spend to the limit', () => {
+    expect(elsewhereLines(there()).some((l) => l.label === 'size' || l.label === 'spend')).toBe(false)
+    const spend = { today_usd: 4.5, limit_usd: 5, state: 'near' as const, running: 2, unpriced: 0 }
+    const lines = elsewhereLines(there({ size: 'small', price_per_hour_usd: 0.12, spend }))
+    expect(lines.find((l) => l.label === 'size')?.text).toBe('small · $0.120/h')
+    const near = lines.find((l) => l.label === 'spend')
+    expect(near?.text).toBe('$4.50 of $5.00 today')
+    expect(near?.tone).toBe('warn')
+    const at = elsewhereLines(there({ spend: { ...spend, today_usd: 5, state: 'at' } })).find((l) => l.label === 'spend')
+    expect(at?.tone).toBe('bad')
+    expect(at?.detail).toContain('limit reached')
+    const none = elsewhereLines(there({ spend: { ...spend, limit_usd: null, state: 'none' } })).find((l) => l.label === 'spend')
+    expect(none?.text).toBe('$4.50 today · no limit')
+  })
+
   test('lists each service and why one is refused', () => {
     const lines = elsewhereLines(
       there({
