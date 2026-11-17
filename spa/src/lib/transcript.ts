@@ -276,8 +276,17 @@ export function runFailures(tools: ToolEntry[], root?: string | null): { text: s
     })
 }
 
+/// How long a call runs before a folded run shows it under its summary. Most
+/// calls land well inside it; showing each of those for the moment it ran
+/// only flashed it on screen and took it away again.
+export const RUNNING_GRACE_MS = 1_500
+
 /// The calls of a run still waiting for their result: what a folded run shows
 /// under its summary while it works, so following a run never means opening it.
+/// With `now`, only a call that has run for `RUNNING_GRACE_MS` shows; without
+/// a clock to tell, every running call does.
 export function runRunning(tools: ToolEntry[], root?: string | null, now = 0): CallRow[] {
-  return tools.filter((t) => !t.result).map((t) => callRow(t, root, now))
+  return tools
+    .filter((t) => !t.result && (now <= 0 || now - t.call.at_ms >= RUNNING_GRACE_MS))
+    .map((t) => callRow(t, root, now))
 }

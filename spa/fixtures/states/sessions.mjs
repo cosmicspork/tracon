@@ -185,6 +185,17 @@ function transcriptEvents(sid) {
   ]
 }
 
+// A run as it starts: its only call began a moment ago and has no result yet.
+// The run is already folded and names nothing under it, so a quick call never
+// flashes its line on screen before the fold takes it.
+function firstCallEvents(sid) {
+  return [
+    ...opening(sid, { prompt: 'Add per-channel rate limits to the gateway, reusing the ceiling window.' }),
+    ev(sid, 'message', { text: 'Checking the tree before touching the gateway.' }, -2000),
+    ...claudeCall(sid, 'toolu_f1', 'Bash', 'execute', { command: 'git status --short', description: 'Show the working tree' }, -400, 0),
+  ]
+}
+
 // The node's own tools as Claude Code calls them: a document read, a review
 // submitted and waited on through its check, a question to the operator, the
 // pull request's state, and another MCP server's tool beside them.
@@ -650,6 +661,15 @@ export default [
     title: 'Tool calls as a transcript (Claude Code)',
     note: 'A finished run folded with its duration and its failed build named under it; the open run below has a call still running. Paths come from raw_input, from the worktree.',
     api: page(S.transcript, { events: transcriptEvents(S.transcript.id) }),
+  },
+  {
+    id: 'sessions-transcript-first-call',
+    area: 'sessions',
+    route: `/sessions/${S.transcript.id}`,
+    title: 'A run whose first call has only just started',
+    note: 'Folded as "Ran 1 shell command" with no call line under it: a call shows under the fold only once it has run 1.5s, and a lone call gets its own line only once something follows it.',
+    since: 'fix/spa-tool-run-flash',
+    api: page(S.transcript, { events: firstCallEvents(S.transcript.id) }),
   },
   {
     id: 'sessions-transcript-opened',

@@ -351,11 +351,15 @@
            re-render every second. -->
       {@const now = live ? clock.now : 0}
       {@const rows = transcript(tools, root, now)}
-      {#if tools.length === 1 && rows[0].kind === 'call'}
+      <!-- A lone call is its own line only once something has followed it:
+           the log's last run may still grow, and drawing its first call in
+           full only to fold it when the second arrives flashed every run. -->
+      {#if tools.length === 1 && rows[0].kind === 'call' && i < entries.length - 1}
         <div class="calls">{@render callLine(rows[0].call)}</div>
       {:else}
         {@const ms = runMs(tools, now)}
         {@const failures = runFailures(tools, root)}
+        {@const going = live ? runRunning(tools, root, now) : []}
         <!-- Folded unless the operator opens it: binding `open` to the run
              still going sprang it open at every call and shut at every result,
              and undid the operator's own choice each time. -->
@@ -388,11 +392,11 @@
             {/each}
           </div>
         {/if}
-        {#if live}
-          <!-- What is running now, under the fold; hidden once the run is
-               open, where the same call is already in the list. -->
+        {#if going.length}
+          <!-- What has been running a while, under the fold; hidden once the
+               run is open, where the same call is already in the list. -->
           <div class="calls running">
-            {#each runRunning(tools, root, now) as c (c.entry.call.seq)}
+            {#each going as c (c.entry.call.seq)}
               {@render callLine(c)}
             {/each}
           </div>
