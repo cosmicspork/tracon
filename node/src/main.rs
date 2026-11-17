@@ -99,6 +99,13 @@ enum Command {
         #[command(subcommand)]
         command: RepoCommand,
     },
+    /// Plugins: programs released on GitHub in tracon's plugin shape, which
+    /// the node installs once the operator allows an install card (talks to
+    /// `tracon serve`).
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCommand,
+    },
     /// The trail behind a commit: model, prompts, approval, policy version.
     Provenance { sha: String },
     /// Runtime volumes, state directories and images whose session,
@@ -157,6 +164,39 @@ enum SandboxCommand {
         #[arg(long)]
         name: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum PluginCommand {
+    /// Fetch the latest release of `owner/repo` (an owner in `[plugins]
+    /// owners`), or read a local archive, check it, and raise its install
+    /// card. Nothing is installed until the card is allowed.
+    Add {
+        /// `owner/repo`, or the path of a `<name>-<version>-<target>.tar.gz`.
+        source: String,
+        /// The channel the install card goes to. Left out:
+        /// `[session] default_channel`.
+        #[arg(long)]
+        channel: Option<String>,
+    },
+    /// The plugins installed, their versions, and any waiting on a card.
+    Ls,
+    /// Fetch the latest release of one plugin, or of every one installed
+    /// from a release, and raise a card for each that changed.
+    Update {
+        name: Option<String>,
+        #[arg(long)]
+        channel: Option<String>,
+    },
+    /// Remove a plugin's builds. Its data is kept unless `--purge`.
+    Rm {
+        name: String,
+        /// Delete its data and forget it too.
+        #[arg(long)]
+        purge: bool,
+    },
+    /// Go back to the version installed before the active one.
+    Rollback { name: String },
 }
 
 #[derive(Subcommand)]
@@ -861,6 +901,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Repo { command } => repo_command(command).await,
+        Command::Plugin { command } => plugin_command(command).await,
         Command::Sandbox {
             command:
                 SandboxCommand::Probe {
@@ -1475,6 +1516,172 @@ async fn channel_command(cmd: ChannelCommand) -> Result<()> {
 
 /// The running node's operator API. The CLI goes through it rather than the
 /// store so every write is published to the mesh like any other.
+/// What came of offering a plugin: the card to answer, or nothing to do.
+fn print_offered(v: &serde_json::Value) {
+    if v["up_to_date"].as_bool() == Some(true) {
+        println!("up to date at {}", v["version"].as_str().unwrap_or("?"));
+        return;
+    }
+    let name = v["name"].as_str().unwrap_or("?");
+    let version = v["version"].as_str().unwrap_or("?");
+    let what = match v["from_version"].as_str() {
+        Some(from) => format!("update {name} {from} → {version}"),
+        None => format!("activate {name} {version}"),
+    };
+    let waiting = match v["new"].as_bool() {
+        Some(false) => " (already waiting)",
+        _ => "",
+    };
+    println!(
+        "approve the install card (approval {}{waiting}) on {} to {what}",
+        v["approval_id"].as_str().unwrap_or("?"),
+        v["channel"].as_str().unwrap_or("?"),
+    );
+}
+
+/// Plugins go through the running node: it fetches, checks and keeps them,
+/// and only it raises the card that installs one.
+async fn plugin_command(command: PluginCommand) -> Result<()> {
+    use reqwest::Method;
+    match command {
+        PluginCommand::Add { source, channel } => {
+            let path = std::path::Path::new(&source);
+            let v = if path.exists() || source.ends_with(".tar.gz") {
+                let bytes =
+                    std::fs::read(path).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let mut query = format!("name={}", urlencoding(&name));
+                if let Some(channel) = &channel {
+                    query.push_str(&format!("&channel={}", urlencoding(channel)));
+                }
+                node_upload(&format!("/api/plugins/archive?{query}"), bytes).await?
+            } else {
+                node_call(
+                    Method::POST,
+                    "/api/plugins",
+                    Some(serde_json::json!({ "repo": source, "channel": channel })),
+                    None,
+                )
+                .await?
+            };
+            print_offered(&v);
+            Ok(())
+        }
+        PluginCommand::Ls => {
+            let v = node_call(Method::GET, "/api/plugins", None, None).await?;
+            let rows = v["plugins"].as_array().cloned().unwrap_or_default();
+            if rows.is_empty() {
+                println!("no plugins");
+            }
+            for row in &rows {
+                let version = |b: &serde_json::Value| b["version"].as_str().map(str::to_string);
+                let state = row["state"].as_str().unwrap_or("?");
+                let active = version(&row["active"]).unwrap_or_else(|| "-".into());
+                println!(
+                    "{}  {active}  {state}  from {}",
+                    row["name"].as_str().unwrap_or("?"),
+                    row["repo"].as_str().unwrap_or("?"),
+                );
+                if let Some(tools) = row["active"]["tools"].as_array() {
+                    let tools: Vec<&str> = tools.iter().filter_map(|t| t.as_str()).collect();
+                    if !tools.is_empty() {
+                        println!("  tools: {}", tools.join(", "));
+                    }
+                }
+                if let Some(previous) = version(&row["previous"]) {
+                    println!("  previous: {previous}");
+                }
+                let pending = &row["pending"];
+                if let Some(pending_version) = version(pending) {
+                    let card = pending["approval_state"].as_str().unwrap_or("gone");
+                    let card = match card {
+                        "pending" => format!(
+                            "approval {}",
+                            pending["approval_id"].as_str().unwrap_or("?")
+                        ),
+                        other => format!("card {other}"),
+                    };
+                    println!("  pending: {pending_version} ({card})");
+                }
+            }
+            Ok(())
+        }
+        PluginCommand::Update { name, channel } => {
+            let names: Vec<String> = match name {
+                Some(name) => vec![name],
+                None => node_call(Method::GET, "/api/plugins", None, None).await?["plugins"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|r| r["state"] != "removed")
+                    .filter(|r| !r["repo"].as_str().unwrap_or("").starts_with("local:"))
+                    .filter_map(|r| r["name"].as_str().map(str::to_string))
+                    .collect(),
+            };
+            if names.is_empty() {
+                println!("no plugins installed from a release");
+            }
+            let mut failed = 0;
+            for name in names {
+                let v = node_call(
+                    Method::POST,
+                    &format!("/api/plugins/{}/update", urlencoding(&name)),
+                    Some(serde_json::json!({ "channel": channel })),
+                    None,
+                )
+                .await;
+                match v {
+                    Ok(v) => {
+                        print!("{name}: ");
+                        print_offered(&v);
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        eprintln!("{name}: {e}");
+                    }
+                }
+            }
+            if failed > 0 {
+                anyhow::bail!("{failed} plugin(s) not updated");
+            }
+            Ok(())
+        }
+        PluginCommand::Rm { name, purge } => {
+            node_call(
+                Method::DELETE,
+                &format!("/api/plugins/{}?purge={purge}", urlencoding(&name)),
+                None,
+                None,
+            )
+            .await?;
+            match purge {
+                true => println!("removed {name} and its data"),
+                false => println!("removed {name}; its data is kept (--purge deletes it)"),
+            }
+            Ok(())
+        }
+        PluginCommand::Rollback { name } => {
+            let v = node_call(
+                Method::POST,
+                &format!("/api/plugins/{}/rollback", urlencoding(&name)),
+                None,
+                None,
+            )
+            .await?;
+            println!(
+                "{name}: {} → {} (the previous version is now {})",
+                v["previous"]["version"].as_str().unwrap_or("?"),
+                v["active"]["version"].as_str().unwrap_or("?"),
+                v["previous"]["version"].as_str().unwrap_or("?"),
+            );
+            Ok(())
+        }
+    }
+}
+
 async fn repo_command(command: RepoCommand) -> Result<()> {
     use reqwest::Method;
     let list = || node_call(Method::GET, "/api/repos/environments", None, None);
@@ -2081,6 +2288,34 @@ async fn node_request(
     body: Option<serde_json::Value>,
     if_match: Option<&str>,
 ) -> Result<serde_json::Value> {
+    node_send(method, path, body.map(NodeBody::Json), if_match).await
+}
+
+/// What a request to the node carries: JSON, or bytes the node reads as
+/// they are (an archive).
+enum NodeBody {
+    Json(serde_json::Value),
+    Bytes(Vec<u8>),
+}
+
+/// [`node_call`] with bytes for its body.
+async fn node_upload(path: &str, bytes: Vec<u8>) -> Result<serde_json::Value> {
+    check_target_identity().await?;
+    node_send(
+        reqwest::Method::POST,
+        path,
+        Some(NodeBody::Bytes(bytes)),
+        None,
+    )
+    .await
+}
+
+async fn node_send(
+    method: reqwest::Method,
+    path: &str,
+    body: Option<NodeBody>,
+    if_match: Option<&str>,
+) -> Result<serde_json::Value> {
     let url = format!("{}{path}", node_url()?);
     let mut req = reqwest::Client::new().request(method, &url);
     // A node on this machine knows the caller is the operator by the loopback
@@ -2091,8 +2326,14 @@ async fn node_request(
             req = req.bearer_auth(token);
         }
     }
-    if let Some(b) = body {
-        req = req.json(&b);
+    match body {
+        Some(NodeBody::Json(b)) => req = req.json(&b),
+        Some(NodeBody::Bytes(b)) => {
+            req = req
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .body(b)
+        }
+        None => {}
     }
     if let Some(h) = if_match {
         req = req.header("if-match", h);

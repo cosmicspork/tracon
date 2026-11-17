@@ -589,6 +589,9 @@ pub struct Guard {
     state: Place,
     config: Place,
     exports: Place,
+    /// `<state>/plugins/bin`: the builds of installed plugins, written only
+    /// by the node (`crate::plugin::install`).
+    plugins: Place,
     homes: Vec<Place>,
     agent_roots: Vec<Place>,
     worktree_roots: Vec<Place>,
@@ -665,6 +668,13 @@ impl Guard {
                 ),
                 Place::new("the node's secrets directory", PathBuf::from(ETC_SECRETS)),
             ],
+            plugins: Place::new(
+                "the node's plugin installs",
+                match layout.state_dir.as_os_str().is_empty() {
+                    true => PathBuf::new(),
+                    false => crate::plugin::install::bin_dir(&layout.state_dir),
+                },
+            ),
             state: Place::new("the state directory", layout.state_dir),
             config: Place::new("the configuration directory", layout.config_dir),
             exports: Place::new(
@@ -858,6 +868,50 @@ impl Guard {
             false => Writers::AnyButRoot,
         };
         self.chains(&walked, writers)
+    }
+
+    /// A plugin's program, which the node is about to run: inside the
+    /// node's plugin installs, reached by no link an agent could have made,
+    /// owned by root or the node and writable by no one else, and a regular
+    /// executable file. The plugin installs sit in the state directory,
+    /// which an agent can write, as the export area may; nothing else there
+    /// may be run this way.
+    pub fn plugin_program(&self, path: &Path) -> Result<PathBuf, Refusal> {
+        if self.off {
+            return Ok(path.to_path_buf());
+        }
+        let refused = |problem: Problem| Refusal {
+            key: "plugin".into(),
+            value: path.display().to_string(),
+            reason: problem.reason,
+            missing: problem.missing,
+        };
+        plain_absolute(path).map_err(refused)?;
+        let walked = walk(path).map_err(refused)?;
+        if !self.plugins.reached_by(&walked, &self.agent_roots) {
+            return Err(refused(refuse(format!(
+                "is not inside {}",
+                self.plugins.shown()
+            ))));
+        }
+        self.outside_agent_roots_but(path, &walked, true)
+            .map_err(refused)?;
+        self.chains(&walked, Writers::Foreign).map_err(refused)?;
+        if !walked.exists {
+            return Err(refused(missing(format!(
+                "{} does not exist",
+                path.display()
+            ))));
+        }
+        let meta = std::fs::symlink_metadata(&walked.resolved)
+            .map_err(|e| refused(refuse(format!("{}: {e}", walked.resolved.display()))))?;
+        if !meta.file_type().is_file() {
+            return Err(refused(refuse("is not a regular file")));
+        }
+        if meta.mode() & 0o111 == 0 {
+            return Err(refused(refuse("is not executable")));
+        }
+        Ok(path.to_path_buf())
     }
 
     /// The `consulta` program, with its arguments held to the shape the
@@ -1106,7 +1160,22 @@ impl Guard {
             return Err(refuse("is the root directory"));
         }
         outside(SYSTEM_DIRS, path, &walked, "a system directory")?;
+        // It holds the state directory, and so the plugin installs, by
+        // design; it may not be inside them.
+        self.outside_plugins(&[path, walked.resolved.as_path()], true)?;
         Ok(walked)
+    }
+
+    /// Not inside the node's plugin installs, nor (unless `may_hold`)
+    /// holding them: what is there is run as the node.
+    fn outside_plugins(&self, forms: &[&Path], may_hold: bool) -> Result<(), Problem> {
+        if forms.iter().any(|p| self.plugins.holds(p)) {
+            return Err(refuse(format!("is inside {}", self.plugins.shown())));
+        }
+        if !may_hold && forms.iter().any(|p| self.plugins.within(p)) {
+            return Err(refuse(format!("holds {}", self.plugins.shown())));
+        }
+        Ok(())
     }
 
     fn directory(&self, path: &Path, kind: PathKind) -> Result<Walked, Problem> {
@@ -1152,6 +1221,7 @@ impl Guard {
                 return Err(refuse(format!("holds {}", place.shown())));
             }
         }
+        self.outside_plugins(&forms, false)?;
         for prefix in &self.trusted {
             if forms.iter().any(|p| prefix.holds(p)) {
                 return Err(refuse(format!(
@@ -2131,6 +2201,100 @@ mod tests {
                 "{rel}: {refusal}"
             );
         }
+    }
+
+    #[test]
+    fn a_plugin_program_is_run_only_from_the_nodes_plugin_installs() {
+        let node = Node::new();
+        let program = node.program("state/plugins/bin/a/1.0.0-0123456789abcdef/bin/a");
+        let guard = node.guard();
+        assert_eq!(guard.plugin_program(&program).unwrap(), program);
+
+        // Elsewhere in the state directory, where an agent writes.
+        let planted = node.program("state/workspaces/x/a");
+        let refusal = guard.plugin_program(&planted).unwrap_err();
+        assert!(
+            refusal
+                .reason
+                .contains("is not inside the node's plugin installs"),
+            "{refusal}"
+        );
+        // Through a link an agent could have made, either way round.
+        let inward = node.at("state/workspaces/x/inward");
+        std::os::unix::fs::symlink(&program, &inward).unwrap();
+        assert!(guard.plugin_program(&inward).is_err());
+        let outward = node.at("state/plugins/bin/a/1.0.0-0123456789abcdef/bin/out");
+        std::os::unix::fs::symlink(&planted, &outward).unwrap();
+        let refusal = guard.plugin_program(&outward).unwrap_err();
+        assert!(!refusal.missing, "{refusal}");
+
+        // Not executable.
+        let plain = node.file("state/plugins/bin/a/1.0.0-0123456789abcdef/bin/b", "x");
+        let refusal = guard.plugin_program(&plain).unwrap_err();
+        assert!(refusal.reason.contains("not executable"), "{refusal}");
+        // Missing is said so.
+        let gone = node.at("state/plugins/bin/a/1.0.0-0123456789abcdef/bin/gone");
+        assert!(guard.plugin_program(&gone).unwrap_err().missing);
+        // Not relative.
+        assert!(guard
+            .plugin_program(Path::new("state/plugins/bin/a/bin/a"))
+            .is_err());
+    }
+
+    #[test]
+    fn a_plugin_program_in_a_directory_anyone_can_write_is_refused() {
+        let node = Node::new();
+        let program = node.program("state/plugins/bin/a/1.0.0-0123456789abcdef/bin/a");
+        let dir = node.at("state/plugins/bin/a");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let refusal = node.guard().plugin_program(&program).unwrap_err();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            refusal.reason.contains("writable by every user"),
+            "{refusal}"
+        );
+    }
+
+    #[test]
+    fn no_directory_key_names_the_plugin_installs() {
+        let node = Node::new();
+        node.dir("state/plugins/bin/a");
+        let guard = node.guard();
+        for (key, rel, says) in [
+            (
+                "session.worktree_root",
+                "state/plugins/bin/a",
+                "is inside the node's plugin installs",
+            ),
+            (
+                "session.worktree_root",
+                "state/plugins",
+                "holds the node's plugin installs",
+            ),
+            (
+                "docs.export_dir",
+                "state/plugins/bin/a",
+                "which an agent can write",
+            ),
+            (
+                "runtime.kubernetes.state_mount",
+                "state/plugins/bin",
+                "is inside the node's plugin installs",
+            ),
+        ] {
+            let refusal = guard
+                .path(key, &shown(&node.at(rel)), Stage::Edit)
+                .unwrap_err();
+            assert!(refusal.reason.contains(says), "{key} {rel}: {refusal}");
+        }
+        // The state mount holds the state directory, and so the installs.
+        guard
+            .path(
+                "runtime.kubernetes.state_mount",
+                &shown(&node.at("state")),
+                Stage::Edit,
+            )
+            .unwrap();
     }
 
     #[test]

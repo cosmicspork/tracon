@@ -818,7 +818,10 @@ pub(crate) mod tests {
         let (a, b) = ("a".repeat(64), "B".repeat(64));
         let text = format!("{a}  x.tar.gz\n{b} *y.tar.gz\n\n");
         assert_eq!(digest_in_checksums(&text, "x.tar.gz").unwrap(), a);
-        assert_eq!(digest_in_checksums(&text, "y.tar.gz").unwrap(), "b".repeat(64));
+        assert_eq!(
+            digest_in_checksums(&text, "y.tar.gz").unwrap(),
+            "b".repeat(64)
+        );
         assert!(digest_in_checksums(&text, "z.tar.gz")
             .unwrap_err()
             .to_string()

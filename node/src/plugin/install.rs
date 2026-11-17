@@ -123,7 +123,9 @@ pub fn parse_repo(spec: &str) -> Result<(&str, &str), InstallError> {
     let (owner, repo) = spec.split_once('/').ok_or_else(bad)?;
     let owner_ok = !owner.is_empty()
         && owner.len() <= 39
-        && owner.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+        && owner
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-');
     let repo_ok = !repo.is_empty()
         && repo.len() <= 100
         && repo != "."
@@ -447,15 +449,18 @@ pub fn tree_digest(dir: &Path) -> Result<String, String> {
             } else if meta.is_file() {
                 files.push((path, meta.permissions().mode() & 0o111 != 0));
             } else {
-                return Err(format!("{} is neither a file nor a directory", path.display()));
+                return Err(format!(
+                    "{} is neither a file nor a directory",
+                    path.display()
+                ));
             }
         }
     }
     files.sort();
     let mut hash = Sha256::new();
     for (path, executable) in files {
-        let digest =
-            bundle::sha256_file(&dir.join(&path)).map_err(|e| format!("{}: {e}", path.display()))?;
+        let digest = bundle::sha256_file(&dir.join(&path))
+            .map_err(|e| format!("{}: {e}", path.display()))?;
         hash.update(path.as_os_str().as_encoded_bytes());
         hash.update(format!("\0{digest}\0{}\n", u8::from(executable)));
     }
@@ -573,7 +578,8 @@ pub(crate) mod tests {
     /// A release as GitHub's API would describe it, and its assets, served
     /// from memory: `releases[(owner/repo)] = (tag, body, assets)`. Every
     /// request is recorded.
-    pub(crate) type Published = std::collections::BTreeMap<String, (String, String, Vec<(String, Vec<u8>)>)>;
+    pub(crate) type Published =
+        std::collections::BTreeMap<String, (String, String, Vec<(String, Vec<u8>)>)>;
 
     pub(crate) async fn serve(
         published: std::sync::Arc<std::sync::Mutex<Published>>,
@@ -724,7 +730,9 @@ pub(crate) mod tests {
         assert!(asked.lock().unwrap().is_empty());
         assert!(!state.path().join("plugins").exists());
         for bad in ["nope", "a/b/c", "a/..", "/x"] {
-            assert!(fetch(&releases, state.path(), &owners(), bad).await.is_err());
+            assert!(fetch(&releases, state.path(), &owners(), bad)
+                .await
+                .is_err());
         }
         assert!(asked.lock().unwrap().is_empty());
     }
@@ -743,7 +751,8 @@ pub(crate) mod tests {
         let mut two = release("sql-review", "0.1.0", good.clone());
         two.push((asset("sql-review-extra", "0.1.0"), good.clone()));
         let renamed: Vec<(String, Vec<u8>)> = release("other", "0.1.0", good.clone());
-        let cases: Vec<(Vec<(String, Vec<u8>)>, &str)> = vec![
+        type Assets = Vec<(String, Vec<u8>)>;
+        let cases: Vec<(Assets, &str)> = vec![
             (wrong_digest, "does not match"),
             (no_sums, "publishes no checksums.txt"),
             (two, "more than one archive"),
@@ -780,7 +789,10 @@ pub(crate) mod tests {
         let refused = fetch(&releases, state.path(), &owners(), "cosmicspork/none")
             .await
             .unwrap_err();
-        assert!(refused.to_string().contains("no published release"), "{refused}");
+        assert!(
+            refused.to_string().contains("no published release"),
+            "{refused}"
+        );
     }
 
     #[test]
@@ -791,14 +803,23 @@ pub(crate) mod tests {
         let text = manifest("sql-review", "0.1.0", &[]);
         let name = format!("sql-review-0.1.0-{target}.tar.gz");
         let cases: Vec<(Vec<u8>, &str)> = vec![
-            (archive(&text, &[("../escape", b"x", 0o644)]), "the tarball holds ../escape"),
-            (archive(&text, &[("/etc/x", b"x", 0o644)]), "the tarball holds /etc/x"),
-            (archive(&text, &[("lib/x.so", b"x", 0o644)]), "lib at its top"),
-            (archive(&text, &[("bin/sql-review", b"again", 0o755)]), "exists"),
             (
-                archive(&text, &[("tracon-plugin.toml/x", b"", 0o644)]),
-                "",
+                archive(&text, &[("../escape", b"x", 0o644)]),
+                "the tarball holds ../escape",
             ),
+            (
+                archive(&text, &[("/etc/x", b"x", 0o644)]),
+                "the tarball holds /etc/x",
+            ),
+            (
+                archive(&text, &[("lib/x.so", b"x", 0o644)]),
+                "lib at its top",
+            ),
+            (
+                archive(&text, &[("bin/sql-review", b"again", 0o755)]),
+                "exists",
+            ),
+            (archive(&text, &[("tracon-plugin.toml/x", b"", 0o644)]), ""),
         ];
         for (bytes, says) in cases {
             let state = tempfile::tempdir().unwrap();
@@ -822,7 +843,9 @@ pub(crate) mod tests {
         let state = tempfile::tempdir().unwrap();
         let refused = stage_local(state.path(), &gz.finish().unwrap(), &name).unwrap_err();
         assert!(
-            refused.to_string().contains("neither a file nor a directory"),
+            refused
+                .to_string()
+                .contains("neither a file nor a directory"),
             "{refused}"
         );
 
@@ -834,18 +857,34 @@ pub(crate) mod tests {
             entries: 100,
             bytes: 1024,
         };
-        let refused =
-            bundle::unpack_tree(&tarball, &dir.path().join("a"), Path::new(""), |_| false, small)
-                .unwrap_err();
-        assert!(refused.to_string().contains("more than 1024 bytes"), "{refused}");
+        let refused = bundle::unpack_tree(
+            &tarball,
+            &dir.path().join("a"),
+            Path::new(""),
+            |_| false,
+            small,
+        )
+        .unwrap_err();
+        assert!(
+            refused.to_string().contains("more than 1024 bytes"),
+            "{refused}"
+        );
         let few = Limits {
             entries: 2,
             bytes: 1 << 20,
         };
-        let refused =
-            bundle::unpack_tree(&tarball, &dir.path().join("b"), Path::new(""), |_| false, few)
-                .unwrap_err();
-        assert!(refused.to_string().contains("more than 2 entries"), "{refused}");
+        let refused = bundle::unpack_tree(
+            &tarball,
+            &dir.path().join("b"),
+            Path::new(""),
+            |_| false,
+            few,
+        )
+        .unwrap_err();
+        assert!(
+            refused.to_string().contains("more than 2 entries"),
+            "{refused}"
+        );
     }
 
     #[test]
@@ -856,11 +895,17 @@ pub(crate) mod tests {
         let state = tempfile::tempdir().unwrap();
         let bytes = archive(&manifest("sql-review", "0.1.0", &[]), &[]);
         let refused = stage_local(state.path(), &bytes, "plugin.tar.gz").unwrap_err();
-        assert!(refused.to_string().contains("its manifest says"), "{refused}");
+        assert!(
+            refused.to_string().contains("its manifest says"),
+            "{refused}"
+        );
         let name = format!("./dist/sql-review-0.1.0-{target}.tar.gz");
         let staged = stage_local(state.path(), &bytes, &name).unwrap();
         use sha2::Digest as _;
-        assert_eq!(staged.build.digest, hex::encode(sha2::Sha256::digest(&bytes)));
+        assert_eq!(
+            staged.build.digest,
+            hex::encode(sha2::Sha256::digest(&bytes))
+        );
         assert_eq!(
             staged.source,
             format!("local:sql-review-0.1.0-{target}.tar.gz")
@@ -880,7 +925,12 @@ pub(crate) mod tests {
         let state = tempfile::tempdir().unwrap();
         let stage = |version: &str| {
             let bytes = archive(&manifest("a", version, &[]), &[]);
-            stage_local(state.path(), &bytes, &format!("a-{version}-{target}.tar.gz")).unwrap()
+            stage_local(
+                state.path(),
+                &bytes,
+                &format!("a-{version}-{target}.tar.gz"),
+            )
+            .unwrap()
         };
         let (one, two, three) = (stage("1.0.0"), stage("1.1.0"), stage("1.2.0"));
         prune(state.path(), "a", &[&one.build, &three.build]).unwrap();

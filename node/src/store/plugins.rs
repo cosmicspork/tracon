@@ -54,20 +54,24 @@ pub struct PluginRow {
     pub updated_ms: i64,
 }
 
+fn column_json<T: serde::de::DeserializeOwned>(
+    column: &str,
+    text: Option<String>,
+) -> rusqlite::Result<Option<T>> {
+    text.map(|t| serde_json::from_str(&t))
+        .transpose()
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                format!("plugin.{column}: {e}").into(),
+            )
+        })
+}
+
 impl PluginRow {
     fn from_row(r: &rusqlite::Row) -> rusqlite::Result<Self> {
-        let json = |column: &str, text: Option<String>| -> rusqlite::Result<_> {
-            text.map(|t| serde_json::from_str(&t))
-                .transpose()
-                .map_err(|e| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        0,
-                        rusqlite::types::Type::Text,
-                        format!("plugin.{column}: {e}").into(),
-                    )
-                })
-        };
-        let manifest: Option<Manifest> = json("manifest", r.get("manifest")?)?;
+        let manifest: Option<Manifest> = column_json("manifest", r.get("manifest")?)?;
         let active = match (
             r.get::<_, Option<String>>("version")?,
             r.get::<_, Option<String>>("digest")?,
@@ -87,8 +91,8 @@ impl PluginRow {
             repo: r.get("repo")?,
             state: r.get("state")?,
             active,
-            previous: json("previous", r.get("previous")?)?,
-            pending: json("pending", r.get("pending")?)?,
+            previous: column_json("previous", r.get("previous")?)?,
+            pending: column_json("pending", r.get("pending")?)?,
             updated_ms: r.get("updated_ms")?,
         })
     }
@@ -274,8 +278,7 @@ mod tests {
     use super::*;
 
     fn build(version: &str, digest: &str) -> Build {
-        let mut manifest =
-            Manifest::parse(crate::plugin::manifest::tests::EXAMPLE).unwrap();
+        let mut manifest = Manifest::parse(crate::plugin::manifest::tests::EXAMPLE).unwrap();
         manifest.version = version.into();
         Build {
             version: version.into(),
@@ -298,7 +301,11 @@ mod tests {
     fn a_first_install_waits_then_activates_and_an_update_keeps_the_one_before() {
         let store = Store::open_in_memory().unwrap();
         store
-            .plugin_stage_pending("sql-review", "cosmicspork/sql", &pending("0.1.0", "d1", "a1"))
+            .plugin_stage_pending(
+                "sql-review",
+                "cosmicspork/sql",
+                &pending("0.1.0", "d1", "a1"),
+            )
             .unwrap();
         let row = store.plugin_get("sql-review").unwrap().unwrap();
         assert_eq!(row.state, PENDING);
@@ -334,7 +341,10 @@ mod tests {
 
         // Rollback swaps them, and again.
         let (now, was) = store.plugin_rollback("sql-review").unwrap().unwrap();
-        assert_eq!((now.version.as_str(), was.version.as_str()), ("0.1.0", "0.2.0"));
+        assert_eq!(
+            (now.version.as_str(), was.version.as_str()),
+            ("0.1.0", "0.2.0")
+        );
         let row = store.plugin_get("sql-review").unwrap().unwrap();
         assert_eq!(row.active.as_ref().unwrap().digest, "d1");
         assert_eq!(row.previous.as_ref().unwrap().digest, "d2");
@@ -394,7 +404,9 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let mut p = pending("1.0.0", "d1", "a1");
         p.build.manifest.formats = vec!["jira_wiki".into()];
-        store.plugin_stage_pending("jira-review", "o/j", &p).unwrap();
+        store
+            .plugin_stage_pending("jira-review", "o/j", &p)
+            .unwrap();
         assert_eq!(
             store.plugin_formats_owned().unwrap(),
             vec![("jira_wiki".to_string(), "jira-review".to_string())]

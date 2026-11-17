@@ -2211,8 +2211,9 @@ fn answered_by(s: &AppState, parts: &axum::http::request::Parts) -> String {
 /// egress, image) into `node.toml`; allowing a Dockerfile trial builds that
 /// Dockerfile with the network, outside the boundary; allowing an egress ask
 /// for the repository saves the host to the repository's egress for every
-/// session after this one. Each is a config write or networked work outside
-/// the boundary, so each is an admin action. Refusing, or asking for
+/// session after this one; allowing a plugin's install card installs a
+/// program the node will run. Each is a config write, networked work or a
+/// program outside the boundary, so each is an admin action. Refusing, or asking for
 /// changes, never is.
 pub(crate) fn admin_answer(
     s: &AppState,
@@ -2252,6 +2253,14 @@ pub(crate) fn admin_answer(
                 };
                 format!("Build {dockerfile} for {repo} with the network")
             },
+        }),
+        crate::store::approvals::PLUGIN_INSTALL_TOOL if allow => Some(AdminAnswer {
+            what: "allowing a plugin's install card installs a program the node will run",
+            summary: format!(
+                "Install plugin {} {} from {repo}",
+                field("name"),
+                field("version")
+            ),
         }),
         crate::mcp::egress::REQUEST | crate::mcp::egress::PREPARE
             if option_id == crate::store::approvals::OPTION_ALLOW_REPO =>

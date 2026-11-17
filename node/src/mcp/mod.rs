@@ -1770,6 +1770,76 @@ impl Tools {
         Some(json!({ "issue": issue }))
     }
 
+    /// The operator's answer to a plugin's install card (`crate::plugin`):
+    /// allowing it makes the build it names the plugin's active one, after
+    /// checking it again; anything else drops the build. Recorded on the
+    /// card either way.
+    async fn answer_plugin_card(
+        &self,
+        access: &SessionAccess,
+        approval: crate::store::approvals::ApprovalRow,
+        option_id: &str,
+        reason: Option<String>,
+        notes: Option<String>,
+        by: Option<&str>,
+    ) -> Result<(), crate::session::SessionError> {
+        use crate::session::SessionError;
+        use crate::store::approvals::{Decision, FAILED, REJECTED, RUNNING, SUCCEEDED};
+        if approval.node_id != access.manager.node_id() {
+            return Err(SessionError::Rejected(
+                "this install card belongs to another node".into(),
+            ));
+        }
+        let allow = option_id == OPTION_ALLOW_ONCE;
+        let reason = match allow {
+            true => None,
+            false => Some(reason.unwrap_or_else(|| "the operator did not install it".into())),
+        };
+        let state = if allow { RUNNING } else { REJECTED };
+        let decision = Decision {
+            state,
+            option_id,
+            reason: reason.as_deref(),
+            note: notes.as_deref(),
+            bound_to: Some(&approval.arguments),
+            ..Default::default()
+        };
+        if !access.store.decide_approval(&approval.id, &decision)? {
+            return Err(SessionError::Rejected(
+                "this approval is no longer waiting".into(),
+            ));
+        }
+        let decided = access
+            .store
+            .get_approval(&approval.id)?
+            .unwrap_or_else(|| approval.clone());
+        access.manager.approval_answered(&decided, state, by).await;
+        let store = access.store.clone();
+        let card = approval.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            crate::plugin::decide(&store, &Config::state_dir(), &card, allow)
+        })
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+        if !allow {
+            if let Err(error) = outcome {
+                tracing::warn!(approval = %approval.id, %error, "a rejected install card left its build");
+            }
+            return Ok(());
+        }
+        let (state, result, reason) = match outcome {
+            Ok(result) => (SUCCEEDED, Some(result.to_string()), None),
+            Err(error) => (FAILED, None, Some(error)),
+        };
+        access
+            .store
+            .finish_approval(&approval.id, state, result.as_deref(), reason.as_deref())?;
+        if let Some(settled) = access.store.get_approval(&approval.id)? {
+            access.manager.approval_decided(&settled, state).await;
+        }
+        Ok(())
+    }
+
     /// The operator's answer to an approval. Allowing it runs the call, with
     /// their edit when they made one, held to every refusal the call itself
     /// would meet. Refusing it, or asking for changes, settles it with what
@@ -1828,8 +1898,10 @@ impl Tools {
         // call, so an edit to it would be silently dropped: what the operator
         // allowed would not be what happened. Refused instead.
         let place = crate::store::approvals::PLACE_TOOL;
+        let plugin = crate::store::approvals::PLUGIN_INSTALL_TOOL;
         let takes_no_edit = matches!(approval.tool.as_str(), egress::REQUEST | egress::PREPARE)
-            || approval.tool == place;
+            || approval.tool == place
+            || approval.tool == plugin;
         if takes_no_edit
             && option_id != OPTION_REQUEST_CHANGES
             && option_id != crate::adapter::types::OPTION_REJECT_ONCE
@@ -1837,12 +1909,16 @@ impl Tools {
             if let Some(edited) = &answer.arguments {
                 let asked: Value = serde_json::from_str(&approval.arguments).unwrap_or_default();
                 if *edited != asked {
-                    let message = match approval.tool == place {
-                        true => {
+                    let message = match approval.tool.as_str() {
+                        t if t == place => {
                             "this card runs the session where it asked and takes no edit; \
                                  reject it instead"
                         }
-                        false => {
+                        t if t == plugin => {
+                            "a plugin is installed as published, or not: this card takes no \
+                                 edit; reject it instead"
+                        }
+                        _ => {
                             "this card opens the host it asked about and takes no edit; \
                                   reject it instead"
                         }
@@ -1894,6 +1970,18 @@ impl Tools {
                 )?;
                 return Ok(());
             }
+        }
+        // An install card installs the build it names, or drops it: there is
+        // no call to run, and nothing to change.
+        if approval.tool == plugin {
+            if option_id == OPTION_REQUEST_CHANGES {
+                return Err(rejected(
+                    "a plugin is installed as published, or not: allow it or reject it",
+                ));
+            }
+            return self
+                .answer_plugin_card(access, approval, option_id, reason, notes, by.as_deref())
+                .await;
         }
         // A warm-up's ask is saved or refused: the warm-up is over, so there
         // is nothing to open once, and no call to run or to change.

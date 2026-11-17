@@ -522,7 +522,9 @@ impl PluginEntry {
 /// A GitHub owner name: letters, digits and single `-`, at most 39.
 fn github_owner_ok(owner: &str) -> bool {
     (1..=39).contains(&owner.len())
-        && owner.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        && owner
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
         && !owner.starts_with('-')
         && !owner.ends_with('-')
         && !owner.contains("--")
@@ -630,8 +632,6 @@ const MCP_RESERVED_HEADERS: &[&str] = &[
     "mcp-protocol-version",
 ];
 
-/// A server's name is the prefix its tools are offered under and split back
-/// off by, so it is held to characters that cannot run into `__`.
 /// A name tools are offered under as `<name>__<tool>`, an `[[mcp_server]]`'s
 /// or a plugin's: 1-24 lowercase letters, digits or `-`, not starting with
 /// `-`, so the tool's full name splits back.
@@ -644,6 +644,8 @@ pub fn namespace_name_ok(name: &str) -> bool {
         && !name.starts_with('-')
 }
 
+/// A server's name is the prefix its tools are offered under and split back
+/// off by, so it is held to characters that cannot run into `__`.
 pub fn validate_mcp_servers(servers: &[McpServer]) -> Result<(), String> {
     let mut seen = std::collections::BTreeSet::new();
     for server in servers {

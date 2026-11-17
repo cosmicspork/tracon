@@ -211,7 +211,16 @@ impl Manifest {
                 Some(key) => format!(
                     "{FILE}: {key} is a top-level key; write it before the first [table], not under [ui]"
                 ),
-                None => format!("{FILE}: {}", e.message().trim()),
+                // Name the line, which names the field: serde's own
+                // message often does not.
+                None => match e.span().map(|span| {
+                    let line = text[..span.start].matches('\n').count() + 1;
+                    let source = text.lines().nth(line - 1).unwrap_or("").trim();
+                    format!("line {line} (`{source}`)")
+                }) {
+                    Some(at) => format!("{FILE}: {at}: {}", e.message().trim()),
+                    None => format!("{FILE}: {}", e.message().trim()),
+                },
             }
         })?;
         manifest.validate()?;
@@ -239,10 +248,7 @@ impl Manifest {
         if self.contract != CONTRACT {
             return bad(
                 "contract",
-                format!(
-                    "contract {}; this node speaks {CONTRACT}",
-                    self.contract
-                ),
+                format!("contract {}; this node speaks {CONTRACT}", self.contract),
             );
         }
         let Some(program) = self.exec.first() else {
@@ -262,7 +268,10 @@ impl Manifest {
         }
         for arg in &self.exec {
             if arg.is_empty() || arg.contains('\0') {
-                return bad("exec", "has an empty argument or one with a NUL byte".into());
+                return bad(
+                    "exec",
+                    "has an empty argument or one with a NUL byte".into(),
+                );
             }
             if NODE_ARGS
                 .iter()
@@ -368,7 +377,10 @@ impl Manifest {
         }
         if let Some(ui) = &self.ui {
             if !std::fs::symlink_metadata(root.join(&ui.entry)).is_ok_and(|m| m.is_file()) {
-                return Err(format!("ui.entry: {} is not a file in the archive", ui.entry));
+                return Err(format!(
+                    "ui.entry: {} is not a file in the archive",
+                    ui.entry
+                ));
             }
         }
         Ok(())
@@ -463,11 +475,7 @@ pub fn diff(old: &Manifest, new: &Manifest) -> Vec<String> {
     };
     for tool in &new.tools {
         match old.tools.iter().find(|t| t.name == tool.name) {
-            None => lines.push(format!(
-                "tool `{}` added ({})",
-                tool.name,
-                shown_tool(tool)
-            )),
+            None => lines.push(format!("tool `{}` added ({})", tool.name, shown_tool(tool))),
             Some(was) if was != tool => lines.push(format!(
                 "tool `{}`: {} → {}",
                 tool.name,
@@ -612,7 +620,11 @@ title = "SQL"
             ("name = \"sql-review\"", "name = \"SQL\"", "name:"),
             ("name = \"sql-review\"", "name = \"-sql\"", "name:"),
             ("version = \"0.1.0\"", "version = \"1.0\"", "version:"),
-            ("contract = 1", "contract = 2", "contract 2; this node speaks 1"),
+            (
+                "contract = 1",
+                "contract = 2",
+                "contract 2; this node speaks 1",
+            ),
             (
                 "exec = [\"bin/sql-review\", \"serve\"]",
                 "exec = []",
@@ -643,7 +655,11 @@ title = "SQL"
                 "exec = [\"bin/sql-review\", \"--data=/x\"]",
                 "the node's own",
             ),
-            ("name = \"query\"", "name = \"write\"", "tool \"write\": is declared twice"),
+            (
+                "name = \"query\"",
+                "name = \"write\"",
+                "tool \"write\": is declared twice",
+            ),
             ("name = \"query\"", "name = \"q__x\"", "tool \"q__x\""),
             (
                 "name = \"sql-write\"",
@@ -652,8 +668,16 @@ title = "SQL"
             ),
             ("lend = \"approved\"", "lend = \"never\"", "lend"),
             ("hint = \"read\"", "hint = \"maybe\"", "hint"),
-            ("entry = \"ui/index.html\"", "entry = \"index.html\"", "ui.entry:"),
-            ("entry = \"ui/index.html\"", "entry = \"ui/../bin/x\"", "ui.entry:"),
+            (
+                "entry = \"ui/index.html\"",
+                "entry = \"index.html\"",
+                "ui.entry:",
+            ),
+            (
+                "entry = \"ui/index.html\"",
+                "entry = \"ui/../bin/x\"",
+                "ui.entry:",
+            ),
             ("title = \"SQL\"", "title = \" \"", "ui.title:"),
             ("db.internal:1521", "db.internal:70000", "egress:"),
             ("db.internal:1521", "db internal", "egress:"),
@@ -667,7 +691,11 @@ title = "SQL"
                 "contract = 1\nformats = [\"Wiki\"]",
                 "formats:",
             ),
-            ("contract = 1", "contract = 1\ncolour = \"red\"", "unknown field"),
+            (
+                "contract = 1",
+                "contract = 1\ncolour = \"red\"",
+                "unknown field",
+            ),
         ];
         for (from, to, says) in cases {
             let error = refused(|text| text.replacen(from, to, 1));
@@ -690,7 +718,9 @@ title = "SQL"
         for ok in ["0.1.0", "1.2.3-rc.1", "1.2.3+build.5", "10.0.0-alpha+x"] {
             assert!(version_ok(ok), "{ok}");
         }
-        for bad in ["1", "1.2", "1.2.3.4", "v1.2.3", "1.2.3-", "1.2.3/x", "", "1..3"] {
+        for bad in [
+            "1", "1.2", "1.2.3.4", "v1.2.3", "1.2.3-", "1.2.3/x", "", "1..3",
+        ] {
             assert!(!version_ok(bad), "{bad}");
         }
     }
@@ -711,7 +741,10 @@ title = "SQL"
             .unwrap_err()
             .contains("not executable"));
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(m.validate_tree(dir.path()).unwrap_err().contains("ui.entry"));
+        assert!(m
+            .validate_tree(dir.path())
+            .unwrap_err()
+            .contains("ui.entry"));
         std::fs::write(dir.path().join("ui/index.html"), b"<p>").unwrap();
         m.validate_tree(dir.path()).unwrap();
     }
@@ -747,7 +780,8 @@ title = "SQL"
     fn the_summary_marks_what_is_lent_only_on_approval() {
         let summary = Manifest::parse(EXAMPLE).unwrap().summary();
         assert!(summary.contains("`sql-review__write`: write, consequential"));
-        assert!(summary.contains("`sql-write` (`sql-write-*`): lent only to a call from an approved card"));
+        assert!(summary
+            .contains("`sql-write` (`sql-write-*`): lent only to a call from an approved card"));
         assert!(summary.contains("SQL (`ui/index.html`)"));
         assert!(summary.contains("`db.internal:1521`"));
     }

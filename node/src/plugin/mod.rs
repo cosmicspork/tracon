@@ -43,8 +43,13 @@ pub struct Ask<'a> {
 #[derive(Debug)]
 pub enum Offered {
     /// A card waits on the operator: new, or the one already raised for
-    /// this same build.
-    Asked { card: ApprovalRow, new: bool },
+    /// this same build. `superseded` is the card of a build that waited
+    /// before it, now expired.
+    Asked {
+        card: ApprovalRow,
+        new: bool,
+        superseded: Option<String>,
+    },
     /// This build is the active one already.
     UpToDate(Build),
 }
@@ -90,7 +95,10 @@ fn card_summary(staged: &Staged, from: Option<&Build>) -> String {
             "Update plugin **{}** {} → {}.\n\n",
             manifest.name, was.version, build.version
         ),
-        None => format!("Install plugin **{}** {}.\n\n", manifest.name, build.version),
+        None => format!(
+            "Install plugin **{}** {}.\n\n",
+            manifest.name, build.version
+        ),
     };
     out.push_str(&manifest.summary());
     out.push_str("\n**Source**\n\n");
@@ -168,9 +176,12 @@ pub fn offer(
         if let Some(pending) = &row.pending {
             if pending.build.digest == staged.build.digest {
                 if let Some(card) = store.get_approval(&pending.approval_id)? {
-                    if card.state == APPROVAL_PENDING && card.expires_ms > crate::store::now_ms()
-                    {
-                        return Ok(Offered::Asked { card, new: false });
+                    if card.state == APPROVAL_PENDING && card.expires_ms > crate::store::now_ms() {
+                        return Ok(Offered::Asked {
+                            card,
+                            new: false,
+                            superseded: None,
+                        });
                     }
                 }
             }
@@ -223,11 +234,14 @@ pub fn offer(
         finished_ms: None,
         expires_ms: now + (ask.expiry_secs.max(1) as i64) * 1000,
     };
+    let mut superseded = None;
     if let Some(older) = row.as_ref().and_then(|r| r.pending.as_ref()) {
-        store.expire_approval(
+        if store.expire_approval(
             &older.approval_id,
             &format!("superseded by {name} {}", build.version),
-        )?;
+        )? {
+            superseded = Some(older.approval_id.clone());
+        }
     }
     store.insert_approval(&card)?;
     store.plugin_stage_pending(
@@ -241,7 +255,11 @@ pub fn offer(
         },
     )?;
     keep(store.plugin_get(&name)?.as_ref(), None)?;
-    Ok(Offered::Asked { card, new: true })
+    Ok(Offered::Asked {
+        card,
+        new: true,
+        superseded,
+    })
 }
 
 /// The plugin an install card names.
@@ -302,13 +320,13 @@ pub fn decide(
     }
     let checked = format_conflict(store, &pending.build.manifest)
         .map_err(|e| e.to_string())?
-        .map_or_else(
-            || install::verify(state_dir, &name, &pending.build),
-            Err,
-        );
+        .map_or_else(|| install::verify(state_dir, &name, &pending.build), Err);
     if let Err(why) = checked {
         drop_pending()?;
-        return Err(format!("{name} {} was not installed: {why}", pending.build.version));
+        return Err(format!(
+            "{name} {} was not installed: {why}",
+            pending.build.version
+        ));
     }
     let was = row.and_then(|r| r.active).map(|b| b.version);
     let installed = store
@@ -332,33 +350,36 @@ pub fn rollback(
         .plugin_get(name)?
         .filter(|r| r.state != REMOVED)
         .ok_or_else(|| InstallError::Refused(format!("no plugin {name} is installed")))?;
-    let previous = row
-        .previous
-        .as_ref()
-        .ok_or_else(|| InstallError::Refused(format!("{name} has no previous version to go back to")))?;
+    let previous = row.previous.as_ref().ok_or_else(|| {
+        InstallError::Refused(format!("{name} has no previous version to go back to"))
+    })?;
     install::verify(state_dir, name, previous).map_err(InstallError::Refused)?;
-    let (now, was) = store
-        .plugin_rollback(name)?
-        .ok_or_else(|| InstallError::Refused(format!("{name} has no previous version to go back to")))?;
+    let (now, was) = store.plugin_rollback(name)?.ok_or_else(|| {
+        InstallError::Refused(format!("{name} has no previous version to go back to"))
+    })?;
     tracing::info!(plugin = %name, from = %was.version, to = %now.version, "rolled a plugin back");
     Ok((now, was))
 }
 
-/// Remove `name`: its builds go, and its card if one waits; its data stays
-/// unless `purge`. Nothing runs it yet, so there is nothing to stop.
+/// Remove `name`: its builds go, and its card if one waits (whose id is
+/// returned, expired); its data stays unless `purge`. Nothing runs it yet,
+/// so there is nothing to stop.
 pub fn remove(
     store: &Store,
     state_dir: &std::path::Path,
     name: &str,
     purge: bool,
-) -> Result<(), InstallError> {
+) -> Result<Option<String>, InstallError> {
     let _offering = offering();
     let row = store
         .plugin_get(name)?
         .filter(|r| purge || r.state != REMOVED)
         .ok_or_else(|| InstallError::Refused(format!("no plugin {name} is installed")))?;
+    let mut expired = None;
     if let Some(pending) = &row.pending {
-        store.expire_approval(&pending.approval_id, &format!("plugin {name} was removed"))?;
+        if store.expire_approval(&pending.approval_id, &format!("plugin {name} was removed"))? {
+            expired = Some(pending.approval_id.clone());
+        }
     }
     store.plugin_remove(name, purge)?;
     install::prune(state_dir, name, &[])?;
@@ -369,7 +390,7 @@ pub fn remove(
         }
     }
     tracing::info!(plugin = %name, purge, "removed a plugin");
-    Ok(())
+    Ok(expired)
 }
 
 #[cfg(test)]
@@ -410,16 +431,24 @@ mod tests {
         let v1 = archive(&manifest("sql-review", "0.1.0", &[]), &[]);
         let published = Arc::new(Mutex::new(Published::from([(
             "cosmicspork/sql-review".to_string(),
-            ("v0.1.0".into(), "First.".into(), release("sql-review", "0.1.0", v1)),
+            (
+                "v0.1.0".into(),
+                "First.".into(),
+                release("sql-review", "0.1.0", v1),
+            ),
         )])));
         let (api, _) = serve(published.clone()).await;
         let releases = install::Releases::at(&api).unwrap();
-        let fetch = || install::fetch(&releases, state.path(), &owners(), "cosmicspork/sql-review");
+        let owners = owners();
+        let fetch = || install::fetch(&releases, state.path(), &owners, "cosmicspork/sql-review");
 
         let card = asked(offer(&store, state.path(), &ask(), fetch().await.unwrap()).unwrap());
         assert_eq!(card.tool, PLUGIN_INSTALL_TOOL);
         assert_eq!(card.session_id, None);
-        assert_eq!(card.title, "install plugin sql-review 0.1.0 from cosmicspork/sql-review");
+        assert_eq!(
+            card.title,
+            "install plugin sql-review 0.1.0 from cosmicspork/sql-review"
+        );
         let args: Value = serde_json::from_str(&card.arguments).unwrap();
         let row = store.plugin_get("sql-review").unwrap().unwrap();
         assert_eq!(row.state, "pending");
@@ -427,10 +456,15 @@ mod tests {
         let pending = row.pending.unwrap();
         assert_eq!(args["digest"], pending.build.digest);
         assert_eq!(pending.build.digest.len(), 64);
-        assert!(args["summary"].as_str().unwrap().contains("release v0.1.0, sha256"));
+        assert!(args["summary"]
+            .as_str()
+            .unwrap()
+            .contains("release v0.1.0, sha256"));
         // Asked again for the same build, the same card.
         let again = offer(&store, state.path(), &ask(), fetch().await.unwrap()).unwrap();
-        assert!(matches!(again, Offered::Asked { ref card, new: false } if card.id == pending.approval_id));
+        assert!(
+            matches!(again, Offered::Asked { ref card, new: false, .. } if card.id == pending.approval_id)
+        );
 
         let result = decide(&store, state.path(), &card, true).unwrap();
         assert_eq!(result["installed"], "0.1.0");
@@ -489,7 +523,10 @@ mod tests {
 
         // Rollback swaps them, keeping both builds on disk.
         let (now, was) = rollback(&store, state.path(), "sql-review").unwrap();
-        assert_eq!((now.version.as_str(), was.version.as_str()), ("0.1.0", "0.2.0"));
+        assert_eq!(
+            (now.version.as_str(), was.version.as_str()),
+            ("0.1.0", "0.2.0")
+        );
         assert_eq!(now, v1_build);
         let dirs = std::fs::read_dir(state.path().join("plugins/bin/sql-review"))
             .unwrap()
@@ -504,8 +541,24 @@ mod tests {
         }
         let state = tempfile::tempdir().unwrap();
         let store = Store::open_in_memory().unwrap();
-        let first = asked(offer(&store, state.path(), &ask(), local(state.path(), "a", "1.0.0", &[])).unwrap());
-        let second = asked(offer(&store, state.path(), &ask(), local(state.path(), "a", "1.0.1", &[])).unwrap());
+        let first = asked(
+            offer(
+                &store,
+                state.path(),
+                &ask(),
+                local(state.path(), "a", "1.0.0", &[]),
+            )
+            .unwrap(),
+        );
+        let second = asked(
+            offer(
+                &store,
+                state.path(),
+                &ask(),
+                local(state.path(), "a", "1.0.1", &[]),
+            )
+            .unwrap(),
+        );
         let first = store.get_approval(&first.id).unwrap().unwrap();
         assert_eq!(first.state, EXPIRED);
         assert_eq!(first.reason.as_deref(), Some("superseded by a 1.0.1"));
@@ -519,7 +572,10 @@ mod tests {
         assert_eq!(dirs.len(), 1);
         assert!(dirs[0].starts_with("1.0.1-"), "{dirs:?}");
 
-        assert_eq!(store.get_approval(&second.id).unwrap().unwrap().state, PENDING);
+        assert_eq!(
+            store.get_approval(&second.id).unwrap().unwrap().state,
+            PENDING
+        );
         decide(&store, state.path(), &second, false).unwrap();
         assert!(store.plugin_get("a").unwrap().is_none());
         assert!(!state.path().join("plugins/bin/a").exists());
@@ -532,16 +588,45 @@ mod tests {
         }
         let state = tempfile::tempdir().unwrap();
         let store = Store::open_in_memory().unwrap();
-        asked(offer(&store, state.path(), &ask(), local(state.path(), "jira-review", "1.0.0", &["jira_wiki"])).unwrap());
-        let refused = offer(&store, state.path(), &ask(), local(state.path(), "b", "1.0.0", &["jira_wiki"]))
-            .unwrap_err();
-        assert_eq!(refused.to_string(), "format jira_wiki is owned by plugin jira-review");
+        asked(
+            offer(
+                &store,
+                state.path(),
+                &ask(),
+                local(state.path(), "jira-review", "1.0.0", &["jira_wiki"]),
+            )
+            .unwrap(),
+        );
+        let refused = offer(
+            &store,
+            state.path(),
+            &ask(),
+            local(state.path(), "b", "1.0.0", &["jira_wiki"]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            "format jira_wiki is owned by plugin jira-review"
+        );
         assert!(!state.path().join("plugins/bin/b").exists());
         // A plugin updating itself keeps its own formats.
-        asked(offer(&store, state.path(), &ask(), local(state.path(), "jira-review", "1.1.0", &["jira_wiki"])).unwrap());
+        asked(
+            offer(
+                &store,
+                state.path(),
+                &ask(),
+                local(state.path(), "jira-review", "1.1.0", &["jira_wiki"]),
+            )
+            .unwrap(),
+        );
         // And an MCP server's name is not a plugin's.
-        let refused = offer(&store, state.path(), &ask(), local(state.path(), "linear", "1.0.0", &[]))
-            .unwrap_err();
+        let refused = offer(
+            &store,
+            state.path(),
+            &ask(),
+            local(state.path(), "linear", "1.0.0", &[]),
+        )
+        .unwrap_err();
         assert!(refused.to_string().contains("[[mcp_server]]"), "{refused}");
     }
 
@@ -569,26 +654,59 @@ mod tests {
         }
         let state = tempfile::tempdir().unwrap();
         let store = Store::open_in_memory().unwrap();
-        let card = asked(offer(&store, state.path(), &ask(), local(state.path(), "a", "1.0.0", &[])).unwrap());
+        let card = asked(
+            offer(
+                &store,
+                state.path(),
+                &ask(),
+                local(state.path(), "a", "1.0.0", &[]),
+            )
+            .unwrap(),
+        );
         decide(&store, state.path(), &card, true).unwrap();
         let refused = rollback(&store, state.path(), "a").unwrap_err();
-        assert!(refused.to_string().contains("no previous version"), "{refused}");
+        assert!(
+            refused.to_string().contains("no previous version"),
+            "{refused}"
+        );
         let data = install::data_dir(state.path(), "a").join("personal");
         std::fs::create_dir_all(&data).unwrap();
         std::fs::write(data.join("db"), b"x").unwrap();
 
         // An update waiting when it is removed has its card expired.
-        let card = asked(offer(&store, state.path(), &ask(), local(state.path(), "a", "1.1.0", &[])).unwrap());
+        let card = asked(
+            offer(
+                &store,
+                state.path(),
+                &ask(),
+                local(state.path(), "a", "1.1.0", &[]),
+            )
+            .unwrap(),
+        );
         remove(&store, state.path(), "a", false).unwrap();
-        assert_eq!(store.get_approval(&card.id).unwrap().unwrap().state, EXPIRED);
+        assert_eq!(
+            store.get_approval(&card.id).unwrap().unwrap().state,
+            EXPIRED
+        );
         assert_eq!(store.plugin_get("a").unwrap().unwrap().state, REMOVED);
         assert!(!state.path().join("plugins/bin/a").exists());
         assert!(data.join("db").exists());
         assert!(remove(&store, state.path(), "a", false).is_err());
 
         // Added again, it is a first install.
-        let card = asked(offer(&store, state.path(), &ask(), local(state.path(), "a", "1.0.0", &[])).unwrap());
-        assert_eq!(card.title, format!("install plugin a 1.0.0 from local:{}", asset("a", "1.0.0")));
+        let card = asked(
+            offer(
+                &store,
+                state.path(),
+                &ask(),
+                local(state.path(), "a", "1.0.0", &[]),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            card.title,
+            format!("install plugin a 1.0.0 from local:{}", asset("a", "1.0.0"))
+        );
         remove(&store, state.path(), "a", true).unwrap();
         assert!(store.plugin_get("a").unwrap().is_none());
         assert!(!install::data_dir(state.path(), "a").exists());
@@ -605,11 +723,23 @@ mod tests {
         staged.source = "cosmicspork/a".into();
         let card = asked(offer(&store, state.path(), &ask(), staged).unwrap());
         decide(&store, state.path(), &card, true).unwrap();
-        let refused = offer(&store, state.path(), &ask(), local(state.path(), "a", "1.1.0", &[]))
-            .unwrap_err();
-        assert!(refused.to_string().contains("is installed from cosmicspork/a"), "{refused}");
+        let refused = offer(
+            &store,
+            state.path(),
+            &ask(),
+            local(state.path(), "a", "1.1.0", &[]),
+        )
+        .unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("is installed from cosmicspork/a"),
+            "{refused}"
+        );
         // The refused build is not left behind.
-        let dirs = std::fs::read_dir(state.path().join("plugins/bin/a")).unwrap().count();
+        let dirs = std::fs::read_dir(state.path().join("plugins/bin/a"))
+            .unwrap()
+            .count();
         assert_eq!(dirs, 1);
     }
 }

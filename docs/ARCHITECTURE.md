@@ -937,6 +937,27 @@ receiver refuses a redelivered bundle older than the one it has installed (or a
 different one for the same version) and answers its own bundle, offered again, as
 applied without writing anything.
 
+**A plugin is installed on the operator's word, by digest, into a tree only the node
+writes.** A plugin is a program (optionally with a static UI) released on GitHub in a
+fixed shape: one archive per target, a `checksums.txt`, and a `tracon-plugin.toml`
+manifest (contract 1) that is refused if it carries an unknown key. The node fetches
+only from an owner in `[plugins] owners`, a key that is changed at the node alone. It
+checks the archive against the release's checksum and unpacks only plain files and
+directories, within bounds. It validates the manifest against the unpacked tree and
+stages the build under `<state>/plugins/bin/<name>/<version>-<digest>/`. Then it raises
+an install card naming the build by digest. The card shows the tools, the credentials
+and when each is lent, the UI, the declared egress, and on an update the manifest diff
+and the release notes. Allowing it is an admin action. The build becomes active only
+then, after its tree digest is checked again, and the previous build is kept for a
+rollback that needs no new card. Each format has one owning plugin, and a plugin's
+name may not be an `[[mcp_server]]`'s. The plugin tree sits inside the state
+directory, which an agent can write, so the path guard treats it as it treats the
+export area: a node-owned exception. A program there is run only when it was reached
+through no link an agent could have made and is writable by no one but the node, and
+no directory key may point into the tree. This release installs and records plugins.
+Starting them, and brokering their tools under policy with a signed caller context
+and credentials lent per call, comes after.
+
 ### Authority grants
 
 A grant is a local operator decision layered under signed policy, not a
