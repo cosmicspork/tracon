@@ -668,7 +668,7 @@ export default [
     route: `/sessions/${S.transcript.id}`,
     title: 'A run whose first call has only just started',
     note: 'Folded as "Ran 1 shell command" with no call line under it: a call shows under the fold only once it has run 1.5s, and a lone call gets its own line only once something follows it.',
-    since: 'fix/spa-tool-run-flash',
+    since: '#943',
     api: page(S.transcript, { events: firstCallEvents(S.transcript.id) }),
   },
   {
