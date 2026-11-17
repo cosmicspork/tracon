@@ -3696,7 +3696,7 @@ dependencies = [
 
 [[package]]
 name = "tracon-attest"
-version = "0.51.2"
+version = "0.52.0"
 dependencies = [
  "futures-util",
  "hex",
