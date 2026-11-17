@@ -39,6 +39,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 COPY ondrej-php.asc /etc/apt/keyrings/ondrej-php.asc
 
+# The PPA's CDN answers 503 in bursts, and apt's default of three retries
+# gave up on one package during the 0.52.0 release. Ten, with apt's growing
+# delay between them, rides out a burst. It stays in the image, where an apt
+# run in a session meets the same CDN.
+RUN printf 'Acquire::Retries "10";\n' > /etc/apt/apt.conf.d/80-retries
+
 # CA certificates come first, from the image's default sources: those are plain
 # HTTP with Release signatures checked against the pre-installed
 # ubuntu-keyring, and the snapshot service is HTTPS only.
