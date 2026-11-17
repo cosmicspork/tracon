@@ -1,0 +1,27 @@
+[package]
+name = "tracon-attest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Verifies a GitHub release artifact's build provenance with a pinned gh, for the desktop wrapper and the node."
+
+[lib]
+name = "tracon_attest"
+path = "src/lib.rs"
+
+# The desktop wrapper is its own workspace and depends on this by path, so
+# everything here must build wherever the wrapper and the node do: Linux gnu
+# and musl, and macOS. No TLS or crypto of its own: the caller's client brings
+# rustls, and `gh` does the Sigstore work.
+[dependencies]
+futures-util = { version = "0.3", default-features = false }
+hex.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["stream"] }
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt"] }
