@@ -1767,6 +1767,29 @@ const MIGRATIONS: &[&str] = &[
     DROP TABLE IF EXISTS context_receipt;
     DROP TABLE IF EXISTS review_finding;
     "#,
+    // 78: each sandbox an elastic provider (DigitalOcean) ran for this node,
+    // from create to destroy, with the hourly price its size had when it was
+    // made: what infrastructure cost beside what inference cost. A row with
+    // no `ended_ms` is still running. `session_id` is NULL for a run that
+    // was not a session's (a check, a preparation).
+    r#"
+    CREATE TABLE sandbox_usage (
+        sandbox_id         TEXT PRIMARY KEY,
+        provider           TEXT NOT NULL,
+        name               TEXT,
+        kind               TEXT NOT NULL,
+        session_id         TEXT,
+        channel            TEXT,
+        size               TEXT,
+        price_per_hour_usd REAL,
+        started_ms         INTEGER NOT NULL,
+        ended_ms           INTEGER,
+        end_reason         TEXT
+    );
+    CREATE INDEX sandbox_usage_started ON sandbox_usage(started_ms);
+    CREATE INDEX sandbox_usage_open ON sandbox_usage(provider, ended_ms);
+    CREATE INDEX sandbox_usage_session ON sandbox_usage(session_id);
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

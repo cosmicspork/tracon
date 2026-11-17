@@ -77,6 +77,256 @@ pub fn ceiling(store: &Store, bindings: &Value, channel: &str) -> CeilingInfo {
     }
 }
 
+// ---- infrastructure: sandboxes by the hour ---------------------------------
+
+/// Today's infrastructure spend against `[spend] infra_usd_per_day`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InfraSpend {
+    /// Ended sandboxes' cost today plus running ones' so far. Unpriced
+    /// sandboxes add nothing, and are counted in `unpriced`.
+    pub today_usd: f64,
+    pub limit_usd: Option<f64>,
+    /// `under`, `near`, `at`, or `none` when no limit is set.
+    pub state: String,
+    pub running: i64,
+    pub unpriced: i64,
+}
+
+impl InfraSpend {
+    pub fn at(&self) -> bool {
+        self.state == "at"
+    }
+    pub fn reason(&self) -> String {
+        format!(
+            "today's infrastructure spend ${:.2} reached [spend] infra_usd_per_day ${:.2}",
+            self.today_usd,
+            self.limit_usd.unwrap_or(0.0)
+        )
+    }
+}
+
+/// Today's spend on sandboxes, on every channel, against the node's limit.
+pub fn infra_spend(store: &Store, cfg: &Config) -> InfraSpend {
+    let since = crate::corpus::promote::chrono_free::day_start_ms();
+    infra_spend_since(
+        store,
+        cfg.live().spend.infra_limit(),
+        since,
+        crate::store::now_ms(),
+    )
+}
+
+fn infra_spend_since(store: &Store, limit: Option<f64>, since: i64, now: i64) -> InfraSpend {
+    let rows = store
+        .sandboxes_between(since, None, None)
+        .unwrap_or_default();
+    let today_usd: f64 = rows
+        .iter()
+        .filter_map(|r| r.cost_between(since, None, now))
+        .sum();
+    let state = match limit {
+        None => "none",
+        Some(l) if today_usd >= l => "at",
+        Some(l) if today_usd >= l * NEAR => "near",
+        Some(_) => "under",
+    };
+    InfraSpend {
+        today_usd,
+        limit_usd: limit,
+        state: state.into(),
+        running: rows.iter().filter(|r| r.ended_ms.is_none()).count() as i64,
+        unpriced: rows
+            .iter()
+            .filter(|r| r.price_per_hour_usd.is_none())
+            .count() as i64,
+    }
+}
+
+/// What one session's sandboxes cost: the runtime half of its cost, beside
+/// the model half (`cost_usd`). Null `cost_usd` when none was priced; an
+/// empty list for a session that ran on the node's own machine.
+pub fn session_runtime(store: &Store, session_id: &str) -> Value {
+    let now = crate::store::now_ms();
+    let rows = store.session_sandboxes(session_id).unwrap_or_default();
+    let cost = rows.iter().filter_map(|r| r.cost(now)).reduce(|a, b| a + b);
+    let hours: f64 = rows
+        .iter()
+        .map(|r| r.hours_between(i64::MIN, None, now))
+        .sum();
+    json!({
+        "cost_usd": cost,
+        "hours": hours,
+        "running": rows.iter().any(|r| r.ended_ms.is_none()),
+        "sandboxes": rows,
+    })
+}
+
+/// One line of the infrastructure report: sandboxes grouped by day,
+/// channel, session or size, inside a window.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct InfraTotal {
+    pub provider: String,
+    pub channel: Option<String>,
+    /// `YYYY-MM-DD` in the asked offset, when grouped by day.
+    pub day: Option<String>,
+    pub session_id: Option<String>,
+    pub size: Option<String>,
+    pub kind: Option<String>,
+    pub sandboxes: i64,
+    pub hours: f64,
+    /// Null when no sandbox in the group was priced.
+    pub cost_usd: Option<f64>,
+    pub unpriced: i64,
+}
+
+/// How [`infra_usage`] groups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InfraGroup {
+    Day,
+    Channel,
+    Session,
+    Size,
+}
+
+impl InfraGroup {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "day" => Self::Day,
+            "channel" => Self::Channel,
+            "session" => Self::Session,
+            "size" => Self::Size,
+            _ => return None,
+        })
+    }
+}
+
+/// The sandboxes alive in `[since_ms, until_ms)`, grouped, each priced for
+/// its part of the window; a day group splits a sandbox across the days it
+/// ran on, at `tz_offset_minutes` east of UTC.
+pub fn infra_usage(
+    store: &Store,
+    channel: Option<&str>,
+    since_ms: i64,
+    until_ms: Option<i64>,
+    group: InfraGroup,
+    tz_offset_minutes: Option<i64>,
+    now_ms: i64,
+) -> Result<Vec<InfraTotal>, crate::store::StoreError> {
+    const DAY_MS: i64 = 86_400_000;
+    // The caller's day boundary, or else the one the ceiling's "today" uses.
+    let tz_offset_minutes =
+        tz_offset_minutes.unwrap_or_else(crate::corpus::promote::chrono_free::offset_minutes);
+    let rows = store.sandboxes_between(since_ms, until_ms, channel)?;
+    let offset = tz_offset_minutes * 60_000;
+    let mut out: std::collections::BTreeMap<(String, String), InfraTotal> = Default::default();
+    let mut add = |key: String,
+                   base: InfraTotal,
+                   r: &crate::store::SandboxUsage,
+                   from: i64,
+                   to: Option<i64>| {
+        let hours = r.hours_between(from, to, now_ms);
+        if hours <= 0.0 {
+            return;
+        }
+        let t = out.entry((r.provider.clone(), key)).or_insert(base);
+        t.sandboxes += 1;
+        t.hours += hours;
+        match r.cost_between(from, to, now_ms) {
+            Some(c) => *t.cost_usd.get_or_insert(0.0) += c,
+            None => t.unpriced += 1,
+        }
+    };
+    for r in &rows {
+        let base = InfraTotal {
+            provider: r.provider.clone(),
+            ..Default::default()
+        };
+        match group {
+            InfraGroup::Channel => {
+                let key = r.channel.clone().unwrap_or_default();
+                add(
+                    key,
+                    InfraTotal {
+                        channel: r.channel.clone(),
+                        ..base
+                    },
+                    r,
+                    since_ms,
+                    until_ms,
+                );
+            }
+            InfraGroup::Session => {
+                let key = r
+                    .session_id
+                    .clone()
+                    .unwrap_or_else(|| format!("{}:", r.kind));
+                let t = InfraTotal {
+                    channel: r.channel.clone(),
+                    session_id: r.session_id.clone(),
+                    kind: Some(r.kind.clone()),
+                    size: r.size.clone(),
+                    ..base
+                };
+                add(key, t, r, since_ms, until_ms);
+            }
+            InfraGroup::Size => {
+                let key = r.size.clone().unwrap_or_default();
+                add(
+                    key,
+                    InfraTotal {
+                        size: r.size.clone(),
+                        ..base
+                    },
+                    r,
+                    since_ms,
+                    until_ms,
+                );
+            }
+            InfraGroup::Day => {
+                let start = r.started_ms.max(since_ms);
+                let end = r
+                    .ended_ms
+                    .unwrap_or(now_ms)
+                    .min(until_ms.unwrap_or(i64::MAX));
+                let mut day = (start + offset).div_euclid(DAY_MS);
+                while day * DAY_MS - offset < end {
+                    let from = (day * DAY_MS - offset).max(start);
+                    let to = ((day + 1) * DAY_MS - offset).min(end);
+                    let name = crate::corpus::promote::chrono_free::local_date_at(
+                        day * DAY_MS - offset,
+                        tz_offset_minutes,
+                    );
+                    let t = InfraTotal {
+                        day: Some(name.clone()),
+                        channel: r.channel.clone(),
+                        ..base.clone()
+                    };
+                    add(
+                        format!("{name}\u{0}{}", r.channel.clone().unwrap_or_default()),
+                        t,
+                        r,
+                        from,
+                        Some(to),
+                    );
+                    day += 1;
+                }
+            }
+        }
+    }
+    let mut totals: Vec<InfraTotal> = out.into_values().collect();
+    if group == InfraGroup::Day {
+        totals.sort_by(|a, b| b.day.cmp(&a.day).then(a.channel.cmp(&b.channel)));
+    } else {
+        totals.sort_by(|a, b| {
+            b.cost_usd
+                .unwrap_or(0.0)
+                .total_cmp(&a.cost_usd.unwrap_or(0.0))
+                .then(b.hours.total_cmp(&a.hours))
+        });
+    }
+    Ok(totals)
+}
+
 // ---- two usage sources, one ledger ---------------------------------------
 //
 // The gateway counts every model call on the wire and that count is what the
@@ -376,8 +626,15 @@ pub struct ChannelMetrics {
     pub tokens_per_accepted_change: Option<f64>,
     /// All gateway tokens on the channel in the window.
     pub tokens: i64,
-    /// Priced where the provider carries a price; null otherwise.
+    /// Priced where the provider carries a price; null otherwise. Model
+    /// (inference) cost only: sandboxes are `infra_cost_usd`.
     pub cost_usd: Option<f64>,
+    /// What the channel's sandboxes on an elastic provider cost in the
+    /// window; null when none ran there, or none was priced.
+    #[serde(default)]
+    pub infra_cost_usd: Option<f64>,
+    #[serde(default)]
+    pub sandbox_hours: f64,
     pub human_seconds: f64,
     pub agent_seconds: f64,
     pub sessions: i64,
@@ -455,6 +712,16 @@ pub fn channel_metrics(
         })
         .sum::<i64>() as f64
         / 1000.0;
+    let now = crate::store::now_ms();
+    let sandboxes = store.sandboxes_between(since_ms, None, Some(channel))?;
+    let infra_cost_usd = sandboxes
+        .iter()
+        .filter_map(|r| r.cost_between(since_ms, None, now))
+        .reduce(|a, b| a + b);
+    let sandbox_hours: f64 = sandboxes
+        .iter()
+        .map(|r| r.hours_between(since_ms, None, now))
+        .sum();
     let n = accepted.len() as i64;
     let per = |x: f64| (n > 0).then(|| x / n as f64);
     let mut workflow = store.workflow_metrics(channel, since_ms)?;
@@ -470,6 +737,8 @@ pub fn channel_metrics(
         tokens_per_accepted_change: per(accepted_tokens as f64),
         tokens,
         cost_usd: cost,
+        infra_cost_usd,
+        sandbox_hours,
         human_seconds: human_perm + human_reviews,
         agent_seconds,
         sessions: sessions.len() as i64,
@@ -561,6 +830,105 @@ pub fn provenance(store: &Store, sha: &str) -> Result<Option<Value>, crate::stor
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const H: i64 = 3_600_000;
+
+    fn sandbox(
+        store: &Store,
+        id: &str,
+        channel: &str,
+        started: i64,
+        ended: Option<i64>,
+        price: Option<f64>,
+    ) {
+        store
+            .sandbox_started(&crate::store::SandboxUsage {
+                sandbox_id: id.into(),
+                provider: "digitalocean".into(),
+                kind: "session".into(),
+                session_id: Some(format!("s-{id}")),
+                channel: Some(channel.into()),
+                size: Some("small".into()),
+                price_per_hour_usd: price,
+                started_ms: started,
+                ended_ms: ended,
+                ..Default::default()
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn infra_spend_counts_ended_and_running_sandboxes_against_the_limit() {
+        let store = Store::open_in_memory().unwrap();
+        let day = 100 * 24 * H;
+        // Started yesterday: only today's hour counts.
+        sandbox(&store, "a", "ch", day - H, Some(day + H), Some(1.0));
+        // Still running, two hours so far.
+        sandbox(&store, "b", "ch", day, None, Some(2.0));
+        sandbox(&store, "c", "ch", day, Some(day + H), None);
+        let now = day + 2 * H;
+        let s = infra_spend_since(&store, None, day, now);
+        assert_eq!(s.today_usd, 5.0);
+        assert_eq!(s.state, "none");
+        assert_eq!((s.running, s.unpriced), (1, 1));
+        assert_eq!(
+            infra_spend_since(&store, Some(10.0), day, now).state,
+            "under"
+        );
+        assert_eq!(infra_spend_since(&store, Some(6.0), day, now).state, "near");
+        let at = infra_spend_since(&store, Some(5.0), day, now);
+        assert!(at.at(), "{at:?}");
+        assert!(at.reason().contains("$5.00"), "{}", at.reason());
+    }
+
+    #[test]
+    fn the_infra_report_splits_a_sandbox_across_the_days_it_ran() {
+        let store = Store::open_in_memory().unwrap();
+        let day = 100 * 24 * H;
+        sandbox(&store, "a", "ch", day - H, Some(day + 2 * H), Some(1.0));
+        sandbox(&store, "b", "other", day, Some(day + H), None);
+        let rows =
+            infra_usage(&store, None, 0, None, InfraGroup::Day, Some(0), day + 5 * H).unwrap();
+        let summary: Vec<_> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.day.clone().unwrap(),
+                    r.channel.clone().unwrap(),
+                    r.hours,
+                    r.cost_usd,
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("1970-04-11".to_string(), "ch".to_string(), 2.0, Some(2.0)),
+                ("1970-04-11".to_string(), "other".to_string(), 1.0, None),
+                ("1970-04-10".to_string(), "ch".to_string(), 1.0, Some(1.0)),
+            ]
+        );
+        assert_eq!(rows[1].unpriced, 1);
+
+        let by_channel = infra_usage(
+            &store,
+            Some("ch"),
+            0,
+            None,
+            InfraGroup::Channel,
+            Some(0),
+            day + 5 * H,
+        )
+        .unwrap();
+        assert_eq!(by_channel.len(), 1);
+        assert_eq!(by_channel[0].cost_usd, Some(3.0));
+        assert_eq!(by_channel[0].sandboxes, 1);
+
+        let runtime = session_runtime(&store, "s-a");
+        assert_eq!(runtime["cost_usd"], 3.0);
+        assert_eq!(runtime["running"], false);
+        assert_eq!(session_runtime(&store, "s-none")["cost_usd"], Value::Null);
+    }
 
     #[test]
     fn two_sources_that_agree_are_reconciled_and_charged_once() {

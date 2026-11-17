@@ -176,6 +176,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/usage", get(api::usage))
         .route("/api/usage.csv", get(api::usage_csv))
+        .route("/api/usage/infra", get(api::usage_infra))
+        .route("/api/usage/infra.csv", get(api::usage_infra_csv))
         .route("/api/metrics", get(api::metrics))
         .route("/api/provenance/{sha}", get(api::provenance))
         .route(

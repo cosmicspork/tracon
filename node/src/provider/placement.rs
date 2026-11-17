@@ -23,6 +23,9 @@ pub struct Candidate {
     /// `Err` with the reason when its isolation is not verified (a boundary
     /// check failed): it is not run on, whatever it reports.
     pub health: Result<(), String>,
+    /// Why it takes no new session now although it is healthy and has room:
+    /// the node's `[spend] infra_usd_per_day` is reached.
+    pub closed: Option<String>,
 }
 
 /// The decision.
@@ -85,6 +88,9 @@ fn elastic<'a>(
     }
     if c.capacity.is_full() {
         return Err(format!("DigitalOcean is at its limit ({})", c.capacity));
+    }
+    if let Some(why) = &c.closed {
+        return Err(format!("DigitalOcean takes no new session: {why}"));
     }
     Ok(c)
 }
@@ -216,6 +222,7 @@ mod tests {
                 limit: Some(4),
             },
             health: Ok(()),
+            closed: None,
         }
     }
 
@@ -312,6 +319,33 @@ mod tests {
             false,
         );
         assert_eq!(placed(&p), Some(Do));
+    }
+
+    #[test]
+    fn a_reached_spend_limit_keeps_new_sessions_off_digitalocean() {
+        let spent = || Candidate {
+            closed: Some("today's infrastructure spend reached its limit".into()),
+            ..free(Do)
+        };
+        // Prefer falls back to a local provider with room.
+        let p = place(
+            &[free(Podman), spent()],
+            &Requirements::any(),
+            DoMode::Prefer,
+            false,
+        );
+        assert_eq!(placed(&p), Some(Podman));
+        // Overflow at capacity is refused, and says why.
+        let p = place(
+            &[full(Podman), spent()],
+            &Requirements::any(),
+            DoMode::Overflow,
+            false,
+        );
+        let Placement::Refuse { reason } = p else {
+            panic!("{p:?}")
+        };
+        assert!(reason.contains("spend reached its limit"), "{reason}");
     }
 
     #[test]

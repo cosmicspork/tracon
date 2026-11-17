@@ -378,6 +378,8 @@ pub const KEYS: &[KeySpec] = &[
     live("upstreams.host.username"),
     live("upstreams.host.password"),
     live("upstreams.host.sessions"),
+    // [spend]: read where a session is placed.
+    live("spend.infra_usd_per_day"),
     // [placement]: read where a session is placed.
     live("placement.digitalocean"),
     live("placement.local_limit"),

@@ -30,6 +30,7 @@ pub mod evidence;
 pub mod exhaustion;
 pub mod external;
 pub mod holdings;
+pub mod infra;
 pub mod limits;
 pub mod manifest;
 pub mod metrics;
@@ -54,6 +55,7 @@ pub use corpus::*;
 pub use credential_revokes::*;
 pub use device::*;
 pub use evidence::*;
+pub use infra::*;
 pub use limits::*;
 pub use manifest::*;
 pub use operator::*;
@@ -4080,7 +4082,7 @@ impl Store {
 mod tests {
     use super::*;
 
-    fn node(store: &Store) -> String {
+    pub(super) fn node(store: &Store) -> String {
         let n = NodeRow {
             id: "n1".into(),
             name: "test".into(),
@@ -4183,7 +4185,7 @@ mod tests {
         assert_eq!(only[0].image_state, "unknown");
     }
 
-    fn session(store: &Store, id: &str, node_id: &str) {
+    pub(super) fn session(store: &Store, id: &str, node_id: &str) {
         store
             .insert_session(&SessionRow {
                 id: id.into(),

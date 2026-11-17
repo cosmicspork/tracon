@@ -7,13 +7,29 @@
   import { router } from '../lib/router.svelte'
   import { localDate, type UsageView, usageSearch, usageView, usageWindow } from '../lib/routes'
   import { store } from '../lib/store.svelte'
-  import type { ChannelMetrics, UsageTotal } from '../lib/types'
-  import { usageCost, usageCsvHref, usageHeading, usageKey, usageParams, usageProviders, usageSpan } from '../lib/usageReport'
+  import type { ChannelMetrics, InfraSpend, InfraTotal, UsageTotal } from '../lib/types'
+  import {
+    formatHours,
+    type InfraGroup,
+    infraCsvHref,
+    infraKey,
+    infraParams,
+    infraSpendLine,
+    usageCost,
+    usageCsvHref,
+    usageHeading,
+    usageKey,
+    usageParams,
+    usageProviders,
+    usageSpan,
+  } from '../lib/usageReport'
 
   // The view lives in the address, so a reload or a shared link shows the same numbers.
   const view = $derived(usageView(router.search))
   const usage = new Loader<{ rows: ChannelMetrics[]; note: string }>()
   const breakdown = new Loader<UsageTotal[]>()
+  const infra = new Loader<{ totals: InfraTotal[]; spend: InfraSpend }>()
+  let infraGroup = $state<InfraGroup>('day')
 
   $effect(() => {
     const since = usageWindow(view).since
@@ -25,6 +41,15 @@
     const params = usageParams(view)
     breakdown.load(usageSearch(view), () => api.usage(params).then((d) => d.totals))
   })
+  $effect(() => {
+    const params = infraParams(view, infraGroup)
+    infra.load(String(params), () => api.usageInfra(params))
+  })
+  const infraRows = $derived(infra.value?.totals ?? [])
+  const spend = $derived(infra.value?.spend ?? null)
+  const infraLabel = $derived(
+    infraGroup === 'day' ? 'Day' : infraGroup === 'channel' ? 'Channel' : infraGroup === 'size' ? 'Size' : 'Session',
+  )
   const rows = $derived(usage.value?.rows ?? [])
   const note = $derived(usage.value?.note ?? '')
   const totals = $derived(breakdown.value ?? [])
@@ -102,7 +127,7 @@
     <div class="scroll">
       <table>
         <thead>
-          <tr><th>Channel</th><th>Approvals / accepted</th><th>Tokens / accepted</th><th>Accepted</th><th>Rejected</th><th>Tokens</th><th>Cost</th><th>Human</th><th>Agent</th><th>Sessions</th></tr>
+          <tr><th>Channel</th><th>Approvals / accepted</th><th>Tokens / accepted</th><th>Accepted</th><th>Rejected</th><th>Tokens</th><th>Model cost</th><th>Infra cost</th><th>Human</th><th>Agent</th><th>Sessions</th></tr>
         </thead>
         <tbody>
           {#each rows as r (r.channel)}
@@ -113,7 +138,8 @@
               <td data-label="Accepted">{r.accepted_changes}</td>
               <td data-label="Rejected">{r.rejected_changes}</td>
               <td data-label="Tokens">{formatTokens(r.tokens)}</td>
-              <td data-label="Cost" class:u={r.cost_usd === null}>{r.cost_usd === null ? 'unpriced' : `$${r.cost_usd.toFixed(2)}`}</td>
+              <td data-label="Model cost" class:u={r.cost_usd === null}>{r.cost_usd === null ? 'unpriced' : `$${r.cost_usd.toFixed(2)}`}</td>
+              <td data-label="Infra cost" class:u={r.infra_cost_usd == null} title={r.sandbox_hours ? `${formatHours(r.sandbox_hours)} of sandboxes` : undefined}>{r.infra_cost_usd == null ? (r.sandbox_hours ? 'unpriced' : '—') : `$${r.infra_cost_usd.toFixed(2)}`}</td>
               <td data-label="Human">{dur(r.human_seconds)}</td>
               <td data-label="Agent">{dur(r.agent_seconds)}</td>
               <td data-label="Sessions">{r.sessions}</td>
@@ -173,6 +199,56 @@
   {/if}
 </LoadGate>
 
+<div class="h4 sub">
+  Infrastructure
+  <span class="r">
+    <label>Rows
+      <select value={infraGroup} onchange={(e) => (infraGroup = e.currentTarget.value as InfraGroup)}>
+        <option value="day">per day</option>
+        <option value="channel">per channel</option>
+        <option value="session">per session</option>
+        <option value="size">per size</option>
+      </select>
+    </label>
+    <a class="lnk" href={infraCsvHref(view, infraGroup)} download>Download CSV</a>
+  </span>
+</div>
+<LoadGate status={infra} what="infrastructure cost" onretry={() => infra.retry()} retrying={infra.pending}>
+  {#if spend}
+    <p class="spend" class:near={spend.state === 'near'} class:at={spend.state === 'at'}>
+      {infraSpendLine(spend)}{#if spend.state === 'at'}{' · limit reached: no new session goes to DigitalOcean today'}{:else if spend.state === 'near'}{' · near the limit'}{/if}{#if spend.running}{` · ${spend.running} running`}{/if}
+      <Help label="About the infrastructure limit"
+        >Set in node.toml as <code>[spend] infra_usd_per_day</code>; unset or 0 means no limit. At the limit, new sessions stay off
+        DigitalOcean until the local day turns. Running sandboxes are not stopped.</Help
+      >
+    </p>
+  {/if}
+  {#if infraRows.length === 0}
+    <div class="empty">No sandboxes on DigitalOcean in this window.</div>
+  {:else}
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr><th>Provider</th><th>{infraLabel}</th>{#if infraGroup === 'day' || infraGroup === 'session'}<th>Channel</th>{/if}{#if infraGroup === 'session'}<th>Size</th>{/if}<th>Sandboxes</th><th>Hours</th><th>Cost</th></tr>
+        </thead>
+        <tbody>
+          {#each infraRows as t, i (i)}
+            <tr>
+              <td>{t.provider}</td>
+              <td data-label={infraLabel}>{#if infraGroup === 'session' && t.session_id}<a class="lnk" href={`/sessions/${t.session_id}`}>{infraKey(t, infraGroup)}</a>{:else}{infraKey(t, infraGroup)}{/if}</td>
+              {#if infraGroup === 'day' || infraGroup === 'session'}<td data-label="Channel">{t.channel ?? '—'}</td>{/if}
+              {#if infraGroup === 'session'}<td data-label="Size">{t.size ?? 'default'}</td>{/if}
+              <td data-label="Sandboxes">{t.sandboxes}</td>
+              <td data-label="Hours">{formatHours(t.hours)}</td>
+              <td data-label="Cost" class:u={t.cost_usd === null} title={t.unpriced ? `${t.unpriced} unpriced` : undefined}>{usageCost(t.cost_usd)}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+  {/if}
+</LoadGate>
+
 <details class="methodology">
   <summary>How Usage is calculated</summary>
   <dl>
@@ -181,7 +257,8 @@
     <dt>Interventions</dt><dd>Permission answers, review decisions, answered questions, pause and resume.</dd>
     <dt>Request waiting</dt><dd>Each request's wait plus review submit→decision. Overlaps add up.</dd>
     <dt>Tokens per accepted</dt><dd>Tokens of the sessions behind accepted reviews.</dd>
-    <dt>Cost</dt><dd>Priced providers only.</dd>
+    <dt>Model cost</dt><dd>Tokens at each provider's configured price. Priced providers only.</dd>
+    <dt>Infra cost</dt><dd>DigitalOcean sandbox time, create to destroy, at its size's hourly price when it was made. Sandboxes are kept warm, so idle time counts. An estimate: checkpoint storage is not included.</dd>
     <dt>Human · agent time</dt><dd>Request→answer and review claim→decision · session start→end.</dd>
     <dt>By provider</dt><dd>Each call the gateway forwarded, by local day. Input excludes cache reads, which are free.</dd>
   </dl>
@@ -233,6 +310,13 @@
   .h4.sub {
     margin-top: 24px;
   }
+  .spend {
+    font: 13px var(--mono);
+    color: var(--ink2);
+    margin: 0 0 10px;
+  }
+  .spend.near { color: var(--wait); }
+  .spend.at { color: var(--crit); }
   .h4 .r label,
   .range label {
     display: flex;

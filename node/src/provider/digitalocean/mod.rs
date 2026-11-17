@@ -43,6 +43,7 @@
 pub mod bootstrap;
 pub mod images;
 pub mod listener;
+pub mod meter;
 pub mod peers;
 pub mod portable;
 pub mod runtime;
@@ -551,6 +552,8 @@ pub struct DoProvider {
     expect_uid: Mutex<Option<u32>>,
     /// What the last sandbox to connect said of itself.
     reported: Mutex<Option<tracon_sandbox::protocol::SandboxInfo>>,
+    /// Each sandbox's lifetime and price, for infrastructure cost.
+    meter: meter::Meter,
 }
 
 fn failed(error: impl std::fmt::Display) -> ProviderError {
@@ -640,7 +643,46 @@ impl DoProvider {
                     .map(|user| user.uid),
             ),
             reported: Mutex::new(None),
+            meter: meter::Meter::default(),
         }
+    }
+
+    pub fn meter(&self) -> &meter::Meter {
+        &self.meter
+    }
+
+    /// Note a sandbox just made, then start its run; a run that fails to
+    /// start removes it, and so ends it.
+    async fn metered_run(
+        &self,
+        client: &Client,
+        session: Session,
+        (image, template): (&str, &str),
+        bootstrap: &Bootstrap,
+        (name, kind, channel, started_ms): (Option<&str>, &str, Option<&str>, i64),
+    ) -> Result<Handle, ProviderError> {
+        let (size, price) = self.meter.price(client, &self.options.settings.size).await;
+        let id = session.session_id.clone();
+        self.meter.started(crate::store::SandboxUsage {
+            sandbox_id: id.clone(),
+            provider: meter::PROVIDER.into(),
+            name: name.map(str::to_string),
+            kind: kind.into(),
+            session_id: None,
+            channel: channel.map(str::to_string),
+            size,
+            price_per_hour_usd: price,
+            started_ms,
+            ended_ms: None,
+            end_reason: None,
+        });
+        let run = self
+            .start_run(client, session, (image, template), bootstrap)
+            .await;
+        if run.is_err() {
+            self.meter.ended(&id, "failed");
+        }
+        run
     }
 
     pub fn client(&self) -> Result<Client, ProviderError> {
@@ -901,9 +943,20 @@ impl SandboxProvider for DoProvider {
         // session nobody can reach.
         self.server_name()?;
         let client = self.client()?;
+        let started_ms = crate::store::now_ms();
         let session = client.create_session(&manifest).await.map_err(failed)?;
-        self.start_run(&client, session, (spec.image, &template), spec.bootstrap)
-            .await
+        let kind = spec
+            .labels
+            .kind
+            .map_or("session", crate::runner::RunKind::as_str);
+        self.metered_run(
+            &client,
+            session,
+            (spec.image, &template),
+            spec.bootstrap,
+            (Some(name), kind, spec.labels.channel.as_deref(), started_ms),
+        )
+        .await
     }
 
     async fn connect(
@@ -993,6 +1046,7 @@ impl SandboxProvider for DoProvider {
             },
         };
         client.delete_session(&id).await.map_err(failed)?;
+        self.meter.ended(&id, "destroyed");
         // Removing a session leaves the config its create stored.
         if let Some(config) = config {
             client.delete_config(&config).await.map_err(failed)?;
@@ -1003,8 +1057,17 @@ impl SandboxProvider for DoProvider {
     async fn status(&self, handle: &Handle) -> Result<Status, ProviderError> {
         let client = self.client()?;
         match client.get_session(&handle.0).await {
-            Ok(session) => Ok(status_of(&session)),
-            Err(error) if error.is_not_found() => Ok(Status::Lost),
+            Ok(session) => {
+                let status = status_of(&session);
+                if status == Status::Lost {
+                    self.meter.ended(&handle.0, "lost");
+                }
+                Ok(status)
+            }
+            Err(error) if error.is_not_found() => {
+                self.meter.ended(&handle.0, "lost");
+                Ok(Status::Lost)
+            }
             Err(error) => Err(failed(error)),
         }
     }
@@ -1056,6 +1119,7 @@ impl SandboxProvider for DoProvider {
             .map(|m| (m.image.clone(), m.template.clone()))
             .unwrap_or_default();
         let client = self.client()?;
+        let started_ms = crate::store::now_ms();
         let child = client
             .fork_session(session, Some(checkpoint), 1)
             .await
@@ -1063,8 +1127,14 @@ impl SandboxProvider for DoProvider {
             .into_iter()
             .next()
             .ok_or_else(|| failed("DigitalOcean forked no session"))?;
-        self.start_run(&client, child, (&image, &template), bootstrap)
-            .await
+        self.metered_run(
+            &client,
+            child,
+            (&image, &template),
+            bootstrap,
+            (None, meter::FORK, None, started_ms),
+        )
+        .await
     }
 
     /// Derived: the runtime rebuilt the image as its template, under a

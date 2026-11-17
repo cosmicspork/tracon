@@ -115,6 +115,7 @@ test('key paths are written as node.toml spells them, and read back', () => {
 test('a label is the key in words, its unit said apart', () => {
   expect(labelOf('permission_timeout_secs')).toEqual({ label: 'Permission timeout', unit: 'seconds' })
   expect(labelOf('budget_tokens')).toEqual({ label: 'Budget tokens', unit: 'tokens' })
+  expect(labelOf('infra_usd_per_day')).toEqual({ label: 'Infra', unit: 'US dollars per day' })
   expect(labelOf('stream_max_body_bytes')).toEqual({ label: 'Stream max body', unit: 'bytes' })
   expect(labelOf('gh')).toEqual({ label: 'Gh', unit: undefined })
   expect(magnitude(86400, 'seconds')).toBe('1 day')

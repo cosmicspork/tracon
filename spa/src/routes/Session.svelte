@@ -18,7 +18,7 @@
   import { exhaustionNote } from '../lib/exhaustion'
   import { budgetProblem, heldAtBudget, suggestedBudget } from '../lib/budget'
   import { externalAgent, formatAge, formatBudget, formatTokens } from '../lib/format'
-  import { usageNote as usageNoteFor } from '../lib/usage'
+  import { runtimeNote as runtimeNoteFor, usageNote as usageNoteFor } from '../lib/usage'
   import { repetitionHint } from '../lib/log'
   import { askMode, compactOffered, compactionRunning, composerState, sessionControls } from '../lib/session-actions'
   import { router } from '../lib/router.svelte'
@@ -29,6 +29,7 @@
     type CeilingInfo,
     type OperatorQuestion,
     type SessionExhaustion,
+    type SessionRuntime,
     type SessionUsage,
     type ShownWork as ShownWorkItem,
   } from '../lib/types'
@@ -43,6 +44,7 @@
   let sending = $state(false)
   let error = $state<string | null>(null)
   let usage = $state<SessionUsage | null>(null)
+  let runtime = $state<SessionRuntime | null>(null)
   let ceiling = $state<CeilingInfo | null>(null)
   let exhaustion = $state<SessionExhaustion | null>(null)
   const exhausted = $derived(exhaustionNote(exhaustion))
@@ -79,6 +81,7 @@
     readError = null
     questions = result.questions
     usage = result.usage
+    runtime = result.runtime ?? null
     ceiling = result.ceiling
     exhaustion = result.exhaustion ?? null
     shownWork = result.shown_work ?? []
@@ -221,6 +224,7 @@
   }
 
   const usageNote = $derived(usageNoteFor(usage))
+  const runtimeNote = $derived(runtimeNoteFor(runtime))
 
   let controlling = $state(false)
   let confirmingKill = $state(false)
@@ -425,7 +429,10 @@
       >
     {/if}
     {#if session.harness_id !== 'external' && session.cost_usd != null}
-      <span class="mono">${session.cost_usd.toFixed(2)}</span>
+      <span class="mono" title="Model cost, as the harness reported it">{runtimeNote ? 'model ' : ''}${session.cost_usd.toFixed(2)}</span>
+    {/if}
+    {#if runtimeNote}
+      <span class="mono" title={runtimeNote.title}>{runtimeNote.text}</span>
     {/if}
     {#if session.manifest_digest}
       <span

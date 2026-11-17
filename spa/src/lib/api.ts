@@ -71,6 +71,9 @@ import type {
   WorkView,
   Project,
   UsageTotal,
+  InfraSpend,
+  InfraTotal,
+  SessionRuntime,
   ManifestView,
   ReviewerView,
 } from './types'
@@ -349,6 +352,8 @@ export const api = {
       waiting: unknown[]
       questions: OperatorQuestion[]
       usage: SessionUsage
+      /** What its sandboxes cost. Absent from an older node. */
+      runtime?: SessionRuntime
       ceiling: Ceiling
       /** Absent from a node that predates exhaustion policies. */
       exhaustion?: SessionExhaustion | null
@@ -958,4 +963,10 @@ export const api = {
   /** What the gateway counted, grouped; `params` is `usageParams`'s query. */
   usage: (params: URLSearchParams) =>
     call<{ since_ms: number; until_ms: number | null; totals: UsageTotal[] }>('GET', `/api/usage?${params}`),
+  /** What sandboxes cost in the same window, by day, channel, session or size. */
+  usageInfra: (params: URLSearchParams) =>
+    call<{ since_ms: number; until_ms: number | null; totals: InfraTotal[]; spend: InfraSpend }>(
+      'GET',
+      `/api/usage/infra?${params}`,
+    ),
 }

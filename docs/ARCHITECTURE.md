@@ -1901,6 +1901,22 @@ tokens per accepted change. Provenance — which model, which prompts, which app
 which policy version shipped a commit — is a query over data captured for metrics
 anyway.
 
+Cost has two halves, kept apart. **Model cost** (inference) is gateway tokens at each
+provider's configured `price`, or what the harness reported (`session.cost_usd`).
+**Infra cost** is the time a sandbox on an elastic provider (DigitalOcean) existed:
+the provider notes each sandbox in `sandbox_usage` when it is made (with the hourly
+price its size has in the runtime's catalog then, the catalog's first size standing for
+an unset `[digitalocean] size`) and when it is destroyed or found lost; the upkeep's
+sweep ends any the runtime no longer lists. Sandboxes are kept warm, so the span is
+create to destroy, idle time included, and a running one is priced up to now. It is an
+estimate: checkpoint storage and template builds are not priced. The session API's
+`runtime`, the channel metrics' `infra_cost_usd` and `GET /api/usage/infra` (and its
+`.csv`) report it, on the node that ran the sandbox. `[spend] infra_usd_per_day`
+(live, unset by default) caps a local day's infra cost: once reached, placement
+treats DigitalOcean as closed, so new sessions go local or are refused with the
+reason, and running sandboxes are left alone. Inference is capped separately, by each
+channel's token ceiling.
+
 That is the workflow's own record, served as JSON at `/api/metrics`. What the cluster
 needs to decide how big a node must be is a scrape target: `[metrics] listen` (unset by
 default, 7425 by convention) serves `GET /metrics` from one process-global registry
