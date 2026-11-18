@@ -313,24 +313,180 @@ pub async fn answering(http: &reqwest::Client, url: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// How many sessions the node has running, if it answers. None when it does
+/// What holds a restart of the node up: the work this node is doing itself.
+/// Sessions on other mesh nodes, external harnesses, and sessions idle on the
+/// operator are not in it; a restart cuts none of them off mid-turn.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Busy {
+    /// Sessions on this node with a turn running.
+    pub turns: usize,
+    /// Required checks running.
+    pub checks: usize,
+    /// Review submissions whose checks have not all run.
+    pub reviews: usize,
+    /// This node's managed sessions whose turn cannot be seen (the queue of a
+    /// node too old to say what it is doing): any of them may be running one.
+    pub sessions: usize,
+}
+
+impl Busy {
+    pub fn idle(&self) -> bool {
+        self.turns == 0 && self.checks == 0 && self.reviews == 0 && self.sessions == 0
+    }
+
+    /// What is being waited for, in the tray's words: "1 turn on this node",
+    /// "2 checks", joined.
+    pub fn describe(&self) -> String {
+        let count = |n: usize, one: &str| format!("{n} {one}{}", if n == 1 { "" } else { "s" });
+        let mut parts = Vec::new();
+        if self.turns > 0 {
+            parts.push(format!("{} on this node", count(self.turns, "turn")));
+        }
+        if self.sessions > 0 {
+            parts.push(format!("{} on this node", count(self.sessions, "session")));
+        }
+        if self.checks > 0 {
+            parts.push(count(self.checks, "check"));
+        }
+        if self.reviews > 0 {
+            parts.push(count(self.reviews, "review submission"));
+        }
+        match parts.split_last() {
+            None => "nothing".into(),
+            Some((last, [])) => last.clone(),
+            Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        }
+    }
+}
+
+/// Whether the node can be restarted now, and what restarting it anyway
+/// would end.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Holdup {
+    pub busy: Busy,
+    /// The live sessions a restart ends, labelled for the tray, as the node's
+    /// own restart lists them.
+    pub closing: Vec<String>,
+}
+
+/// What holds a restart of the node up, if it answers. None when it does
 /// not: a node that cannot be asked is not idle.
-pub async fn running_sessions(http: &reqwest::Client, url: &str) -> Option<usize> {
-    let v: serde_json::Value = http
-        .get(format!("{url}/api/queue"))
+///
+/// The node says itself, in its restart status (`GET /api/restart`), what
+/// its own `when_idle` restart waits for; that is the one definition of busy
+/// used. A node too old to say is counted from its queue instead
+/// ([`queue_holdup`]).
+pub async fn holdup(http: &reqwest::Client, url: &str) -> Option<Holdup> {
+    let res = http
+        .get(format!("{url}/api/restart"))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .ok()?;
+    let code = res.status();
+    if code.is_success() {
+        let status = res.json::<serde_json::Value>().await.ok();
+        if let Some(holdup) = status.as_ref().and_then(restart_holdup) {
+            return Some(holdup);
+        }
+    } else if code != reqwest::StatusCode::NOT_FOUND {
+        return None;
+    }
+    let node = get_json(http, &format!("{url}/api/node"))
+        .await
+        .and_then(|v| v["id"].as_str().map(str::to_string));
+    let queue = get_json(http, &format!("{url}/api/queue")).await?;
+    Some(queue_holdup(&queue, node.as_deref()))
+}
+
+async fn get_json(http: &reqwest::Client, url: &str) -> Option<serde_json::Value> {
+    let res = http
+        .get(url)
         .timeout(Duration::from_secs(2))
         .send()
         .await
-        .ok()?
-        .json()
-        .await
         .ok()?;
-    Some(
-        v["running"]
+    if !res.status().is_success() {
+        return None;
+    }
+    res.json().await.ok()
+}
+
+/// The holdup from the node's restart status, if it carries `busy`.
+pub fn restart_holdup(status: &serde_json::Value) -> Option<Holdup> {
+    let busy = status.get("busy")?.as_object()?;
+    let n = |key: &str| busy.get(key).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    Some(Holdup {
+        busy: Busy {
+            turns: busy
+                .get("turns")
+                .and_then(|v| v.as_array())
+                .map_or(0, Vec::len),
+            checks: n("checks"),
+            reviews: n("reviews"),
+            sessions: 0,
+        },
+        closing: status["closing"]
             .as_array()
-            .map(|a| a.iter().filter(|s| s["state"] != "closed").count())
-            .unwrap_or(0),
-    )
+            .map(|a| a.iter().map(session_label).collect())
+            .unwrap_or_default(),
+    })
+}
+
+/// The holdup an older node's queue implies. The queue lists the whole mesh,
+/// so only this node's own sessions count (`node`, from `/api/node`; when it
+/// cannot be read, every session does), and external harnesses, which only
+/// lose their MCP connection over a restart, never do. A session idle on the
+/// operator does not count either; one whose row does not say whether a turn
+/// is running does.
+pub fn queue_holdup(queue: &serde_json::Value, node: Option<&str>) -> Holdup {
+    let own: Vec<&serde_json::Value> = queue["running"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter(|s| s["state"] != "closed" && s["harness_id"] != "external")
+                .filter(|s| node.is_none_or(|node| s["node_id"] == node))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut busy = Busy::default();
+    for s in &own {
+        let turn = &s["turn_active"];
+        match turn.as_i64().or_else(|| turn.as_bool().map(i64::from)) {
+            Some(0) => {}
+            Some(_) => busy.turns += 1,
+            None => busy.sessions += 1,
+        }
+    }
+    Holdup {
+        busy,
+        closing: own
+            .iter()
+            .filter(|s| s["state"] != "suspended")
+            .map(|s| session_label(s))
+            .collect(),
+    }
+}
+
+/// A session as the tray names it: its branch, else its repository, else
+/// its id, and what state it is in.
+fn session_label(s: &serde_json::Value) -> String {
+    let text = |key: &str| s[key].as_str().filter(|t| !t.is_empty());
+    let name = text("branch")
+        .map(str::to_string)
+        .or_else(|| {
+            text("repo_path").map(|p| {
+                Path::new(p)
+                    .file_name()
+                    .map_or(p.to_string(), |f| f.to_string_lossy().into_owned())
+            })
+        })
+        .or_else(|| text("id").map(|id| id.chars().take(8).collect()))
+        .unwrap_or_else(|| "a session".into());
+    match text("state") {
+        Some(state) => format!("{name} · {}", state.replace('_', " ")),
+        None => name,
+    }
 }
 
 /// Whether the node refuses to run harnesses because its boundary images are
@@ -620,6 +776,199 @@ mod tests {
         assert!(plan(Some("0.15.0"), "0.15.0", Some("0.15.0"), true).is_empty());
         // A node that does not answer is not restarted by an update.
         assert_eq!(plan(None, "0.15.0", Some("0.14.0"), true), vec![InstallCli]);
+    }
+
+    fn session(id: &str, node: &str, harness: &str, state: &str, turn: i64) -> serde_json::Value {
+        serde_json::json!({
+            "id": id, "node_id": node, "harness_id": harness, "state": state,
+            "turn_active": turn, "branch": format!("feat/{id}"), "repo_path": "/src/repo",
+        })
+    }
+
+    #[test]
+    fn only_this_nodes_own_turns_hold_a_restart_up_in_an_older_nodes_queue() {
+        let queue = serde_json::json!({ "running": [
+            // A peer's session, mirrored here: the mesh-wide queue lists it.
+            session("peer", "bazzite", "claude", "running", 1),
+            // An external harness only loses its MCP connection.
+            session("ext", "mac", "external", "running", 1),
+            // Idle on the operator: a restart cuts nothing off.
+            session("idle", "mac", "claude", "waiting_on_you", 0),
+            session("parked", "mac", "claude", "suspended", 0),
+        ]});
+        let h = queue_holdup(&queue, Some("mac"));
+        assert!(h.busy.idle(), "{h:?}");
+        // What restarting now would end: the live one, not the suspended one.
+        assert_eq!(h.closing, vec!["feat/idle · waiting on you".to_string()]);
+
+        let mut busy = queue.clone();
+        busy["running"]
+            .as_array_mut()
+            .unwrap()
+            .push(session("mine", "mac", "claude", "running", 1));
+        let h = queue_holdup(&busy, Some("mac"));
+        assert_eq!(
+            h.busy,
+            Busy {
+                turns: 1,
+                ..Busy::default()
+            }
+        );
+        assert_eq!(h.busy.describe(), "1 turn on this node");
+
+        // A closed session never counts.
+        let closed = serde_json::json!({ "running": [session("c", "mac", "claude", "closed", 1)] });
+        assert!(queue_holdup(&closed, Some("mac")).busy.idle());
+    }
+
+    #[test]
+    fn without_the_nodes_id_every_managed_session_counts() {
+        let queue = serde_json::json!({ "running": [
+            session("peer", "bazzite", "claude", "running", 1),
+            session("ext", "mac", "external", "running", 1),
+        ]});
+        assert_eq!(queue_holdup(&queue, None).busy.turns, 1);
+    }
+
+    #[test]
+    fn a_row_that_does_not_say_whether_a_turn_runs_counts() {
+        let mut row = session("old", "mac", "claude", "waiting_on_you", 0);
+        row.as_object_mut().unwrap().remove("turn_active");
+        let h = queue_holdup(&serde_json::json!({ "running": [row] }), Some("mac"));
+        assert_eq!(h.busy.sessions, 1);
+        assert_eq!(h.busy.describe(), "1 session on this node");
+    }
+
+    #[test]
+    fn the_nodes_restart_status_is_read_for_what_it_waits_for() {
+        let status = serde_json::json!({
+            "busy": { "turns": ["s1"], "checks": 2, "reviews": 0 },
+            "closing": [
+                { "id": "s1", "branch": "feat/x", "state": "running" },
+                { "id": "0193abcdef", "branch": null, "repo_path": "", "state": "waiting_on_you" },
+            ],
+        });
+        let h = restart_holdup(&status).unwrap();
+        assert_eq!(
+            h.busy,
+            Busy {
+                turns: 1,
+                checks: 2,
+                ..Busy::default()
+            }
+        );
+        assert_eq!(h.busy.describe(), "1 turn on this node and 2 checks");
+        assert_eq!(
+            h.closing,
+            vec!["feat/x · running", "0193abcd · waiting on you"]
+        );
+        // A status without `busy` is an older node's; the queue is asked.
+        assert_eq!(restart_holdup(&serde_json::json!({ "config": {} })), None);
+    }
+
+    #[test]
+    fn what_holds_a_restart_up_is_said_in_a_line() {
+        let b = Busy {
+            turns: 2,
+            checks: 1,
+            reviews: 3,
+            sessions: 0,
+        };
+        assert_eq!(
+            b.describe(),
+            "2 turns on this node, 1 check and 3 review submissions"
+        );
+        assert_eq!(
+            Busy {
+                checks: 2,
+                ..Busy::default()
+            }
+            .describe(),
+            "2 checks"
+        );
+    }
+
+    /// A node that answers each path with what `routes` gives it, and records
+    /// what it was asked.
+    async fn fake_node(
+        routes: Vec<(&'static str, u16, serde_json::Value)>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = asked.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut request = [0; 4096];
+                let n = socket.read(&mut request).await.unwrap_or(0);
+                let text = String::from_utf8_lossy(&request[..n]).to_string();
+                let path = text.split_whitespace().nth(1).unwrap_or("").to_string();
+                seen.lock().unwrap().push(path.clone());
+                let (code, body) = routes
+                    .iter()
+                    .find(|(p, _, _)| *p == path)
+                    .map(|(_, c, b)| (*c, b.to_string()))
+                    .unwrap_or((404, "{}".into()));
+                let _ = socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            }
+        });
+        (url, asked)
+    }
+
+    fn busy_queue() -> serde_json::Value {
+        serde_json::json!({ "running": [session("mine", "mac", "claude", "running", 1)] })
+    }
+
+    #[tokio::test]
+    async fn the_nodes_own_word_on_busy_is_used_when_it_offers_it() {
+        let (url, asked) = fake_node(vec![
+            (
+                "/api/restart",
+                200,
+                serde_json::json!({ "busy": { "turns": [], "checks": 0, "reviews": 0 }, "closing": [] }),
+            ),
+            ("/api/node", 200, serde_json::json!({ "id": "mac" })),
+            ("/api/queue", 200, busy_queue()),
+        ])
+        .await;
+        let h = holdup(&reqwest::Client::new(), &url).await.unwrap();
+        assert!(h.busy.idle(), "{h:?}");
+        assert_eq!(*asked.lock().unwrap(), vec!["/api/restart".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn an_older_node_is_counted_from_its_queue() {
+        let (url, asked) = fake_node(vec![
+            ("/api/node", 200, serde_json::json!({ "id": "mac" })),
+            ("/api/queue", 200, busy_queue()),
+        ])
+        .await;
+        let h = holdup(&reqwest::Client::new(), &url).await.unwrap();
+        assert_eq!(h.busy.turns, 1, "{h:?}");
+        assert!(asked.lock().unwrap().contains(&"/api/queue".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_node_that_does_not_answer_is_not_idle() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        assert_eq!(holdup(&reqwest::Client::new(), &url).await, None);
+        // Nor one that answers with an error.
+        let (url, _) = fake_node(vec![("/api/restart", 500, serde_json::json!({}))]).await;
+        assert_eq!(holdup(&reqwest::Client::new(), &url).await, None);
     }
 
     #[test]
