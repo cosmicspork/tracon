@@ -221,8 +221,9 @@
 {/snippet}
 
 <!-- A failed queue leaves the lanes below short of every permission, review
-     and promotion; saying nothing would read as nothing waiting. -->
-{#if store.loads.queue.error !== null}
+     and promotion; saying nothing would read as nothing waiting. A node that
+     cannot be reached already says so above, with the same Retry. -->
+{#if store.loads.queue.error !== null && loadPhase(known) === 'ready'}
   <LoadGate status={store.loads.queue} what="what is waiting on you" onretry={refetch} retrying={store.refetching} />
 {/if}
 

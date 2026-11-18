@@ -6,7 +6,7 @@ import * as push from './push'
 import { router } from './router.svelte'
 import { api, ApiError } from './api'
 import { upsertNode } from './nodes'
-import { LOADING, settledLoad, type LoadStatus } from './load'
+import { LOADING, refetchOnOpen, settledLoad, type LoadStatus } from './load'
 import { applySessionFrame } from './queue'
 import { allAnswered, kept, wantsLogin } from './snapshot'
 import type {
@@ -171,13 +171,13 @@ class Store {
       this.connectionLost = false
       this.connected = true
       if (this.wasConnected) {
-        // Frames may have been missed while down: refetch snapshots and drop
-        // ephemeral state, which the replayed events supersede.
+        // Frames may have been missed while down: drop ephemeral state, which
+        // the replayed events supersede.
         this.openChunks = new Map()
         this.toolProgress = new Map()
         this.toolOutput = new Map()
-        void this.refetch()
       }
+      if (refetchOnOpen(this.wasConnected, this.refetching, Object.values(this.loads))) void this.refetch()
       this.wasConnected = true
     }
     source.onerror = () => {
