@@ -624,6 +624,36 @@ const MCP_SERVERS = {
   ],
 }
 
+// Settings › Plugins: one plugin with instances in three states, one with none.
+const INSTANCE = {
+  plugin: 'sql-review',
+  version: '0.3.1',
+  digest: '5d1c0e8f2a7b9c3d4e6f8a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d',
+  backoff_ms: null,
+}
+const PLUGINS = {
+  plugins: [
+    {
+      name: 'sql-review',
+      repo: 'example-org/sql-review',
+      state: 'installed',
+      active: { version: '0.3.1', tools: ['query', 'explain'] },
+      instances: [
+        { ...INSTANCE, channel: 'personal', state: 'ready', pid: 48102, started_ms: Date.UTC(2026, 10, 18, 9, 12), uptime_secs: 1260, restarts: 0, last_error: null },
+        { ...INSTANCE, channel: 'orbit', state: 'unhealthy', pid: null, started_ms: null, uptime_secs: null, restarts: 7, last_error: 'exited with code 1' },
+        { ...INSTANCE, channel: 'research', state: 'backing_off', pid: null, started_ms: null, uptime_secs: null, restarts: 2, backoff_ms: 4000, last_error: 'not ready within 30s: initialize did not answer on its socket' },
+      ],
+    },
+    {
+      name: 'tickets',
+      repo: 'example-org/tickets-plugin',
+      state: 'installed',
+      active: { version: '1.2.0', tools: ['search'] },
+      instances: [],
+    },
+  ],
+}
+
 // Everything Settings reads, in its populated form.
 const BASE = {
   '/api/nodes': NODES,
@@ -645,11 +675,23 @@ const BASE = {
   '/api/push/subscriptions': PUSH_DEVICES,
   '/api/external': EXTERNAL,
   '/api/mcp-servers': MCP_SERVERS,
+  '/api/plugins': PLUGINS,
+  '/api/plugins/sql-review/logs': {
+    lines: [
+      '[tracon] started 0.3.1 pid 48211',
+      'sql-review 0.3.1 listening on /run/user/1000/tracon/p/3f9a01c2b7e4.sock',
+      '[tracon] exited with code 1',
+      '[tracon] started 0.3.1 pid 48230',
+      'error: data directory: database is locked (another process holds reviews.db)',
+      '[tracon] exited with code 1',
+      '[tracon] unhealthy: not started again',
+    ],
+  },
   '/api/restart': {
     config: { boot_hash: CONFIG_FILE.hash, hash: CONFIG_FILE.hash, keys: [], unparseable: false },
     restart: { available: true, mechanism: 'systemd', reason: null },
     plan: null,
-    busy: { turns: [], checks: 0, reviews: 0 },
+    busy: { turns: [], checks: 0, reviews: 0, plugins: [] },
     closing: [],
     last_error: null,
   },
@@ -858,6 +900,21 @@ export default [
         ],
       },
     },
+  }),
+
+  // --- Plugins ---------------------------------------------------------------
+  S('plugins', '/settings#plugins', 'Plugins: installed, with their instances', {
+    note: 'One plugin with a ready, an unhealthy and a backing-off instance, and one running nowhere.',
+  }),
+  S('plugins-logs', '/settings#plugins', 'Plugins: an unhealthy instance\'s logs', {
+    note: 'The log view of an instance that crashed until it was marked unhealthy.',
+    act: async (page) => {
+      await page.getByRole('button', { name: 'Logs', exact: true }).nth(1).click()
+      await scrollTo(page, 'unhealthy: not started again')
+    },
+  }),
+  S('plugins-empty', '/settings#plugins', 'Plugins: none installed', {
+    over: { '/api/plugins': { plugins: [] } },
   }),
 
   // --- Channels --------------------------------------------------------------

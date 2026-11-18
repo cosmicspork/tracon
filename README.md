@@ -1060,12 +1060,33 @@ the manifest and the release's notes, while the installed version stays active.
 `tracon plugin rollback <name>` goes back to the version before, which was approved when
 it was installed, so no card is raised. `tracon plugin rm <name>` removes its builds and
 keeps its data under `<state dir>/plugins/data/<name>/`; `--purge` deletes that too.
-Rolling back and removing are admin actions. `tracon plugin ls` lists what is installed,
-the version before it, and any build waiting on a card.
+Rolling back and removing are admin actions, as is restarting a plugin's process.
+`tracon plugin ls` lists what is installed, the version before it, and any build waiting
+on a card.
 
-This release installs plugins and runs none of them yet: the node does not start a
-plugin or offer its tools. `[[plugin]]` entries are read and checked now so they are in
-place when it does.
+The node runs a plugin as one process per channel, started when a session on that
+channel first uses its tools. A process stops once it has gone unused for its
+`[[plugin]]` entry's `idle_timeout_secs` (15 minutes by default). It also stops when the
+plugin is updated, rolled back or removed, and when the node shuts down; the next use
+starts the version active then. The node checks the build's digest again and runs its
+`exec` with `--socket <path> --data <dir>` appended. The environment is empty except for
+`TRACON_PLUGIN_TOKEN` (fresh for each start and held only in the node's memory),
+`TRACON_NODE_KEY` (the node id) and `TRACON_CONTRACT=1`. Credentials are never in it:
+they are lent per call. The socket is in a 0700 directory of the node's runtime
+directory (`$XDG_RUNTIME_DIR/tracon/p/`, or `/tmp/tracon-<uid>/tracon/p/` where that is
+unset), and the plugin's data and working directory is
+`<state dir>/plugins/data/<name>/<channel>/`, also 0700. A process is ready once MCP
+`initialize` answers on its socket within 30 seconds. One that exits or is not ready is
+started again after a wait that doubles from 1 second to 60; if it fails again after the
+60-second wait it is marked unhealthy and left down until it is next used or restarted.
+Its output is kept in memory and in `<state dir>/plugins/logs/<name>/<channel>.log`,
+rotated at 1 MiB with three kept. `tracon plugin ls` shows each process's state, pid,
+uptime, restarts and last error, `tracon plugin logs <name> --channel <c>` its last
+lines, and `tracon plugin restart <name> --channel <c>` starts it afresh, or starts it
+on a channel where it has not run yet. Settings › Plugins shows the same. A `when_idle`
+node restart waits for running plugin processes as it waits for turns. Until brokered
+plugin tools ship, no session uses a plugin, so a plugin runs only once `tracon plugin
+restart` starts it.
 
 ### Asking, pinging, and complaining
 

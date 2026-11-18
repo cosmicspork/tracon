@@ -49,6 +49,16 @@ test('a waiting restart names what it waits for and can be withdrawn', () => {
   expect(view?.offer).toBe(false)
 })
 
+test('a waiting restart counts the plugin instances still running', () => {
+  const view = restartBanner(
+    status({
+      plan: { mode: 'when_idle', requested_ms: 1, deadline_ms: 2, state: 'draining', expected_hash: 'b' },
+      busy: { turns: [], checks: 0, reviews: 0, plugins: ['sql/personal'] },
+    }),
+  )
+  expect(view?.detail).toContain('waiting for 1 plugin instance to finish')
+})
+
 test('a file that does not load and a restart that failed are critical', () => {
   expect(restartBanner(status({ config: { boot_hash: 'a', hash: 'b', keys: [], unparseable: true } }))?.tone).toBe('crit')
   const failed = restartBanner(status({ last_error: 'gave up waiting' }))

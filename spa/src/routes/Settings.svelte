@@ -25,6 +25,7 @@
   import Maintenance from '../components/settings/Maintenance.svelte'
   import DataHeld from '../components/settings/DataHeld.svelte'
   import McpServers from '../components/settings/McpServers.svelte'
+  import Plugins from '../components/settings/Plugins.svelte'
   import Repositories from '../components/settings/Repositories.svelte'
   import MeshAdministration from '../components/settings/MeshAdministration.svelte'
   import NodeList from '../components/settings/NodeList.svelte'
@@ -840,6 +841,10 @@
   </Card>
 
   <McpServers />
+{/if}
+
+{#if activeSection === 'plugins'}
+  <Plugins />
 {/if}
 
 {#if activeSection === 'channels'}

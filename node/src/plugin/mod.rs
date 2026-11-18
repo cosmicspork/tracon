@@ -7,10 +7,13 @@
 //! allows that card (`decide`), which makes the build the plugin's active
 //! one and keeps the one before it for `rollback`. An update is the same
 //! card, showing what changed and the release's notes, while the active
-//! build keeps serving. Nothing here runs a plugin.
+//! build keeps serving. `supervisor` runs the active build, one process per
+//! plugin and channel, and stops a plugin's processes when it is updated,
+//! rolled back or removed.
 
 pub mod install;
 pub mod manifest;
+pub mod supervisor;
 
 use serde_json::{json, Value};
 
@@ -362,8 +365,8 @@ pub fn rollback(
 }
 
 /// Remove `name`: its builds go, and its card if one waits (whose id is
-/// returned, expired); its data stays unless `purge`. Nothing runs it yet,
-/// so there is nothing to stop.
+/// returned, expired); its data stays unless `purge`. Its running
+/// instances are the caller's to stop (`supervisor::Supervisor::stop_plugin`).
 pub fn remove(
     store: &Store,
     state_dir: &std::path::Path,

@@ -344,10 +344,15 @@ on macOS both are `~/Library/Application Support/tracon/`.
 | `policy.toml`, `policy.toml.sig`, `policy-key.pub` | the signed bundle the node reads at startup | back it up |
 | `policy-key` | the signing key, if this machine signs bundles | back it up, separately |
 | `providers/` | harness provider logins | re-doable by logging in again |
-| `plugins/data/` | each installed plugin's own data, by channel | back it up |
+| `plugins/data/` | each installed plugin's own data, by channel (`<name>/<channel>/`, 0700) | back it up |
+| `plugins/logs/` | plugin processes' output, rotated | disposable |
 | `plugins/bin/` | installed plugin builds, pinned by digest in `node.db` | derived from the releases; a lost or changed build is refused by its digest, and `tracon plugin rm` then `add` installs the latest release again, on a new card |
 | `local-runtime/`, `workspaces/`, `harness-state/`, `git-home/` | runtime volumes, snapshots, caches | derived; large; skip |
 | the vector index, inside `node.db` | semantic search | derived; `tracon doc reindex` |
+
+Plugin processes' sockets are in the runtime directory (`$XDG_RUNTIME_DIR/tracon/p/`,
+or `/tmp/tracon-<uid>/tracon/p/`), not the state directory, and are made afresh at
+each start: there is nothing there to back up.
 
 **A fresh node needs, at minimum, `node-identity.seed` and `node.db`.** The
 seed is the node's name on the mesh and the key its credentials are sealed

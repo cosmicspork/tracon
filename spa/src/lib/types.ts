@@ -214,8 +214,9 @@ export interface RestartStatus {
     state: 'draining' | 'restarting'
     expected_hash: string
   } | null
-  /** What `when_idle` waits on: turns, running checks, and review submissions whose checks have not all run. */
-  busy: { turns: string[]; checks: number; reviews: number }
+  /** What `when_idle` waits on: turns, running checks, review submissions whose checks have not all run,
+      and running plugin instances as `plugin/channel` (`plugins`, absent from an older node). */
+  busy: { turns: string[]; checks: number; reviews: number; plugins?: string[] }
   /** Live sessions a restart ends. */
   closing: { id: string; channel: string; repo_path: string; branch: string; state: string; turn_active: boolean }[]
   last_error: string | null
@@ -2157,6 +2158,32 @@ export interface McpServerTool {
   /** How a call to it is answered now, policy included. */
   decision: 'allow' | 'ask' | 'deny'
   rule_id: string | null
+}
+
+/** One plugin process, on one channel, as the node's supervisor sees it. */
+export interface PluginInstance {
+  plugin: string
+  channel: string
+  state: 'starting' | 'ready' | 'backing_off' | 'unhealthy' | 'stopped'
+  pid: number | null
+  started_ms: number | null
+  uptime_secs: number | null
+  /** Starts again after a failure. */
+  restarts: number
+  /** While it backs off, how long the wait is. */
+  backoff_ms: number | null
+  last_error: string | null
+  version: string | null
+  digest: string | null
+}
+
+/** An installed plugin (`GET /api/plugins`), only what Settings shows. */
+export interface PluginSummary {
+  name: string
+  repo: string
+  state: string
+  active: { version: string; tools: string[] } | null
+  instances: PluginInstance[]
 }
 
 /** One `[[mcp_server]]` as the node sees it now. */

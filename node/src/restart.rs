@@ -276,11 +276,15 @@ pub struct Busy {
     /// the review is still in flight. New ones are refused during a drain.
     /// The node's own runs of an external candidate's checks count too.
     pub reviews: i64,
+    /// Plugin instances running, as `plugin/channel`. Each stops on its own
+    /// once unused for its idle timeout, and a drain refuses the turns that
+    /// would use it.
+    pub plugins: Vec<String>,
 }
 
 impl Busy {
     pub fn idle(&self) -> bool {
-        self.turns.is_empty() && self.checks == 0 && self.reviews == 0
+        self.turns.is_empty() && self.checks == 0 && self.reviews == 0 && self.plugins.is_empty()
     }
 }
 
@@ -306,6 +310,7 @@ pub fn busy(manager: &Manager) -> Busy {
             .unwrap_or(0),
         // A submission's checks, and the node's own of an external one.
         reviews: (manager.checking().in_flight() + manager.external_checks().in_flight()) as i64,
+        plugins: manager.plugins().running(),
     }
 }
 
@@ -503,10 +508,11 @@ async fn drive(manager: Manager, generation: u64) {
             let plural =
                 |n: usize, one: &str| format!("{n} {one}{}", if n == 1 { "" } else { "s" });
             let why = format!(
-                "gave up waiting: {}, {} and {} still running at the deadline",
+                "gave up waiting: {}, {}, {} and {} still running at the deadline",
                 plural(busy.turns.len(), "turn"),
                 plural(busy.checks as usize, "check"),
                 plural(busy.reviews as usize, "review submission"),
+                plural(busy.plugins.len(), "plugin instance"),
             );
             abandon(&manager, generation, why).await;
             return;

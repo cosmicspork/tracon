@@ -490,6 +490,7 @@ pub fn route_summary(method: &Method, path: &str) -> Option<String> {
             format!("Roll plugin {name} back to its previous version")
         }
         ("DELETE", ["api", "plugins", name]) => format!("Remove plugin {name}"),
+        ("POST", ["api", "plugins", name, "restart"]) => format!("Restart plugin {name}"),
         ("POST", ["api", "admin", "restart"]) => "Restart the node".to_string(),
         ("DELETE", ["api", "admin", "restart"]) => "Withdraw the node's restart".to_string(),
         ("POST", ["api", "passkeys", "register", "options"]) => "Add a passkey".to_string(),

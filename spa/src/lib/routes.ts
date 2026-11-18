@@ -44,6 +44,7 @@ export function redirect(path: string, search = '', hash = ''): string | null {
 export const SETTINGS_SECTIONS = [
   ['general', 'General'],
   ['connections', 'Connections'],
+  ['plugins', 'Plugins'],
   ['channels', 'Channels & repositories'],
   ['access', 'Access & devices'],
   ['policies', 'Permissions & policies'],
