@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.54.0](https://github.com/cosmicspork/tracon/compare/v0.53.0...v0.54.0) (2026-11-18)
+
+
+### Features
+
+* **node:** supervise plugin processes on the host ([#982](https://github.com/cosmicspork/tracon/issues/982)) ([a15b8e9](https://github.com/cosmicspork/tracon/commit/a15b8e92c5cc14e888454d05e7b28442ef0c16c2))
+
+
+### Bug Fixes
+
+* resend a tree cut off mid-send, and keep the running row's timer steady ([#971](https://github.com/cosmicspork/tracon/issues/971)) ([22f0c7a](https://github.com/cosmicspork/tracon/commit/22f0c7a51c92e41345ec1f7f3d7163fe922a04de))
+* **spa:** clear load errors when the stream first opens after an outage ([#969](https://github.com/cosmicspork/tracon/issues/969)) ([b6c6e3b](https://github.com/cosmicspork/tracon/commit/b6c6e3b769a1ae544dd6fabcd3e9fc446310ca40))
+
 ## [0.53.0](https://github.com/cosmicspork/tracon/compare/v0.52.0...v0.53.0) (2026-11-18)
 
 
