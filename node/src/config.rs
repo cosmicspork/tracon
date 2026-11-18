@@ -72,6 +72,8 @@ pub struct Config {
     pub embed: Embed,
     pub external: External,
     pub docs: Docs,
+    /// The runtime-storage sweep on a timer: off unless set.
+    pub gc: Gc,
     pub work: Work,
     /// Hosts the node attaches a stored credential to, on behalf of a client
     /// that never holds it.
@@ -743,6 +745,24 @@ pub struct Docs {
     pub kind: Vec<DocKind>,
 }
 
+/// `[gc]`: what `tracon gc --apply` does, on a timer the operator sets
+/// (`crate::gc_schedule`). Off by default; every key is read again before
+/// each run.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Gc {
+    /// How often the sweep runs, in seconds. 0 (the default) is off; less
+    /// than an hour is an hour.
+    pub every_secs: u64,
+    /// Archive this node's ended sessions (closed, killed_budget, failed)
+    /// untouched for this long before each sweep. Unset, nothing is
+    /// archived, and the sweep frees only what is archived already.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archive_ended_after_secs: Option<u64>,
+    /// Dependency caches are candidates too, as `tracon gc --caches`.
+    pub caches: bool,
+}
+
 /// One operator-configured document kind.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocKind {
@@ -1184,6 +1204,10 @@ pub struct ReviewLimits {
     /// mostly deletions, and those are not what a reviewer reads line by line.
     pub max_diff_lines: i64,
     pub max_files: usize,
+    /// Publish an approved description as the operator's opener with the
+    /// agent's text collapsed beneath it under "Generated details", and
+    /// refuse an approval that sends a description without an opener.
+    pub generated_details: bool,
 }
 
 impl Default for ReviewLimits {
@@ -1191,6 +1215,7 @@ impl Default for ReviewLimits {
         Self {
             max_diff_lines: 10_000,
             max_files: 200,
+            generated_details: false,
         }
     }
 }
@@ -2400,7 +2425,12 @@ pub struct Mesh {
     /// How many owner streams this node may have open at once.
     pub stream_max_concurrent: usize,
     /// Renew shared subscription credentials first. Set it on a node that is
-    /// always on; every other holder steps in only if this one has not.
+    /// always on; every other holder steps in only if this one has not, and
+    /// only with the hub's claim. Unset, a node on Kubernetes that is the
+    /// only one among a sign-in's holders renews first anyway. The one node
+    /// that renews a shared sign-in without a claim, in its last five minutes,
+    /// when the hub cannot be reached. A peer this node lets administer it
+    /// may set it (Settings › Mesh offers to).
     pub renew_credentials: bool,
     /// The peers (node ids) this node lets administer it over the mesh:
     /// read and edit its `node.toml`, and sign its providers in and out,
@@ -3150,6 +3180,7 @@ impl Default for Config {
             embed: Embed::default(),
             external: External::default(),
             docs: Docs::default(),
+            gc: Gc::default(),
             work: Work::default(),
             upstreams: Upstreams::default(),
             placement: Default::default(),

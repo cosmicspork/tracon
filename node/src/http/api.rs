@@ -2475,6 +2475,13 @@ pub struct VerdictBody {
     /// description, the comment, or neither. Absent means the revision's own.
     #[serde(default)]
     pub outputs: Option<crate::review::publish::Outputs>,
+    /// The operator's own opening words for the description an approval
+    /// sends, under `[review] generated_details`. The node composes the
+    /// published description from it and the agent's text
+    /// (`review::publish::compose_generated_details`), and refuses an
+    /// approval that sends a description without one. Ignored otherwise.
+    #[serde(default)]
+    pub opener: Option<String>,
 }
 
 /// What an old tab is told when the review it is showing has been superseded.
@@ -2710,6 +2717,10 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
         "change_draft": change_draft,
         "shown_work": shown_work,
         "authorship": authorship,
+        // Whether an approval's description goes out behind an opener the
+        // operator writes (`[review] generated_details`), as this node holds
+        // it now; a mirror reads its owner's, which is what decides.
+        "generated_details": s.cfg.live().review.generated_details,
     }))
 }
 
@@ -2741,6 +2752,7 @@ const OWNER_FIELDS: &[&str] = &[
     "publication",
     "forge_state",
     "change_draft",
+    "generated_details",
 ];
 
 /// The review row's own fields the owner's reviewer writes, taken from the
@@ -3503,6 +3515,7 @@ async fn decide_review_inner(
                         .outputs
                         .as_ref()
                         .and_then(|outputs| serde_json::to_value(outputs).ok()),
+                    opener: b.opener.clone(),
                 },
                 timeout,
             )
@@ -3678,7 +3691,21 @@ async fn decide_review_here(
         }
         "approve" => {
             let title = b.title.as_deref().unwrap_or(r.approved_title()).to_string();
-            let body = b.body.as_deref().unwrap_or(r.approved_body()).to_string();
+            let mut body = b.body.as_deref().unwrap_or(r.approved_body()).to_string();
+            // Before anything is claimed or pushed: under
+            // `[review] generated_details` a description goes out only behind
+            // the operator's own opener, composed here and nowhere else.
+            let mut edited_outputs = b.outputs.clone();
+            if s.cfg.live().review.generated_details {
+                with_generated_details(
+                    &s,
+                    &r,
+                    decided_revision.as_deref(),
+                    b.opener.as_deref(),
+                    &mut body,
+                    &mut edited_outputs,
+                )?;
+            }
             match crate::authority::publish_review(
                 &crate::authority::PublishContext {
                     store: s.store(),
@@ -3697,7 +3724,7 @@ async fn decide_review_here(
                     // landing from here on loses, rather than having its
                     // bytes published under this approval.
                     decided_revision_id: decided_revision.as_deref(),
-                    outputs: b.outputs.as_ref(),
+                    outputs: edited_outputs.as_ref(),
                     recover: false,
                     operator: true,
                 },
@@ -3742,6 +3769,56 @@ async fn decide_review_here(
             format!("{other:?} is not a verdict"),
         )),
     }
+}
+
+/// Put the operator's opener over the description an approval sends, under
+/// `[review] generated_details`: a new change's (the edited outputs', else
+/// the approved body) or the one replacing an open change's. A push-only
+/// update of an open change, and a repository's first push, send none and
+/// need none. Without an opener the approval is refused.
+fn with_generated_details(
+    s: &AppState,
+    r: &crate::store::ReviewRow,
+    decided_revision: Option<&str>,
+    opener: Option<&str>,
+    body: &mut String,
+    outputs: &mut Option<crate::review::publish::Outputs>,
+) -> ApiResult<()> {
+    let Ok(target) = serde_json::from_str::<crate::review::publish::Target>(&r.target) else {
+        return Ok(());
+    };
+    if target.initial {
+        return Ok(());
+    }
+    // The description that would go: as the operator edited it, else as the
+    // revision asked for it, which is what publication would fall back to.
+    let mut sent = match outputs.clone() {
+        Some(outputs) => outputs,
+        None => {
+            crate::authority::revision_intent(s.store(), decided_revision)
+                .map_err(|message| ApiError(StatusCode::CONFLICT, message))?
+                .forge
+        }
+    };
+    if sent.description.is_none() && target.change.is_some() {
+        return Ok(());
+    }
+    let compose = |text: &str| {
+        crate::review::publish::compose_generated_details(opener.unwrap_or_default(), text).ok_or(
+            ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                crate::review::publish::OPENER_MISSING.into(),
+            ),
+        )
+    };
+    match sent.description.as_mut() {
+        Some(description) => {
+            description.body = compose(&description.body)?;
+            *outputs = Some(sent);
+        }
+        None => *body = compose(body)?,
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -7318,6 +7395,7 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                 head_sha,
                 revision_id,
                 outputs,
+                opener,
             } => {
                 async {
                     let review = self
@@ -7353,6 +7431,7 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                                         ))
                                     }
                                 },
+                                opener,
                             },
                         )
                         .await

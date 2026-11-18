@@ -26,16 +26,28 @@ const UNCHECKED: [CheckId; 3] = [
 ];
 
 pub async fn check_all(b: &AppleBackend, cfg: &Config, deep: bool) -> BoundaryReport {
+    check_all_while(b, cfg, deep, crate::boundary::reconcile::running()).await
+}
+
+/// [`check_all`], `building` when the node's own converge is running (or
+/// about to, as it is while the node starts): then what the converge
+/// fetches and pulls is waited for, not fetched again here.
+pub(super) async fn check_all_while(
+    b: &AppleBackend,
+    cfg: &Config,
+    deep: bool,
+    building: bool,
+) -> BoundaryReport {
     let mut checks = Vec::new();
-    let runtime = check_runtime(b, cfg).await;
-    let runtime_ok = runtime.ok;
-    checks.push(runtime);
-    if !runtime_ok {
+    let runtime = check_runtime(b, cfg, building).await;
+    if !runtime.ok {
         for id in UNCHECKED {
-            checks.push(CheckResult::fail(id, "not checked: runtime unavailable"));
+            checks.push(CheckResult::unchecked(id, &runtime));
         }
+        checks.insert(0, runtime);
         return BoundaryReport { checks };
     }
+    checks.push(runtime);
     match probe(b, cfg).await {
         Ok(seen) => checks.extend(verdicts(&seen)),
         Err(error) => {
@@ -51,10 +63,28 @@ pub async fn check_all(b: &AppleBackend, cfg: &Config, deep: bool) -> BoundaryRe
 }
 
 /// `container` running, the bundle with its supervisor, and the base pinned.
-async fn check_runtime(b: &AppleBackend, cfg: &Config) -> CheckResult {
-    // The bundle checked and the base pinned in this process, as the node's
-    // start does: a check run on its own has to find them itself.
-    if let Err(why) = b.converge_images().await {
+async fn check_runtime(b: &AppleBackend, cfg: &Config, building: bool) -> CheckResult {
+    if building {
+        // The node's converge is fetching the bundles and pulling the base
+        // while the node serves: a check waits for it, and says what it is
+        // waiting on. Fetching them here too would hold the node's start
+        // (and its listeners) for as long as the download takes.
+        if let Some(why) = crate::boundary::checks::awaited_bundles(cfg) {
+            return CheckResult::pending(CheckId::Runtime, why);
+        }
+        let base = crate::sandbox_images::base_image(cfg);
+        if !base.contains("@sha256:") {
+            return CheckResult::pending(
+                CheckId::Runtime,
+                format!(
+                    "the base image {base} is not pulled and pinned yet; the node is pulling it"
+                ),
+            );
+        }
+    } else if let Err(why) = b.converge_images().await {
+        // The bundle checked and the base pinned in this process, as the
+        // node's converge does: a check run on its own has to find them
+        // itself.
         return CheckResult::fail(CheckId::Runtime, why);
     }
     let Some(bundle) = crate::bundle::effective(cfg) else {

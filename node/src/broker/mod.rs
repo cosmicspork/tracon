@@ -137,6 +137,13 @@ pub struct Credential {
     /// from before origins were recorded: [`Self::origin`] reads those.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant_origin: Option<String>,
+    /// For `oauth`: the node that made the last refresh, and when. It
+    /// travels with the renewed copy, so every holder can say who renewed
+    /// its version; absent before the first refresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renewed_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renewed_ms: Option<i64>,
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -158,6 +165,8 @@ impl std::fmt::Debug for Credential {
             .field("grant_id", &self.grant_id)
             .field("grant_version", &self.grant_version)
             .field("grant_origin", &self.grant_origin)
+            .field("renewed_by", &self.renewed_by)
+            .field("renewed_ms", &self.renewed_ms)
             .finish()
     }
 }
@@ -180,6 +189,8 @@ impl Default for Credential {
             grant_id: None,
             grant_version: 0,
             grant_origin: None,
+            renewed_by: None,
+            renewed_ms: None,
         }
     }
 }

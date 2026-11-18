@@ -106,6 +106,16 @@ pub enum StoreError {
 
 type Result<T> = std::result::Result<T, StoreError>;
 
+/// What `Store::archive_aged_ended_sessions` did.
+#[derive(Debug, Default)]
+pub struct AgedArchive {
+    /// The rows it archived, as they now are, to publish.
+    pub archived: Vec<SessionRow>,
+    /// Sessions old enough that it left alone: their review or its
+    /// publication still reads their workspace.
+    pub held: Vec<String>,
+}
+
 pub fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -465,6 +475,62 @@ impl Store {
             }
         }
         Ok(rows)
+    }
+
+    /// Put away `node_id`'s own ended sessions untouched since before
+    /// `before_ms`, at `ms`: what the scheduled storage sweep archives
+    /// (`crate::gc_schedule`). A peer's mirrored row is never touched, and
+    /// neither is a running, starting or paused session, however old.
+    ///
+    /// A session whose review is still open, or whose review has a
+    /// publication not yet settled, is held back: approving the review and
+    /// retrying the publication both snapshot the submitting session's
+    /// workspace again, which archiving would let the sweep remove. Those
+    /// come back as `held`, in the same order.
+    pub fn archive_aged_ended_sessions(
+        &self,
+        node_id: &str,
+        before_ms: i64,
+        ms: i64,
+    ) -> Result<AgedArchive> {
+        let (ids, held) = {
+            let conn = self.conn.lock().unwrap();
+            let aged = "FROM session s WHERE s.node_id=?1 \
+                 AND s.state IN ('closed','killed_budget','failed') \
+                 AND s.archived_ms IS NULL AND s.updated_ms < ?2";
+            let pending = "EXISTS (SELECT 1 FROM review r WHERE r.session_id=s.id \
+                 AND (r.state IN ('new','claimed','revising','publishing') \
+                 OR EXISTS (SELECT 1 FROM publication p WHERE p.review_id=r.id \
+                 AND p.state NOT IN ('opened','failed'))))";
+            let select = |held: bool| -> Result<Vec<String>> {
+                let not = if held { "" } else { "NOT" };
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT s.id {aged} AND {not} {pending} ORDER BY s.created_ms"
+                ))?;
+                let ids = stmt
+                    .query_map(rusqlite::params![node_id, before_ms], |r| {
+                        r.get::<_, String>(0)
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(ids)
+            };
+            let ids = select(false)?;
+            let held = select(true)?;
+            for id in &ids {
+                conn.execute(
+                    "UPDATE session SET archived_ms=?2 WHERE id=?1 AND archived_ms IS NULL",
+                    rusqlite::params![id, ms],
+                )?;
+            }
+            (ids, held)
+        };
+        let mut archived = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(r) = self.get_session(&id)? {
+                archived.push(r);
+            }
+        }
+        Ok(AgedArchive { archived, held })
     }
 
     /// How many sessions of `harness_id` are not yet marked legacy: what
@@ -4230,6 +4296,145 @@ mod tests {
                 manifest_digest: None,
             })
             .unwrap();
+    }
+
+    /// The scheduled sweep archives only this node's own ended sessions,
+    /// only once they are old enough, never a live one however old, and
+    /// never one whose review or publication may still read its workspace.
+    #[test]
+    fn aged_archiving_takes_only_this_node_s_old_ended_sessions() {
+        let store = Store::open_in_memory().unwrap();
+        let me = node(&store);
+        store.ensure_peer_node("n2").unwrap();
+        let rows = [
+            ("old-closed", me.as_str(), "closed", 100),
+            ("old-killed", me.as_str(), "killed_budget", 100),
+            ("old-failed", me.as_str(), "failed", 100),
+            ("young-closed", me.as_str(), "closed", 5_000),
+            ("old-running", me.as_str(), "running", 100),
+            ("old-starting", me.as_str(), "starting", 100),
+            ("old-paused", me.as_str(), "paused", 100),
+            ("old-suspended", me.as_str(), "suspended", 100),
+            ("peer-closed", "n2", "closed", 100),
+            ("already", me.as_str(), "closed", 100),
+            ("reviewing", me.as_str(), "closed", 100),
+            ("publishing", me.as_str(), "closed", 100),
+            ("published", me.as_str(), "closed", 100),
+        ];
+        for (id, node_id, state, updated) in rows {
+            session(&store, id, node_id);
+            store
+                .conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE session SET state=?2, updated_ms=?3 WHERE id=?1",
+                    rusqlite::params![id, state, updated],
+                )
+                .unwrap();
+        }
+        store.set_session_archived("already", Some(7)).unwrap();
+        let review = |id: &str, session: &str, state: &str| {
+            store
+                .insert_review(&ReviewRow {
+                    id: id.into(),
+                    session_id: Some(session.into()),
+                    node_id: me.clone(),
+                    channel: "personal".into(),
+                    kind: "code".into(),
+                    title: "t".into(),
+                    body: "b".into(),
+                    edited_title: None,
+                    edited_body: None,
+                    provider: "github".into(),
+                    target: "{}".into(),
+                    diff: String::new(),
+                    files: "[]".into(),
+                    head_sha: "abc".into(),
+                    base_ref: "main".into(),
+                    added: 0,
+                    removed: 0,
+                    state: state.into(),
+                    verdict_reason: None,
+                    publish_result: None,
+                    claimed_ms: None,
+                    created_ms: 1,
+                    created_mono_ms: 0,
+                    resolved_mono_ms: None,
+                    updated_ms: 1,
+                    checks_json: None,
+                    review_session_id: None,
+                    ai_verdict_json: None,
+                    revision_patch: None,
+                    lane: None,
+                    publication_failed: None,
+                })
+                .unwrap();
+        };
+        review("r-open", "reviewing", "new");
+        review("r-pub", "publishing", "approved");
+        review("r-done", "published", "approved");
+        let publication = |id: &str, review_id: &str| {
+            store
+                .publication_begin(&PublicationBegin {
+                    id,
+                    review_id,
+                    revision_id: None,
+                    candidate_id: "c",
+                    channel: "personal",
+                    node_id: &me,
+                    provider: "github",
+                    project: "o/r",
+                    base: "main",
+                    branch: "b",
+                    head_sha: "abc",
+                    instance: "i",
+                })
+                .unwrap();
+        };
+        publication("p-pending", "r-pub");
+        publication("p-opened", "r-done");
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE publication SET state='opened' WHERE id='p-opened'",
+                [],
+            )
+            .unwrap();
+
+        let done = store.archive_aged_ended_sessions(&me, 1_000, 9).unwrap();
+        let mut archived: Vec<&str> = done.archived.iter().map(|r| r.id.as_str()).collect();
+        archived.sort();
+        assert_eq!(
+            archived,
+            ["old-closed", "old-failed", "old-killed", "published"]
+        );
+        assert!(done.archived.iter().all(|r| r.archived_ms == Some(9)));
+        let mut held = done.held.clone();
+        held.sort();
+        assert_eq!(held, ["publishing", "reviewing"]);
+        for kept in [
+            "young-closed",
+            "old-running",
+            "old-starting",
+            "old-paused",
+            "old-suspended",
+            "peer-closed",
+            "reviewing",
+            "publishing",
+        ] {
+            let row = store.get_session(kept).unwrap().unwrap();
+            assert_eq!(row.archived_ms, None, "{kept}");
+        }
+        assert_eq!(
+            store.get_session("already").unwrap().unwrap().archived_ms,
+            Some(7)
+        );
+        // Once they are, a second pass has nothing left to take.
+        let again = store.archive_aged_ended_sessions(&me, 1_000, 10).unwrap();
+        assert!(again.archived.is_empty());
     }
 
     #[test]

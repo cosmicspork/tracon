@@ -1017,7 +1017,7 @@
       "apply": "restart",
       "editable": true,
       "editable_at_node": true,
-      "editable_by_peer": false,
+      "editable_by_peer": true,
       "exec_path": false,
       "fs_path": false,
       "key": "mesh.renew_credentials",
@@ -1026,8 +1026,7 @@
       "shape": {
         "kind": "bool",
         "optional": false
-      },
-      "why_not_by_peer": "decides who may reach or administer this node, so it is changed at the node or with its own passkey, never by a peer"
+      }
     },
     {
       "admin": true,
@@ -2798,6 +2797,22 @@
       "editable_by_peer": true,
       "exec_path": false,
       "fs_path": false,
+      "key": "review.generated_details",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
       "key": "notify.contact",
       "path": null,
       "secret": false,
@@ -3095,6 +3110,54 @@
       "shape": {
         "kind": "string",
         "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "gc.every_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "gc.archive_ended_after_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "gc.caches",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": false
       }
     },
     {

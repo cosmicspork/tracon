@@ -534,6 +534,36 @@ pub fn ready_snapshots(store: &Store) -> Vec<String> {
         .collect()
 }
 
+/// The current image of each repository with no ready prepared snapshot:
+/// an entry that prepares nothing, whose sessions elsewhere start from its
+/// image itself.
+pub fn ready_unprepared(store: &Store) -> Vec<String> {
+    let rows = store.repo_images().unwrap_or_default();
+    let prepared: std::collections::BTreeSet<&str> = rows
+        .iter()
+        .filter(|row| row.kind == SNAPSHOT && row.status == "ready")
+        .map(|row| row.repo_path.as_str())
+        .collect();
+    let repos: std::collections::BTreeSet<&str> = rows
+        .iter()
+        .filter(|row| {
+            row.kind == crate::repo_image::BASE && !prepared.contains(row.repo_path.as_str())
+        })
+        .map(|row| row.repo_path.as_str())
+        .collect();
+    repos
+        .iter()
+        .filter_map(|repo| {
+            store
+                .ready_repo_image(repo, crate::repo_image::BASE)
+                .ok()
+                .flatten()
+        })
+        .map(|row| row.image)
+        .filter(|image| !image.is_empty())
+        .collect()
+}
+
 /// Whether `image` is one of this node's prepared snapshots, by its name:
 /// `localhost/<prefix>-snapshot-…` in a local store, or the same name under
 /// a registry, where a pod-hosted node's builder pushes it.

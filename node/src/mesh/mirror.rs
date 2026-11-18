@@ -195,6 +195,7 @@ impl Mirror {
             Payload::PolicyReceipt { .. } => Applied::Unhandled("policy_receipt"),
             Payload::CredentialHandoff { .. } => Applied::Unhandled("credential_handoff"),
             Payload::CredentialRevoke { .. } => Applied::Unhandled("credential_revoke"),
+            Payload::CredentialRequest { .. } => Applied::Unhandled("credential_request"),
             Payload::CredentialRevokeReceipt { .. } => {
                 Applied::Unhandled("credential_revoke_receipt")
             }

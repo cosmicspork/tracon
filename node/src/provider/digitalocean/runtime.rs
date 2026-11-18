@@ -127,6 +127,113 @@ fn client_source(
     })
 }
 
+/// The image a session runs in on DigitalOcean.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoImage {
+    pub image: String,
+    /// Why it is not what the session's repository gets on this node's own
+    /// runtime, when it is not: for its `session_started` event.
+    pub note: Option<String>,
+}
+
+/// What a repository's sessions on this node's own runtime run in, best
+/// first, as the images DigitalOcean templates are made from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Own {
+    /// The repository's short name.
+    pub repository: Option<String>,
+    /// Its prepared snapshot, then the image its entry builds or names: the
+    /// one a session runs in when the snapshot's template is not ready, and
+    /// the template itself of an entry that prepares nothing.
+    pub images: Vec<String>,
+    /// Why the entry asks for an image of its own that is not here.
+    pub missing: Option<String>,
+}
+
+impl Own {
+    /// From `snapshot` (the repository's prepared one, if any) and its
+    /// `environment`.
+    pub fn of(snapshot: Option<String>, environment: &crate::environment::RepoEnvironment) -> Self {
+        let mut images: Vec<String> = snapshot.into_iter().collect();
+        let mut missing = None;
+        if environment.names_image() {
+            // The environment falls back to the stock base, and says why.
+            if environment.image_source.starts_with("harness image") {
+                missing = Some(match environment.image_source.contains("held") {
+                    true => "its image is held: start its build in Settings, Repositories",
+                    false => "its image has not been built on this node yet",
+                });
+            } else if !images.contains(&environment.image) {
+                images.push(environment.image.clone());
+            }
+        }
+        if images.is_empty() && missing.is_none() && !environment.prepare.is_empty() {
+            missing = Some("its prepared snapshot has not been made on this node yet");
+        }
+        Own {
+            repository: environment.repo.clone(),
+            images,
+            missing: missing.map(str::to_string),
+        }
+    }
+}
+
+/// The note of a session that runs without its repository's own image.
+fn missing(repository: Option<&str>, why: &str) -> String {
+    format!(
+        "no DigitalOcean template for {}: {why}",
+        repository.unwrap_or("its repository")
+    )
+}
+
+/// The image of `own` a session runs in, else `default`, and the one whose
+/// template is to be prepared: the first of `own`, while it is not ready.
+fn choose(
+    templates: &Templates,
+    own: &Own,
+    default: Option<String>,
+) -> (Option<DoImage>, Option<String>) {
+    let Some(first) = own.images.first() else {
+        let note = own
+            .missing
+            .as_deref()
+            .map(|why| missing(own.repository.as_deref(), why));
+        return (default.map(|image| DoImage { image, note }), None);
+    };
+    let why = match templates.ready(first) {
+        Ok(_) => {
+            let image = DoImage {
+                image: first.clone(),
+                note: None,
+            };
+            return (Some(image), None);
+        }
+        Err(_) if matches!(templates.source(), Source::Given(_)) => {
+            "[digitalocean] image is the one image every session there runs in".to_string()
+        }
+        Err(why) => why,
+    };
+    let prepare = templates.serves(first).then(|| first.clone());
+    let chosen = match own.images[1..]
+        .iter()
+        .find(|image| templates.ready(image).is_ok())
+    {
+        Some(image) => Some(DoImage {
+            image: image.clone(),
+            note: Some(format!(
+                "no DigitalOcean template for {}'s prepared snapshot: {why}; the session runs \
+                 in its image, unprepared",
+                own.repository.as_deref().unwrap_or("its repository")
+            )),
+        }),
+        None => default.map(|image| DoImage {
+            image,
+            note: Some(missing(own.repository.as_deref(), &why)),
+        }),
+    };
+    (chosen, prepare)
+}
+
 impl DoRuntime {
     /// Start the provider for `cfg`, or nothing when it is not configured
     /// on. Binding its listener, and a node that cannot build the templates
@@ -343,7 +450,9 @@ impl DoRuntime {
     }
 
     /// The image a session on `origin` runs in there: its repository's
-    /// prepared snapshot when that has a template ready, else the default.
+    /// prepared snapshot when that has a template ready, else the image its
+    /// entry builds or names (the template itself of an entry that prepares
+    /// nothing), else the default, with why it is not the repository's own.
     /// One with none yet has it made in the background (here, or asked of
     /// a peer), for the sessions after this one.
     pub async fn session_image(
@@ -353,11 +462,11 @@ impl DoRuntime {
         store: &crate::store::Store,
         origin: Option<&Path>,
         environment: &crate::environment::RepoEnvironment,
-    ) -> Option<String> {
+    ) -> Option<DoImage> {
         if !self.takes_from_peer() {
             // Never prepared for this session.
             let own = match origin {
-                Some(origin) => {
+                Some(origin) => Own::of(
                     crate::sandbox_images::snapshot_for(
                         backend,
                         cfg,
@@ -366,29 +475,40 @@ impl DoRuntime {
                         environment,
                         false,
                     )
-                    .await
-                }
-                None => None,
+                    .await,
+                    environment,
+                ),
+                None => Own::default(),
             };
-            return self.image_for(own);
+            return self.image_for(&own);
         }
-        if let Some(origin) = origin.filter(|_| !environment.prepare.is_empty()) {
+        let mut why = None;
+        // An entry that builds its own image has a template of its own,
+        // prepared or not; one that does neither runs on the stock base.
+        if let Some(origin) =
+            origin.filter(|_| !environment.prepare.is_empty() || environment.names_image())
+        {
             match self.peer_repo_image(cfg, origin).await {
                 Ok((image, identity, commit)) => {
-                    let ready = self.provider.templates().ready(&image).is_ok();
+                    let ready = self.provider.templates().ready(&image);
                     self.ask_peer(&image, &identity, &commit);
-                    if ready {
-                        return Some(image);
+                    match ready {
+                        Ok(_) => return Some(DoImage { image, note: None }),
+                        Err(not) => why = Some(not),
                     }
                 }
-                Err(why) => {
-                    tracing::info!(repo = %origin.display(), %why, "no DigitalOcean template from a peer for this repository")
+                Err(not) => {
+                    tracing::info!(repo = %origin.display(), why = %not, "no DigitalOcean template from a peer for this repository");
+                    why = Some(not);
                 }
             }
         }
         let image = self.default_image()?;
         self.ask_peer(&image, "", "");
-        Some(image)
+        Some(DoImage {
+            image,
+            note: why.map(|why| missing(environment.repo.as_deref(), &why)),
+        })
     }
 
     /// `origin`'s portable image, its forge identity and the commit its
@@ -552,18 +672,16 @@ impl DoRuntime {
         serde_json::to_value(adverts).ok()
     }
 
-    /// The image a session there runs in: `own` (its repository's prepared
-    /// snapshot) when its template is ready, else the default. One whose
-    /// template is not ready yet has it prepared in the background, for the
-    /// sessions after this one.
-    pub fn image_for(self: &Arc<Self>, own: Option<String>) -> Option<String> {
-        if let Some(own) = own.filter(|own| self.provider.templates().serves(own)) {
-            if self.provider.templates().ready(&own).is_ok() {
-                return Some(own);
-            }
-            self.prepare(own);
+    /// The image a session there runs in: the first of `own` whose template
+    /// is ready, else the default. The first of them has its template
+    /// prepared in the background when it is not ready, for the sessions
+    /// after this one.
+    pub fn image_for(self: &Arc<Self>, own: &Own) -> Option<DoImage> {
+        let (chosen, prepare) = choose(self.provider.templates(), own, self.default_image());
+        if let Some(image) = prepare {
+            self.prepare(image);
         }
-        self.default_image()
+        chosen
     }
 
     /// Register `image`'s template in the background, looking until it is
@@ -605,6 +723,8 @@ impl DoRuntime {
             // the store's ready rows are the current ones either way.
             images.extend(backend.prepared_snapshots().await);
             images.extend(crate::sandbox_images::ready_snapshots(store));
+            // An entry that prepares nothing has its image's template.
+            images.extend(crate::sandbox_images::ready_unprepared(store));
         }
         images
             .iter()
@@ -1099,5 +1219,228 @@ fn service_support(
             }
         )),
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Repo;
+    use crate::store::{RepoImageStart, Store};
+
+    const BASE: &str = "ghcr.io/cosmicspork/tracon-sandbox-base@sha256:c9d629a811111111222222222222222233333333333333334444444444444444";
+    const REPO: &str = "localhost/tracon-repo-sql-review-0123456789@sha256:5555555555555555666666666666666677777777777777778888888888888888";
+    const SNAPSHOT: &str = "localhost/tracon-snapshot-sql-review-0123@sha256:9999999999999999aaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbcccccccccccccccc";
+
+    fn built() -> Templates {
+        Templates::new(
+            Source::Built {
+                registry: "registry.digitalocean.com/acme".into(),
+                prefix: "tracon".into(),
+                bundle: "/state/bundles/0.51.2/amd64".into(),
+                services: Vec::new(),
+            },
+            "coding-base",
+            "tracon-tabcd1234",
+        )
+        .unwrap()
+    }
+
+    fn ready(store: &Store, repo: &str, kind: &str, image: &str) {
+        let row = store
+            .start_repo_image(&RepoImageStart {
+                repo_path: repo,
+                kind,
+                recipe_hash: "k1",
+                source_ref: "main",
+                source_commit: "abc",
+                parent_image: BASE,
+            })
+            .unwrap();
+        store.finish_repo_image(&row, Ok(image), "", &[]).unwrap();
+    }
+
+    /// `entry`'s environment for /src/sql-review, with its image built when
+    /// `built` says so.
+    fn environment(entry: &Repo, built: bool) -> crate::environment::RepoEnvironment {
+        let store = Store::open_in_memory().unwrap();
+        if built {
+            ready(&store, "/src/sql-review", crate::repo_image::BASE, REPO);
+        }
+        crate::environment::environment_with(
+            &Config::default(),
+            &store,
+            Some(Path::new("/src/sql-review")),
+            Some(entry),
+        )
+    }
+
+    fn build_only() -> Repo {
+        Repo {
+            path: "/src/sql-review".into(),
+            build: vec!["curl https://sh.rustup.rs | sh -s -- -y".into()],
+            ..Default::default()
+        }
+    }
+
+    /// A repository whose entry builds its image and prepares nothing runs
+    /// there in a template made from that image, once it is ready; until
+    /// then, on the stock base, with why, and its template is made.
+    #[test]
+    fn a_build_only_entry_runs_in_its_images_template() {
+        let templates = built();
+        let own = Own::of(None, &environment(&build_only(), true));
+        assert_eq!(own.images, vec![REPO.to_string()]);
+        assert_eq!(own.missing, None);
+
+        let (chosen, prepare) = choose(&templates, &own, Some(BASE.into()));
+        let chosen = chosen.unwrap();
+        assert_eq!(chosen.image, BASE);
+        let note = chosen.note.unwrap();
+        assert!(
+            note.starts_with("no DigitalOcean template for sql-review: its template"),
+            "{note}"
+        );
+        assert_eq!(prepare.as_deref(), Some(REPO), "its template is made");
+
+        templates.seen_ready(REPO);
+        let (chosen, prepare) = choose(&templates, &own, Some(BASE.into()));
+        assert_eq!(
+            chosen,
+            Some(DoImage {
+                image: REPO.into(),
+                note: None
+            })
+        );
+        assert_eq!(prepare, None);
+    }
+
+    /// An entry that neither builds nor prepares runs on the stock base,
+    /// which is all it gets on the node's own runtime too: nothing to say.
+    #[test]
+    fn an_entry_that_builds_and_prepares_nothing_runs_on_the_stock_base() {
+        let plain = Repo {
+            path: "/src/sql-review".into(),
+            ..Default::default()
+        };
+        let own = Own::of(None, &environment(&plain, false));
+        assert_eq!(
+            own,
+            Own {
+                repository: Some("sql-review".into()),
+                ..Default::default()
+            }
+        );
+        let (chosen, prepare) = choose(&built(), &own, Some(BASE.into()));
+        assert_eq!(
+            chosen,
+            Some(DoImage {
+                image: BASE.into(),
+                note: None
+            })
+        );
+        assert_eq!(prepare, None);
+    }
+
+    /// One whose image is not built here, or that prepares on the stock
+    /// base with no snapshot made yet, says so rather than running on the
+    /// stock base unremarked.
+    #[test]
+    fn a_repository_without_its_image_here_says_so() {
+        let own = Own::of(None, &environment(&build_only(), false));
+        assert!(own.images.is_empty());
+        let (chosen, prepare) = choose(&built(), &own, Some(BASE.into()));
+        let chosen = chosen.unwrap();
+        assert_eq!(chosen.image, BASE);
+        assert_eq!(
+            chosen.note.as_deref(),
+            Some("no DigitalOcean template for sql-review: its image has not been built on this node yet")
+        );
+        assert_eq!(prepare, None);
+
+        let prepares = Repo {
+            path: "/src/sql-review".into(),
+            prepare: vec!["cargo fetch --locked".into()],
+            ..Default::default()
+        };
+        let own = Own::of(None, &environment(&prepares, false));
+        let note = choose(&built(), &own, Some(BASE.into()))
+            .0
+            .unwrap()
+            .note
+            .unwrap();
+        assert!(
+            note.contains("prepared snapshot has not been made"),
+            "{note}"
+        );
+    }
+
+    /// A prepared snapshot comes first; while its template builds, the
+    /// image it was prepared in serves if its template is ready, and only
+    /// the snapshot's template is made.
+    #[test]
+    fn a_snapshot_whose_template_builds_falls_back_to_its_image() {
+        let templates = built();
+        let entry = Repo {
+            prepare: vec!["cargo fetch --locked".into()],
+            ..build_only()
+        };
+        let own = Own::of(Some(SNAPSHOT.into()), &environment(&entry, true));
+        assert_eq!(own.images, vec![SNAPSHOT.to_string(), REPO.to_string()]);
+        templates.seen_ready(REPO);
+        let (chosen, prepare) = choose(&templates, &own, Some(BASE.into()));
+        let chosen = chosen.unwrap();
+        assert_eq!(chosen.image, REPO);
+        assert!(
+            chosen
+                .note
+                .as_deref()
+                .unwrap()
+                .contains("prepared snapshot"),
+            "{chosen:?}"
+        );
+        assert_eq!(prepare.as_deref(), Some(SNAPSHOT));
+        templates.seen_ready(SNAPSHOT);
+        let (chosen, _) = choose(&templates, &own, Some(BASE.into()));
+        assert_eq!(chosen.unwrap().image, SNAPSHOT);
+    }
+
+    /// The operator's one image serves every session, which is said.
+    #[test]
+    fn the_operators_image_is_said_to_stand_in() {
+        let given = "registry.example/team/sandbox@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        let templates = Templates::new(Source::Given(given.into()), "coding-base", "t").unwrap();
+        let own = Own::of(None, &environment(&build_only(), true));
+        let (chosen, prepare) = choose(&templates, &own, Some(given.into()));
+        let chosen = chosen.unwrap();
+        assert_eq!(chosen.image, given);
+        assert!(
+            chosen
+                .note
+                .as_deref()
+                .unwrap()
+                .contains("[digitalocean] image"),
+            "{chosen:?}"
+        );
+        assert_eq!(prepare, None);
+    }
+
+    /// The template of a repository's image is kept from the sweep while
+    /// the repository has no prepared snapshot ready.
+    #[test]
+    fn an_unprepared_repositorys_image_is_kept() {
+        let store = Store::open_in_memory().unwrap();
+        ready(&store, "/src/sql-review", crate::repo_image::BASE, REPO);
+        ready(&store, "/src/app", crate::repo_image::BASE, BASE);
+        ready(
+            &store,
+            "/src/app",
+            crate::sandbox_images::SNAPSHOT,
+            SNAPSHOT,
+        );
+        assert_eq!(
+            crate::sandbox_images::ready_unprepared(&store),
+            vec![REPO.to_string()]
+        );
     }
 }

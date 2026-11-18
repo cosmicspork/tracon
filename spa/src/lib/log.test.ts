@@ -146,6 +146,10 @@ test('the worktree line says the workspace is prepared, and only what needs the 
   expect(worktreeLine({ branch: 'feat/x', source: 'resumed', volume: 'tracon-workspace-abc' })).toBe('workspace resumed')
   // A source this does not know still reads as words, not as a field name.
   expect(worktreeOrigin({ branch: 'feat/x', source: 'host_worktree' })).toBe('host worktree · on feat/x')
+  // A session on an empty repository says so, with no commit to come from.
+  expect(worktreeOrigin({ branch: 'main', source: 'empty repository', base: null, volume: 'v' })).toBe(
+    'empty repository · on main · volume v',
+  )
   // A host worktree, which names its path and the base it started from.
   expect(
     worktreeOrigin({ path: '/var/lib/tracon/worktrees/orbit', branch: 'feat/x', base: 'origin/main', main_checkout_dirty: false }),

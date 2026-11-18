@@ -20,22 +20,39 @@ use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
 use self::callback::{CallbackCapture, CallbackError, CallbackOutcome, CaptureEvent, CaptureReply};
-use self::mesh::{claim_key, ClaimResult, CredentialMesh};
+use self::mesh::{claim_key, designated_renewer, ClaimResult, CredentialMesh, RenewRole};
 use crate::{
     broker::{self, Broker, Credential, SharedBroker, KIND_API_KEY, KIND_OAUTH},
-    config::{Config, Provider},
+    config::{Config, Provider, RuntimeKind},
     oauth::{self, anthropic, codex, Endpoints, Flow, OAuthError, Pkce, Tokens},
     store::now_ms,
     stream::{Bus, Frame},
 };
 
 /// How far ahead of expiry a credential is renewed by a node that renews
-/// first: one set to (`[mesh] renew_credentials`), or the only holder.
+/// first: the designated renewer of a shared sign-in
+/// ([`mesh::designated_renewer`]), or the only holder.
 const REFRESH_AHEAD_MS: i64 = 30 * 60 * 1000;
 /// How far ahead every other holder of a shared credential steps in, leaving
 /// the renewing node the first half hour.
 const FALLBACK_REFRESH_AHEAD_MS: i64 = 15 * 60 * 1000;
+/// The last stretch before expiry in which a node set to renew
+/// (`[mesh] renew_credentials`) renews a shared sign-in without a claim,
+/// when the hub cannot be asked: the hub being down should not strand the
+/// mesh. No other holder ever renews a shared copy unclaimed.
+pub const UNCLAIMED_RENEWAL_MS: i64 = 5 * 60 * 1000;
+/// How long a holder whose shared copy could not be renewed waits for a
+/// peer's newer copy before it asks for a new sign-in. Half of it is spent
+/// asking only the node that renewed it, when the hub named one.
+pub const RECOVER_WAIT_MS: i64 = 2 * 60 * 1000;
 pub const REFRESH_TICK_SECS: u64 = 5 * 60;
+/// How often the refresh loop looks at the clocks, to notice a suspend and a
+/// recovery that has waited long enough. Renewals still run every
+/// [`REFRESH_TICK_SECS`].
+const LOOP_TICK: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long, after the host woke, the node waits for other holders' newer
+/// copies before renewing anything.
+const WAKE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 const MAX_MANUAL_INPUT: usize = 8 * 1024;
 
@@ -43,6 +60,12 @@ const MAX_MANUAL_INPUT: usize = 8 * 1024;
 /// again. Not "failed": nothing went wrong and nothing is going to be retried,
 /// the operator simply has to reconnect.
 const NEEDS_RECONNECT: &str = "needs_reconnect";
+/// A shared sign-in this node may not renew now: another holder has the
+/// claim, or no claim could be had. Retried at the next tick.
+const WAITING: &str = "waiting";
+/// A shared copy that could not be renewed, whose current copy has been
+/// asked of the other holders ([`RECOVER_WAIT_MS`]).
+const RECOVERING: &str = "recovering";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoginOwner {
@@ -156,6 +179,19 @@ struct Note {
     state: &'static str,
     error: Option<String>,
     updated_ms: i64,
+    /// For [`WAITING`] and [`RECOVERING`]: the holder expected to renew, or
+    /// that renewed, the sign-in.
+    renewer: Option<String>,
+    /// For [`RECOVERING`]: every other holder has been asked, not only the
+    /// renewer.
+    widened: bool,
+}
+
+/// The last renewal of a sign-in that went wrong here, and why.
+#[derive(Debug, Clone)]
+struct Failure {
+    reason: String,
+    at_ms: i64,
 }
 
 /// What a refresh did.
@@ -165,6 +201,25 @@ pub enum Refreshed {
     /// Another holder of the shared credential renews this version; its copy
     /// arrives by handoff.
     LeftToAnotherHolder,
+    /// No claim could be had (the hub cannot be asked, or predates claims),
+    /// so this holder leaves the shared credential to its renewer and asks
+    /// again at the next tick.
+    Waiting,
+    /// This shared copy is stale, or its refresh was refused: the current
+    /// copy has been asked of the other holders, and a new sign-in is asked
+    /// for only if none has one within [`RECOVER_WAIT_MS`].
+    Recovering,
+}
+
+impl Refreshed {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Renewed => "renewed",
+            Self::LeftToAnotherHolder => "left to another holder",
+            Self::Waiting => "waiting for the renewer",
+            Self::Recovering => "stale; asking other holders",
+        }
+    }
 }
 
 /// What removing one of a provider's sign-ins takes from the node
@@ -195,6 +250,9 @@ pub struct Providers {
     /// Per credential: why a sign-in could not be renewed. Kept apart from
     /// `notes`, whose keys are provider names a credential's often equals.
     renewals: Mutex<HashMap<String, Note>>,
+    /// Per credential: the last renewal here that failed, kept past the
+    /// note it made so the card can say why.
+    failures: Mutex<HashMap<String, Failure>>,
     next_generation: AtomicU64,
     on_connected: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>,
     on_publish: std::sync::OnceLock<Box<dyn Fn(Vec<serde_json::Value>) + Send + Sync>>,
@@ -256,6 +314,7 @@ impl Providers {
             inflight: Mutex::new(HashMap::new()),
             notes: Mutex::new(HashMap::new()),
             renewals: Mutex::new(HashMap::new()),
+            failures: Mutex::new(HashMap::new()),
             next_generation: AtomicU64::new(1),
             on_connected: std::sync::OnceLock::new(),
             on_publish: std::sync::OnceLock::new(),
@@ -292,6 +351,17 @@ impl Providers {
         }
         // A copy that arrived is a sign-in renewed or made elsewhere: what
         // was known about renewing the one it replaces no longer holds.
+        {
+            let renewals = self.renewals.lock();
+            for credential in credential_names {
+                if let Some(note) = renewals
+                    .get(credential)
+                    .filter(|note| matches!(note.state, RECOVERING | NEEDS_RECONNECT))
+                {
+                    tracing::info!(%credential, was = note.state, "a newer copy of the credential arrived from another holder");
+                }
+            }
+        }
         self.forget_renewals(credential_names);
         if let Some(callback) = self.on_connected.get() {
             callback();
@@ -312,6 +382,7 @@ impl Providers {
         let inflight = self.inflight.lock();
         let notes = self.notes.lock();
         let renewals = self.renewals.lock();
+        let failures = self.failures.lock();
         self.cfg
             .providers
             .iter()
@@ -380,6 +451,14 @@ impl Providers {
                             "channels": serves,
                             "bound": c.channels,
                         });
+                        if c.kind == KIND_OAUTH {
+                            let object = row.as_object_mut().expect("sign-in summary object");
+                            object.extend(self.renewal_summary(
+                                c,
+                                renewals.get(*credential_name),
+                                private.then(|| failures.get(*credential_name)).flatten(),
+                            ));
+                        }
                         if private {
                             let object = row.as_object_mut().expect("sign-in summary object");
                             object.insert(
@@ -479,6 +558,95 @@ impl Providers {
         held
     }
 
+    /// What a sign-in's row says about renewing it: its version, what this
+    /// node does about renewing (`renews`, read by every other holder to
+    /// work out the same renewer), who renews it (`renewer`), what this node
+    /// is waiting on (`renewal`), who last renewed it (`last_renewed`), and,
+    /// when `failure` is given, the last renewal here that failed.
+    fn renewal_summary(
+        &self,
+        credential: &Credential,
+        note: Option<&Note>,
+        failure: Option<&Failure>,
+    ) -> serde_json::Map<String, Value> {
+        let shared = credential.nodes.iter().any(|node| *node != self.node_id);
+        let mut row = serde_json::Map::new();
+        row.insert("version".into(), json!(credential.grant_version));
+        row.insert(
+            "renews".into(),
+            json!(self.own_role().map(RenewRole::as_str)),
+        );
+        row.insert(
+            "renewer".into(),
+            json!(shared.then(|| self.renewer_of(credential)).flatten()),
+        );
+        row.insert(
+            "renewal".into(),
+            json!(note
+                .filter(|note| matches!(note.state, WAITING | RECOVERING))
+                .map(|note| json!({
+                    "state": note.state,
+                    "renewer": note.renewer,
+                    "since_ms": note.updated_ms,
+                }))),
+        );
+        row.insert(
+            "last_renewed".into(),
+            json!(credential.renewed_by.as_ref().map(|by| json!({
+                "by": by,
+                "at_ms": credential.renewed_ms,
+                "version": credential.grant_version,
+            }))),
+        );
+        if let Some(failure) = failure {
+            row.insert(
+                "last_failure".into(),
+                json!({ "reason": failure.reason, "at_ms": failure.at_ms }),
+            );
+        }
+        row
+    }
+
+    /// What this node says about renewing the shared sign-ins it holds.
+    fn own_role(&self) -> Option<RenewRole> {
+        if self.cfg.mesh.renew_credentials {
+            Some(RenewRole::Configured)
+        } else if self.cfg.runtime.kind == RuntimeKind::Kubernetes {
+            Some(RenewRole::AlwaysOn)
+        } else {
+            None
+        }
+    }
+
+    /// The holder that renews `credential` first, as every holder works it
+    /// out from what each says ([`designated_renewer`]).
+    fn renewer_of(&self, credential: &Credential) -> Option<String> {
+        let mesh = self.mesh.get();
+        let roles: Vec<(&str, Option<RenewRole>)> = credential
+            .nodes
+            .iter()
+            .map(|node| {
+                let role = if *node == self.node_id {
+                    self.own_role()
+                } else {
+                    mesh.and_then(|mesh| mesh.renew_role(node))
+                };
+                (node.as_str(), role)
+            })
+            .collect();
+        designated_renewer(roles).map(str::to_string)
+    }
+
+    /// Whether this node's copy of `credential` may be handed to a peer that
+    /// asked for the current one: not one this node already knows is dead,
+    /// or is itself waiting to replace.
+    pub fn can_hand_over(&self, credential: &str) -> bool {
+        self.renewals
+            .lock()
+            .get(credential)
+            .is_none_or(|note| !matches!(note.state, NEEDS_RECONNECT | RECOVERING))
+    }
+
     /// The nodes other than this one that hold a copy of `credential`.
     fn peers_of(&self, credential: &Credential) -> Vec<String> {
         credential
@@ -527,6 +695,8 @@ impl Providers {
                 state,
                 error,
                 updated_ms: now_ms(),
+                renewer: None,
+                widened: false,
             },
         );
     }
@@ -1471,6 +1641,8 @@ impl Providers {
                 // renew it then.
                 credential.ensure_grant(&self.node_id);
                 credential.grant_version += 1;
+                credential.renewed_by = Some(self.node_id.clone());
+                credential.renewed_ms = Some(now_ms());
                 (credential_name, credential, Vec::new(), Vec::new())
             }
         };
@@ -1555,16 +1727,25 @@ impl Providers {
     ///
     /// A refresh rotates the refresh token and revokes the access token it
     /// replaced, so a credential held by several nodes is renewed by one of
-    /// them per version: whichever wins the hub's claim, which then hands the
-    /// renewed copy to the rest. Without a claim — no hub, a hub that predates
-    /// claims, or one that cannot be reached — only the node that signed in,
-    /// first in `nodes`, renews.
+    /// them per version: whichever wins the hub's claim, which then tells the
+    /// hub it renewed that version and hands the renewed copy to the rest.
+    /// Without a claim — no hub, a hub that predates claims, or one that
+    /// cannot be reached — no holder renews, except a node set to renew
+    /// (`[mesh] renew_credentials`) in the last [`UNCLAIMED_RENEWAL_MS`]
+    /// before expiry; the rest wait for it.
+    ///
+    /// A shared copy the hub calls stale, or whose refresh token the
+    /// provider refuses, is not given up at once: its current copy is asked
+    /// of the other holders, and a new sign-in is asked for only if none
+    /// answers within [`RECOVER_WAIT_MS`] ([`Providers::expire_recoveries`]).
+    ///
+    /// Every attempt is logged at INFO with the credential, its version, the
+    /// claim's result and the outcome.
     pub async fn refresh(
         &self,
         name: &str,
         credential_name: &str,
     ) -> Result<Refreshed, ProviderError> {
-        let flow = self.flow(name)?;
         let held = self
             .broker
             .read()
@@ -1572,28 +1753,116 @@ impl Providers {
             .get(credential_name)
             .cloned()
             .ok_or_else(|| ProviderError::Failed(format!("no {name} credential to refresh")))?;
+        let (claim, outcome) = self.attempt(name, credential_name, &held).await;
+        let (label, reason) = match &outcome {
+            Ok(refreshed) => (refreshed.as_str(), String::new()),
+            Err(error @ ProviderError::ReconnectRequired(_)) => ("refused", error.to_string()),
+            Err(error) => ("unavailable", error.to_string()),
+        };
+        tracing::info!(
+            provider = %name,
+            credential = %credential_name,
+            version = held.grant_version,
+            claim = %claim,
+            outcome = label,
+            reason = %reason,
+            "credential renewal attempt"
+        );
+        match &outcome {
+            Ok(Refreshed::Renewed) | Ok(Refreshed::Recovering) => {}
+            Ok(Refreshed::LeftToAnotherHolder) | Ok(Refreshed::Waiting) => self.publish(),
+            // Nothing will change on its own: the note is what stops this
+            // being asked again, and it is cleared by the next successful
+            // connect.
+            Err(ProviderError::ReconnectRequired(reason)) => {
+                self.renewal_note(credential_name, NEEDS_RECONNECT, Some(reason.clone()), None);
+                self.record_failure(credential_name, reason);
+                self.publish();
+            }
+            Err(error) => {
+                let reason = format!("refresh failed: {error}");
+                self.renewal_note(credential_name, "failed", Some(reason.clone()), None);
+                self.record_failure(credential_name, &reason);
+                self.publish();
+            }
+        }
+        outcome
+    }
+
+    /// One renewal attempt: the claim's result, as the log line says it, and
+    /// what came of it.
+    async fn attempt(
+        &self,
+        name: &str,
+        credential_name: &str,
+        held: &Credential,
+    ) -> (String, Result<Refreshed, ProviderError>) {
+        let flow = match self.flow(name) {
+            Ok(flow) => flow,
+            Err(error) => return ("not asked".into(), Err(error)),
+        };
         // A token minted without one (`claude setup-token`'s) runs its
         // course and is replaced by signing in.
         let Some(refresh_token) = held.env.get("REFRESH_TOKEN").cloned() else {
-            return Err(ProviderError::ReconnectRequired(format!(
-                "the {name} token cannot be renewed in place; connect the provider again"
-            )));
+            return (
+                "not asked".into(),
+                Err(ProviderError::ReconnectRequired(format!(
+                    "the {name} token cannot be renewed in place; connect the provider again"
+                ))),
+            );
         };
-        if held.nodes.iter().any(|node| *node != self.node_id) {
-            let first = held.nodes.first() == Some(&self.node_id);
-            let claimed = match (self.mesh.get(), held.grant_id.as_deref()) {
+        let mesh = self.mesh.get();
+        let shared = held.nodes.iter().any(|node| *node != self.node_id);
+        let mut won = None;
+        let mut claim = String::from("not shared");
+        if shared {
+            let claimed = match (mesh, held.grant_id.as_deref()) {
                 (Some(mesh), Some(grant)) => {
-                    mesh.claim(&claim_key(grant), held.grant_version).await
+                    let key = claim_key(grant);
+                    let claimed = mesh.claim(&key, held.grant_version).await;
+                    if claimed == ClaimResult::Won {
+                        won = Some(key);
+                    }
+                    claimed
                 }
-                _ => ClaimResult::Unsupported,
+                (Some(_), None) => ClaimResult::Unsupported,
+                (None, _) => ClaimResult::Unreachable("this node has no hub".into()),
             };
+            claim = claimed.to_string();
             match claimed {
                 ClaimResult::Won => {}
-                ClaimResult::Lost => return Ok(Refreshed::LeftToAnotherHolder),
-                ClaimResult::Unsupported | ClaimResult::Unreachable(_) if !first => {
-                    return Ok(Refreshed::LeftToAnotherHolder)
+                ClaimResult::Held(holder) => {
+                    self.renewal_note(credential_name, WAITING, None, holder);
+                    return (claim, Ok(Refreshed::LeftToAnotherHolder));
                 }
-                ClaimResult::Unsupported | ClaimResult::Unreachable(_) => {}
+                ClaimResult::Stale(renewed_by) => {
+                    let by = renewed_by
+                        .as_deref()
+                        .map(|by| format!(" by {by}"))
+                        .unwrap_or_default();
+                    let reason = format!(
+                        "this copy (version {}) was already renewed{by}",
+                        held.grant_version
+                    );
+                    return (
+                        claim,
+                        self.recover(name, credential_name, held, renewed_by, reason),
+                    );
+                }
+                ClaimResult::Unsupported | ClaimResult::Unreachable(_)
+                    if self.cfg.mesh.renew_credentials
+                        && held
+                            .expires_ms
+                            .is_some_and(|expires| expires - now_ms() < UNCLAIMED_RENEWAL_MS) =>
+                {
+                    claim
+                        .push_str("; renewing unclaimed as the node set to renew, close to expiry");
+                }
+                ClaimResult::Unsupported | ClaimResult::Unreachable(_) => {
+                    let renewer = self.renewer_of(held);
+                    self.renewal_note(credential_name, WAITING, None, renewer);
+                    return (claim, Ok(Refreshed::Waiting));
+                }
             }
         }
         let refreshed = match flow {
@@ -1602,24 +1871,190 @@ impl Providers {
             }
             Flow::Codex => codex::refresh(&self.http, &self.endpoints, &refresh_token).await,
         };
-        let tokens = refreshed.map_err(|error| match error {
-            OAuthError::Rejected(reason) => {
-                ProviderError::ReconnectRequired(format!("{reason}; connect the provider again"))
+        let tokens = match refreshed {
+            Ok(tokens) => tokens,
+            // The refresh token was already spent: another holder most
+            // likely renewed this version, and its copy never arrived.
+            Err(OAuthError::Rejected(reason)) if shared => {
+                return (
+                    claim,
+                    self.recover(name, credential_name, held, None, reason),
+                )
             }
-            OAuthError::Unavailable(reason) => ProviderError::Failed(reason),
-        })?;
-        let stored = self.store(
+            Err(OAuthError::Rejected(reason)) => {
+                return (
+                    claim,
+                    Err(ProviderError::ReconnectRequired(format!(
+                        "{reason}; connect the provider again"
+                    ))),
+                )
+            }
+            Err(OAuthError::Unavailable(reason)) => {
+                return (claim, Err(ProviderError::Failed(reason)))
+            }
+        };
+        let stored = match self.store(
             name,
             tokens,
             StoreKind::Refresh {
                 credential: credential_name.to_string(),
             },
-        )?;
-        if let Some(mesh) = self.mesh.get() {
+        ) {
+            Ok(stored) => stored,
+            Err(error) => return (claim, Err(error)),
+        };
+        self.forget_renewals(std::slice::from_ref(&stored.name));
+        if let Some(mesh) = mesh {
+            if let Some(key) = won {
+                if let Err(error) = mesh.renewed(&key, held.grant_version).await {
+                    tracing::warn!(credential = %credential_name, version = held.grant_version, %error, "the hub was not told of this renewal");
+                }
+            }
             self.hand_off(mesh.as_ref(), &stored.name, &stored.credential);
         }
         self.publish();
-        Ok(Refreshed::Renewed)
+        (claim, Ok(Refreshed::Renewed))
+    }
+
+    /// A shared copy that cannot be renewed: ask the node that renewed it,
+    /// when known, for the current copy (every other holder after half of
+    /// [`RECOVER_WAIT_MS`]), rather than asking for a new sign-in at once.
+    /// With no one to ask, a new sign-in it is.
+    fn recover(
+        &self,
+        name: &str,
+        credential_name: &str,
+        held: &Credential,
+        renewed_by: Option<String>,
+        reason: String,
+    ) -> Result<Refreshed, ProviderError> {
+        let peers = self.peers_of(held);
+        let first = match renewed_by.as_ref().filter(|by| **by != self.node_id) {
+            Some(by) => vec![by.clone()],
+            None => peers.clone(),
+        };
+        let mesh = self.mesh.get().filter(|_| held.grant_id.is_some());
+        let Some(mesh) = mesh.filter(|_| !first.is_empty()) else {
+            return Err(ProviderError::ReconnectRequired(format!(
+                "{reason}; connect the provider again"
+            )));
+        };
+        tracing::info!(provider = %name, credential = %credential_name, version = held.grant_version, asked = ?first, %reason, "asking other holders for the current copy");
+        mesh.request_copy(credential_name, held, &first);
+        let widened = peers.iter().all(|peer| first.contains(peer));
+        self.renewals.lock().insert(
+            credential_name.to_string(),
+            Note {
+                state: RECOVERING,
+                error: Some(reason.clone()),
+                updated_ms: now_ms(),
+                renewer: renewed_by,
+                widened,
+            },
+        );
+        self.record_failure(credential_name, &reason);
+        self.publish();
+        Ok(Refreshed::Recovering)
+    }
+
+    /// Move each recovery on: past half of [`RECOVER_WAIT_MS`] ask every
+    /// other holder, not only the renewer; past all of it, with no newer
+    /// copy arrived, ask for a new sign-in. A copy that arrives ends a
+    /// recovery ([`Providers::handoff_received`]).
+    pub fn expire_recoveries(&self, now: i64) {
+        let mut widen = Vec::new();
+        let mut lapsed = Vec::new();
+        {
+            let mut renewals = self.renewals.lock();
+            for (credential, note) in renewals.iter_mut() {
+                if note.state != RECOVERING {
+                    continue;
+                }
+                let waited = now - note.updated_ms;
+                if waited >= RECOVER_WAIT_MS {
+                    let reason = note.error.clone().unwrap_or_default();
+                    note.state = NEEDS_RECONNECT;
+                    note.error = Some(format!(
+                        "{reason}; no other holder had a newer copy; connect the provider again"
+                    ));
+                    note.updated_ms = now;
+                    lapsed.push((credential.clone(), note.error.clone().unwrap_or_default()));
+                } else if !note.widened && waited >= RECOVER_WAIT_MS / 2 {
+                    note.widened = true;
+                    widen.push(credential.clone());
+                }
+            }
+        }
+        if let Some(mesh) = self.mesh.get() {
+            for credential in widen {
+                let held = self.broker.read().unwrap().get(&credential).cloned();
+                if let Some(held) = held {
+                    let peers = self.peers_of(&held);
+                    tracing::info!(%credential, version = held.grant_version, asked = ?peers, "no copy from the renewer yet; asking every other holder");
+                    mesh.request_copy(&credential, &held, &peers);
+                }
+            }
+        }
+        for (credential, reason) in &lapsed {
+            tracing::warn!(%credential, %reason, "no other holder had a newer copy; the credential needs a new sign-in");
+            self.record_failure(credential, reason);
+        }
+        if !lapsed.is_empty() {
+            self.publish();
+        }
+    }
+
+    /// After the host slept: ask every other holder of each shared sign-in
+    /// held here for its copy, should it hold a newer one, before anything
+    /// is renewed — a renewal made while this node slept revoked the copy it
+    /// holds. Returns what was asked about, as (credential, version).
+    pub fn ask_after_wake(&self) -> Vec<(String, u64)> {
+        let Some(mesh) = self.mesh.get() else {
+            return Vec::new();
+        };
+        let held: Vec<(String, Credential)> = {
+            let broker = self.broker.read().unwrap();
+            self.cfg
+                .providers
+                .iter()
+                .flat_map(|(name, provider)| {
+                    self.held_sign_ins(&broker, name, provider)
+                        .into_iter()
+                        .map(|(credential, c)| (credential.to_string(), c.clone()))
+                        .collect::<Vec<_>>()
+                })
+                .filter(|(_, c)| c.kind == KIND_OAUTH && c.grant_id.is_some())
+                .collect()
+        };
+        let mut asked = Vec::new();
+        for (credential, c) in held {
+            let peers = self.peers_of(&c);
+            if peers.is_empty() {
+                continue;
+            }
+            mesh.request_copy(&credential, &c, &peers);
+            asked.push((credential, c.grant_version));
+        }
+        asked
+    }
+
+    /// Wait until each of `asked` is held here at a newer version, or
+    /// `timeout` passes.
+    async fn await_copies(&self, asked: &[(String, u64)], timeout: std::time::Duration) {
+        let newer = || {
+            let broker = self.broker.read().unwrap();
+            asked.iter().all(|(credential, version)| {
+                broker
+                    .get(credential)
+                    .is_none_or(|c| c.grant_version > *version)
+            })
+        };
+        let _ = tokio::time::timeout(timeout, async {
+            while !newer() {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        })
+        .await;
     }
 
     /// The sign-ins, as (provider, credential), whose token expires soon
@@ -1639,15 +2074,18 @@ impl Providers {
             for (credential_name, credential) in self.held_sign_ins(&broker, name, provider) {
                 // A credential already known not to renew is not due for
                 // anything: asking again every tick would be a loop that
-                // only stops when the operator reconnects.
+                // only stops when the operator reconnects. One whose current
+                // copy has been asked for waits for it.
                 if renewals
                     .get(credential_name)
-                    .is_some_and(|note| note.state == NEEDS_RECONNECT)
+                    .is_some_and(|note| matches!(note.state, NEEDS_RECONNECT | RECOVERING))
                 {
                     continue;
                 }
                 let shared = credential.nodes.iter().any(|node| *node != self.node_id);
-                let ahead = if self.cfg.mesh.renew_credentials || !shared {
+                let ahead = if !shared
+                    || self.renewer_of(credential).as_deref() == Some(self.node_id.as_str())
+                {
                     REFRESH_AHEAD_MS
                 } else {
                     FALLBACK_REFRESH_AHEAD_MS
@@ -1664,47 +2102,74 @@ impl Providers {
         due
     }
 
+    /// Renew what is due every [`REFRESH_TICK_SECS`], moving recoveries on
+    /// in between. A suspend noticed in between (the wall clock ran ahead of
+    /// the monotonic one) first asks the other holders for their copies and
+    /// waits a little for them, then renews what is still due.
     pub async fn refresh_loop(self: Arc<Self>) {
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(REFRESH_TICK_SECS));
+        let mut tick = tokio::time::interval(LOOP_TICK);
+        let mut last_pass: Option<std::time::Instant> = None;
+        let mut clocks = (std::time::SystemTime::now(), std::time::Instant::now());
         loop {
             tick.tick().await;
-            for (name, credential) in self.due_for_refresh(now_ms()) {
-                match self.refresh(&name, &credential).await {
-                    Ok(Refreshed::Renewed) => {
-                        tracing::info!(provider = %name, %credential, "token refreshed")
-                    }
-                    Ok(Refreshed::LeftToAnotherHolder) => {
-                        tracing::debug!(provider = %name, %credential, "another holder renews this token")
-                    }
-                    // Nothing will change on its own: the note is what stops
-                    // this being asked again, and it is cleared by the next
-                    // successful connect.
-                    Err(ProviderError::ReconnectRequired(reason)) => {
-                        tracing::warn!(provider = %name, %credential, reason = %reason, "token needs a new sign-in");
-                        self.renewal_note(&credential, NEEDS_RECONNECT, Some(reason));
-                        self.publish();
-                    }
-                    Err(error) => {
-                        tracing::warn!(provider = %name, %credential, error = %error, "token refresh failed");
-                        self.renewal_note(
-                            &credential,
-                            "failed",
-                            Some(format!("refresh failed: {error}")),
-                        );
-                        self.publish();
-                    }
+            let now = (std::time::SystemTime::now(), std::time::Instant::now());
+            let slept = crate::awake::asleep_between(
+                now.0.duration_since(clocks.0).unwrap_or_default(),
+                now.1.duration_since(clocks.1),
+            );
+            clocks = now;
+            if let Some(slept) = slept {
+                let asked = self.ask_after_wake();
+                tracing::info!(
+                    asleep_secs = slept.as_secs(),
+                    asked = asked.len(),
+                    "woke from a suspend; asking other holders for current copies before renewing"
+                );
+                if !asked.is_empty() {
+                    self.await_copies(&asked, WAKE_WAIT).await;
                 }
+            }
+            self.expire_recoveries(now_ms());
+            let due = slept.is_some()
+                || last_pass.is_none_or(|at| {
+                    at.elapsed() >= std::time::Duration::from_secs(REFRESH_TICK_SECS)
+                });
+            if !due {
+                continue;
+            }
+            last_pass = Some(std::time::Instant::now());
+            for (name, credential) in self.due_for_refresh(now_ms()) {
+                // `refresh` logs the attempt and notes what came of it.
+                let _ = self.refresh(&name, &credential).await;
             }
         }
     }
 
-    fn renewal_note(&self, credential: &str, state: &'static str, error: Option<String>) {
+    fn renewal_note(
+        &self,
+        credential: &str,
+        state: &'static str,
+        error: Option<String>,
+        renewer: Option<String>,
+    ) {
         self.renewals.lock().insert(
             credential.to_string(),
             Note {
                 state,
                 error,
                 updated_ms: now_ms(),
+                renewer,
+                widened: false,
+            },
+        );
+    }
+
+    fn record_failure(&self, credential: &str, reason: &str) {
+        self.failures.lock().insert(
+            credential.to_string(),
+            Failure {
+                reason: reason.to_string(),
+                at_ms: now_ms(),
             },
         );
     }

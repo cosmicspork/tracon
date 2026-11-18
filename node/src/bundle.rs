@@ -370,6 +370,27 @@ pub(crate) async fn download(
     url: &str,
     to: &Path,
 ) -> Result<(), BundleError> {
+    fetch_to(client, url, to, None).await
+}
+
+/// [`download`], told to [`fetching`] as it goes and logged: where from and
+/// how big at the start, how far every [`LOG_EVERY`] or quarter, and when it
+/// is done. A bundle is a few hundred megabytes, minutes on a slow line.
+pub(crate) async fn download_tracked(
+    client: &reqwest::Client,
+    url: &str,
+    to: &Path,
+    fetch: &Fetch,
+) -> Result<(), BundleError> {
+    fetch_to(client, url, to, Some(fetch)).await
+}
+
+async fn fetch_to(
+    client: &reqwest::Client,
+    url: &str,
+    to: &Path,
+    fetch: Option<&Fetch>,
+) -> Result<(), BundleError> {
     use tokio::io::AsyncWriteExt as _;
     let failed = |error: String| BundleError::Fetch {
         url: url.to_string(),
@@ -381,12 +402,218 @@ pub(crate) async fn download(
         .await
         .and_then(|r| r.error_for_status())
         .map_err(|e| failed(e.to_string()))?;
+    let total = response.content_length();
+    let started = std::time::Instant::now();
+    let mut pace = Pace::new(total, started);
+    if let Some(fetch) = fetch {
+        fetch.update(|p| p.total = total);
+        tracing::info!(
+            what = %fetch.what,
+            host = %host_of(url),
+            size = %total.map_or_else(|| "unknown".to_string(), megabytes),
+            "downloading"
+        );
+    }
+    let mut got = 0u64;
     let mut out = tokio::fs::File::create(to).await?;
     while let Some(chunk) = response.chunk().await.map_err(|e| failed(e.to_string()))? {
         out.write_all(&chunk).await?;
+        got += chunk.len() as u64;
+        let Some(fetch) = fetch else { continue };
+        fetch.update(|p| p.got = got);
+        if pace.due(got, std::time::Instant::now()) {
+            tracing::info!(
+                what = %fetch.what,
+                so_far = %megabytes(got),
+                of = %total.map_or_else(|| "unknown".to_string(), megabytes),
+                "still downloading"
+            );
+        }
     }
     out.flush().await?;
+    if let Some(fetch) = fetch {
+        tracing::info!(
+            what = %fetch.what,
+            size = %megabytes(got),
+            secs = started.elapsed().as_secs(),
+            "downloaded"
+        );
+    }
     Ok(())
+}
+
+/// How often a download says how far it has got, at least.
+const LOG_EVERY: Duration = Duration::from_secs(10);
+
+/// When a download is worth another line: each quarter of a known size, and
+/// every [`LOG_EVERY`] whatever the size.
+struct Pace {
+    total: Option<u64>,
+    last: std::time::Instant,
+    quarter: u64,
+}
+
+impl Pace {
+    fn new(total: Option<u64>, now: std::time::Instant) -> Self {
+        Self {
+            total: total.filter(|t| *t > 0),
+            last: now,
+            quarter: 0,
+        }
+    }
+
+    /// Whether `got` bytes at `now` is a line. The whole is not one: the
+    /// download's own last line says it.
+    fn due(&mut self, got: u64, now: std::time::Instant) -> bool {
+        let quarter = self
+            .total
+            .map_or(0, |total| got.saturating_mul(4) / total)
+            .min(4);
+        let next_quarter = quarter > self.quarter && quarter < 4;
+        let due = next_quarter || now.duration_since(self.last) >= LOG_EVERY;
+        self.quarter = self.quarter.max(quarter);
+        if due {
+            self.last = now;
+        }
+        due
+    }
+}
+
+fn megabytes(bytes: u64) -> String {
+    format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+}
+
+/// The host a URL names, for a log line; the URL itself when it names none.
+pub(crate) fn host_of(url: &str) -> String {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_else(|| url.to_string())
+}
+
+/// How far one fetch has got, as [`fetching`] tells it.
+#[derive(Debug, Clone, Default)]
+struct Progress {
+    got: u64,
+    total: Option<u64>,
+    /// Downloaded; being checked and unpacked.
+    checking: bool,
+}
+
+/// The fetches under way in this process, by [`Fetch`].
+static FETCHES: std::sync::Mutex<BTreeMap<u64, (String, Progress)>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+static NEXT_FETCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// One bundle being fetched, known to [`fetching`] until it is dropped: a
+/// fetch cut short (its task dropped, the node stopping) is no longer said
+/// to be under way.
+pub(crate) struct Fetch {
+    id: u64,
+    /// What is fetched, as a sentence names it: "the 0.52.0 harness bundle".
+    what: String,
+}
+
+impl Fetch {
+    pub(crate) fn start(what: impl Into<String>) -> Self {
+        let id = NEXT_FETCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let what = what.into();
+        if let Ok(mut fetches) = FETCHES.lock() {
+            fetches.insert(id, (what.clone(), Progress::default()));
+        }
+        Self { id, what }
+    }
+
+    fn update(&self, change: impl FnOnce(&mut Progress)) {
+        if let Ok(mut fetches) = FETCHES.lock() {
+            if let Some((_, progress)) = fetches.get_mut(&self.id) {
+                change(progress);
+            }
+        }
+    }
+
+    /// Downloaded: what is left is checking and unpacking it.
+    pub(crate) fn checking(&self) {
+        self.update(|p| p.checking = true);
+    }
+}
+
+impl Drop for Fetch {
+    fn drop(&mut self) {
+        if let Ok(mut fetches) = FETCHES.lock() {
+            fetches.remove(&self.id);
+        }
+    }
+}
+
+/// What the node is fetching right now and how far it has got, in words a
+/// check shows while it waits: "fetching the 0.52.0 harness bundle (31.2 MB
+/// of 118.0 MB)". `None` when nothing is being fetched.
+pub fn fetching() -> Option<String> {
+    let fetches = FETCHES.lock().ok()?;
+    let said: Vec<String> = fetches
+        .values()
+        .map(|(what, progress)| describe(what, progress))
+        .collect();
+    (!said.is_empty()).then(|| said.join("; "))
+}
+
+fn describe(what: &str, progress: &Progress) -> String {
+    match (progress.checking, progress.got, progress.total) {
+        (true, ..) => format!("checking and unpacking {what}"),
+        (false, 0, _) => format!("fetching {what}"),
+        (false, got, Some(total)) => format!(
+            "fetching {what} ({} of {})",
+            megabytes(got),
+            megabytes(total)
+        ),
+        (false, got, None) => format!("fetching {what} ({} so far)", megabytes(got)),
+    }
+}
+
+/// A tarball named `name` whose sha256 is `expected`, left complete in
+/// another `.incoming-*` directory under `root` by a fetch that was cut
+/// short (the node killed while it unpacked), linked to `to` rather than
+/// fetched again. `false` when there is none: a partial one does not match.
+pub(crate) async fn reuse_incoming(
+    root: &Path,
+    own: &Path,
+    name: &str,
+    expected: &str,
+    to: &Path,
+) -> bool {
+    let (root, own, name, expected, to) = (
+        root.to_path_buf(),
+        own.to_path_buf(),
+        name.to_string(),
+        expected.to_string(),
+        to.to_path_buf(),
+    );
+    tokio::task::spawn_blocking(move || {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            return false;
+        };
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            if dir == own || !entry.file_name().to_string_lossy().starts_with(".incoming-") {
+                continue;
+            }
+            let left = dir.join(&name);
+            if !left.is_file() || sha256_file(&left).ok().as_deref() != Some(expected.as_str()) {
+                continue;
+            }
+            // Linked, not moved: a fetch still running in another process
+            // keeps its own.
+            if std::fs::hard_link(&left, &to).is_ok() || std::fs::copy(&left, &to).is_ok() {
+                tracing::info!(tarball = %left.display(), "reusing a download an interrupted fetch left complete");
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// What [`ensure_at`] did.
@@ -438,13 +665,18 @@ pub async fn ensure_at(
     let base = format!("{}/v{version}", release_url.trim_end_matches('/'));
     let tarball = incoming.path().join(&name);
     let sums = incoming.path().join(format!("{name}.sha256"));
+    let fetch = Fetch::start(format!("the {version} harness bundle"));
+    tracing::info!(version, arch, host = %host_of(release_url), "fetching the harness bundle");
     download(client, &format!("{base}/{name}.sha256"), &sums).await?;
-    download(client, &format!("{base}/{name}"), &tarball).await?;
+    let expected = expected_digest(&tokio::fs::read_to_string(&sums).await?, &name)?;
+    if !reuse_incoming(&root, incoming.path(), &name, &expected, &tarball).await {
+        download_tracked(client, &format!("{base}/{name}"), &tarball, &fetch).await?;
+    }
+    fetch.checking();
     let unpacked = incoming.path().join("unpacked");
     let (v, a) = (version.to_string(), arch.to_string());
     let checked = unpacked.clone();
     tokio::task::spawn_blocking(move || -> Result<(), BundleError> {
-        let expected = expected_digest(&std::fs::read_to_string(&sums)?, &name)?;
         let got = sha256_file(&tarball)?;
         if got != expected {
             return Err(BundleError::Digest {
@@ -465,6 +697,7 @@ pub async fn ensure_at(
         std::fs::remove_dir_all(&dest)?;
     }
     std::fs::rename(unpacked.join(version).join(arch), &dest)?;
+    tracing::info!(version, arch, bundle = %dest.display(), "the harness bundle checks out against its .sha256 and manifest; installed");
     Ok(Ensured::Fetched(dest))
 }
 
@@ -852,5 +1085,128 @@ pub(crate) mod tests {
         };
         let managed = effective(&cfg).unwrap();
         assert!(managed.ends_with(format!("{DIR}/{}/{arch}", env!("CARGO_PKG_VERSION"))));
+    }
+    /// A download says how far it is each quarter of its size and every
+    /// ten seconds, but not at its end, which its last line says.
+    #[test]
+    fn a_download_is_logged_by_quarters_and_by_time() {
+        let start = std::time::Instant::now();
+        let mut pace = Pace::new(Some(100), start);
+        assert!(!pace.due(10, start));
+        assert!(pace.due(25, start));
+        assert!(!pace.due(30, start));
+        assert!(!pace.due(49, start + Duration::from_secs(9)));
+        assert!(pace.due(50, start + Duration::from_secs(9)));
+        assert!(pace.due(55, start + Duration::from_secs(19)));
+        assert!(pace.due(99, start + Duration::from_secs(20)));
+        assert!(!pace.due(100, start + Duration::from_secs(21)));
+
+        // No size: by time alone.
+        let mut pace = Pace::new(None, start);
+        assert!(!pace.due(1 << 30, start + Duration::from_secs(9)));
+        assert!(pace.due(1 << 31, start + Duration::from_secs(10)));
+    }
+
+    /// While a bundle downloads, the node can say which and how far; once
+    /// the fetch is gone (cut short here), it no longer says so.
+    #[tokio::test]
+    async fn a_fetch_under_way_says_how_far_it_has_got() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let release = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        publish(release.path(), "7.7.7", FILES);
+        let name = "tracon-bundle-7.7.7-amd64.tar.gz";
+        let sums = std::fs::read(release.path().join(format!("v7.7.7/{name}.sha256"))).unwrap();
+        // The .sha256 whole; the tarball a megabyte of four, then nothing.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let (mut conn, _) = listener.accept().await.unwrap();
+                let mut request = vec![0u8; 4096];
+                let n = conn.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..n]).to_string();
+                if request.contains(".sha256 ") {
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        sums.len()
+                    );
+                    conn.write_all(head.as_bytes()).await.unwrap();
+                    conn.write_all(&sums).await.unwrap();
+                } else {
+                    conn.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 4000000\r\n\r\n")
+                        .await
+                        .unwrap();
+                    conn.write_all(&vec![0u8; 1_000_000]).await.unwrap();
+                    held.push(conn);
+                }
+            }
+        });
+        let client = reqwest::Client::new();
+        let state_dir = state.path().to_path_buf();
+        let fetch =
+            tokio::spawn(
+                async move { ensure_at(&client, &url, &state_dir, "7.7.7", "amd64").await },
+            );
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let said = loop {
+            let now = fetching().unwrap_or_default();
+            if now.contains("fetching the 7.7.7 harness bundle (1.0 MB of 4.0 MB)") {
+                break now;
+            }
+            assert!(std::time::Instant::now() < deadline, "said {now:?}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert!(!fetch.is_finished(), "{said}");
+        fetch.abort();
+        let _ = fetch.await;
+        assert!(!fetching().unwrap_or_default().contains("7.7.7"));
+    }
+
+    /// A tarball a killed fetch left complete is not fetched again; one it
+    /// left partial is.
+    #[tokio::test]
+    async fn a_download_an_interrupted_fetch_left_complete_is_reused() {
+        let release = tempfile::tempdir().unwrap();
+        publish(release.path(), "3.0.0", FILES);
+        let name = "tracon-bundle-3.0.0-amd64.tar.gz";
+        let published = std::fs::read(release.path().join("v3.0.0").join(name)).unwrap();
+        let (url, asked) = serve(release.path().to_path_buf()).await;
+        let client = reqwest::Client::new();
+        let tarball_asked = |asked: &std::sync::Mutex<Vec<String>>| {
+            asked
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|path| path.as_str() == format!("v3.0.0/{name}"))
+                .count()
+        };
+
+        let partial = tempfile::tempdir().unwrap();
+        let left = partial.path().join(DIR).join(".incoming-killed");
+        std::fs::create_dir_all(&left).unwrap();
+        std::fs::write(left.join(name), &published[..published.len() / 2]).unwrap();
+        let fetched = ensure_at(&client, &url, partial.path(), "3.0.0", "amd64")
+            .await
+            .unwrap();
+        assert!(matches!(fetched, Ensured::Fetched(_)));
+        assert_eq!(tarball_asked(&asked), 1);
+
+        let complete = tempfile::tempdir().unwrap();
+        let left = complete.path().join(DIR).join(".incoming-killed");
+        std::fs::create_dir_all(&left).unwrap();
+        std::fs::write(left.join(name), &published).unwrap();
+        let reused = ensure_at(&client, &url, complete.path(), "3.0.0", "amd64")
+            .await
+            .unwrap();
+        assert!(matches!(reused, Ensured::Fetched(_)));
+        assert_eq!(
+            std::fs::read(reused.path().join("bin/tracon-sandbox")).unwrap(),
+            b"sandbox"
+        );
+        assert_eq!(tarball_asked(&asked), 1, "{:?}", asked.lock().unwrap());
+        // The one it was linked from is left to whoever wrote it.
+        assert!(left.join(name).is_file());
     }
 }

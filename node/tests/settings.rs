@@ -64,6 +64,10 @@ fn this_node() -> Node {
 }
 
 fn node_as(cfg: Config, node_id: &str) -> Node {
+    node_on(cfg, node_id, Arc::new(tracon::runner::local::LocalBackend))
+}
+
+fn node_on(cfg: Config, node_id: &str, backend: Arc<dyn tracon::boundary::Backend>) -> Node {
     // Before anything can reach the credential store or node.toml.
     state::isolate();
     let store = Arc::new(Store::open_in_memory().unwrap());
@@ -83,7 +87,7 @@ fn node_as(cfg: Config, node_id: &str) -> Node {
         node_id.into(),
         tools.clone(),
         Default::default(),
-        Arc::new(tracon::runner::local::LocalBackend),
+        backend,
     );
     let state_manager = manager.clone();
     let broker = tools.broker.clone();
@@ -1696,11 +1700,16 @@ async fn a_provider_key_needs_a_key_and_open_channels() {
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{v}");
 }
 
+/// Held by every test here that removes runtime storage: they share the
+/// state directory, and each one's sweep would take the other's volumes.
+static SWEEPING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Runtime storage is swept by owner: what an archived or vanished session
 /// left goes, what an open one holds stays, and nothing is removed until
 /// asked — and only at the node.
 #[tokio::test]
 async fn storage_is_swept_by_owner_and_only_removed_when_asked() {
+    let _sweeping = SWEEPING.lock().await;
     let n = node();
     let tag = uuid::Uuid::now_v7().simple().to_string();
     let open = format!("open{tag}");
@@ -1782,6 +1791,211 @@ async fn storage_is_swept_by_owner_and_only_removed_when_asked() {
     }
     assert!(state_dir.join(format!("sessions/{open}")).exists());
     assert!(!state_dir.join(format!("sessions/{archived}")).exists());
+}
+
+/// `LocalBackend`, with every volume made long ago: the day a fresh
+/// workspace is kept for would otherwise outlast the test.
+struct Aged(tracon::runner::local::LocalBackend);
+
+#[async_trait::async_trait]
+impl tracon::boundary::Backend for Aged {
+    fn kind(&self) -> &'static str {
+        self.0.kind()
+    }
+    async fn setup(
+        &self,
+        cfg: &Config,
+        rebuild: bool,
+    ) -> Result<(), tracon::boundary::BoundaryError> {
+        self.0.setup(cfg, rebuild).await
+    }
+    async fn check_all(&self, cfg: &Config, deep: bool) -> tracon::boundary::BoundaryReport {
+        self.0.check_all(cfg, deep).await
+    }
+    fn runner(&self, extra: Vec<tracon::runner::Mount>) -> Arc<dyn tracon::runner::Runner> {
+        self.0.runner(extra)
+    }
+    fn runner_for(
+        &self,
+        harness_id: &str,
+        extra: Vec<tracon::runner::Mount>,
+    ) -> Arc<dyn tracon::runner::Runner> {
+        self.0.runner_for(harness_id, extra)
+    }
+    async fn import_volume(
+        &self,
+        volume: &str,
+        source: &std::path::Path,
+    ) -> Result<(), tracon::boundary::BoundaryError> {
+        self.0.import_volume(volume, source).await
+    }
+    async fn export_volume(
+        &self,
+        volume: &str,
+        destination: &std::path::Path,
+    ) -> Result<(), tracon::boundary::BoundaryError> {
+        self.0.export_volume(volume, destination).await
+    }
+    fn harness_host(&self) -> String {
+        self.0.harness_host()
+    }
+    fn harness_home(&self) -> String {
+        self.0.harness_home()
+    }
+    async fn reconcile(&self, names: &[String]) {
+        self.0.reconcile(names).await
+    }
+    async fn list_volumes(
+        &self,
+    ) -> Result<Vec<tracon::boundary::VolumeInfo>, tracon::boundary::BoundaryError> {
+        let mut volumes = self.0.list_volumes().await?;
+        for volume in &mut volumes {
+            volume.created_ms = Some(0);
+        }
+        Ok(volumes)
+    }
+    async fn remove_volume(&self, volume: &str) -> Result<(), tracon::boundary::BoundaryError> {
+        self.0.remove_volume(volume).await
+    }
+}
+
+/// With `[gc]` set, the node archives its own ended sessions once they are
+/// old enough and frees their storage on its timer, with no `tracon gc
+/// --apply`: a young or live session, a peer's, and a workspace an open
+/// session shares all stay. A sweep asked for meanwhile is told one runs.
+#[tokio::test]
+async fn a_scheduled_sweep_archives_old_ended_sessions_and_frees_their_storage() {
+    let _sweeping = SWEEPING.lock().await;
+    let cfg = Config {
+        gc: tracon::config::Gc {
+            every_secs: 1,
+            archive_ended_after_secs: Some(3600),
+            caches: false,
+        },
+        ..Default::default()
+    };
+    let n = node_on(
+        cfg.clone(),
+        "n1",
+        Arc::new(Aged(tracon::runner::local::LocalBackend)),
+    );
+    n.store.ensure_peer_node("n1").unwrap();
+    n.store.ensure_peer_node("n2").unwrap();
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let hours_ago = tracon::store::now_ms() - 2 * 3_600_000;
+    let id = |name: &str| format!("{name}{tag}");
+    let shared = format!("workspace://review-{tag}");
+    let sessions = [
+        (id("old"), "closed", hours_ago, "/src/p", "n1"),
+        (
+            id("young"),
+            "closed",
+            tracon::store::now_ms(),
+            "/src/p",
+            "n1",
+        ),
+        (id("live"), "running", hours_ago, "/src/p", "n1"),
+        (id("reviewdone"), "closed", hours_ago, shared.as_str(), "n1"),
+        (
+            id("reviewopen"),
+            "running",
+            hours_ago,
+            shared.as_str(),
+            "n1",
+        ),
+        (id("peer"), "closed", hours_ago, "/src/p", "n2"),
+    ];
+    for (session, state, updated_ms, repo_path, node_id) in &sessions {
+        let mut row = session_on(session, "personal", state);
+        row.updated_ms = *updated_ms;
+        row.repo_path = repo_path.to_string();
+        row.node_id = node_id.to_string();
+        n.store.insert_session(&row).unwrap();
+    }
+
+    let state_dir = tracon::config::Config::state_dir();
+    let runtime = state_dir.join("local-runtime");
+    let gone = [
+        format!("tracon-workspace-{}", id("old")),
+        format!("tracon-scratch-{}", id("old")),
+        format!("tracon-scratch-{}", id("reviewdone")),
+    ];
+    let kept = [
+        format!("tracon-workspace-{}", id("young")),
+        format!("tracon-scratch-{}", id("young")),
+        format!("tracon-workspace-{}", id("live")),
+        format!("tracon-scratch-{}", id("live")),
+        format!("tracon-workspace-review-{tag}"),
+        format!("tracon-scratch-{}", id("reviewopen")),
+    ];
+    for volume in gone.iter().chain(&kept) {
+        std::fs::create_dir_all(runtime.join(volume)).unwrap();
+    }
+    for session in [id("old"), id("young")] {
+        std::fs::create_dir_all(state_dir.join("sessions").join(session)).unwrap();
+    }
+
+    // One sweep at a time: one asked for by hand while another runs is
+    // refused rather than run beside it.
+    {
+        let _running = tracon::gc_schedule::lock().lock().await;
+        let (s, v) = call(
+            &n,
+            "POST",
+            "/api/maintenance/storage",
+            Some(LOCAL),
+            Some(json!({ "apply": true })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT, "{v}");
+        assert!(v.to_string().contains("a sweep is running"), "{v}");
+    }
+
+    let schedule = tracon::gc_schedule::Schedule::with(
+        std::time::Duration::ZERO,
+        std::time::Duration::from_millis(10),
+    );
+    let timer = tokio::spawn(schedule.run(n.manager.clone(), Arc::new(cfg)));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let last = loop {
+        if let Some(last) = tracon::gc_schedule::status().last {
+            break last;
+        }
+        assert!(std::time::Instant::now() < deadline, "no scheduled run");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    timer.abort();
+    let _ = timer.await;
+
+    assert_eq!(last.error, None);
+    assert_eq!(last.archived, 2, "{last:?}");
+    assert!(last.failures.is_empty(), "{last:?}");
+    let archived = |session: &str| n.store.get_session(session).unwrap().unwrap().archived_ms;
+    assert!(archived(&id("old")).is_some());
+    assert!(archived(&id("reviewdone")).is_some());
+    for session in [id("young"), id("live"), id("reviewopen"), id("peer")] {
+        assert_eq!(archived(&session), None, "{session}");
+    }
+    for volume in &gone {
+        assert!(!runtime.join(volume).exists(), "{volume} is still there");
+    }
+    for volume in &kept {
+        assert!(runtime.join(volume).exists(), "{volume} was removed");
+    }
+    assert!(!state_dir.join("sessions").join(id("old")).exists());
+    assert!(state_dir.join("sessions").join(id("young")).exists());
+
+    // Settings and `tracon gc` say when it ran.
+    let (s, v) = call(&n, "GET", "/api/maintenance/storage", Some(LOCAL), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["scheduled"]["last"]["archived"], json!(2));
+    assert!(
+        v["scheduled_line"]
+            .as_str()
+            .unwrap()
+            .starts_with("last automatic sweep"),
+        "{v}"
+    );
 }
 
 /// The repository table is readable with what each repository was built into,

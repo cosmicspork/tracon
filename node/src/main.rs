@@ -895,6 +895,9 @@ async fn main() -> Result<()> {
             } else if !apply {
                 println!("{listed} to remove; run again with --apply to remove them");
             }
+            if let Some(line) = v["scheduled_line"].as_str() {
+                println!("{line}");
+            }
             if failed > 0 {
                 anyhow::bail!("{failed} could not be removed");
             }
@@ -1054,13 +1057,18 @@ fn boundary_lines(checked: &serde_json::Value) -> (Vec<String>, Option<String>) 
     let mut failed = None;
     for c in checked["checks"]["checks"].as_array().into_iter().flatten() {
         let ok = c["ok"].as_bool().unwrap_or(false);
+        let pending = c["pending"].as_bool().unwrap_or(false);
         let id = c["id"].as_str().unwrap_or("?");
         if !ok && failed.is_none() {
             failed = Some(id.to_string());
         }
         lines.push(format!(
             "{} {:<22} {}",
-            if ok { "ok  " } else { "FAIL" },
+            match (ok, pending) {
+                (true, _) => "ok  ",
+                (false, true) => "WAIT",
+                (false, false) => "FAIL",
+            },
             id,
             c["detail"].as_str().unwrap_or_default()
         ));
@@ -1843,15 +1851,7 @@ async fn repo_command(command: RepoCommand) -> Result<()> {
             if started["cloned"].as_bool() == Some(true) {
                 println!("cloned {repo}");
             }
-            println!(
-                "{} {repo} from {} ({:.12}); a first build can take several minutes",
-                match started["joined"].as_bool() {
-                    Some(true) => "joining the build already running for",
-                    _ => "building",
-                },
-                started["source_ref"].as_str().unwrap_or(""),
-                started["source_commit"].as_str().unwrap_or("")
-            );
+            println!("{}", build_started(&started, &repo));
             let mut idle = std::time::Duration::ZERO;
             loop {
                 tokio::time::sleep(BUILD_POLL).await;
@@ -1911,6 +1911,23 @@ const BUILD_POLL: std::time::Duration = std::time::Duration::from_secs(2);
 /// How long `tracon repo build` waits for a build the node is neither
 /// recording nor working on before it gives up.
 const BUILD_START_WITHIN: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The line `tracon repo build` starts with: what it builds, and from which
+/// commit. A repository with nothing committed yet (an empty repository) has
+/// no commit to name, and says so.
+fn build_started(started: &serde_json::Value, repo: &str) -> String {
+    let what = match started["joined"].as_bool() {
+        Some(true) => "joining the build already running for",
+        _ => "building",
+    };
+    let source_ref = started["source_ref"].as_str().unwrap_or("");
+    let commit = started["source_commit"].as_str().unwrap_or("");
+    let from = match commit.is_empty() {
+        true => "an empty repository, with nothing committed yet".to_string(),
+        false => format!("{source_ref} ({commit:.12})"),
+    };
+    format!("{what} {repo} from {from}; a first build can take several minutes")
+}
 
 /// What `/api/repos/environments` says of a build asked for at `since`.
 #[derive(Debug, PartialEq)]
@@ -3948,8 +3965,29 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::resolve_prefix;
-    use super::{awaited_build, AwaitedBuild};
+    use super::{awaited_build, build_started, AwaitedBuild};
     use serde_json::json;
+
+    /// The build's first line names the commit it reads, and says when the
+    /// repository has none rather than printing empty fields (#937).
+    #[test]
+    fn a_build_of_an_empty_repository_says_it_is_empty() {
+        let started = json!({
+            "source_ref": "origin/main",
+            "source_commit": "0123456789abcdef",
+            "joined": false,
+        });
+        assert_eq!(
+            build_started(&started, "/r"),
+            "building /r from origin/main (0123456789ab); a first build can take several minutes"
+        );
+        let empty = json!({ "source_ref": "", "source_commit": "", "joined": true });
+        assert_eq!(
+            build_started(&empty, "/r"),
+            "joining the build already running for /r from an empty repository, with nothing \
+             committed yet; a first build can take several minutes"
+        );
+    }
 
     /// `tracon repo build` follows its build's row, stops with the node's
     /// reason when nothing was built, waits while the node is still working
@@ -4056,6 +4094,17 @@ mod tests {
             {"id": "runtime", "ok": true, "detail": "ok"},
         ]}, "providers": []});
         assert_eq!(super::boundary_lines(&passed).1, None);
+
+        // A check waiting on the node's own fetch says so, and still fails.
+        let waiting = serde_json::json!({"checks": {"checks": [
+            {"id": "runtime", "ok": false, "pending": true, "detail": "fetching the 0.52.0 harness bundle"},
+        ]}, "providers": []});
+        let (lines, failed) = super::boundary_lines(&waiting);
+        assert_eq!(
+            lines,
+            ["WAIT runtime                fetching the 0.52.0 harness bundle"]
+        );
+        assert_eq!(failed.as_deref(), Some("runtime"));
     }
 
     /// A port something listens on is in use; a free one, or port 0, is not.

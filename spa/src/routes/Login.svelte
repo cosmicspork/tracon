@@ -2,15 +2,12 @@
   import { isTauri } from '@tauri-apps/api/core'
 
   import DeviceCode from '../components/DeviceCode.svelte'
+  import QrScanner from '../components/QrScanner.svelte'
   import { api, ApiError } from '../lib/api'
+  import { approving as shown, openApproval } from '../lib/approving.svelte'
   import { insecureContext, takeToken } from '../lib/auth'
-  import {
-    DeviceCancelled,
-    deviceProblem,
-    pollForApproval,
-    stashedApproval,
-    type DeviceStart,
-  } from '../lib/device'
+  import { DeviceCancelled, deviceProblem, pollForApproval, type DeviceStart } from '../lib/device'
+  import { canScan, scanEnvironment, type ScanResult } from '../lib/scan'
   import { store } from '../lib/store.svelte'
 
   let token = $state('')
@@ -48,7 +45,16 @@
   // passkey) approves this one. The desktop app's way in to a remote node,
   // and any browser's that has no token to hand.
   const desktop = typeof window !== 'undefined' && isTauri()
-  const approving = stashedApproval() !== null
+  const approving = $derived(shown.id !== null)
+
+  // A sign-in QR read in the app: its token goes straight to the exchange,
+  // never into the address, history or storage. An approval's code read
+  // before signing in is held and shown once signed in.
+  const scannable = canScan(scanEnvironment(desktop))
+  function scanned(r: ScanResult) {
+    if (r.kind === 'login') void signIn(r.token)
+    else if (r.kind === 'approve') openApproval(r.id)
+  }
   let device = $state<DeviceStart | null>(null)
   let deviceError = $state<string | null>(null)
   let asking = $state(false)
@@ -118,6 +124,9 @@
     {#if error}<p class="err">{error}</p>{/if}
     <button type="submit" disabled={busy || !token.trim()}>{busy ? 'Checking…' : 'Log in'}</button>
     <small>Exchanged for a cookie; the token isn't stored.</small>
+    {#if scannable && !insecure}
+      <QrScanner label="Scan a sign-in QR" accept={['login', 'approve']} onresult={scanned} />
+    {/if}
     {#if !approving}
       <div class="or">
         {#if device}

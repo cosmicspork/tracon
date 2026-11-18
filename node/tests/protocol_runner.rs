@@ -262,6 +262,304 @@ async fn the_protocol_runner_over_a_loopback_sandbox() {
     a_sandbox_with_the_wrong_token_is_refused_and_removed().await;
     the_podman_provider_takes_the_supervisors_connection_past_a_bad_one().await;
     a_sandbox_left_running_is_taken_back_by_the_next_node_process().await;
+    fetch_branch_runs_in_the_live_sandbox_and_in_the_nodes_copy_without_one().await;
+}
+
+/// `sh -c script` in `dir` on the host. Only while no sandbox runs: the
+/// sandbox loop reaps every child of this process.
+fn host(dir: &std::path::Path, script: &str) -> String {
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{script}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// `sh -c script` in `dir` in the sandbox behind `conn`, as the agent would
+/// run it there.
+async fn inside(conn: &SandboxConn, dir: &str, script: &str) -> String {
+    let mut spec = tracon_sandbox::protocol::SpawnSpec::new(["sh", "-c", script]);
+    spec.cwd = Some(dir.into());
+    spec.stdin = false;
+    spec.env = [
+        ("GIT_CONFIG_GLOBAL".to_string(), "/dev/null".to_string()),
+        ("GIT_CONFIG_NOSYSTEM".to_string(), "1".to_string()),
+    ]
+    .into();
+    let out = conn.spawn(spec).await.unwrap().output().await.unwrap();
+    assert!(
+        out.status.success(),
+        "{script}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// A fresh node directory holding a copy of `bundle` as the fetch's bundle,
+/// as the node stages one.
+fn staged(root: &std::path::Path, bundle: &std::path::Path) -> PathBuf {
+    let stage = root.join(format!("stage-{}", uuid::Uuid::now_v7().simple()));
+    std::fs::create_dir_all(&stage).unwrap();
+    std::fs::copy(bundle, stage.join(tracon::mcp::branch::BUNDLE_FILE)).unwrap();
+    stage
+}
+
+/// Bundle volumes kept in the store, as Kubernetes keeps them: sent into
+/// the fetch's sandbox like the workspace.
+struct StoreVolumes(tracon::runner::sandbox_files::FilesStore);
+
+#[async_trait]
+impl tracon::mcp::branch::BundleVolumes for StoreVolumes {
+    async fn stage(&self, volume: &str, source: &std::path::Path) -> Result<(), String> {
+        self.0.import(volume, source).map_err(|e| e.to_string())
+    }
+
+    async fn remove(&self, volume: &str) -> Result<(), String> {
+        self.0.remove(volume).map_err(|e| e.to_string())
+    }
+}
+
+/// `fetch_branch` on a workspace the node keeps (#946). While the session's
+/// sandbox runs, Git runs there, over the node's connection to it: the tree
+/// the agent works in sees the new `origin/main` at once, and so does the
+/// node's copy after the next sync, with nothing else moved. A step that
+/// hangs there (a FIFO at `.git/packed-refs`) is killed at its limit and
+/// nothing else: the sandbox, its harness and its connection stay up, and
+/// no lock is left held. With the session stopped, the fetch runs in a
+/// sandbox of its own on the node's copy, whose runner locks the volume per
+/// send and take-back: holding that lock around the step, as the fetch once
+/// did, deadlocked here until the step's limit.
+async fn fetch_branch_runs_in_the_live_sandbox_and_in_the_nodes_copy_without_one() {
+    use tracon::mcp::branch::{Bundle, Fetch, Place};
+    use tracon::runner::sandbox_files::{self as files, FilesStore};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let id = uuid::Uuid::now_v7().to_string();
+    let volume = tracon::workspace::volume_name(&id);
+    let name = volume.replacen("-workspace-", "-fetch-", 1);
+    let store = FilesStore::new(root.join("store"));
+
+    // An upstream, the managed clone's stand-in, and a workspace cloned
+    // from it with no remote and a branch of the agent's own.
+    host(
+        root,
+        "git init -q --bare -b main upstream.git && git clone -q upstream.git work          && cd work && echo one > a.txt && git add a.txt          && git -c user.name=t -c user.email=t@t commit -qm one && git push -q origin main          && cd .. && git clone -q --no-local upstream.git ws && cd ws          && git remote remove origin && git update-ref refs/remotes/origin/main HEAD          && git checkout -qb feat/x && echo mine > b.txt && git add b.txt          && git -c user.name=t -c user.email=t@t commit -qm mine",
+    );
+    let ws = root.join("ws");
+    let base = host(&ws, "git rev-parse origin/main");
+    let head = host(&ws, "git rev-parse HEAD");
+    let advance = |text: &str| {
+        host(
+            &root.join("work"),
+            &format!(
+                "echo {text} > a.txt && git -c user.name=t -c user.email=t@t commit -qam {text}                  && git push -q origin main && git rev-parse HEAD"
+            ),
+        )
+    };
+    let bundle_of = |file: &str, from: &str| {
+        host(
+            &root.join("work"),
+            &format!(
+                "git update-ref refs/remotes/origin/main HEAD                  && git bundle create -q ../{file} refs/remotes/origin/main ^{from}"
+            ),
+        );
+        root.join(file)
+    };
+    let two = advance("two");
+    let first = bundle_of("two.bundle", &base);
+    store.import(&volume, &ws).unwrap();
+
+    let provider = Loopback::new(false);
+    let runner = ProtocolRunner::new(provider.clone(), "img@sha256:aa")
+        .with_server(support::sandbox_server())
+        .with_connect_within(Duration::from_secs(10))
+        .with_files(store.clone());
+    let live = root.join("live").to_string_lossy().into_owned();
+    let mut session = sh(
+        "while read -r line; do echo \"$line\"; done",
+        "tracon-h-fetch",
+    );
+    session.mounts = vec![Mount::volume(&volume, &live, false)];
+    session.workdir = Some(live.clone());
+    session.labels = tracon::runner::RunLabels::of(tracon::runner::RunKind::Session);
+    let spawned = runner.spawn(session).await.unwrap();
+    let mut stdin = spawned.stdin;
+    let mut lines = BufReader::new(spawned.stdout).lines();
+
+    let (conn, dir) = files::live_target(&volume).expect("the session's sandbox holds it");
+    assert_eq!(dir, live);
+    let fetch = Fetch {
+        session: "s-fetch",
+        volume: &volume,
+        name: &name,
+        branch: "main",
+        limit: Duration::from_secs(60),
+    };
+    let started = std::time::Instant::now();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let fetched = fetch
+        .run(
+            Place::Live {
+                conn: conn.clone(),
+                dir: dir.clone(),
+            },
+            |have| {
+                *seen.lock().unwrap() = have;
+                let stage = staged(root, &first);
+                let sha = two.clone();
+                async move {
+                    Ok(Bundle {
+                        sha,
+                        stage: Some(stage),
+                    })
+                }
+            },
+        )
+        .await
+        .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(seen.lock().unwrap().contains(&base), "{seen:?}");
+    assert_eq!(fetched.head, two);
+    assert_eq!((fetched.ahead, fetched.behind), (Some(1), Some(1)));
+    // In the tree the agent works in, at once; nothing of the agent's moved,
+    // and the bundle is gone from it.
+    assert_eq!(inside(&conn, &dir, "git rev-parse origin/main").await, two);
+    assert_eq!(inside(&conn, &dir, "git rev-parse HEAD").await, head);
+    assert_eq!(
+        inside(&conn, &dir, "git rev-parse --abbrev-ref HEAD").await,
+        "feat/x"
+    );
+    assert_eq!(inside(&conn, &dir, "git status --porcelain").await, "");
+    assert_eq!(
+        inside(
+            &conn,
+            "/tmp",
+            &format!("ls -d /tmp/{name}-* 2>/dev/null | wc -l")
+        )
+        .await,
+        "0"
+    );
+    assert!(
+        provider.created.lock().unwrap().len() == 1,
+        "no sandbox made"
+    );
+
+    // The turn's end takes the live tree back: the node's copy has it too.
+    files::turn_ended("tracon-h-fetch").await;
+    let stored = root.join("store").join(&volume);
+    assert_eq!(
+        std::fs::read_to_string(stored.join(".git/refs/remotes/origin/main"))
+            .unwrap()
+            .trim(),
+        two
+    );
+
+    // A FIFO the agent put at `.git/packed-refs`: the step is killed at its
+    // limit, and only the step.
+    inside(
+        &conn,
+        &dir,
+        "mv .git/packed-refs .git/packed-refs.kept && mkfifo .git/packed-refs",
+    )
+    .await;
+    let hung = Fetch {
+        limit: Duration::from_secs(1),
+        ..fetch
+    };
+    let answer = hung
+        .run(
+            Place::Live {
+                conn: conn.clone(),
+                dir: dir.clone(),
+            },
+            |_| async { Err::<Bundle, String>("never asked".into()) },
+        )
+        .await
+        .unwrap_err();
+    assert!(answer.contains("did not finish in 1s"), "{answer}");
+    assert!(answer.contains("FIFO"), "{answer}");
+    assert!(!conn.is_closed());
+    assert!(files::live_target(&volume).is_some());
+    assert!(provider.destroyed.lock().unwrap().is_empty());
+    assert!(tracon::workspace::volume_lock(&volume).try_lock().is_ok());
+    stdin.write_all(b"still here\n").await.unwrap();
+    assert_eq!(lines.next_line().await.unwrap().unwrap(), "still here");
+    // Nothing reads the FIFO any more: opening it to write without blocking
+    // is refused. The kill is a signal, so give Git a moment to go.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let fifo = PathBuf::from(&dir).join(".git/packed-refs");
+    let open = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&fifo)
+    };
+    assert!(
+        matches!(&open, Err(error) if error.raw_os_error() == Some(libc::ENXIO)),
+        "git still reads the FIFO: {open:?}"
+    );
+    std::fs::remove_file(&fifo).unwrap();
+    std::fs::rename(PathBuf::from(&dir).join(".git/packed-refs.kept"), &fifo).unwrap();
+
+    // The session stops; its last sync keeps the fetched ref.
+    stdin.shutdown().await.unwrap();
+    assert_eq!(spawned.done.await.unwrap(), 0);
+    drop((stdin, lines));
+    provider.settle().await;
+    assert!(files::live_target(&volume).is_none());
+    assert_eq!(host(&stored, "git rev-parse origin/main"), two);
+
+    // With no sandbox holding it, the fetch runs on the node's copy in a
+    // sandbox of its own, which takes it back as its checkout.
+    let three = advance("three");
+    let second = bundle_of("three.bundle", &two);
+    let volumes = StoreVolumes(store.clone());
+    let fetched = tokio::time::timeout(
+        Duration::from_secs(60),
+        fetch.run(
+            Place::Sandbox {
+                runner: &runner,
+                volumes: &volumes,
+                workspace: Mount::volume(&volume, root.join("fetch-work").to_str().unwrap(), false),
+                bundle_dir: root.join("fetch-bundle").to_string_lossy().into_owned(),
+                kept: true,
+            },
+            |have| {
+                assert!(have.contains(&two), "{have:?}");
+                let stage = staged(root, &second);
+                let sha = three.clone();
+                async move {
+                    Ok(Bundle {
+                        sha,
+                        stage: Some(stage),
+                    })
+                }
+            },
+        ),
+    )
+    .await
+    .expect("the fetch waited on a lock it held")
+    .unwrap();
+    assert_eq!(fetched.head, three);
+    assert_eq!((fetched.ahead, fetched.behind), (Some(1), Some(2)));
+    provider.settle().await;
+    assert!(!store.holds(&name), "the bundle's volume is removed");
+    assert!(tracon::workspace::volume_lock(&volume).try_lock().is_ok());
+    assert_eq!(host(&stored, "git rev-parse origin/main"), three);
+    assert_eq!(host(&stored, "git rev-parse HEAD"), head);
+    assert_eq!(host(&stored, "git rev-parse --abbrev-ref HEAD"), "feat/x");
+    assert_eq!(host(&stored, "git status --porcelain"), "");
 }
 
 /// The node stops with a session's harness in a sandbox that can resume:

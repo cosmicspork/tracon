@@ -696,9 +696,12 @@ impl ProtocolRunner {
         let taken_back = teardown.conclude().await;
         let output = output.map_err(|e| RunnerError::Other(format!("{name}: {e}")))?;
         // What a preparation installed is its point: one that ran and whose
-        // tree never reached the node has prepared nothing. A failed command
-        // says more by its own exit.
-        if let (Err(error), Some(super::RunKind::Prepare)) = (&taken_back, cmd.labels.kind) {
+        // tree never reached the node has prepared nothing, as a fetch whose
+        // ref never did has fetched nothing. A failed command says more by
+        // its own exit.
+        if let (Err(error), Some(super::RunKind::Prepare | super::RunKind::Fetch)) =
+            (&taken_back, cmd.labels.kind)
+        {
             if exit_code(output.status) == 0 {
                 return Err(RunnerError::Other(format!(
                     "{name}: could not take its trees back: {error}"
@@ -823,7 +826,7 @@ async fn teardown(
 }
 
 /// An exit as a container's would read: the code, or 128 and the signal.
-fn exit_code(status: ExitStatus) -> i32 {
+pub(crate) fn exit_code(status: ExitStatus) -> i32 {
     match (status.code, status.signal) {
         (Some(code), _) => code,
         (None, Some(signal)) => 128 + signal,
@@ -831,7 +834,7 @@ fn exit_code(status: ExitStatus) -> i32 {
     }
 }
 
-fn std_status(code: i32) -> std::process::ExitStatus {
+pub(crate) fn std_status(code: i32) -> std::process::ExitStatus {
     use std::os::unix::process::ExitStatusExt as _;
     std::process::ExitStatus::from_raw((code & 0xff) << 8)
 }

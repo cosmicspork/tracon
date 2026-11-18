@@ -1,4 +1,4 @@
-import type { LoginCompletion, ProviderInfo, ProviderSignIn } from './types'
+import type { LoginCompletion, NodeInfo, ProviderInfo, ProviderSignIn } from './types'
 
 export function providerLabel(name: string): string {
   if (name === 'openai') return 'OpenAI API'
@@ -69,6 +69,72 @@ export function disconnectLoses(
     : `Disconnecting ${signInLabel(signIn)} leaves no channel here without ${label}`
   const copies = peers.length ? `; the shared copies on ${peers.join(', ')} stay there` : ''
   return `${taken}${copies}.`
+}
+
+/**
+ * What the card says about renewing a subscription sign-in: what the node
+ * waits on, who last renewed it, and the last renewal there that failed.
+ */
+export function renewalLines(
+  signIn: ProviderSignIn,
+  peerName: (id: string) => string = (id) => id,
+  at: (ms: number) => string = (ms) => new Date(ms).toLocaleString(),
+): string[] {
+  const lines: string[] = []
+  const who = (id: string | null | undefined, otherwise: string) => (id ? peerName(id) : otherwise)
+  if (signIn.renewal?.state === 'waiting') {
+    lines.push(`Waiting for ${who(signIn.renewal.renewer ?? signIn.renewer, 'another holder')} to renew.`)
+  } else if (signIn.renewal?.state === 'recovering') {
+    lines.push(`This copy could not be renewed; asking ${who(signIn.renewal.renewer, 'the other holders')} for the current one.`)
+  }
+  const last = signIn.last_renewed
+  if (last) {
+    lines.push(`Last renewed by ${peerName(last.by)}${last.at_ms ? ` at ${at(last.at_ms)}` : ''} (version ${last.version}).`)
+  }
+  if (signIn.last_failure) {
+    lines.push(`Last failed at ${at(signIn.last_failure.at_ms)}: ${signIn.last_failure.reason}`)
+  }
+  return lines
+}
+
+/** One subscription sign-in more than one node holds, as Settings › Mesh lists it. */
+export interface SharedSignIn {
+  provider: string
+  credential: string
+  identity: string | null
+  /** The nodes holding a copy, by id, in the order the nodes are listed. */
+  holders: string[]
+  /** The node that renews it first, or null when none does. */
+  renewer: string | null
+}
+
+/**
+ * Every subscription sign-in held by more than one node, from what each node
+ * publishes. A sign-in is the same one on every holder when it is held under
+ * the same credential name with the same account. Its renewer is what the
+ * nodes say, the serving node's word first.
+ */
+export function sharedSignIns(nodes: NodeInfo[]): SharedSignIn[] {
+  const byKey = new Map<string, SharedSignIn & { said: (string | null | undefined)[] }>()
+  const ordered = [...nodes].sort((a, b) => Number(b.is_self) - Number(a.is_self))
+  for (const node of ordered) {
+    for (const provider of node.providers ?? []) {
+      for (const signIn of provider.sign_ins ?? []) {
+        if (signIn.kind !== 'oauth' || !signIn.credential) continue
+        const key = `${provider.name}\u0000${signIn.credential}\u0000${signIn.identity ?? ''}`
+        let entry = byKey.get(key)
+        if (!entry) {
+          entry = { provider: provider.name, credential: signIn.credential, identity: signIn.identity, holders: [], renewer: null, said: [] }
+          byKey.set(key, entry)
+        }
+        if (!entry.holders.includes(node.id)) entry.holders.push(node.id)
+        entry.said.push(signIn.renewer)
+      }
+    }
+  }
+  return [...byKey.values()]
+    .filter((entry) => entry.holders.length > 1)
+    .map(({ said, ...entry }) => ({ ...entry, renewer: said.find((id) => !!id) ?? null }))
 }
 
 export function completionInstruction(completion: LoginCompletion | null): string {
