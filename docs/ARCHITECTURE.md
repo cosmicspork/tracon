@@ -986,9 +986,24 @@ name may not be an `[[mcp_server]]`'s. The plugin tree sits inside the state
 directory, which an agent can write, so the path guard treats it as it treats the
 export area: a node-owned exception. A program there is run only when it was reached
 through no link an agent could have made and is writable by no one but the node, and
-no directory key may point into the tree. This release installs and records plugins.
-Starting them, and brokering their tools under policy with a signed caller context
-and credentials lent per call, comes after.
+no directory key may point into the tree.
+
+**A plugin runs as one supervised process per channel, holding nothing it was not
+handed.** `plugin::supervisor` starts an instance when a channel's session first needs
+it and stops it after the `[[plugin]]` entry's idle timeout, on an update, rollback or
+removal, and at shutdown. Each start checks the active build's tree digest again and
+its program through the path guard, then runs it with an empty environment except for
+a per-start instance token, the node's public key and the contract version. Credentials
+are lent per call, never put in the environment, so a plugin process left running
+holds none. It speaks MCP over HTTP on a Unix socket in a private 0700 directory, with
+no loopback-port fallback, since a port is reachable by every local user. It is ready
+once `initialize` answers there. Failed starts back off from 1 s to 60 s and then leave
+the instance unhealthy rather than retrying forever. The restart loop has the shape of
+the sandbox's service supervisor but is not that code: that one spawns as another
+user through the sandbox protocol and never gives up. A running instance holds off a
+`when_idle` node restart, which it releases within its idle timeout once a drain
+refuses the turns that would use it. Brokering plugin tools under policy, with a signed
+caller context and credentials lent per call, comes after.
 
 ### Authority grants
 

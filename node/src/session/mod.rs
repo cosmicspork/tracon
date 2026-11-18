@@ -607,6 +607,8 @@ pub struct Manager {
     slots: Arc<placing::Slots>,
     /// Sessions waiting for a new sign-in to their provider.
     sign_in_waits: Arc<sign_in::SignInWaits>,
+    /// The plugin processes running on this node.
+    plugins: Arc<crate::plugin::supervisor::Supervisor>,
 }
 
 /// The manager's continuation guard, held. Every path that carries a session
@@ -627,7 +629,24 @@ impl Manager {
         policy: Arc<parking_lot::RwLock<crate::policy::Policy>>,
         backend: Arc<dyn crate::boundary::Backend>,
     ) -> Self {
+        let live = cfg.clone();
+        let plugins = Arc::new(crate::plugin::supervisor::Supervisor::new(
+            store.clone(),
+            Config::state_dir(),
+            node_id.clone(),
+            Arc::new(move |name: &str| {
+                let secs = live
+                    .live()
+                    .plugin
+                    .iter()
+                    .find(|p| p.name == name)
+                    .map(|p| p.idle_timeout_secs())
+                    .unwrap_or(crate::config::PluginEntry::DEFAULT_IDLE_TIMEOUT_SECS);
+                std::time::Duration::from_secs(secs)
+            }),
+        ));
         Self {
+            plugins,
             tools,
             policy,
             backend,
@@ -700,6 +719,11 @@ impl Manager {
     /// The review sessions being started here.
     pub fn review_starts(&self) -> &Arc<crate::mcp::review::ReviewStarts> {
         &self.review_starts
+    }
+
+    /// The plugin processes this node runs.
+    pub fn plugins(&self) -> &Arc<crate::plugin::supervisor::Supervisor> {
+        &self.plugins
     }
 
     /// The node's checks of external candidates under way on this node.

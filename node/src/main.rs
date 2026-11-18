@@ -197,6 +197,24 @@ enum PluginCommand {
     },
     /// Go back to the version installed before the active one.
     Rollback { name: String },
+    /// The last lines a plugin's instance on a channel wrote, and what the
+    /// node said of it.
+    Logs {
+        name: String,
+        #[arg(long)]
+        channel: String,
+        /// How many lines.
+        #[arg(short = 'n', long, default_value_t = 200)]
+        lines: usize,
+    },
+    /// Stop a plugin's instance on a channel and start it afresh, clearing
+    /// its backoff: what brings an unhealthy one back. On a channel it has
+    /// not run on yet, start it there.
+    Restart {
+        name: String,
+        #[arg(long)]
+        channel: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1614,6 +1632,9 @@ async fn plugin_command(command: PluginCommand) -> Result<()> {
                     };
                     println!("  pending: {pending_version} ({card})");
                 }
+                for instance in row["instances"].as_array().into_iter().flatten() {
+                    println!("  {}", instance_line(instance));
+                }
             }
             Ok(())
         }
@@ -1687,6 +1708,76 @@ async fn plugin_command(command: PluginCommand) -> Result<()> {
             );
             Ok(())
         }
+        PluginCommand::Logs {
+            name,
+            channel,
+            lines,
+        } => {
+            let v = node_call(
+                Method::GET,
+                &format!(
+                    "/api/plugins/{}/logs?channel={}&lines={lines}",
+                    urlencoding(&name),
+                    urlencoding(&channel)
+                ),
+                None,
+                None,
+            )
+            .await?;
+            for line in v["lines"].as_array().into_iter().flatten() {
+                println!("{}", line.as_str().unwrap_or(""));
+            }
+            Ok(())
+        }
+        PluginCommand::Restart { name, channel } => {
+            let v = node_call(
+                Method::POST,
+                &format!("/api/plugins/{}/restart", urlencoding(&name)),
+                Some(serde_json::json!({ "channel": channel })),
+                None,
+            )
+            .await?;
+            println!("{name} {}", instance_line(&v["instance"]));
+            if let Some(error) = v["error"].as_str() {
+                anyhow::bail!("{error}");
+            }
+            Ok(())
+        }
+    }
+}
+
+/// One plugin instance, as `tracon plugin ls` shows it:
+/// `<channel>: <state> pid <pid> up <uptime> restarts <n> — <last error>`.
+fn instance_line(instance: &serde_json::Value) -> String {
+    let mut line = format!(
+        "{}: {}",
+        instance["channel"].as_str().unwrap_or("?"),
+        instance["state"].as_str().unwrap_or("?").replace('_', " "),
+    );
+    if let Some(pid) = instance["pid"].as_u64() {
+        line.push_str(&format!(" pid {pid}"));
+    }
+    if let Some(up) = instance["uptime_secs"].as_u64() {
+        line.push_str(&format!(" up {}", short_duration(up)));
+    }
+    if let Some(ms) = instance["backoff_ms"].as_u64() {
+        line.push_str(&format!(" next try in {}", short_duration(ms / 1000)));
+    }
+    line.push_str(&format!(
+        " restarts {}",
+        instance["restarts"].as_u64().unwrap_or(0)
+    ));
+    if let Some(error) = instance["last_error"].as_str() {
+        line.push_str(&format!(" — {error}"));
+    }
+    line
+}
+
+fn short_duration(secs: u64) -> String {
+    match secs {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m{}s", s / 60, s % 60),
+        s => format!("{}h{}m", s / 3600, s % 3600 / 60),
     }
 }
 

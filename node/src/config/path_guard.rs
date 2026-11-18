@@ -1793,6 +1793,14 @@ pub fn resolve(key: &str, value: &str, fallbacks: &[&Path]) -> Option<Result<Pat
     current().map(|guard| guard.program_with(key, value, fallbacks))
 }
 
+/// A plugin's program to spawn (`Guard::plugin_program`), checked now.
+pub fn plugin_program(path: &Path) -> std::io::Result<PathBuf> {
+    match current() {
+        Some(guard) => Ok(guard.plugin_program(path)?),
+        None => Ok(path.to_path_buf()),
+    }
+}
+
 /// The consulta program to spawn, with its arguments checked now.
 pub fn consulta(consulta: &Consulta) -> std::io::Result<PathBuf> {
     match current() {

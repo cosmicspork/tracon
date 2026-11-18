@@ -303,7 +303,8 @@ pub fn router(state: AppState) -> Router {
             get(api::list_channels).post(api::create_channel),
         )
         // Plugins: adding or updating one raises its install card; rolling
-        // back and removing are admin actions (`passkey::AdminAction`).
+        // back, removing and restarting an instance are admin actions
+        // (`passkey::AdminAction`).
         .route("/api/plugins", get(plugins::list).post(plugins::add))
         .route(
             "/api/plugins/archive",
@@ -314,6 +315,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/plugins/{name}/update", post(plugins::update))
         .route("/api/plugins/{name}/rollback", post(plugins::rollback))
         .route("/api/plugins/{name}", delete(plugins::remove))
+        .route("/api/plugins/{name}/logs", get(plugins::logs))
+        .route("/api/plugins/{name}/restart", post(plugins::restart))
         .route("/api/repos/recent", get(api::recent_repos))
         .route("/api/repos/branches", get(api::repo_branches))
         .route("/api/repos/clone", post(api::clone_repo))
@@ -769,6 +772,8 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         manager: manager.clone(),
     });
     manager.record_egress_refusals();
+    // A node killed outright leaves its plugins' sockets behind.
+    tokio::task::spawn_blocking(crate::plugin::supervisor::sweep_sockets);
     // Off unless `[digitalocean]` names a credential and `[placement]
     // digitalocean` is not `off`.
     if let Err(error) = crate::provider::digitalocean::runtime::DoRuntime::start(
@@ -1249,6 +1254,8 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     // The listener is closed; end every live session so no harness container
     // outlives the process that gates it.
     manager.shutdown_all().await;
+    // No plugin process outlives the node that supervises it.
+    manager.plugins().shutdown().await;
     // A stop, not a failed start.
     if state_lock.is_some() {
         crate::config::last_good::clean_stop(&boots);

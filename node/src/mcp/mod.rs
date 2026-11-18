@@ -1827,6 +1827,13 @@ impl Tools {
             }
             return Ok(());
         }
+        if outcome.is_ok() {
+            // An update: what ran the build before stops, and the next use
+            // starts this one.
+            if let Ok(name) = crate::plugin::card_plugin(&approval) {
+                access.manager.plugins().stop_plugin(&name).await;
+            }
+        }
         let (state, result, reason) = match outcome {
             Ok(result) => (SUCCEEDED, Some(result.to_string()), None),
             Err(error) => (FAILED, None, Some(error)),

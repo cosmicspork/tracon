@@ -21,6 +21,8 @@ import type {
   StorageScheduled,
   DataInventory,
   McpServerStatus,
+  PluginInstance,
+  PluginSummary,
   DocKindInfo,
   Document,
   EnrollStatus,
@@ -449,6 +451,18 @@ export const api = {
   /** Runtime storage whose owner is over; removed only with `apply`. Loopback only. */
   /** What the serving node holds, kind by kind, and where each is deleted. */
   data: () => call<DataInventory>('GET', '/api/maintenance/data'),
+  plugins: () => call<{ plugins: PluginSummary[] }>('GET', '/api/plugins'),
+  /** The last lines a plugin's instance on `channel` wrote. */
+  pluginLogs: (name: string, channel: string, lines = 200) =>
+    call<{ lines: string[] }>(
+      'GET',
+      `/api/plugins/${encodeURIComponent(name)}/logs?channel=${encodeURIComponent(channel)}&lines=${lines}`,
+    ),
+  /** Start a plugin's instance afresh, its backoff cleared; answered once ready or failed. */
+  pluginRestart: (name: string, channel: string) =>
+    call<{ instance: PluginInstance; error?: string }>('POST', `/api/plugins/${encodeURIComponent(name)}/restart`, {
+      channel,
+    }),
   mcpServers: (refresh = false) =>
     call<{ servers: McpServerStatus[] }>('GET', `/api/mcp-servers${refresh ? '?refresh=true' : ''}`),
   storageSweep: (apply: boolean, caches: boolean) =>

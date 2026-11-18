@@ -47,6 +47,7 @@ export function restartBanner(s: RestartStatus | null): RestartBannerView | null
       s.busy.turns.length ? count(s.busy.turns.length, 'turn', 'turns') : '',
       s.busy.checks ? count(s.busy.checks, 'check', 'checks') : '',
       s.busy.reviews ? count(s.busy.reviews, 'review', 'reviews') : '',
+      s.busy.plugins?.length ? count(s.busy.plugins.length, 'plugin instance', 'plugin instances') : '',
     ].filter(Boolean)
     return {
       tone: 'warn',

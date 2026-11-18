@@ -25,6 +25,10 @@ path = "tests/support/fake_claude.rs"
 name = "fake_native"
 path = "tests/support/fake_native.rs"
 
+[[bin]]
+name = "fake_plugin"
+path = "tests/support/fake_plugin.rs"
+
 [dependencies]
 anyhow.workspace = true
 tracon-proto.workspace = true

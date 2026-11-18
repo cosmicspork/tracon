@@ -4,7 +4,10 @@
 //! install card; the operator's answer to that card is what installs it,
 //! and allowing it is an admin action (`api::admin_answer`). Rolling back
 //! and removing change what the node holds without a card, so each is an
-//! admin action itself (`passkey::AdminAction`).
+//! admin action itself (`passkey::AdminAction`). Each of those stops the
+//! plugin's running instances (`plugin::supervisor`); the next use starts
+//! what is active then. Restarting an instance kills a process and starts
+//! one, so it is an admin action too.
 
 use axum::{
     body::Bytes,
@@ -63,6 +66,13 @@ fn row_view(s: &AppState, row: &PluginRow) -> Value {
         view["ui"] = json!(b.manifest.ui.is_some());
         view
     });
+    let instances: Vec<_> = s
+        .manager
+        .plugins()
+        .status()
+        .into_iter()
+        .filter(|i| i.plugin == row.name)
+        .collect();
     json!({
         "name": row.name,
         "repo": row.repo,
@@ -71,6 +81,7 @@ fn row_view(s: &AppState, row: &PluginRow) -> Value {
         "previous": row.previous.as_ref().map(build_view),
         "pending": pending,
         "updated_ms": row.updated_ms,
+        "instances": instances,
     })
 }
 
@@ -97,18 +108,23 @@ fn card_channel(s: &AppState, named: Option<&str>) -> ApiResult<String> {
             "name a channel for the install card (--channel), or set [session] default_channel",
         ));
     }
-    let known = s.store().channel_list()?;
-    let exists = match known.is_empty() {
-        true => DEFAULT_CHANNELS.contains(&channel.as_str()),
-        false => known.iter().any(|c| c.name == channel),
-    };
-    if !exists {
+    if !channel_known(s, &channel)? {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
             format!("no channel {channel} on this node"),
         ));
     }
     Ok(channel)
+}
+
+/// Whether the node has `channel`: one it holds, or, holding none yet, one
+/// of the channels a fresh node starts with.
+fn channel_known(s: &AppState, channel: &str) -> ApiResult<bool> {
+    let known = s.store().channel_list()?;
+    Ok(match known.is_empty() {
+        true => DEFAULT_CHANNELS.contains(&channel),
+        false => known.iter().any(|c| c.name == channel),
+    })
 }
 
 /// Put a staged build to the operator, and say what came of it.
@@ -287,10 +303,13 @@ pub async fn rollback(
     AdminAction(()): AdminAction,
 ) -> ApiResult<Json<Value>> {
     let store = s.store().clone();
-    let (now, was) =
-        tokio::task::spawn_blocking(move || plugins::rollback(&store, &Config::state_dir(), &name))
-            .await
-            .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    let name_ = name.clone();
+    let (now, was) = tokio::task::spawn_blocking(move || {
+        plugins::rollback(&store, &Config::state_dir(), &name_)
+    })
+    .await
+    .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    s.manager.plugins().stop_plugin(&name).await;
     Ok(Json(
         json!({ "active": build_view(&now), "previous": build_view(&was) }),
     ))
@@ -312,15 +331,96 @@ pub async fn remove(
 ) -> ApiResult<Json<Value>> {
     let store = s.store().clone();
     let removed = name.clone();
+    // Stopped before its builds (and, purged, its data) go, and again after
+    // in case a use started it in between.
+    s.manager.plugins().stop_plugin(&name).await;
     let expired = tokio::task::spawn_blocking(move || {
         plugins::remove(&store, &Config::state_dir(), &removed, query.purge)
     })
     .await
     .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    s.manager.plugins().stop_plugin(&name).await;
     if let Some(id) = expired {
         if let Some(row) = s.store().get_approval(&id)? {
             s.manager.approval_decided(&row, EXPIRED).await;
         }
     }
     Ok(Json(json!({ "removed": name, "purged": query.purge })))
+}
+
+#[derive(Deserialize)]
+pub struct LogsQuery {
+    channel: String,
+    #[serde(default)]
+    lines: Option<usize>,
+}
+
+/// `GET /api/plugins/{name}/logs?channel=&lines=`: the last lines an
+/// instance wrote, and what the node said of it.
+pub async fn logs(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    Query(query): Query<LogsQuery>,
+) -> ApiResult<Json<Value>> {
+    let lines = query.lines.unwrap_or(200).min(1000);
+    Ok(Json(json!({
+        "lines": s.manager.plugins().logs(&name, &query.channel, lines),
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct RestartBody {
+    channel: String,
+}
+
+/// `POST /api/plugins/{name}/restart`: stop the instance on a channel and
+/// start it afresh, clearing its backoff, or start it on a channel it has
+/// not run on yet; answered once it is ready or has failed.
+pub async fn restart(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    AdminAction(Json(body)): AdminAction<Json<RestartBody>>,
+) -> ApiResult<Json<Value>> {
+    let supervisor = s.manager.plugins();
+    let channel = body.channel;
+    let instance = |supervisor: &crate::plugin::supervisor::Supervisor| {
+        supervisor
+            .status()
+            .into_iter()
+            .find(|i| i.plugin == name && i.channel == channel)
+    };
+    let outcome = if instance(supervisor).is_some() {
+        supervisor.restart(&name, &channel).await
+    } else {
+        // Not run here yet. Starting it is how an operator tries a plugin
+        // before a session uses it, so only an installed plugin on a
+        // channel the node has.
+        let installed = s
+            .store()
+            .plugin_get(&name)?
+            .is_some_and(|row| row.active.is_some() && row.state != crate::store::plugins::REMOVED);
+        if !installed {
+            return Err(ApiError::new(
+                StatusCode::NOT_FOUND,
+                format!("plugin {name} is not installed"),
+            ));
+        }
+        if !channel_known(&s, &channel)? {
+            return Err(ApiError::new(
+                StatusCode::NOT_FOUND,
+                format!("no channel {channel} on this node"),
+            ));
+        }
+        supervisor.ensure(&name, &channel).await
+    };
+    let Some(status) = instance(supervisor) else {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            format!("plugin {name} has no instance on {channel}"),
+        ));
+    };
+    Ok(Json(match outcome {
+        Ok(_) => json!({ "instance": status }),
+        Err(error) => json!({ "instance": status, "error": error }),
+    }))
 }

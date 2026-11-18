@@ -600,23 +600,29 @@ impl Registry {
             let connection = match held {
                 Some(connection) => connection,
                 None => {
-                    let connection = self.initialize(server, headers, &print).await?;
+                    let id = self.next_id();
+                    let connection = handshake(self.target(server), id, headers, LIST_TIMEOUT)
+                        .await
+                        .map(|c| Connection {
+                            fingerprint: print.clone(),
+                            ..c
+                        })?;
                     self.connections
                         .lock()
                         .insert(key.clone(), connection.clone());
                     connection
                 }
             };
-            match self
-                .rpc(
-                    server,
-                    headers,
-                    Some(&connection),
-                    method,
-                    params.clone(),
-                    timeout,
-                )
-                .await
+            match rpc(
+                self.target(server),
+                self.next_id(),
+                headers,
+                Some(&connection),
+                method,
+                params.clone(),
+                timeout,
+            )
+            .await
             {
                 Err(Failure::Expired) => {
                     self.connections.lock().remove(&key);
@@ -627,161 +633,16 @@ impl Registry {
         Err(Failure::Expired)
     }
 
-    async fn initialize(
-        &self,
-        server: &McpServer,
-        headers: &[(String, String)],
-        print: &str,
-    ) -> Result<Connection, Failure> {
-        let (result, session_id) = self
-            .rpc(
-                server,
-                headers,
-                None,
-                "initialize",
-                json!({
-                    "protocolVersion": PROTOCOL_VERSION,
-                    "capabilities": {},
-                    "clientInfo": { "name": "mcp-client", "version": "1.0.0" },
-                }),
-                LIST_TIMEOUT,
-            )
-            .await
-            .map_err(|failure| match failure {
-                // Nothing was asked of the server yet.
-                Failure::Unknown(e) => Failure::Unreachable(e),
-                other => other,
-            })?;
-        let connection = Connection {
-            fingerprint: print.to_string(),
-            session_id,
-            version: result["protocolVersion"]
-                .as_str()
-                .unwrap_or(PROTOCOL_VERSION)
-                .to_string(),
-        };
-        let mut note = self.post(
-            server,
-            headers,
-            Some(&connection),
-            &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
-        );
-        note = note.timeout(LIST_TIMEOUT);
-        let response = note
-            .send()
-            .await
-            .map_err(|e| Failure::Unreachable(e.to_string()))?;
-        if !response.status().is_success() {
-            return Err(Failure::Refused(format!(
-                "HTTP {} to notifications/initialized",
-                response.status()
-            )));
+    fn target<'a>(&'a self, server: &'a McpServer) -> Target<'a> {
+        Target {
+            http: &self.http,
+            url: &server.url,
         }
-        Ok(connection)
     }
 
-    fn post(
-        &self,
-        server: &McpServer,
-        headers: &[(String, String)],
-        connection: Option<&Connection>,
-        body: &Value,
-    ) -> reqwest::RequestBuilder {
-        let mut request = self
-            .http
-            .post(&server.url)
-            .header("accept", "application/json, text/event-stream")
-            .json(body);
-        for (name, value) in headers {
-            request = request.header(name, value);
-        }
-        if let Some(connection) = connection {
-            request = request.header("mcp-protocol-version", &connection.version);
-            if let Some(id) = &connection.session_id {
-                request = request.header("mcp-session-id", id);
-            }
-        }
-        request
-    }
-
-    /// One JSON-RPC request, answered as JSON or as an event stream, and the
-    /// session id the server set, if it set one.
-    async fn rpc(
-        &self,
-        server: &McpServer,
-        headers: &[(String, String)],
-        connection: Option<&Connection>,
-        method: &str,
-        params: Value,
-        timeout: Duration,
-    ) -> Result<(Value, Option<String>), Failure> {
-        let id = self
-            .next_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let body = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-        let request = self.post(server, headers, connection, &body);
-        let exchange = async {
-            let response = request.send().await.map_err(|e| {
-                if e.is_connect() || e.is_builder() {
-                    Failure::Unreachable(e.to_string())
-                } else {
-                    Failure::Unknown(e.to_string())
-                }
-            })?;
-            let status = response.status();
-            if status == reqwest::StatusCode::NOT_FOUND
-                && connection.is_some_and(|c| c.session_id.is_some())
-            {
-                return Err(Failure::Expired);
-            }
-            let session_id = response
-                .headers()
-                .get("mcp-session-id")
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_string);
-            let streamed = response
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|t| t.starts_with("text/event-stream"));
-            if !status.is_success() {
-                let text = read_bounded(response).await.unwrap_or_default();
-                return Err(Failure::Refused(match status.as_u16() {
-                    401 | 403 => format!("refused the credential (HTTP {status})"),
-                    _ => format!("HTTP {status}: {}", bounded(text.trim(), 300)),
-                }));
-            }
-            let message = if streamed {
-                read_event(response, id).await?
-            } else {
-                let text = read_bounded(response).await.map_err(Failure::Unknown)?;
-                let value: Value = serde_json::from_str(&text)
-                    .map_err(|e| Failure::Refused(format!("unreadable answer: {e}")))?;
-                match value {
-                    Value::Array(batch) => batch
-                        .into_iter()
-                        .find(|m| m["id"] == json!(id))
-                        .ok_or_else(|| Failure::Refused("no answer to the request".into()))?,
-                    single => single,
-                }
-            };
-            if let Some(error) = message.get("error") {
-                return Err(Failure::Refused(
-                    error["message"]
-                        .as_str()
-                        .map(str::to_string)
-                        .unwrap_or_else(|| error.to_string()),
-                ));
-            }
-            Ok((message["result"].clone(), session_id))
-        };
-        match tokio::time::timeout(timeout, exchange).await {
-            Ok(outcome) => outcome,
-            Err(_) => Err(Failure::Unknown(format!(
-                "no answer to {method} within {}s",
-                timeout.as_secs()
-            ))),
-        }
+    fn next_id(&self) -> u64 {
+        self.next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Each server as the node sees it now, for the operator: where it is,
@@ -833,6 +694,197 @@ impl Registry {
                 })
             })
             .collect()
+    }
+}
+
+/// Where a request goes: the client that carries it and the URL it names.
+/// An `[[mcp_server]]` is reached over HTTP at its `url`; a plugin over its
+/// Unix socket (`unix_client`), at `PLUGIN_URL`.
+#[derive(Clone, Copy)]
+pub struct Target<'a> {
+    pub http: &'a reqwest::Client,
+    pub url: &'a str,
+}
+
+/// The URL a plugin is asked at: the host names nothing, the socket is the
+/// connection.
+pub const PLUGIN_URL: &str = "http://plugin/";
+
+/// A client for an MCP server on a Unix socket: a plugin
+/// (`crate::plugin::supervisor`). No proxy and no redirects.
+pub fn unix_client(socket: &std::path::Path) -> reqwest::Client {
+    reqwest::Client::builder()
+        .unix_socket(socket)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("http client")
+}
+
+/// Whether the MCP server `http` reaches (`unix_client`) answers
+/// `initialize` within `timeout`: a plugin's readiness. No credential is
+/// sent; the instance token travels with each call.
+pub async fn initialize_unix(http: &reqwest::Client, timeout: Duration) -> Result<(), String> {
+    let target = Target {
+        http,
+        url: PLUGIN_URL,
+    };
+    handshake(target, 1, &[], timeout)
+        .await
+        .map(|_| ())
+        .map_err(|f| f.describe("plugin"))
+}
+
+/// `initialize`, then `notifications/initialized`: the MCP session it
+/// starts, its fingerprint left for the caller to set.
+async fn handshake(
+    target: Target<'_>,
+    id: u64,
+    headers: &[(String, String)],
+    timeout: Duration,
+) -> Result<Connection, Failure> {
+    let (result, session_id) = rpc(
+        target,
+        id,
+        headers,
+        None,
+        "initialize",
+        json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": { "name": "mcp-client", "version": "1.0.0" },
+        }),
+        timeout,
+    )
+    .await
+    .map_err(|failure| match failure {
+        // Nothing was asked of the server yet.
+        Failure::Unknown(e) => Failure::Unreachable(e),
+        other => other,
+    })?;
+    let connection = Connection {
+        fingerprint: String::new(),
+        session_id,
+        version: result["protocolVersion"]
+            .as_str()
+            .unwrap_or(PROTOCOL_VERSION)
+            .to_string(),
+    };
+    let response = post(
+        target,
+        headers,
+        Some(&connection),
+        &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+    )
+    .timeout(timeout)
+    .send()
+    .await
+    .map_err(|e| Failure::Unreachable(e.to_string()))?;
+    if !response.status().is_success() {
+        return Err(Failure::Refused(format!(
+            "HTTP {} to notifications/initialized",
+            response.status()
+        )));
+    }
+    Ok(connection)
+}
+
+fn post(
+    target: Target<'_>,
+    headers: &[(String, String)],
+    connection: Option<&Connection>,
+    body: &Value,
+) -> reqwest::RequestBuilder {
+    let mut request = target
+        .http
+        .post(target.url)
+        .header("accept", "application/json, text/event-stream")
+        .json(body);
+    for (name, value) in headers {
+        request = request.header(name, value);
+    }
+    if let Some(connection) = connection {
+        request = request.header("mcp-protocol-version", &connection.version);
+        if let Some(id) = &connection.session_id {
+            request = request.header("mcp-session-id", id);
+        }
+    }
+    request
+}
+
+/// One JSON-RPC request, answered as JSON or as an event stream, and the
+/// session id the server set, if it set one.
+async fn rpc(
+    target: Target<'_>,
+    id: u64,
+    headers: &[(String, String)],
+    connection: Option<&Connection>,
+    method: &str,
+    params: Value,
+    timeout: Duration,
+) -> Result<(Value, Option<String>), Failure> {
+    let body = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+    let request = post(target, headers, connection, &body);
+    let exchange = async {
+        let response = request.send().await.map_err(|e| {
+            if e.is_connect() || e.is_builder() {
+                Failure::Unreachable(e.to_string())
+            } else {
+                Failure::Unknown(e.to_string())
+            }
+        })?;
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND
+            && connection.is_some_and(|c| c.session_id.is_some())
+        {
+            return Err(Failure::Expired);
+        }
+        let session_id = response
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let streamed = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|t| t.starts_with("text/event-stream"));
+        if !status.is_success() {
+            let text = read_bounded(response).await.unwrap_or_default();
+            return Err(Failure::Refused(match status.as_u16() {
+                401 | 403 => format!("refused the credential (HTTP {status})"),
+                _ => format!("HTTP {status}: {}", bounded(text.trim(), 300)),
+            }));
+        }
+        let message = if streamed {
+            read_event(response, id).await?
+        } else {
+            let text = read_bounded(response).await.map_err(Failure::Unknown)?;
+            let value: Value = serde_json::from_str(&text)
+                .map_err(|e| Failure::Refused(format!("unreadable answer: {e}")))?;
+            match value {
+                Value::Array(batch) => batch
+                    .into_iter()
+                    .find(|m| m["id"] == json!(id))
+                    .ok_or_else(|| Failure::Refused("no answer to the request".into()))?,
+                single => single,
+            }
+        };
+        if let Some(error) = message.get("error") {
+            return Err(Failure::Refused(
+                error["message"]
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| error.to_string()),
+            ));
+        }
+        Ok((message["result"].clone(), session_id))
+    };
+    match tokio::time::timeout(timeout, exchange).await {
+        Ok(outcome) => outcome,
+        Err(_) => Err(Failure::Unknown(format!(
+            "no answer to {method} within {}s",
+            timeout.as_secs()
+        ))),
     }
 }
 
