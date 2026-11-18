@@ -840,6 +840,23 @@ leases on whatever the branch holds on the forge, so a publication that pushed
 and then failed to open can be rebased and retried. Once a change is open, its
 base is moved on the forge, and a resubmission naming another is refused.
 
+A review can also push straight to its base, with no change: submitted with
+`branch` equal to `base`, approval fast-forwards the base to the approved
+revision (squashed onto it with the approved message, or the agent's commits under
+`keep`) and opens nothing, so the forge's CI runs after the push rather than before
+it. Any review may ask for it. Publication looks first and refuses if the base moved
+since the revision was captured; the push is never forced, a rewrite is refused, and
+a resubmission under the same review pushes its next revision the same way. While
+`warn_direct` is on (the default; `[publish]`, a repository's entry, or the channel's
+`publish.warn_direct` binding), the review, its card and its notification say so in a
+warning that names the commit it fast-forwards from. The node also asks the forge
+what protects the base, at submit and when the review opens (GitHub's rulesets and,
+where the credential can read it, classic protection; GitLab's protected branch), and
+shows what it found: a base that requires a pull request is named as a push that will
+be rejected, and a lookup that fails reads *protection unknown* with its reason. The
+forge is the authority: submit is not refused on it, and a push the forge rejects is
+a publication error carrying the forge's message, never retried or worked around.
+
 Feedback left on the forge comes back the same way: an agent reads a change's
 review threads (file, line, resolved or outdated) and conversation with
 `pr_threads` / `mr_discussions`, finds a branch's open change with `pr_for_branch` /
@@ -1792,6 +1809,7 @@ glab = "glab"
 git = "git"
 forge_timeout_secs = 15             # how long one gh or glab call may run
 commits = "squash"                  # one commit of the reviewed tree; "keep" pushes the agent's commits
+warn_direct = true                  # warn when a review pushes straight to its base, no change opened
 # [publish.style]                   # every rule off unless set; a repository entry may carry its own
 # conventional = true               # type(scope): subject, types from `types` or the usual set
 # imperative = true                 # "add", not "added" or "adds"

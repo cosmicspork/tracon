@@ -104,7 +104,7 @@ pub fn definitions() -> Vec<Value> {
                         },
                     },
                     "message": { "type": "string", "description": "The commit message the change ships with; the title, body and forge description never become it. Omitted, it is your one commit's own message, and that commit ships as it is, SHA and signature, when it sits directly on the base; with several commits beyond the base, `message` is required. Another message ships one new, unsigned commit of the reviewed tree (a repository set to keep its commits pushes them as written). The operator may edit it; the result says what ships (`ships`, `commit_message`, `drops_signatures`)." },
-                    "branch": { "type": "string", "description": "The forge branch a new change is pushed to, e.g. feat/short-description. Defaults to your worktree's branch, or one named from the title. Fixed by a review's first submit; an existing change is pushed to its own branch." },
+                    "branch": { "type": "string", "description": "The forge branch a new change is pushed to, e.g. feat/short-description. Defaults to your worktree's branch, or one named from the title. Fixed by a review's first submit; an existing change is pushed to its own branch. Naming the base itself (branch equal to base) pushes straight to it: approval fast-forwards the base, opens no change, and CI runs after the push; your work must build on origin/<base>, a rewrite is refused, and a base the forge protects (a pull request required, say) rejects the push, which the result's `direct.protection` says before the operator decides." },
                     "rewrite": { "type": "boolean", "description": "The branch's history was rewritten (rebase, amend), so the push replaces what the forge's branch holds, only over what it held at submit and always approved by the operator." },
                 },
                 "required": ["title", "body", "provider", "project"],
@@ -579,6 +579,8 @@ async fn submit(
                 url: String::new(),
             }),
             initial: false,
+            direct: false,
+            warn_direct: false,
         },
     };
     let mut forge = forge_arg(args)?;
@@ -648,19 +650,48 @@ async fn submit(
             .find_map(|publication| publication.pushed_sha),
         _ => None,
     };
-    let mut intent = forge_intent(
-        manager,
-        ctx,
-        &mut target,
-        asked_branch.is_some(),
-        &capture.head_sha,
-        &worktree,
-        forge,
-        rewrite,
-        last_pushed,
-        squash.then_some(store.as_ref()),
-    )
-    .await?;
+    // A branch named as a base the forge has asks to push straight to it:
+    // approval fast-forwards the base and opens no change.
+    target.direct = !target.initial && target.branch == target.base;
+    target.warn_direct = target.direct
+        && review::prose::warn_direct(
+            &manager.cfg().live(),
+            store,
+            &ctx.channel,
+            repo_path.as_deref(),
+        );
+    let mut intent = if target.direct {
+        let from = direct_from(
+            &target,
+            &worktree,
+            range_base.as_deref(),
+            &capture.head_sha,
+            rewrite,
+        )
+        .await?;
+        Intent {
+            forge,
+            // What the base held when this was reviewed: the only commit
+            // the push may fast-forward from.
+            lease: Some(from),
+            protection: Some(base_protection(manager, &ctx.channel, &ctx.node_id, &target).await),
+            ..Intent::default()
+        }
+    } else {
+        forge_intent(
+            manager,
+            ctx,
+            &mut target,
+            asked_branch.is_some(),
+            &capture.head_sha,
+            &worktree,
+            forge,
+            rewrite,
+            last_pushed,
+            squash.then_some(store.as_ref()),
+        )
+        .await?
+    };
     intent.commits = commits;
     // On a change already on the forge, what its branch holds is published:
     // the review shows, and the cap measures, only what this push adds to it.
@@ -785,7 +816,14 @@ async fn submit(
             tracing::warn!(%error, review = %existing.id, "change not drafted for a new revision");
         }
     }
-    let ships = what_ships(&intent);
+    let mut ships = what_ships(&intent);
+    if target.direct {
+        ships["direct"] = json!({
+            "base": target.base,
+            "from": intent.lease,
+            "protection": intent.protection,
+        });
+    }
     let intent_json = Some(serde_json::to_string(&intent).map_err(|e| e.to_string())?);
     let max_snapshot_bytes = manager.cfg().live().supervision.max_snapshot_bytes;
     // Capture the committed candidate before any check can execute. The
@@ -2320,6 +2358,79 @@ async fn initial_push(manager: &Manager, ctx: &CallContext, target: &Target) -> 
             Ok(())
         }
     }
+}
+
+/// The commit a review that pushes straight to its base fast-forwards it
+/// from: what `origin/<base>` holds in the worktree, which the revision must
+/// build on. It opens no change, so it names none, and the base is never
+/// rewritten.
+async fn direct_from(
+    target: &Target,
+    worktree: &str,
+    range_base: Option<&str>,
+    head_sha: &str,
+    rewrite: bool,
+) -> Result<String, String> {
+    let base = &target.base;
+    if let Some(change) = &target.change {
+        return Err(format!(
+            "branch {base} pushes straight to {base} and opens no change, so it cannot update \
+             change {}; submit on that change's branch instead",
+            change.number
+        ));
+    }
+    if rewrite {
+        return Err(format!(
+            "branch {base} pushes straight to {base}, which is only ever fast-forwarded, never \
+             rewritten; rebase onto origin/{base} and submit without rewrite"
+        ));
+    }
+    let range_base = range_base.ok_or_else(|| format!("origin/{base} is not in this worktree"))?;
+    let from = review::resolve(worktree, range_base)
+        .await
+        .map_err(|e| e.to_string())?;
+    if !review::descends_from(worktree, head_sha, &from).await {
+        return Err(format!(
+            "{head_sha:.8} does not build on {range_base} ({from:.8}), so pushing it to {base} \
+             would not be a fast-forward: fetch, rebase onto {range_base} and submit again"
+        ));
+    }
+    Ok(from)
+}
+
+/// What protects `target`'s base on the forge, read with the channel's
+/// credential: at submit, and again when the review page opens. Never a
+/// refusal; a lookup that cannot be made says why.
+pub(crate) async fn base_protection(
+    manager: &Manager,
+    channel: &str,
+    node_id: &str,
+    target: &Target,
+) -> review::publish::BaseProtection {
+    use review::publish::BaseProtection;
+    let Some(provider) = Provider::parse(&target.provider) else {
+        return BaseProtection::unknown(format!(
+            "{} is not a provider this node publishes to",
+            target.provider
+        ));
+    };
+    let env = manager
+        .broker()
+        .read()
+        .unwrap()
+        .env_for(provider.credential(), channel, node_id);
+    let env = match env {
+        Ok(env) => env,
+        Err(error) => {
+            return BaseProtection::unknown(format!("no forge credential on {channel}: {error}"))
+        }
+    };
+    let dir = match review::publish::inspection_dir() {
+        Ok(dir) => dir,
+        Err(error) => return BaseProtection::unknown(error.to_string()),
+    };
+    let live = manager.cfg().live();
+    review::publish::base_protection(provider, &live, &dir, &env, target).await
 }
 
 /// Settle what this revision may do on the forge, asking the forge rather

@@ -1379,6 +1379,8 @@ mod tests {
                 url: String::new(),
             }),
             initial: false,
+            direct: false,
+            warn_direct: false,
         };
         let squash = "5".repeat(40);
         let intent = publish::Intent {

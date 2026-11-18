@@ -203,6 +203,7 @@ pub const KEYS: &[KeySpec] = &[
     live("publish.style.max_subject"),
     live("publish.style.kebab_branch"),
     live("publish.style.no_ticket_keys"),
+    live("publish.warn_direct"),
     // [github]
     live("github.dispatch.*"),
     // [mesh]
@@ -282,6 +283,7 @@ pub const KEYS: &[KeySpec] = &[
     live("repo.style.max_subject"),
     live("repo.style.kebab_branch"),
     live("repo.style.no_ticket_keys"),
+    live("repo.warn_direct"),
     // [[service]]
     restart("service.name"),
     restart("service.command"),

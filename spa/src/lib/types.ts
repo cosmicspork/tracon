@@ -671,6 +671,12 @@ export interface ReviewDetails {
    * the forge; absent from a node that predates it.
    */
   change_draft?: ChangeDraft | null
+  /**
+   * For a review that pushes straight to its base: what protects the base,
+   * read from the forge as the page opened. Null otherwise; absent from a
+   * node that predates it.
+   */
+  protection?: BaseProtection | null
 }
 
 export interface ForgeIdentity {
@@ -854,6 +860,18 @@ export interface ReviewIntent {
   own_message?: string
   /** Of `commits`, the signed ones a commit made in publication would replace. */
   signed?: string[]
+  /** For a push straight to the base: what protected it at submit. */
+  protection?: BaseProtection
+}
+
+/** What protects a base on the forge, for a review that pushes straight to it. */
+export interface BaseProtection {
+  /** Each rule found; empty or absent: nothing protects the base. */
+  found?: string[]
+  /** Why the forge will refuse the push, when a rule says it will. */
+  rejects?: string
+  /** The lookup failed, and why. */
+  unknown?: string
 }
 
 export interface ReviewRevisionRef {
@@ -1889,6 +1907,8 @@ export interface RepoEntry {
   commits?: 'squash' | 'keep'
   /** Its commit-subject and branch rules. Not edited here. */
   style?: Record<string, unknown>
+  /** Whether a push straight to its base is warned of. Not edited here. */
+  warn_direct?: boolean
 }
 
 /** One build of a repository's image on this node. */

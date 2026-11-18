@@ -2675,6 +2675,29 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
         }
         _ => None,
     };
+    // What protects the base a direct push lands on, asked of the forge
+    // again now: rules change between submit and approval. Node-local: the
+    // owner holds the credential.
+    let protection = match (&remote_owner, &r.target) {
+        (None, target) => match serde_json::from_str::<crate::review::publish::Target>(target) {
+            Ok(target)
+                if target.direct
+                    && !matches!(
+                        r.state.as_str(),
+                        "approved" | "rejected" | "acknowledged" | "gone"
+                    ) =>
+            {
+                Some(
+                    crate::mcp::review::base_protection(
+                        &s.manager, &r.channel, &s.node_id, &target,
+                    )
+                    .await,
+                )
+            }
+            _ => None,
+        },
+        _ => None,
+    };
     // Why no reviewer is reading it, as the node last found when it tried.
     // Node-local: the owner is what starts one, and a mirror reads these
     // three from it (`OWNER_FIELDS`).
@@ -2710,6 +2733,7 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
         "change_draft": change_draft,
         "shown_work": shown_work,
         "authorship": authorship,
+        "protection": protection,
     }))
 }
 
@@ -2741,6 +2765,7 @@ const OWNER_FIELDS: &[&str] = &[
     "publication",
     "forge_state",
     "change_draft",
+    "protection",
 ];
 
 /// The review row's own fields the owner's reviewer writes, taken from the

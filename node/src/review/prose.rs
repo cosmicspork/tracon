@@ -333,12 +333,7 @@ pub fn message_for(
 pub fn rules(cfg: &Config, store: &Store, channel: &str, repo: Option<&Path>) -> (Commits, Style) {
     let repos = cfg.repos();
     let entry = repo.and_then(|repo| repos.iter().find(|entry| entry.matches(repo)));
-    let bindings = store
-        .channel_get(channel)
-        .ok()
-        .flatten()
-        .and_then(|row| serde_json::from_str::<serde_json::Value>(&row.bindings_json).ok())
-        .unwrap_or_default();
+    let bindings = publish_binding(store, channel);
     let bound = &bindings["publish"];
     let commits = entry
         .and_then(|e| e.commits)
@@ -349,6 +344,28 @@ pub fn rules(cfg: &Config, store: &Store, channel: &str, repo: Option<&Path>) ->
         .or_else(|| serde_json::from_value(bound["style"].clone()).ok())
         .unwrap_or_else(|| cfg.publish.style.clone());
     (commits, style)
+}
+
+/// Whether the operator is warned of a review that pushes straight to its
+/// base, resolved as `rules` resolves the rest: the repository's entry, then
+/// the channel's `publish` binding, then `[publish] warn_direct`.
+pub fn warn_direct(cfg: &Config, store: &Store, channel: &str, repo: Option<&Path>) -> bool {
+    let repos = cfg.repos();
+    let entry = repo.and_then(|repo| repos.iter().find(|entry| entry.matches(repo)));
+    entry
+        .and_then(|e| e.warn_direct)
+        .or_else(|| publish_binding(store, channel)["publish"]["warn_direct"].as_bool())
+        .unwrap_or(cfg.publish.warn_direct)
+}
+
+/// The channel's bindings, where its `publish` settings are.
+fn publish_binding(store: &Store, channel: &str) -> serde_json::Value {
+    store
+        .channel_get(channel)
+        .ok()
+        .flatten()
+        .and_then(|row| serde_json::from_str::<serde_json::Value>(&row.bindings_json).ok())
+        .unwrap_or_default()
 }
 
 /// One commit the agent made, as listed beside the diff.
@@ -365,6 +382,44 @@ pub struct CommitLine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The repository's entry, then the channel's binding, then `[publish]`.
+    #[test]
+    fn warn_direct_resolves_from_the_repository_then_the_channel_then_the_node() {
+        let store = Store::open_in_memory().unwrap();
+        let repo = Path::new("/src/github.com/owner/app");
+        let mut cfg = Config::default();
+        assert!(
+            warn_direct(&cfg, &store, "work", Some(repo)),
+            "on by default"
+        );
+        cfg.publish.warn_direct = false;
+        assert!(!warn_direct(&cfg, &store, "work", Some(repo)));
+        store
+            .channel_put(
+                "work",
+                b"",
+                &serde_json::json!({ "publish": { "warn_direct": true } }).to_string(),
+            )
+            .unwrap();
+        assert!(
+            warn_direct(&cfg, &store, "work", Some(repo)),
+            "the channel's"
+        );
+        cfg.repo = vec![crate::config::Repo {
+            path: "github.com/owner/app".into(),
+            warn_direct: Some(false),
+            ..Default::default()
+        }];
+        assert!(
+            !warn_direct(&cfg, &store, "work", Some(repo)),
+            "the repository's wins"
+        );
+        assert!(
+            warn_direct(&cfg, &store, "work", Some(Path::new("/src/other"))),
+            "another repository falls back to the channel's"
+        );
+    }
 
     #[test]
     fn a_conventional_imperative_subject_passes() {

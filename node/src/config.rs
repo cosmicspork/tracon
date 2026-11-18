@@ -1778,6 +1778,11 @@ pub struct Repo {
     /// channel's and `[publish] style`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub style: Option<crate::review::prose::Style>,
+    /// Whether a review that pushes straight to this repository's base is
+    /// shown with a warning, in place of the channel's and `[publish]
+    /// warn_direct`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warn_direct: Option<bool>,
 }
 
 /// The hosts each egress preset stands for. A preset is the registry and the
@@ -2519,6 +2524,11 @@ pub struct Publish {
     /// the channel's `publish.style` binding or the repository's entry says
     /// otherwise. Every rule is off by default.
     pub style: crate::review::prose::Style,
+    /// Warn the operator, on the review, its card and its notification, when
+    /// a review pushes straight to its base with no change, unless the
+    /// channel's `publish.warn_direct` binding or the repository's entry says
+    /// otherwise. On by default.
+    pub warn_direct: bool,
 }
 
 /// How a candidate's commits reach the forge.
@@ -3202,6 +3212,7 @@ impl Default for Config {
                 forge_timeout_secs: 15,
                 commits: Commits::Squash,
                 style: Default::default(),
+                warn_direct: true,
             },
             session: SessionDefaults {
                 budget_tokens: 0,

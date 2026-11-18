@@ -1135,6 +1135,8 @@ async fn publish_pins_the_reviewed_commit_and_refuses_a_moved_branch() {
         repo: None,
         change: None,
         initial: false,
+        direct: false,
+        warn_direct: false,
     };
     // A head_sha that is not the worktree's HEAD stands in for a branch that
     // moved between approval and publish.
@@ -8484,6 +8486,7 @@ async fn the_first_commit_of_an_empty_repository_is_reviewed_whole_and_pushed_as
     assert_eq!((review.added, review.removed), (1, 0));
     let target: tracon::review::publish::Target = serde_json::from_str(&review.target).unwrap();
     assert!(target.initial, "{}", review.target);
+    assert!(!target.direct, "{}", review.target);
     assert_eq!(
         (target.base.as_str(), target.branch.as_str()),
         ("main", "main")
@@ -8591,4 +8594,309 @@ async fn a_first_commit_is_not_pushed_over_a_base_the_forge_gained_since() {
         sh_out(&f.dir.join("origin.git"), "git rev-parse refs/heads/main"),
         theirs
     );
+}
+
+// ---- pushing straight to the base ----
+
+/// Submit the fixture's work with `branch` equal to `base`: a push straight
+/// to `main`.
+async fn submit_direct(f: &Fixture, extra: Value) -> Value {
+    let mut args = f.submit_args();
+    args["branch"] = json!("main");
+    for (key, value) in extra.as_object().unwrap() {
+        args[key] = value.clone();
+    }
+    f.tool("s1", "submit_review", args).await
+}
+
+fn target_of(f: &Fixture, id: &str) -> tracon::review::publish::Target {
+    serde_json::from_str(&f.store.get_review(id).unwrap().unwrap().target).unwrap()
+}
+
+/// A `gh` whose REST calls answer what protects `main`: `rules.json` for its
+/// rulesets and `classic.json` for its classic protection, or GitHub's 404
+/// when the test wrote none.
+fn gh_protecting(f: &Fixture, rules: Value, classic: Option<Value>) {
+    std::fs::write(f.dir.join("rules.json"), rules.to_string()).unwrap();
+    if let Some(classic) = classic {
+        std::fs::write(f.dir.join("classic.json"), classic.to_string()).unwrap();
+    }
+    std::fs::write(
+        f.dir.join("bin/gh"),
+        "#!/bin/sh\n\
+         d=\"$(dirname \"$0\")/..\"\n\
+         { echo \"ARGS: $*\"; echo \"GH_TOKEN=$GH_TOKEN\"; } >> \"$d/gh.log\"\n\
+         case \"$1 $3 $4\" in\n\
+         'api GET repos/owner/name/rules/branches/main') cat \"$d/rules.json\" ;;\n\
+         'api GET repos/owner/name/branches/main/protection')\n\
+         if [ -f \"$d/classic.json\" ]; then cat \"$d/classic.json\";\n\
+         else echo 'gh: Branch not protected (HTTP 404)' >&2; exit 1; fi ;;\n\
+         *) echo https://github.test/pull/1 ;;\n\
+         esac\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(f.dir.join("bin/gh"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+    }
+}
+
+/// A review whose branch is its base fast-forwards the base to the approved
+/// squash commit, carrying the approved message, and opens no change (#935).
+#[tokio::test]
+async fn a_review_on_its_base_fast_forwards_it_to_the_approved_squash_and_opens_no_change() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, squashing).await;
+    let base = f.base_sha();
+    let v = submit_direct(&f, json!({ "message": "feat: straight to main" })).await;
+    let id = review_id(&v);
+    assert_eq!(v["direct"]["base"], "main", "{v}");
+    assert_eq!(v["direct"]["from"], json!(base), "{v}");
+    let target = target_of(&f, &id);
+    assert!(target.direct && !target.initial, "{target:?}");
+    assert_eq!(intent(&f, &id).lease.as_deref(), Some(base.as_str()));
+    assert_eq!(intent(&f, &id).squash_onto.as_deref(), Some(base.as_str()));
+
+    // A rename would turn the push into a change nobody asked for.
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "approve", "outputs": { "branch": "feat/elsewhere" } })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body.to_string().contains("straight to main"), "{body}");
+
+    f.forget_logs();
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["published"], "https://github.com/owner/name/tree/main");
+    let origin = f.dir.join("origin.git");
+    let pushed = sh_out(&origin, "git rev-parse refs/heads/main");
+    assert_eq!(
+        sh_out(&origin, &format!("git log -1 --format=%P%n%B {pushed}")),
+        format!("{base}\nfeat: straight to main")
+    );
+    let head = f.store.get_review(&id).unwrap().unwrap().head_sha;
+    assert_eq!(
+        sh_out(&origin, &format!("git rev-parse {pushed}^{{tree}}")),
+        sh_out(
+            std::path::Path::new(&f.worktree),
+            &format!("git rev-parse {head}^{{tree}}")
+        )
+    );
+    assert!(!f.gh_log().contains("pr create"), "{}", f.gh_log());
+    assert!(!f.git_log().contains("--force"), "{}", f.git_log());
+    assert!(sh_out(&origin, "git branch --list feat/x").is_empty());
+}
+
+/// The base moved between submit and approval: nothing is pushed, and the
+/// operator is told to have it rebased.
+#[tokio::test]
+async fn a_direct_push_onto_a_base_that_moved_since_review_is_refused() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = review_id(&submit_direct(&f, json!({})).await);
+    let wt = std::path::Path::new(&f.worktree);
+    let origin = f.dir.join("origin.git");
+    sh(
+        wt,
+        &format!(
+            "git checkout -q -b other main && echo other > b.txt && git add -A \
+             && git commit -qm other && git push -q {} other:refs/heads/main \
+             && git checkout -q feat/x",
+            origin.display()
+        ),
+    );
+    let theirs = sh_out(&origin, "git rev-parse refs/heads/main");
+    f.forget_logs();
+
+    let (status, body) = f.approve(&id).await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(&format!("main moved to {}", &theirs[..8]))
+            && message.contains("fetch, rebase and submit again"),
+        "{body}"
+    );
+    assert!(!f.git_log().contains("push origin"), "{}", f.git_log());
+    assert_eq!(sh_out(&origin, "git rev-parse refs/heads/main"), theirs);
+}
+
+/// Under `keep` the agent's commits are what lands on the base; a
+/// resubmission under the same review pushes the next revision the same
+/// way, and a rewrite of the base is refused at submit.
+#[tokio::test]
+async fn a_direct_push_keeps_the_agents_commits_and_a_resubmission_pushes_again() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let wt = std::path::Path::new(&f.worktree);
+    let origin = f.dir.join("origin.git");
+    let id = review_id(&submit_direct(&f, json!({})).await);
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let first = sh_out(wt, "git rev-parse HEAD");
+    assert_eq!(sh_out(&origin, "git rev-parse refs/heads/main"), first);
+
+    // What a fetch would bring back.
+    sh(
+        wt,
+        &format!(
+            "git update-ref refs/remotes/origin/main {first} \
+             && echo again >> a.txt && git add -A && git commit -qm again"
+        ),
+    );
+    let mut args = f.submit_args();
+    args["review_id"] = json!(id);
+    let resubmitted = f.tool("s1", "submit_review", args).await;
+    assert_eq!(review_id(&resubmitted), id, "{resubmitted}");
+    assert!(target_of(&f, &id).direct);
+    assert_eq!(intent(&f, &id).lease.as_deref(), Some(first.as_str()));
+    f.forget_logs();
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        sh_out(&origin, "git rev-parse refs/heads/main"),
+        sh_out(wt, "git rev-parse HEAD")
+    );
+    assert!(!f.gh_log().contains("pr create"), "{}", f.gh_log());
+
+    sh(wt, "git commit -q --amend -m 'again, amended'");
+    let mut args = f.submit_args();
+    args["review_id"] = json!(id);
+    args["rewrite"] = json!(true);
+    let refused = f.tool("s1", "submit_review", args).await;
+    let error = refused["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{refused}"));
+    assert!(error.contains("never rewritten"), "{error}");
+}
+
+/// A direct push names no change: a submit asking for both is refused.
+#[tokio::test]
+async fn a_direct_push_cannot_also_update_a_change() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let refused = submit_direct(&f, json!({ "change": 7 })).await;
+    let error = refused["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{refused}"));
+    assert!(error.contains("opens no change"), "{error}");
+    assert!(f.store.open_reviews().unwrap().is_empty());
+}
+
+/// On by default, the warning is on the target the page, the card and the
+/// notification read; `[publish] warn_direct = false` turns it off, and the
+/// target is still named plainly as direct.
+#[tokio::test]
+async fn a_direct_push_is_warned_of_unless_warn_direct_is_off() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = review_id(&submit_direct(&f, json!({})).await);
+    assert!(target_of(&f, &id).warn_direct);
+
+    let quiet = fixture_with(&format!("{}-quiet", test_name!()), WITH_GH, |c| {
+        c.publish.warn_direct = false
+    })
+    .await;
+    let id = review_id(&submit_direct(&quiet, json!({})).await);
+    let target = target_of(&quiet, &id);
+    assert!(target.direct && !target.warn_direct, "{target:?}");
+
+    // A review that opens a change is never warned of.
+    let id = f.submit().await;
+    let target = target_of(&f, &id);
+    assert!(!target.direct && !target.warn_direct, "{target:?}");
+}
+
+/// What protects the base is read at submit and again when the review opens:
+/// a pull request required is shown as a push that will be rejected, and a
+/// lookup that fails says protection is unknown, with its reason. Submit is
+/// refused for neither.
+#[tokio::test]
+async fn the_bases_protection_is_shown_before_approval() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    gh_protecting(
+        &f,
+        json!([
+            { "type": "pull_request", "parameters": {} },
+            { "type": "required_status_checks", "parameters": { "required_status_checks": [
+                { "context": "title" }, { "context": "spa" }
+            ] } },
+        ]),
+        None,
+    );
+    let v = submit_direct(&f, json!({})).await;
+    let id = review_id(&v);
+    let rejects = "main requires a pull request; this push will be rejected. Resubmit on a \
+                   branch to open a change.";
+    assert_eq!(v["direct"]["protection"]["rejects"], rejects, "{v}");
+    let protection = intent(&f, &id).protection.unwrap();
+    assert_eq!(
+        protection.found,
+        ["requires a pull request", "required checks spa, title"]
+    );
+    let (status, detail) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["protection"]["rejects"], rejects, "{detail}");
+
+    // The stub `gh` answers anything else with a URL, not JSON.
+    let unknown = fixture(&format!("{}-unknown", test_name!()), WITH_GH).await;
+    let id = review_id(&submit_direct(&unknown, json!({})).await);
+    let reason = intent(&unknown, &id).protection.unwrap().unknown;
+    assert!(
+        reason.as_deref().is_some_and(|r| r.contains("not JSON")),
+        "{reason:?}"
+    );
+    let (_, detail) = unknown
+        .call("GET", &format!("/api/reviews/{id}"), None)
+        .await;
+    assert!(detail["protection"]["unknown"].is_string(), "{detail}");
+}
+
+/// A forge that refuses the push says why in the publication error, and
+/// nothing is recorded as published: no retry, no way around it.
+#[tokio::test]
+async fn a_rejected_direct_push_surfaces_the_forges_message_and_publishes_nothing() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = review_id(&submit_direct(&f, json!({})).await);
+    let origin = f.dir.join("origin.git");
+    let base = sh_out(&origin, "git rev-parse refs/heads/main");
+    let hook = origin.join("hooks/pre-receive");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\necho 'GH006: Protected branch update failed for refs/heads/main.' >&2\nexit 1\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    f.forget_logs();
+
+    let (status, body) = f.approve(&id).await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("GH006: Protected branch update failed"),
+        "{body}"
+    );
+    assert_eq!(
+        f.git_log().matches("push origin").count(),
+        1,
+        "{}",
+        f.git_log()
+    );
+    assert!(!f.git_log().contains("--force"), "{}", f.git_log());
+    assert_eq!(sh_out(&origin, "git rev-parse refs/heads/main"), base);
+    let record = f.publication(&id);
+    assert_eq!(record.state, "failed");
+    assert!(record.pushed_sha.is_none() && record.result.is_none());
+    assert_ne!(f.store.get_review(&id).unwrap().unwrap().state, "approved");
 }
