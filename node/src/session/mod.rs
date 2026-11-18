@@ -3272,6 +3272,9 @@ impl Manager {
         // The image a session placed elsewhere started from: its template's
         // there, which `image` (this node's runtime's) knows nothing of.
         let mut started_elsewhere = None;
+        // Why that is not what its repository gets on this node's own
+        // runtime, when it is not.
+        let mut elsewhere_note = None;
         let (runner, cache_env) = match &placed {
             placing::Placed::DigitalOcean {
                 runtime,
@@ -3291,6 +3294,11 @@ impl Manager {
                     .ok_or_else(|| {
                         anyhow::anyhow!("DigitalOcean has no image to run this session in yet")
                     })?;
+                if let Some(note) = &image.note {
+                    tracing::info!(session = %id, %note, "a session on DigitalOcean runs without its repository's own image");
+                }
+                elsewhere_note = image.note;
+                let image = image.image;
                 started_elsewhere = Some(image.clone());
                 // Its trees are kept where this node's own sandboxes keep
                 // theirs, which is where its workspace was made.
@@ -3445,11 +3453,12 @@ impl Manager {
                     Some(started_in) => crate::repo_image::source_elsewhere(
                         started_in,
                         &crate::sandbox_images::base_image(&self.cfg),
+                        &environment.image,
                     ),
                     None => image.source(&self.cfg),
                 },
                 "toolchain_image": image.toolchain_image,
-                "image_note": image.note,
+                "image_note": elsewhere_note.as_ref().or(image.note.as_ref()),
                 "resumed": reopened.is_some(),
             }),
             at_ms: now_ms(),
