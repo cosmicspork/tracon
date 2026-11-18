@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { capabilityName, capabilityTone, elsewhereLines } from './capabilities'
+import { capabilityName, capabilityTone, elsewhereLines, memoryWords, roomLine, roomWords } from './capabilities'
 import type { Elsewhere } from './types'
 
 const line = (value: string | null) => ({ capability: 'route', value, check: 'network_isolated', detail: '' })
@@ -93,5 +93,39 @@ describe('a provider elsewhere', () => {
     const root = elsewhereLines(there({ reported: { version: '0.48.1', uid: null } }))[3]
     expect(root.tone).toBe('bad')
     expect(root.detail).toContain('0.48.1 did not become uid 65532')
+  })
+})
+
+describe("a cluster's room", () => {
+  const full = { free_cpu: 763, free_memory: 660602880, needs_cpu: 1250, needs_memory: 1610612736, fits: false }
+  test('says what it has free and what a session and its checks need', () => {
+    expect(roomWords(full)).toBe('the cluster has 630 Mi free, a session and its checks need 1.5 Gi')
+    expect(roomWords({ ...full, free_memory: 4 * 1024 ** 3, free_cpu: 500 })).toBe(
+      'the cluster has 0.5 CPU free, a session and its checks need 1.25 CPU',
+    )
+    expect(roomWords({ ...full, free_memory: 4 * 1024 ** 3, free_cpu: 2000, fits: true })).toBe(
+      'the cluster has 4 Gi and 2 CPU free; a session and its checks need 1.5 Gi and 1.25 CPU',
+    )
+    expect(roomWords({ running: 2, limit: 4 })).toBe('')
+    expect(roomWords(null)).toBe('')
+    expect(memoryWords(512 * 1024 * 1024)).toBe('512 Mi')
+  })
+
+  test('says why it was not read, and a pod the scheduler refused', () => {
+    expect(roomWords({ unread: 'the node may not read node n1' })).toBe("the cluster's room was not read: the node may not read node n1")
+    expect(roomWords({ fits: false, unschedulable: 'could not be scheduled: 0/1 nodes are available' })).toBe(
+      'its pod could not be scheduled: 0/1 nodes are available',
+    )
+  })
+
+  test('is a line beside the runtime capabilities', () => {
+    expect(roomLine(full)).toEqual({
+      label: 'room',
+      tone: 'warn',
+      text: 'full',
+      detail: 'the cluster has 630 Mi free, a session and its checks need 1.5 Gi: a new session overflows or is refused',
+    })
+    expect(roomLine({ unread: 'forbidden' })?.tone).toBe('off')
+    expect(roomLine(undefined)).toBeNull()
   })
 })

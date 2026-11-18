@@ -593,6 +593,23 @@ pub async fn run_required_for(
                 }
                 (outcome, code, tail(&output_text), metadata)
             }
+            // The cluster had no room for the check's pod past its grace:
+            // said in the scheduler's words, never waited on until the
+            // check's own timeout.
+            Ok(Err(RunnerError::Refused { reason, message }))
+                if reason == crate::provider::kubernetes::pod::UNSCHEDULABLE =>
+            {
+                (
+                    "interrupted",
+                    None,
+                    message.clone(),
+                    json!({
+                        "execution_backend": backend.kind(),
+                        "runner_error": message,
+                        "unschedulable": true,
+                    }),
+                )
+            }
             Ok(Err(error)) => (
                 "interrupted",
                 None,

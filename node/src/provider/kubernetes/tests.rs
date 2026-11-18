@@ -653,11 +653,47 @@ async fn admission_that_widens_the_pod_is_a_breach() {
 }
 
 /// Affinity puts the pod through the scheduler, which leaves one that does
-/// not fit pending; a lack of room is a refusal, as the kubelet's was.
+/// not fit pending, whatever keeps it off: that is read as unschedulable,
+/// in the scheduler's words, and `connect` gives it its grace.
 #[test]
-fn a_pod_the_scheduler_has_no_room_for_is_refused() {
+fn a_pod_the_scheduler_has_no_room_for_is_unschedulable() {
+    let k = options().spec;
+    for said in [
+        "0/3 nodes are available: 1 Insufficient memory, 2 node(s) didn't match pod affinity rules.",
+        "0/3 nodes are available: 3 node(s) had untolerated taint.",
+    ] {
+        match progress("tracon-c-1", &unschedulable_for(said), Sizing::Command, &k) {
+            Progress::Unschedulable(message) => assert_eq!(message, said),
+            _ => panic!("not unschedulable: {said}"),
+        }
+    }
+    let RunnerError::Refused { reason, message } = pod::unschedulable_error(
+        "tracon-c-1",
+        "0/1 nodes are available: 1 Insufficient memory.",
+        Sizing::Command,
+        &k.resources,
+        Duration::from_secs(61),
+    ) else {
+        panic!("not a refusal");
+    };
+    assert_eq!(reason, pod::UNSCHEDULABLE);
+    assert!(
+        message
+            .starts_with("could not be scheduled: 0/1 nodes are available: 1 Insufficient memory."),
+        "{message}"
+    );
+    assert!(
+        message.contains(
+            "requests 2Gi of memory ([runtime.kubernetes.resources.command] memory_request)"
+        ),
+        "{message}"
+    );
+    assert!(message.contains("tracon-c-1"), "{message}");
+}
+
+fn unschedulable_for(message: &str) -> PodStatus {
     use k8s_openapi::api::core::v1::PodCondition;
-    let unschedulable_for = |message: &str| PodStatus {
+    PodStatus {
         phase: Some("Pending".into()),
         conditions: Some(vec![PodCondition {
             type_: "PodScheduled".into(),
@@ -667,25 +703,63 @@ fn a_pod_the_scheduler_has_no_room_for_is_refused() {
             ..Default::default()
         }]),
         ..Default::default()
-    };
-    let k = options().spec;
-    let status =
-        unschedulable_for("0/3 nodes are available: 1 Insufficient memory, 2 node(s) didn't match pod affinity rules.");
-    match progress("tracon-c-1", &status, Sizing::Command, &k) {
-        Progress::Failed(reason, ProviderError::Refused { message, .. }) => {
-            assert_eq!(reason, "out_of_memory");
-            assert!(
-                message.contains("[runtime.kubernetes.resources.command] memory_request"),
-                "{message}"
-            );
-        }
-        _ => panic!("not refused"),
     }
-    let other = unschedulable_for("0/3 nodes are available: 3 node(s) had untolerated taint.");
-    assert!(matches!(
-        progress("tracon-c-1", &other, Sizing::Command, &k),
-        Progress::Waiting
-    ));
+}
+
+/// A pod the scheduler keeps unschedulable is given up after
+/// `unschedulable_grace_secs`, with the scheduler's message, rather than
+/// waited on until `start_timeout_secs`; the read before the grace is up
+/// waits.
+#[tokio::test(start_paused = true)]
+async fn an_unschedulable_pod_is_given_up_after_its_grace() {
+    let router = axum::Router::new().route(
+        "/api/v1/namespaces/tracon-node/pods/tracon-c-1",
+        axum::routing::get(|| async {
+            axum::Json(serde_json::json!({
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {"name": "tracon-c-1", "namespace": "tracon-node"},
+                "status": {
+                    "phase": "Pending",
+                    "conditions": [{
+                        "type": "PodScheduled",
+                        "status": "False",
+                        "reason": "Unschedulable",
+                        "message": "0/1 nodes are available: 1 Insufficient memory.",
+                    }],
+                },
+            }))
+        }),
+    );
+    let mut options = options();
+    options.listen = "127.0.0.1:0".parse().unwrap();
+    options.spec.unschedulable_grace = Duration::from_secs(60);
+    let provider = KubeSandboxProvider::new(kube::Client::new(router, "tracon-node"), options);
+    let identity = tracon_sandbox::tls::NodeIdentity::generate().unwrap();
+    let server =
+        SandboxServer::new(&identity, tracon_sandbox::node::ServerOptions::default()).unwrap();
+    let begun = tokio::time::Instant::now();
+    let error = provider
+        .connect(
+            &Handle("tracon-c-1".into()),
+            &server,
+            Duration::from_secs(30),
+        )
+        .await
+        .err()
+        .expect("refused");
+    let waited = begun.elapsed();
+    assert!(waited >= Duration::from_secs(60), "{waited:?}");
+    assert!(waited < Duration::from_secs(65), "{waited:?}");
+    let ProviderError::Refused { reason, message } = error else {
+        panic!("{error}");
+    };
+    assert_eq!(reason, pod::UNSCHEDULABLE);
+    assert!(
+        message
+            .starts_with("could not be scheduled: 0/1 nodes are available: 1 Insufficient memory."),
+        "{message}"
+    );
 }
 
 /// A connection is handed only to the run expected at its address, whether

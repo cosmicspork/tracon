@@ -306,6 +306,51 @@ pub(crate) fn refusal_error(
     }
 }
 
+/// What a refusal for a pod the scheduler found no room for is classified
+/// as (`RunnerError::Refused::reason`): a session's start is placed again on
+/// it, and a check reports it as its result.
+pub const UNSCHEDULABLE: &str = "unschedulable";
+
+/// What a pod the scheduler kept unschedulable past
+/// `[runtime.kubernetes] unschedulable_grace_secs` is reported as: the
+/// scheduler's own words first, then, where it names a resource this pod
+/// requests, the request and the `[runtime.kubernetes.resources.*]` key
+/// that sizes it.
+pub(crate) fn unschedulable_error(
+    name: &str,
+    said: &str,
+    sizing: Sizing,
+    resources: &KubeResources,
+    waited: Duration,
+) -> RunnerError {
+    let sized = sizing.sized(resources);
+    let table = format!("[runtime.kubernetes.resources.{}]", sizing.as_str());
+    let said = match said.trim() {
+        "" => "the scheduler gave no reason",
+        said => said,
+    };
+    let mut message = format!("could not be scheduled: {said}");
+    if said.contains("Insufficient memory") {
+        message.push_str(&format!(
+            "; this pod requests {} of memory ({table} memory_request)",
+            sized.memory_request
+        ));
+    } else if said.contains("Insufficient cpu") {
+        message.push_str(&format!(
+            "; this pod requests {} cpu ({table} cpu_request)",
+            sized.cpu_request
+        ));
+    }
+    message.push_str(&format!(
+        " (pod {name}, unschedulable for {}s; [runtime.kubernetes] unschedulable_grace_secs)",
+        waited.as_secs()
+    ));
+    RunnerError::Refused {
+        reason: UNSCHEDULABLE,
+        message,
+    }
+}
+
 /// Whether the API server refused a create for a ResourceQuota or a
 /// LimitRange: a 403 whose message is the quota's (`exceeded quota`, or
 /// `failed quota: <name>: must specify ...` when the quota covers a resource
@@ -373,6 +418,10 @@ pub struct KubeSpec {
     /// How long a pod may stay unstarted (unscheduled, pulling, mounting)
     /// before the run is given up. `[runtime.kubernetes] start_timeout_secs`.
     pub start_timeout: Duration,
+    /// How long a pod may stay unschedulable before its start is given up
+    /// with the scheduler's message. `[runtime.kubernetes]
+    /// unschedulable_grace_secs`.
+    pub unschedulable_grace: Duration,
     /// `[runtime.kubernetes.resources]`: a session's pod and a captured
     /// command's are sized apart.
     pub resources: KubeResources,
@@ -405,6 +454,7 @@ impl KubeSpec {
             state_dir: layout.dir,
             stop_timeout_secs: cfg.boundary.stop_timeout_secs,
             start_timeout: Duration::from_secs(k.start_timeout_secs),
+            unschedulable_grace: Duration::from_secs(k.unschedulable_grace_secs),
             resources: k.resources.clone(),
             image_pull_secrets: k.image_pull_secrets.clone(),
             shm_size: k.shm_size.clone(),

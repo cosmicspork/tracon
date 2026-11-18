@@ -60,6 +60,7 @@
 //! never from inside.
 
 pub mod pod;
+pub mod room;
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, SocketAddr};
@@ -806,28 +807,18 @@ fn refused(error: RunnerError) -> ProviderError {
     }
 }
 
-/// Why the scheduler cannot place a pod for lack of room on the node's
-/// machine: affinity binds it there, so it would wait for room rather than
-/// be refused, as a pod bound by `nodeName` was.
-fn unschedulable(status: &PodStatus) -> Option<(Refusal, String)> {
+/// What the scheduler says of a pod it has not placed: its `PodScheduled`
+/// condition `False` with reason `Unschedulable`, for lack of room on the
+/// node's machine (affinity binds it there) or for anything else that keeps
+/// it off (a taint, a cordon). It waits rather than fails, so `connect` gives
+/// it `unschedulable_grace` before it says so.
+fn unschedulable(status: &PodStatus) -> Option<String> {
     let condition = status.conditions.as_deref()?.iter().find(|c| {
         c.type_ == "PodScheduled"
             && c.status == "False"
             && c.reason.as_deref() == Some("Unschedulable")
     })?;
-    let message = condition.message.clone().unwrap_or_default();
-    let refusal = if message.contains("Insufficient cpu") {
-        Refusal::OutOfCpu
-    } else if message.contains("Insufficient memory") {
-        Refusal::OutOfMemory
-    } else if message.contains("Too many pods") {
-        Refusal::OutOfPods
-    } else if message.contains("Insufficient ephemeral-storage") {
-        Refusal::OutOfEphemeralStorage
-    } else {
-        return None;
-    };
-    Some((refusal, message))
+    Some(condition.message.clone().unwrap_or_default())
 }
 
 impl KubeSandboxProvider {
@@ -1211,6 +1202,8 @@ impl KubeSandboxProvider {
 enum Progress {
     Waiting,
     Started,
+    /// The scheduler finds no place for it, in its words.
+    Unschedulable(String),
     /// Ended before it connected.
     Ended(String),
     Failed(&'static str, ProviderError),
@@ -1229,11 +1222,8 @@ fn progress(name: &str, status: &PodStatus, sizing: Sizing, k: &KubeSpec) -> Pro
             )),
         );
     }
-    if let Some((refused, said)) = unschedulable(status) {
-        return Progress::Failed(
-            refused.as_str(),
-            self::refused(refusal_error(name, refused, sizing, &k.resources, &said)),
-        );
+    if let Some(said) = unschedulable(status) {
+        return Progress::Unschedulable(said);
     }
     let waiting = |statuses: Option<&Vec<k8s_openapi::api::core::v1::ContainerStatus>>| {
         statuses
@@ -1547,6 +1537,9 @@ impl SandboxProvider for KubeSandboxProvider {
         let pods = self.pods();
         let start_deadline = tokio::time::Instant::now() + self.options.spec.start_timeout;
         let mut connect_deadline: Option<tokio::time::Instant> = None;
+        // Since when the scheduler has said, without a break, that it has no
+        // place for the pod.
+        let mut unscheduled_since: Option<tokio::time::Instant> = None;
         let mut expected: Option<Expected> = None;
         let mut failures = 0;
         let mut tick = tokio::time::interval(POLL);
@@ -1600,8 +1593,28 @@ impl SandboxProvider for KubeSandboxProvider {
                             expected = Some(dispatcher.expect(&ips));
                         }
                     }
-                    match progress(name, &status, pending.sizing, &self.options.spec) {
+                    let progressed = progress(name, &status, pending.sizing, &self.options.spec);
+                    if !matches!(progressed, Progress::Unschedulable(_)) {
+                        unscheduled_since = None;
+                    }
+                    match progressed {
                         Progress::Failed(reason, error) => return Err(fail(reason, error)),
+                        Progress::Unschedulable(said) => {
+                            let since = *unscheduled_since.get_or_insert_with(tokio::time::Instant::now);
+                            let waited = since.elapsed();
+                            if waited >= self.options.spec.unschedulable_grace {
+                                return Err(fail(
+                                    pod::UNSCHEDULABLE,
+                                    refused(pod::unschedulable_error(
+                                        name,
+                                        &said,
+                                        pending.sizing,
+                                        &self.options.spec.resources,
+                                        waited,
+                                    )),
+                                ));
+                            }
+                        }
                         Progress::Ended(why) => {
                             return Err(failed(format!(
                                 "{name} stopped before connecting ({why}): {}",

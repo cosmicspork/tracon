@@ -23,6 +23,56 @@ export function capabilityTone(line: CapabilityLine): 'off' | 'warn' | '' {
   return ''
 }
 
+/** Memory as an operator reads it: `630 Mi`, `1.5 Gi`. */
+export function memoryWords(bytes: number): string {
+  const mi = 1024 * 1024
+  const gi = mi * 1024
+  if (bytes >= gi) return `${(bytes / gi).toFixed(1).replace(/\.0$/, '')} Gi`
+  return `${Math.floor(bytes / mi)} Mi`
+}
+
+/** CPU in cores from millicores: `2`, `0.75`. */
+export function cpuWords(millis: number): string {
+  return String(Number((millis / 1000).toFixed(2)))
+}
+
+/**
+ * Why a Kubernetes runtime is full or has room, from a placement event's
+ * `capacity` or the checks' `room`: the cluster's free and needed figures,
+ * the scheduler's refusal of the session's pod, or why the room was not
+ * read. Empty for a capacity that carries none of these (a count alone).
+ */
+export function roomWords(room: Record<string, unknown> | null | undefined): string {
+  if (!room) return ''
+  if (typeof room.unschedulable === 'string') return `its pod ${room.unschedulable}`
+  if (typeof room.unread === 'string') return `the cluster's room was not read: ${room.unread}`
+  const n = (k: string) => (typeof room[k] === 'number' ? (room[k] as number) : null)
+  const [freeCpu, freeMemory, needsCpu, needsMemory] = [n('free_cpu'), n('free_memory'), n('needs_cpu'), n('needs_memory')]
+  if (freeCpu === null || freeMemory === null || needsCpu === null || needsMemory === null) return ''
+  if (room.fits === true) {
+    return `the cluster has ${memoryWords(freeMemory)} and ${cpuWords(freeCpu)} CPU free; a session and its checks need ${memoryWords(needsMemory)} and ${cpuWords(needsCpu)} CPU`
+  }
+  if (freeMemory < needsMemory) {
+    return `the cluster has ${memoryWords(freeMemory)} free, a session and its checks need ${memoryWords(needsMemory)}`
+  }
+  return `the cluster has ${cpuWords(freeCpu)} CPU free, a session and its checks need ${cpuWords(needsCpu)} CPU`
+}
+
+/** The room line a local Kubernetes runtime shows beside its capabilities. */
+export function roomLine(room: Record<string, unknown> | null | undefined): ElsewhereLine | null {
+  const text = roomWords(room)
+  if (!text || !room) return null
+  if (typeof room.unread === 'string') {
+    return { label: 'room', tone: 'off', text: 'not read', detail: `${room.unread}; placement counts sessions only ([placement] local_limit)` }
+  }
+  return {
+    label: 'room',
+    tone: room.fits === false ? 'warn' : '',
+    text: room.fits === false ? 'full' : 'room for a session',
+    detail: room.fits === false ? `${text}: a new session overflows or is refused` : text,
+  }
+}
+
 /** One line of what a provider elsewhere stands at, in the checks list. */
 export interface ElsewhereLine {
   label: string

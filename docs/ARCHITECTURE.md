@@ -765,7 +765,20 @@ create. The provider reports either as a refusal (`RunnerError::Refused`, classi
 `[runtime.kubernetes.resources.*]` key that sizes it, rather than as a run that never
 connected. A quota that covers a resource the pod leaves unset (`failed quota: ...:
 must specify limits.cpu`, which every pod meets while `cpu_limit` is unset) is a
-`quota` refusal that names the key to set.
+`quota` refusal that names the key to set. A pod the scheduler keeps `Unschedulable`
+(its `PodScheduled` condition) past `[runtime.kubernetes] unschedulable_grace_secs`
+(60 s) is an `unschedulable` refusal carrying the scheduler's message: a session's
+start places the session again with the runtime counted full
+(`placement::Room::Unschedulable`), and a check reports "could not be scheduled: ..."
+as its result rather than waiting out its timeout.
+
+**Placement counts the cluster's room.** The Kubernetes candidate is full when a
+session's pod and one check's pod (`resources.session` plus `resources.command`) do not
+fit on the node pod's machine: allocatable less the requests of the pods bound there
+that have not ended (`provider::kubernetes::room`), read with cluster-wide read-only
+`get`/`list` on `nodes` and `pods` and kept for 3 s. `[placement] local_limit` still
+caps the count. A node that cannot read them places by count and records why
+(`capacity.unread` in the placement event).
 
 **The checks verify what runs.** They render the same run specification a session
 uses onto a probe that is created but never started, so a mutating admission webhook
@@ -1950,7 +1963,7 @@ scrape 7425 until an overlay adds an ingress rule admitting the scraper alone.
 
 | Family | Labels |
 |---|---|
-| `tracon_pod_refusals_total` | kind, sizing, reason (`out_of_cpu`, `out_of_memory`, `out_of_pods`, `out_of_ephemeral_storage`, `out_of_other`, `quota`) |
+| `tracon_pod_refusals_total` | kind, sizing, reason (`out_of_cpu`, `out_of_memory`, `out_of_pods`, `out_of_ephemeral_storage`, `out_of_other`, `quota`, `unschedulable`) |
 | `tracon_pod_start_failures_total` | kind, sizing, reason (`image_pull`, `config_error`, `start_timeout`, `create_error`, `attach_error`, `other`) |
 | `tracon_pod_start_seconds` | kind, sizing |
 | `tracon_runs_in_flight` | kind |

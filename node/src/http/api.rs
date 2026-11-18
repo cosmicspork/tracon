@@ -7563,6 +7563,14 @@ pub(crate) async fn recheck_boundary_with(
     let mut providers: Vec<_> = crate::provider::backend_report(backend.kind(), &report)
         .into_iter()
         .collect();
+    // A cluster's room for a session, which placement counts beside the
+    // session count.
+    if let Some(local) = providers.first_mut() {
+        local.room = backend.room().await.map(|read| match read {
+            Ok(fit) => crate::provider::Room::Read(fit),
+            Err(unread) => crate::provider::Room::Unread { unread },
+        });
+    }
     {
         use crate::provider::digitalocean::runtime as do_runtime;
         if let Some(runtime) = do_runtime::global().filter(|_| do_runtime::enabled(&s.cfg)) {

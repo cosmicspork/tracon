@@ -119,6 +119,10 @@ pub struct CapabilityReport {
     /// node, and whether it can take a session now.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub elsewhere: Option<Elsewhere>,
+    /// For a local Kubernetes runtime: its cluster's room for one more
+    /// session and its checks, as placement reads it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub room: Option<super::Room>,
 }
 
 /// A provider elsewhere as the node sees it now.
@@ -342,6 +346,7 @@ pub fn from_checks(provider: ProviderKind, report: &BoundaryReport) -> Capabilit
         capabilities,
         enforced: false,
         elsewhere: None,
+        room: None,
     }
 }
 

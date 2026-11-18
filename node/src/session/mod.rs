@@ -27,6 +27,18 @@ use crate::{
     stream::{Bus, Frame},
 };
 
+/// The scheduler's refusal of a session's pod, in its words, when that is
+/// why its harness did not launch (`provider::kubernetes::pod::UNSCHEDULABLE`).
+fn unschedulable(error: &crate::adapter::AdapterError) -> Option<String> {
+    match error {
+        crate::adapter::AdapterError::Runner(crate::runner::RunnerError::Refused {
+            reason,
+            message,
+        }) if *reason == crate::provider::kubernetes::pod::UNSCHEDULABLE => Some(message.clone()),
+        _ => None,
+    }
+}
+
 /// Startup is bounded separately from a turn: no model work has happened yet,
 /// so a stuck container or ACP handshake is a failed start, not a half-live
 /// session.
@@ -2488,29 +2500,42 @@ impl Manager {
 
     /// Decide where a starting session runs (`placing`), asking the
     /// operator first when that is what the decision is, and record it.
+    /// `unschedulable` is the scheduler's refusal of the session's pod on
+    /// this node's own runtime, which then counts as full: the session is
+    /// placed again, and the decision recorded, even where placement is
+    /// otherwise not in play.
     async fn place(
         &self,
         id: &str,
         channel: &str,
         origin: Option<&std::path::Path>,
         started: Instant,
+        unschedulable: Option<&str>,
     ) -> anyhow::Result<placing::Placed> {
         use crate::provider::digitalocean::runtime as do_runtime;
-        use crate::provider::{Placement, ProviderKind};
+        use crate::provider::{Placement, ProviderKind, Room};
         let resolved = placing::resolve(&self.cfg, channel, origin);
         let runtime = do_runtime::global().filter(|_| do_runtime::enabled(&self.cfg));
-        if !placing::in_play(runtime.is_some(), &resolved) {
+        if unschedulable.is_none() && !placing::in_play(runtime.is_some(), &resolved) {
             return Ok(placing::Placed::Local);
         }
         let mut providers = Vec::new();
         if let Some(kind) = ProviderKind::of_backend(self.backend.kind()) {
             let node = self.store.get_node(&self.node_id).ok().flatten();
-            providers.push(placing::local_candidate(
+            let mut local = placing::local_candidate(
                 kind,
                 placing::node_health(node.as_ref()),
                 self.running_locally(id).await,
                 self.cfg.live().placement.local_limit,
-            ));
+            );
+            local.room = match unschedulable {
+                Some(said) => Some(Room::unschedulable(said)),
+                None => self.backend.room().await.map(|read| match read {
+                    Ok(fit) => Room::Read(fit),
+                    Err(unread) => Room::Unread { unread },
+                }),
+            };
+            providers.push(local);
         }
         if let Some(runtime) = &runtime {
             providers.push(runtime.candidate(&self.cfg).await);
@@ -2878,7 +2903,7 @@ impl Manager {
             .ok()
             .flatten();
         let placed = self
-            .place(id, &spec.channel, origin.as_deref(), started)
+            .place(id, &spec.channel, origin.as_deref(), started, None)
             .await?;
         // Carried on in the sandbox the node's previous process left running
         // (`runner::reattach`): the session runs in what that sandbox runs,
@@ -3269,141 +3294,164 @@ impl Manager {
         let mut mounts = scratch.mounts;
         materialize::own_state(&mut mounts, &scratch.volume);
         mounts.push(workspace.mount("/work", false));
-        // The image a session placed elsewhere started from: its template's
-        // there, which `image` (this node's runtime's) knows nothing of.
-        let mut started_elsewhere = None;
-        let (runner, cache_env) = match &placed {
-            placing::Placed::DigitalOcean {
-                runtime,
-                requirements,
-            } => {
-                // Its repository's prepared snapshot where that has a
-                // template there (this node's, or a peer's by portable key).
-                let image = runtime
-                    .session_image(
-                        self.backend.as_ref(),
-                        &self.cfg,
-                        &self.store,
-                        origin.as_deref(),
-                        &environment,
+        // A session whose pod this node's runtime cannot schedule is placed
+        // again with that runtime counted full, once: on to DigitalOcean
+        // where it may go (or the operator asked), else ended with the
+        // scheduler's words.
+        let mut placed = placed;
+        let (runner, started_elsewhere, relaunch, handle, events) = loop {
+            // The image a session placed elsewhere started from: its
+            // template's there, which `image` (this node's runtime's) knows
+            // nothing of.
+            let mut started_elsewhere = None;
+            let (runner, cache_env) = match &placed {
+                placing::Placed::DigitalOcean {
+                    runtime,
+                    requirements,
+                } => {
+                    // Its repository's prepared snapshot where that has a
+                    // template there (this node's, or a peer's by portable key).
+                    let image = runtime
+                        .session_image(
+                            self.backend.as_ref(),
+                            &self.cfg,
+                            &self.store,
+                            origin.as_deref(),
+                            &environment,
+                        )
+                        .await
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("DigitalOcean has no image to run this session in yet")
+                        })?;
+                    started_elsewhere = Some(image.clone());
+                    // Its trees are kept where this node's own sandboxes keep
+                    // theirs, which is where its workspace was made.
+                    let files = self
+                        .backend
+                        .sandbox_files_store()
+                        .unwrap_or_else(crate::runner::sandbox_files::FilesStore::for_node);
+                    (
+                        runtime.runner_with(
+                            &self.cfg,
+                            requirements.clone(),
+                            mounts.clone(),
+                            image,
+                            adapter.id(),
+                            files,
+                        ),
+                        Vec::new(),
                     )
-                    .await
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("DigitalOcean has no image to run this session in yet")
-                    })?;
-                started_elsewhere = Some(image.clone());
-                // Its trees are kept where this node's own sandboxes keep
-                // theirs, which is where its workspace was made.
-                let files = self
-                    .backend
-                    .sandbox_files_store()
-                    .unwrap_or_else(crate::runner::sandbox_files::FilesStore::for_node);
-                (
-                    runtime.runner_with(
-                        &self.cfg,
-                        requirements.clone(),
-                        mounts,
-                        image,
+                }
+                placing::Placed::Local => {
+                    // Kept with the sandbox if the node stops while it runs.
+                    crate::runner::reattach::note_image(&container, &image);
+                    session_runner(
+                        self.backend.as_ref(),
                         adapter.id(),
-                        files,
-                    ),
-                    Vec::new(),
-                )
+                        image.image.as_deref(),
+                        session_cache.clone(),
+                        mounts.clone(),
+                    )
+                }
+            };
+
+            // Record the container name before it exists: it is deterministic, and a
+            // launch that fails after the container is created would otherwise leave
+            // a credential-mounted harness with no name in the store for
+            // `reconcile_after_restart` to remove.
+            self.store.update_session(
+                id,
+                SessionPatch {
+                    container_name: Some(container.clone()),
+                    ..Default::default()
+                },
+            )?;
+
+            let (mut harness_env, harness_secret_env) =
+                harness_environment(&wiring, egress.as_ref(), &harness_home);
+            harness_env.extend(cache_env);
+
+            let launch_spec = LaunchSpec {
+                cwd_in_runner: "/work".into(),
+                model: spec.model.clone(),
+                container_name: container.clone(),
+                harness_home: harness_home.clone(),
+                mcp_servers: mcp_servers.clone(),
+                tools: self.cfg.harness.tools.clone(),
+                env: harness_env,
+                secret_env: harness_secret_env,
+                system_prompt_file: Some(scratch.orientation_path.clone()),
+                resume: reopened.as_ref().map(|r| r.resume.clone()),
+                labels: crate::runner::RunLabels {
+                    channel: Some(spec.channel.clone()),
+                    phase: Some(spec.phase.as_str()),
+                    ..crate::runner::RunLabels::of(crate::runner::RunKind::Session)
+                }
+                // From the repository the work came from: a continued session's
+                // own path is `workspace://<session>`, which names no repository.
+                .repo_dir(origin.as_deref()),
+            };
+            // Asked before anything runs in it, so a conversation the harness
+            // has no record of refuses the reopening rather than its first turn.
+            if let Some(reopened) = &reopened {
+                let kept = adapter
+                    .has_conversation(
+                        runner.as_ref(),
+                        &launch_spec,
+                        &reopened.resume.harness_session_id,
+                    )
+                    .await;
+                if let Ok(false) = kept {
+                    return Err(crate::adapter::AdapterError::ConversationGone(format!(
+                        "the {} harness no longer has a record of conversation {}",
+                        adapter.id(),
+                        reopened.resume.harness_session_id
+                    ))
+                    .into());
+                }
             }
-            placing::Placed::Local => {
-                // Kept with the sandbox if the node stops while it runs.
-                crate::runner::reattach::note_image(&container, &image);
-                session_runner(
-                    self.backend.as_ref(),
-                    adapter.id(),
-                    image.image.as_deref(),
-                    session_cache,
-                    mounts,
-                )
+            // Kept for a harness that can be started again on this session when
+            // its process dies.
+            let relaunch = adapter.restorable().then(|| supervisor::Relaunch {
+                adapter: adapter.clone(),
+                spec: launch_spec.clone(),
+            });
+            let launched = tokio::time::timeout(
+                STARTUP_TIMEOUT,
+                adapter.launch(runner.as_ref(), launch_spec),
+            )
+            .await;
+            match launched {
+                Ok(Ok((handle, events))) => {
+                    break (runner, started_elsewhere, relaunch, handle, events)
+                }
+                Ok(Err(e)) => {
+                    let _ = tokio::time::timeout(CLEANUP_TIMEOUT, runner.kill(&container)).await;
+                    let Some(said) = unschedulable(&e).filter(|_| !placed.is_elsewhere()) else {
+                        return Err(e.into());
+                    };
+                    tracing::warn!(session = %id, %said, "the session's pod could not be scheduled; placing it again");
+                    crate::runner::reattach::unnote_image(&container);
+                    placed = match self
+                        .place(id, &spec.channel, origin.as_deref(), started, Some(&said))
+                        .await?
+                    {
+                        // Full here: placement never keeps it on this
+                        // runtime, but if it did, the pod still has no room.
+                        placing::Placed::Local => return Err(e.into()),
+                        elsewhere => elsewhere,
+                    };
+                }
+                Err(_) => {
+                    let _ = tokio::time::timeout(CLEANUP_TIMEOUT, runner.kill(&container)).await;
+                    return Err(anyhow::anyhow!(
+                        "harness startup timed out after {} seconds",
+                        STARTUP_TIMEOUT.as_secs()
+                    ));
+                }
             }
         };
-
-        // Record the container name before it exists: it is deterministic, and a
-        // launch that fails after the container is created would otherwise leave
-        // a credential-mounted harness with no name in the store for
-        // `reconcile_after_restart` to remove.
-        self.store.update_session(
-            id,
-            SessionPatch {
-                container_name: Some(container.clone()),
-                ..Default::default()
-            },
-        )?;
-
-        let (mut harness_env, harness_secret_env) =
-            harness_environment(&wiring, egress.as_ref(), &harness_home);
-        harness_env.extend(cache_env);
-
         let (cmd_tx, cmd_rx) = mpsc::channel(16);
-        let launch_spec = LaunchSpec {
-            cwd_in_runner: "/work".into(),
-            model: spec.model.clone(),
-            container_name: container.clone(),
-            harness_home: harness_home.clone(),
-            mcp_servers,
-            tools: self.cfg.harness.tools.clone(),
-            env: harness_env,
-            secret_env: harness_secret_env,
-            system_prompt_file: Some(scratch.orientation_path.clone()),
-            resume: reopened.as_ref().map(|r| r.resume.clone()),
-            labels: crate::runner::RunLabels {
-                channel: Some(spec.channel.clone()),
-                phase: Some(spec.phase.as_str()),
-                ..crate::runner::RunLabels::of(crate::runner::RunKind::Session)
-            }
-            // From the repository the work came from: a continued session's
-            // own path is `workspace://<session>`, which names no repository.
-            .repo_dir(origin.as_deref()),
-        };
-        // Asked before anything runs in it, so a conversation the harness
-        // has no record of refuses the reopening rather than its first turn.
-        if let Some(reopened) = &reopened {
-            let kept = adapter
-                .has_conversation(
-                    runner.as_ref(),
-                    &launch_spec,
-                    &reopened.resume.harness_session_id,
-                )
-                .await;
-            if let Ok(false) = kept {
-                return Err(crate::adapter::AdapterError::ConversationGone(format!(
-                    "the {} harness no longer has a record of conversation {}",
-                    adapter.id(),
-                    reopened.resume.harness_session_id
-                ))
-                .into());
-            }
-        }
-        // Kept for a harness that can be started again on this session when
-        // its process dies.
-        let relaunch = adapter.restorable().then(|| supervisor::Relaunch {
-            adapter: adapter.clone(),
-            spec: launch_spec.clone(),
-        });
-        let launched = tokio::time::timeout(
-            STARTUP_TIMEOUT,
-            adapter.launch(runner.as_ref(), launch_spec),
-        )
-        .await;
-        let (handle, events) = match launched {
-            Ok(Ok(v)) => v,
-            Ok(Err(e)) => {
-                let _ = tokio::time::timeout(CLEANUP_TIMEOUT, runner.kill(&container)).await;
-                return Err(e.into());
-            }
-            Err(_) => {
-                let _ = tokio::time::timeout(CLEANUP_TIMEOUT, runner.kill(&container)).await;
-                return Err(anyhow::anyhow!(
-                    "harness startup timed out after {} seconds",
-                    STARTUP_TIMEOUT.as_secs()
-                ));
-            }
-        };
 
         if !self.startable(id)? {
             let _ = tokio::time::timeout(CLEANUP_TIMEOUT, runner.kill(&container)).await;

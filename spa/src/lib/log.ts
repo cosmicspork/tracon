@@ -7,6 +7,7 @@
 // break a run: every Claude Code call now carries a policy record, and letting
 // those through left no two calls side by side.
 
+import { roomWords } from './capabilities'
 import { exhaustionNote } from './exhaustion'
 import { formatDuration, formatTokens } from './format'
 import { toolName } from './nodetools'
@@ -526,10 +527,16 @@ export function eventLine(e: Event): EventLine | null {
       // Where the session runs, when the node had to decide it.
       const where = (v: unknown) => (str(v) === 'digitalocean' ? 'DigitalOcean' : str(v) ? `this node (${str(v)})` : '')
       switch (str(p.decision)) {
-        case 'place':
-          return str(p.provider) === 'digitalocean'
-            ? line('mark', ['runs on DigitalOcean', p.approval_id ? 'the operator allowed it' : "this node's own runtime is full or DigitalOcean is preferred"])
-            : line('sys', [`runs on ${where(p.provider)}`])
+        case 'place': {
+          if (str(p.provider) !== 'digitalocean') return line('sys', [`runs on ${where(p.provider)}`])
+          if (p.approval_id) return line('mark', ['runs on DigitalOcean', 'the operator allowed it'])
+          // A cluster without room says what it has free and what was needed.
+          const providers = Array.isArray(p.providers) ? (p.providers as Record<string, unknown>[]) : []
+          const full = providers
+            .map((c) => (c && typeof c.capacity === 'object' ? (c.capacity as Record<string, unknown>) : null))
+            .find((c) => c?.fits === false)
+          return line('mark', ['runs on DigitalOcean', roomWords(full) || "this node's own runtime is full or DigitalOcean is preferred"])
+        }
         case 'ask':
           return line('wait', [`asked whether to run on ${where(p.offer) || 'another provider'}`, str(p.reason)])
         case 'refuse':

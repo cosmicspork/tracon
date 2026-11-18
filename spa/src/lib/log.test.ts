@@ -334,6 +334,21 @@ test('each 0.29.0 kind reads as a sentence, not its name', () => {
     ['placement', { decision: 'place', provider: 'digitalocean' }, "runs on DigitalOcean · this node's own runtime is full or DigitalOcean is preferred"],
     ['placement', { decision: 'place', provider: 'digitalocean', approval_id: 'a1' }, 'runs on DigitalOcean · the operator allowed it'],
     ['placement', { decision: 'place', provider: 'podman' }, 'runs on this node (podman)'],
+    [
+      'placement',
+      {
+        decision: 'place',
+        provider: 'digitalocean',
+        providers: [
+          {
+            provider: 'kubernetes',
+            capacity: { running: 4, limit: null, free_cpu: 763, free_memory: 660602880, needs_cpu: 1250, needs_memory: 1610612736, fits: false },
+          },
+          { provider: 'digitalocean', capacity: { running: 0, limit: 2 } },
+        ],
+      },
+      'runs on DigitalOcean · the cluster has 630 Mi free, a session and its checks need 1.5 Gi',
+    ],
     ['placement', { decision: 'ask', offer: 'digitalocean', reason: 'the gateway is down' }, 'asked whether to run on DigitalOcean · the gateway is down'],
     ['placement', { decision: 'refuse', reason: 'dns is provider-open' }, 'no sandbox provider can take it · dns is provider-open'],
   ]

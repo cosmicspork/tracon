@@ -79,6 +79,7 @@ pub fn local_candidate(
         capacity: Capacity { running, limit },
         health,
         closed: None,
+        room: None,
     }
 }
 
@@ -103,9 +104,18 @@ pub fn event(decision: &Placement, resolved: &Resolved, providers: &[Candidate])
     payload["providers"] = providers
         .iter()
         .map(|c| {
+            // A cluster's room beside its count: free and needed figures,
+            // or why they were not read.
+            let mut capacity = json!(c.capacity);
+            if let (Some(room), Some(fields)) = (
+                c.room.as_ref().and_then(|r| serde_json::to_value(r).ok()),
+                capacity.as_object_mut(),
+            ) {
+                fields.extend(room.as_object().cloned().unwrap_or_default());
+            }
             json!({
                 "provider": c.kind,
-                "capacity": c.capacity,
+                "capacity": capacity,
                 "healthy": c.health.is_ok(),
                 "why": c.health.as_ref().err(),
             })
@@ -229,6 +239,7 @@ mod tests {
             },
             health: Ok(()),
             closed: None,
+            room: None,
         }
     }
 
@@ -350,6 +361,48 @@ mod tests {
         assert_eq!(e["provider"], "digitalocean");
         assert_eq!(e["providers"][0]["healthy"], false);
         assert_eq!(e["providers"][1]["capacity"]["running"], 1);
+    }
+
+    /// A Kubernetes runtime's capacity carries its cluster's room: the free
+    /// and needed figures, or why they were not read.
+    #[test]
+    fn the_event_carries_the_clusters_room() {
+        use crate::provider::kubernetes::room::Fit;
+        use crate::provider::Room;
+        let resolved = placement("").resolve("personal", None);
+        let mut kube = local_candidate(ProviderKind::Kubernetes, node("ready"), 4, None);
+        kube.room = Some(Room::Read(Fit {
+            free_cpu: 763,
+            free_memory: 660_602_880,
+            needs_cpu: 1250,
+            needs_memory: 1_610_612_736,
+            fits: false,
+        }));
+        let decision = Placement::Place {
+            provider: ProviderKind::DigitalOcean,
+        };
+        let e = event(&decision, &resolved, &[kube.clone(), droplet(0)]);
+        assert_eq!(
+            e["providers"][0]["capacity"],
+            json!({
+                "running": 4,
+                "limit": null,
+                "free_cpu": 763,
+                "free_memory": 660_602_880u64,
+                "needs_cpu": 1250,
+                "needs_memory": 1_610_612_736u64,
+                "fits": false,
+            })
+        );
+        kube.room = Some(Room::Unread {
+            unread: "the node may not read node general-1".into(),
+        });
+        let e = event(&decision, &resolved, &[kube]);
+        assert_eq!(
+            e["providers"][0]["capacity"]["unread"],
+            "the node may not read node general-1"
+        );
+        assert!(e["providers"][0]["capacity"].get("fits").is_none());
     }
 
     #[test]

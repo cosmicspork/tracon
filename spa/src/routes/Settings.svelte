@@ -51,7 +51,7 @@
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
   import { remedy } from '../lib/refusal'
-  import { capabilityName, capabilityTone, elsewhereLines } from '../lib/capabilities'
+  import { capabilityName, capabilityTone, elsewhereLines, roomLine } from '../lib/capabilities'
   import { nodeHarnesses } from '../lib/nodes'
   import { versionLabel } from '../lib/version'
   import type { HarnessState } from '../lib/types'
@@ -1197,6 +1197,10 @@
             {#each elsewhereLines(p.elsewhere) as e (e.label)}
               <li><span class="chip" class:off={e.tone === 'off'} class:warn={e.tone === 'warn'} class:bad={e.tone === 'bad'}>{e.label}</span> {e.text}{#if e.detail} · <small>{e.detail}</small>{/if}</li>
             {/each}
+          {/if}
+          {#if roomLine(p.room)}
+            {@const r = roomLine(p.room)!}
+            <li><span class="chip" class:off={r.tone === 'off'} class:warn={r.tone === 'warn'}>{r.label}</span> {r.text}{#if r.detail} · <small>{r.detail}</small>{/if}</li>
           {/if}
           {#each p.lines as l (l.capability)}
             <li><span class="chip" class:off={capabilityTone(l) === 'off'} class:warn={capabilityTone(l) === 'warn'}>{capabilityName(l.capability)}</span> {l.value ?? 'not established'} · <small>{l.detail}</small></li>

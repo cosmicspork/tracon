@@ -1,0 +1,13 @@
+# Read-only, cluster-wide: what placement reads to know whether one more
+# session and one check's pod fit on the node pod's machine (its allocatable
+# CPU and memory, less the requests of every pod bound to it, in any
+# namespace). Nothing is written. Without it the node places by session count
+# alone ([placement] local_limit) and says so in each placement event.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tracon-node-capacity
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list"]

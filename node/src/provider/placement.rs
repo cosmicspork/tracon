@@ -11,6 +11,7 @@
 use serde::Serialize;
 
 use super::capabilities::Capabilities;
+use super::kubernetes::room::Fit;
 use super::requirements::{DoMode, Requirements};
 use super::{Capacity, ProviderKind};
 
@@ -26,6 +27,66 @@ pub struct Candidate {
     /// Why it takes no new session now although it is healthy and has room:
     /// the node's `[spend] infra_usd_per_day` is reached.
     pub closed: Option<String>,
+    /// What a cluster has room for, beside `capacity`'s count: a Kubernetes
+    /// runtime is full when a session and one check would not fit, or when
+    /// the scheduler has just refused this session's pod. `None` where the
+    /// runtime has no such measure.
+    pub room: Option<Room>,
+}
+
+/// A cluster's room for one more session, as placement holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum Room {
+    /// Read from the API (`kubernetes::room`).
+    Read(Fit),
+    /// Not read: the session count alone decides, as before.
+    Unread { unread: String },
+    /// The scheduler kept this session's pod unschedulable past its grace:
+    /// full, whatever was read, in the scheduler's words.
+    Unschedulable { fits: bool, unschedulable: String },
+}
+
+impl Room {
+    pub fn unschedulable(said: impl Into<String>) -> Self {
+        Room::Unschedulable {
+            fits: false,
+            unschedulable: said.into(),
+        }
+    }
+
+    pub fn is_full(&self) -> bool {
+        match self {
+            Room::Read(fit) => !fit.fits,
+            Room::Unread { .. } => false,
+            Room::Unschedulable { .. } => true,
+        }
+    }
+}
+
+impl std::fmt::Display for Room {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Room::Read(fit) => fit.fmt(f),
+            Room::Unread { unread } => write!(f, "the cluster's room was not read: {unread}"),
+            Room::Unschedulable { unschedulable, .. } => write!(f, "its pod {unschedulable}"),
+        }
+    }
+}
+
+impl Candidate {
+    /// Full by its count (`capacity`) or by its cluster's room.
+    pub fn is_full(&self) -> bool {
+        self.capacity.is_full() || self.room.as_ref().is_some_and(Room::is_full)
+    }
+
+    /// Why it is full, in the placement's words.
+    fn full(&self) -> String {
+        match &self.room {
+            Some(room) if room.is_full() => format!("{} is full ({room})", self.kind.as_str()),
+            _ => format!("{} is full ({})", self.kind.as_str(), self.capacity),
+        }
+    }
 }
 
 /// The decision.
@@ -56,7 +117,7 @@ fn local<'a>(c: &'a Candidate, requirements: &Requirements) -> Local<'a> {
     if let Err(why) = &c.health {
         return Local::Unhealthy(c, why);
     }
-    if c.capacity.is_full() {
+    if c.is_full() {
         return Local::Full(c);
     }
     Local::Free(c)
@@ -129,7 +190,7 @@ pub fn place(
     let full: Vec<String> = locals
         .iter()
         .filter_map(|l| match l {
-            Local::Full(c) => Some(format!("{} is full ({})", c.kind.as_str(), c.capacity)),
+            Local::Full(c) => Some(c.full()),
             _ => None,
         })
         .collect();
@@ -223,6 +284,7 @@ mod tests {
             },
             health: Ok(()),
             closed: None,
+            room: None,
         }
     }
 
@@ -621,5 +683,93 @@ mod tests {
                 "offer": "digitalocean",
             })
         );
+    }
+
+    const GI: u64 = 1024 * 1024 * 1024;
+
+    /// A Kubernetes runtime with no `local_limit` and `free` bytes free on
+    /// its machine, against a session and its checks' 3 GiB.
+    fn cluster(room: u64) -> Candidate {
+        Candidate {
+            capacity: Capacity {
+                running: 4,
+                limit: None,
+            },
+            room: Some(Room::Read(Fit {
+                free_cpu: 2000,
+                free_memory: room,
+                needs_cpu: 750,
+                needs_memory: 3 * GI,
+                fits: room >= 3 * GI,
+            })),
+            ..free(Kubernetes)
+        }
+    }
+
+    /// A cluster without room for a session and one check is full with no
+    /// `local_limit`, under each `digitalocean` mode, and says why.
+    #[test]
+    fn a_cluster_without_room_is_full_under_each_mode() {
+        let any = Requirements::any();
+        let full = cluster(630 * 1024 * 1024);
+        assert!(full.is_full());
+        // Overflow and prefer move it.
+        for mode in [DoMode::Overflow, DoMode::Prefer] {
+            let p = place(&[full.clone(), free(Do)], &any, mode, false);
+            assert_eq!(placed(&p), Some(Do), "{mode:?}");
+        }
+        // Off, or forbidden for the repository, refuses it with the figures.
+        for (mode, forbid) in [(DoMode::Off, false), (DoMode::Overflow, true)] {
+            let p = place(&[full.clone(), free(Do)], &any, mode, forbid);
+            let Placement::Refuse { reason } = p else {
+                panic!("{mode:?}: {p:?}")
+            };
+            assert!(
+                reason.contains(
+                    "kubernetes is full (the cluster has 630 Mi free, a session and its checks need 3 Gi)"
+                ),
+                "{reason}"
+            );
+        }
+        // A session that fits stays, whatever the count.
+        for mode in [DoMode::Off, DoMode::Overflow] {
+            let p = place(&[cluster(4 * GI), free(Do)], &any, mode, false);
+            assert_eq!(placed(&p), Some(Kubernetes), "{mode:?}");
+        }
+        // `local_limit` still caps it, whichever comes first.
+        let mut capped = cluster(4 * GI);
+        capped.capacity.limit = Some(4);
+        let p = place(&[capped, free(Do)], &any, DoMode::Overflow, false);
+        assert_eq!(placed(&p), Some(Do));
+    }
+
+    /// Room that was not read leaves the count alone to decide, as before;
+    /// a pod the scheduler refused makes it full, in the scheduler's words.
+    #[test]
+    fn unread_room_counts_sessions_and_an_unschedulable_pod_is_full() {
+        let any = Requirements::any();
+        let unread = Candidate {
+            room: Some(Room::Unread {
+                unread: "the node may not read node general-1".into(),
+            }),
+            ..cluster(0)
+        };
+        assert!(!unread.is_full());
+        let p = place(&[unread, free(Do)], &any, DoMode::Overflow, false);
+        assert_eq!(placed(&p), Some(Kubernetes));
+
+        let refused = Candidate {
+            room: Some(Room::unschedulable(
+                "could not be scheduled: 0/1 nodes are available: 1 Insufficient memory.",
+            )),
+            ..cluster(4 * GI)
+        };
+        let p = place(&[refused.clone(), free(Do)], &any, DoMode::Overflow, false);
+        assert_eq!(placed(&p), Some(Do));
+        let p = place(&[refused, free(Do)], &any, DoMode::Off, false);
+        let Placement::Refuse { reason } = p else {
+            panic!("{p:?}")
+        };
+        assert!(reason.contains("1 Insufficient memory"), "{reason}");
     }
 }
