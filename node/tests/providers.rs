@@ -15,7 +15,7 @@ use tracon::{
     config::Config,
     oauth::Endpoints,
     providers::{
-        mesh::{ClaimResult, CredentialMesh},
+        mesh::{ClaimResult, CredentialMesh, RenewRole},
         LoginCompletion, LoginOwner, ProviderError, Providers, Refreshed,
     },
     stream::Bus,
@@ -614,6 +614,12 @@ struct FakeMesh {
     claim: Mutex<Option<ClaimResult>>,
     claims: Mutex<Vec<(String, u64)>>,
     handed: Mutex<Vec<(String, Credential, Vec<String>)>>,
+    /// What the hub was told was renewed, as (key, version).
+    renewed: Mutex<Vec<(String, u64)>>,
+    /// Who was asked for a current copy, as (credential, version, nodes).
+    requested: Mutex<Vec<(String, u64, Vec<String>)>>,
+    /// What each peer says about renewing.
+    roles: Vec<(String, RenewRole)>,
 }
 
 #[async_trait::async_trait]
@@ -639,11 +645,31 @@ impl CredentialMesh for FakeMesh {
                 .collect()
         }
     }
+    async fn renewed(&self, key: &str, version: u64) -> Result<(), String> {
+        self.renewed
+            .lock()
+            .unwrap()
+            .push((key.to_string(), version));
+        Ok(())
+    }
     fn hand_off(&self, name: &str, credential: &Credential, to: &[String]) {
         self.handed
             .lock()
             .unwrap()
             .push((name.to_string(), credential.clone(), to.to_vec()));
+    }
+    fn request_copy(&self, name: &str, credential: &Credential, from: &[String]) {
+        self.requested.lock().unwrap().push((
+            name.to_string(),
+            credential.grant_version,
+            from.to_vec(),
+        ));
+    }
+    fn renew_role(&self, node: &str) -> Option<RenewRole> {
+        self.roles
+            .iter()
+            .find(|(peer, _)| peer == node)
+            .map(|(_, role)| *role)
     }
 }
 
@@ -746,8 +772,18 @@ async fn a_shared_credential_is_renewed_by_whichever_holder_wins_the_claim() {
         assert_eq!(renewed.env["ACCESS_TOKEN"], "sk-ant-access-2");
     }
 
+    assert_eq!(
+        *mesh.renewed.lock().unwrap(),
+        [(tracon::providers::mesh::claim_key(&grant), 0)],
+        "the winner tells the hub which version it renewed"
+    );
+    assert_eq!(held.renewed_by.as_deref(), Some("n1"));
+    let row = &listed(&p, "anthropic")["sign_ins"][0];
+    assert_eq!(row["last_renewed"]["by"], "n1");
+    assert_eq!(row["last_renewed"]["version"], 1);
+
     // Another holder has this version: nothing is refreshed, nothing revoked.
-    *mesh.claim.lock().unwrap() = Some(ClaimResult::Lost);
+    *mesh.claim.lock().unwrap() = Some(ClaimResult::Held(Some("n2".into())));
     let refreshes = fake.with(|f| f.refreshes);
     assert_eq!(
         p.refresh("anthropic", "anthropic").await.unwrap(),
@@ -755,35 +791,246 @@ async fn a_shared_credential_is_renewed_by_whichever_holder_wins_the_claim() {
     );
     assert_eq!(fake.with(|f| f.refreshes), refreshes);
     assert_eq!(mesh.claims.lock().unwrap().last().unwrap().1, 1);
+    let row = &listed(&p, "anthropic")["sign_ins"][0];
+    assert_eq!(row["renewal"]["state"], "waiting");
+    assert_eq!(row["renewal"]["renewer"], "n2");
 
-    // With no claim to be had, the node that signed in still renews, and no
-    // other holder does.
-    *mesh.claim.lock().unwrap() = Some(ClaimResult::Unsupported);
+    // With no claim to be had, not even the node that signed in renews.
+    for claim in [
+        ClaimResult::Unsupported,
+        ClaimResult::Unreachable("down".into()),
+    ] {
+        *mesh.claim.lock().unwrap() = Some(claim);
+        assert_eq!(
+            p.refresh("anthropic", "anthropic").await.unwrap(),
+            Refreshed::Waiting
+        );
+    }
+    assert_eq!(fake.with(|f| f.refreshes), refreshes);
+    assert_eq!(
+        listed(&p, "anthropic")["sign_ins"][0]["renewal"]["state"],
+        "waiting"
+    );
+    assert_eq!(listed(&p, "anthropic")["state"], "connected");
+}
+
+/// Two holders and no hub: neither renews, and each says it waits. The node
+/// set to renew renews unclaimed, but only in the last five minutes, and
+/// hands the copy to the other.
+#[tokio::test]
+async fn without_a_hub_only_the_node_set_to_renew_renews_and_only_at_the_last() {
+    state::isolate();
+    let fake = OAuthFake::start().await;
+    let (p, broker, _bus) = providers(fake.endpoints());
+    let mesh = Arc::new(FakeMesh {
+        members: vec!["n2".into()],
+        claim: Mutex::new(Some(ClaimResult::Unreachable("down".into()))),
+        ..Default::default()
+    });
+    p.set_mesh(mesh.clone());
+    sign_in_anthropic(&p, &fake, true).await;
+    assert_eq!(
+        p.refresh("anthropic", "anthropic").await.unwrap(),
+        Refreshed::Waiting
+    );
+
+    let mut cfg = Config::default();
+    cfg.mesh.renew_credentials = true;
+    let renewer = Providers::with_endpoints(
+        Arc::new(cfg),
+        broker.clone(),
+        proto::envelope::DataKey::from_bytes([9u8; 32]),
+        fake.endpoints(),
+        "n1".into(),
+        Bus::new(),
+    );
+    renewer.set_mesh(mesh.clone());
+    // Two hours left: still waiting.
+    assert_eq!(
+        renewer.refresh("anthropic", "anthropic").await.unwrap(),
+        Refreshed::Waiting
+    );
+    let row = &listed(&renewer, "anthropic")["sign_ins"][0];
+    assert_eq!(row["renewal"]["state"], "waiting");
+    assert_eq!(row["renewer"], "n1", "{row}");
+    assert_eq!(row["renews"], "configured");
+    assert_eq!(fake.with(|f| f.refreshes), 0);
+
+    // Four minutes left.
+    {
+        let mut b = broker.write().unwrap();
+        let mut c = b.get("anthropic").unwrap().clone();
+        c.expires_ms = Some(tracon::store::now_ms() + 4 * 60 * 1000);
+        b.put("anthropic", c);
+    }
+    assert_eq!(
+        p.refresh("anthropic", "anthropic").await.unwrap(),
+        Refreshed::Waiting,
+        "a node not set to renew never renews unclaimed"
+    );
+    assert_eq!(
+        renewer.refresh("anthropic", "anthropic").await.unwrap(),
+        Refreshed::Renewed
+    );
+    assert_eq!(fake.with(|f| f.refreshes), 1);
+    let handed = mesh.handed.lock().unwrap();
+    let (_, renewed, to) = handed.last().unwrap();
+    assert_eq!(to, &["n2"]);
+    assert_eq!(renewed.grant_version, 1);
+    assert!(
+        mesh.renewed.lock().unwrap().is_empty(),
+        "nothing to tell a hub that granted no claim"
+    );
+}
+
+/// A holder whose copy the hub calls stale asks the renewer for the current
+/// one, without spending its own refresh token; the copy arriving ends it.
+#[tokio::test]
+async fn a_stale_copy_is_asked_of_its_renewer_and_recovered_without_a_refresh() {
+    state::isolate();
+    let fake = OAuthFake::start().await;
+    let (p, broker, _bus) = providers(fake.endpoints());
+    let mesh = Arc::new(FakeMesh {
+        members: vec!["n2".into(), "n3".into()],
+        ..Default::default()
+    });
+    p.set_mesh(mesh.clone());
+    sign_in_anthropic(&p, &fake, true).await;
+    *mesh.claim.lock().unwrap() = Some(ClaimResult::Stale(Some("n2".into())));
+    assert_eq!(
+        p.refresh("anthropic", "anthropic").await.unwrap(),
+        Refreshed::Recovering
+    );
+    assert_eq!(fake.with(|f| f.refreshes), 0);
+    assert_eq!(
+        *mesh.requested.lock().unwrap(),
+        [("anthropic".to_string(), 0, vec!["n2".to_string()])]
+    );
+    let listed_now = listed(&p, "anthropic");
+    assert_eq!(listed_now["state"], "connected");
+    assert_eq!(listed_now["sign_ins"][0]["renewal"]["state"], "recovering");
+    assert_eq!(listed_now["sign_ins"][0]["renewal"]["renewer"], "n2");
+    assert!(listed_now["sign_ins"][0]["last_failure"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("already renewed by n2"));
+    // Not due again while it waits for the copy, and not handed to a peer.
+    let now = tracon::store::now_ms();
+    assert!(p.due_for_refresh(now + 100 * 60 * 1000).is_empty());
+    assert!(!p.can_hand_over("anthropic"));
+
+    // Half the wait: every other holder is asked too, once.
+    p.expire_recoveries(now + tracon::providers::RECOVER_WAIT_MS / 2 + 1);
+    p.expire_recoveries(now + tracon::providers::RECOVER_WAIT_MS / 2 + 2);
+    assert_eq!(
+        mesh.requested.lock().unwrap().last().unwrap().2,
+        ["n2", "n3"]
+    );
+    assert_eq!(mesh.requested.lock().unwrap().len(), 2);
+
+    // The renewer's copy arrives.
+    {
+        let mut b = broker.write().unwrap();
+        let mut c = b.get("anthropic").unwrap().clone();
+        c.grant_version = 2;
+        c.renewed_by = Some("n2".into());
+        c.renewed_ms = Some(now);
+        b.put("anthropic", c);
+    }
+    p.handoff_received(&["anthropic".to_string()]);
+    let row = &listed(&p, "anthropic")["sign_ins"][0];
+    assert_eq!(row["state"], "connected");
+    assert!(row["renewal"].is_null());
+    assert_eq!(row["last_renewed"]["by"], "n2");
+    assert_eq!(row["last_renewed"]["version"], 2);
+    p.expire_recoveries(now + tracon::providers::RECOVER_WAIT_MS * 2);
+    assert_eq!(listed(&p, "anthropic")["state"], "connected");
+    assert_eq!(fake.with(|f| f.refreshes), 0);
+}
+
+/// The provider refusing a shared copy's refresh token asks every other
+/// holder for a newer copy first; only when none comes does the sign-in need
+/// connecting again, and the card says who last renewed it and why it was
+/// refused.
+#[tokio::test]
+async fn a_refused_shared_copy_needs_a_new_sign_in_only_when_no_holder_has_a_newer_one() {
+    state::isolate();
+    let fake = OAuthFake::start().await;
+    let (p, broker, _bus) = providers(fake.endpoints());
+    let mesh = Arc::new(FakeMesh {
+        members: vec!["n2".into(), "n3".into()],
+        ..Default::default()
+    });
+    p.set_mesh(mesh.clone());
+    sign_in_anthropic(&p, &fake, true).await;
     assert_eq!(
         p.refresh("anthropic", "anthropic").await.unwrap(),
         Refreshed::Renewed
     );
-    assert_eq!(
-        broker
-            .read()
-            .unwrap()
-            .get("anthropic")
-            .unwrap()
-            .grant_version,
-        2
-    );
-    {
-        let mut b = broker.write().unwrap();
-        let mut c = b.get("anthropic").unwrap().clone();
-        c.nodes = vec!["n2".into(), "n1".into()];
-        b.put("anthropic", c);
-    }
-    *mesh.claim.lock().unwrap() = Some(ClaimResult::Unreachable("down".into()));
+    // Another holder spent the refresh token this copy holds.
+    fake.with(|f| f.live_refresh = Some("spent-elsewhere".into()));
     assert_eq!(
         p.refresh("anthropic", "anthropic").await.unwrap(),
-        Refreshed::LeftToAnotherHolder
+        Refreshed::Recovering
     );
-    assert_eq!(fake.with(|f| f.refreshes), refreshes + 1);
+    assert_eq!(fake.with(|f| f.refreshes), 2);
+    assert_eq!(
+        *mesh.requested.lock().unwrap(),
+        [(
+            "anthropic".to_string(),
+            1,
+            vec!["n2".to_string(), "n3".to_string()]
+        )]
+    );
+    assert_eq!(listed(&p, "anthropic")["state"], "connected");
+
+    let now = tracon::store::now_ms();
+    p.expire_recoveries(now + tracon::providers::RECOVER_WAIT_MS / 2 + 1);
+    assert_eq!(
+        mesh.requested.lock().unwrap().len(),
+        1,
+        "everyone was asked already"
+    );
+    p.expire_recoveries(now + tracon::providers::RECOVER_WAIT_MS + 1);
+    let state = listed(&p, "anthropic");
+    assert_eq!(state["state"], "needs_reconnect");
+    assert!(state["error"]
+        .as_str()
+        .unwrap()
+        .contains("no other holder had a newer copy"));
+    let row = &state["sign_ins"][0];
+    assert_eq!(row["last_renewed"]["by"], "n1");
+    assert_eq!(row["last_renewed"]["version"], 1);
+    assert!(row["last_failure"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("invalid_grant"));
+    assert!(p.due_for_refresh(now + 100 * 60 * 1000).is_empty());
+    assert!(broker.read().unwrap().get("anthropic").is_some());
+}
+
+/// Waking from a suspend asks every other holder of each shared sign-in for
+/// its copy before anything is renewed.
+#[tokio::test]
+async fn waking_asks_the_other_holders_for_their_copies() {
+    state::isolate();
+    let fake = OAuthFake::start().await;
+    let (p, _broker, _bus) = providers(fake.endpoints());
+    let mesh = Arc::new(FakeMesh {
+        members: vec!["n2".into(), "n3".into()],
+        ..Default::default()
+    });
+    p.set_mesh(mesh.clone());
+    sign_in_anthropic(&p, &fake, true).await;
+    assert_eq!(p.ask_after_wake(), [("anthropic".to_string(), 0)]);
+    assert_eq!(
+        *mesh.requested.lock().unwrap(),
+        [(
+            "anthropic".to_string(),
+            0,
+            vec!["n2".to_string(), "n3".to_string()]
+        )]
+    );
 }
 
 /// The node set to renew tries half an hour ahead; every other holder of a
@@ -843,6 +1090,19 @@ fn the_renewing_node_tries_first_and_the_other_holders_after() {
         renewer.due_for_refresh(now),
         [("anthropic".to_string(), "anthropic".to_string())]
     );
+
+    // Unset, the only holder always on renews first; this node is not it.
+    p.set_mesh(Arc::new(FakeMesh {
+        roles: vec![("n2".into(), RenewRole::AlwaysOn)],
+        ..Default::default()
+    }));
+    assert!(p.due_for_refresh(now).is_empty());
+    let public = p
+        .list_public()
+        .into_iter()
+        .find(|value| value["name"] == "anthropic")
+        .unwrap();
+    assert_eq!(public["sign_ins"][0]["renewer"], "n2");
 }
 
 /// A renewed copy arriving from another holder clears a provider that was
@@ -899,8 +1159,15 @@ async fn signing_in_again_replaces_a_stalled_sign_in_in_place_and_shares_it_agai
     let before = broker.read().unwrap().get("anthropic").unwrap().clone();
     fake.with(|f| f.reject_refresh = true);
     let loop_task = tokio::spawn(p.clone().refresh_loop());
-    eventually("the loop to notice", || p.needs_reconnect("anthropic")).await;
+    eventually("the loop to notice", || {
+        listed(&p, "anthropic")["sign_ins"][0]["renewal"]["state"] == "recovering"
+            || p.needs_reconnect("anthropic")
+    })
+    .await;
     loop_task.abort();
+    // No other holder has a newer copy: only a new sign-in will do.
+    p.expire_recoveries(tracon::store::now_ms() + 24 * 3600 * 1000);
+    assert!(p.needs_reconnect("anthropic"));
     assert_eq!(
         listed(&p, "anthropic")["sign_ins"][0]["state"],
         "needs_reconnect"

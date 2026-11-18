@@ -385,7 +385,8 @@ it as a zip — and publication happens from that snapshot through a separate,
 credential-bearing repository the node owns, never from the agent's clone. A
 snapshot is the workspace as Git sees it: what its ignore rules exclude (a
 `target/`, a `node_modules/`) stays in the volume and is never exported.
-Nothing is removed on its own except a check run's copy once the check is over.
+Nothing is removed on its own except a check run's copy once the check is over,
+unless `[gc]` sets a schedule (below).
 `tracon gc` (or **Settings → Maintenance → Runtime storage**) lists the volumes
 and state directories whose owner is over (an archived or vanished session, a
 workspace no open session uses and older than a day, a finished check run, a
@@ -394,6 +395,14 @@ the leftover containers first so what they held goes in the same run; a workspac
 directory goes only with its volume; dependency caches only with `--caches`, and the
 node-wide volumes, any name it does not recognize, and another node's volumes (named with
 that node's `[boundary] resource_prefix`) never.
+
+With `[gc] every_secs` set, the node runs that same sweep with `--apply` on its own
+timer (at least an hour apart; never beside a sweep asked for by hand, which is told
+one is running), first archiving this node's own ended sessions (closed, out of budget,
+failed) that nobody has touched for `archive_ended_after_secs`. A peer's mirrored
+sessions, live and paused ones, and one whose review is still open or whose publication
+is not settled are never archived. It removes only runtime storage, never session rows,
+logs or evidence; `tracon gc` and Runtime storage show the last run and the next.
 
 On Podman and Apple it lists images too, class by class with about what each frees and a total.
 Every image a node builds or commits (a build-steps image, a prepared snapshot, a
@@ -1315,7 +1324,7 @@ and revoked the moment the hub loses that key.
 | `tracon repo ls\|show\|set\|rm\|build [repo]` | the `[[repo]]` entries (also **Settings → Repositories**), and building a repository's image from its default-branch Dockerfile |
 | `tracon policy keygen\|init\|sign\|push\|show` | the policy bundle |
 | `tracon metrics [--channel] [--days]`, `provenance <sha>` | what happened |
-| `tracon gc [--apply] [--caches] [--legacy] [--adopt-unlabelled] [--all]` | runtime storage and images whose owner is over |
+| `tracon gc [--apply] [--caches] [--legacy] [--adopt-unlabelled] [--all]` | runtime storage and images whose owner is over, and when the `[gc]` schedule last ran |
 
 Most commands talk to the running node over its API. The node is `TRACON_URL` when it
 is set; else `http://` and `TRACON_LISTEN`, the address `serve` binds; else the address
@@ -1831,6 +1840,8 @@ max_diff_lines = 10000              # added lines (removed ones do not count, th
                                     # ten times this); a bigger submission is refused before any check runs.
                                     # An update to an open change counts only what it adds to the change's branch
 max_files = 200
+generated_details = false           # a description an approval sends opens with words you write; the agent's
+                                    # text follows, collapsed under "Generated details"
 
 [notify]
 # contact = "mailto:you@example.com"    # what a push service may write to about this sender; falls back to [auth] public_origin
@@ -1862,6 +1873,12 @@ preview_listen = "127.0.0.1:7422"   # isolated HTML capability origin
 # label = "Runbook"                 # what the Documents screen calls it
 # description = "how to run something here"   # what doc_write tells an agent it is for
 # working_note = false              # true: the shipped policy writes it unasked
+
+# [gc]                              # tracon gc --apply on a timer; off unless every_secs is set
+# every_secs = 86400                # 0 or unset: off; less than 3600 is 3600
+# archive_ended_after_secs = 86400  # archive this node's ended sessions untouched this long
+                                    # first; unset: free only what is archived already
+# caches = false                    # true: dependency caches too, as tracon gc --caches
 
 # [metrics]                         # a Prometheus scrape target, GET /metrics; unset, nothing listens
 # listen = "127.0.0.1:7425"         # unauthenticated and read-only: loopback on a host; "0.0.0.0:7425"

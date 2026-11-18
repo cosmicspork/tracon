@@ -136,6 +136,23 @@ pub fn missing(cfg: &Config, fetching: bool) -> Option<String> {
     None
 }
 
+/// The release's browser bundle, when the node's converge is to fetch it and
+/// it is not here yet, in words for the operator; `None` once it is, or when
+/// no service asks for it.
+pub fn awaited(cfg: &Config) -> Option<String> {
+    cfg.service
+        .iter()
+        .filter(|service| is_release(service))
+        .filter_map(resolve)
+        .find(|dir| !dir.is_dir())
+        .map(|dir| {
+            format!(
+                "the release's browser bundle {} is not here yet; the node is fetching it",
+                dir.display()
+            )
+        })
+}
+
 /// What a browser bundle's `manifest.json` says. Unknown fields (`source`)
 /// are allowed.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -263,13 +280,19 @@ pub async fn ensure_at(
     let base = format!("{}/v{version}", release_url.trim_end_matches('/'));
     let tarball = incoming.path().join(&name);
     let sums = incoming.path().join(format!("{name}.sha256"));
+    let fetch = crate::bundle::Fetch::start(format!("the Chrome {chrome} browser bundle"));
+    tracing::info!(chrome, arch, release = version, host = %crate::bundle::host_of(release_url), "fetching the browser bundle");
     crate::bundle::download(client, &format!("{base}/{name}.sha256"), &sums).await?;
-    crate::bundle::download(client, &format!("{base}/{name}"), &tarball).await?;
+    let expected = crate::bundle::expected_digest(&tokio::fs::read_to_string(&sums).await?, &name)?;
+    if !crate::bundle::reuse_incoming(&root, incoming.path(), &name, &expected, &tarball).await {
+        crate::bundle::download_tracked(client, &format!("{base}/{name}"), &tarball, &fetch)
+            .await?;
+    }
+    fetch.checking();
     let unpacked = incoming.path().join("unpacked");
     let (c, a) = (chrome.to_string(), arch.to_string());
     let checked = unpacked.clone();
     tokio::task::spawn_blocking(move || -> Result<(), BundleError> {
-        let expected = crate::bundle::expected_digest(&std::fs::read_to_string(&sums)?, &name)?;
         let got = crate::bundle::sha256_file(&tarball)?;
         if got != expected {
             return Err(BundleError::Digest {
@@ -290,6 +313,7 @@ pub async fn ensure_at(
         std::fs::remove_dir_all(&dest)?;
     }
     std::fs::rename(unpacked.join(chrome).join(arch), &dest)?;
+    tracing::info!(chrome, arch, bundle = %dest.display(), "the browser bundle checks out against its .sha256 and manifest; installed");
     Ok(Ensured::Fetched(dest))
 }
 

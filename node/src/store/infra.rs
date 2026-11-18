@@ -23,7 +23,8 @@ pub struct SandboxUsage {
     pub provider: String,
     /// The name the node knows it by (a session's container name).
     pub name: Option<String>,
-    /// `RunKind::as_str`: `session`, `check`, `prepare`, `probe`.
+    /// `RunKind::as_str`: `session`, `check`, `prepare`, `probe`,
+    /// `fetch`.
     pub kind: String,
     pub session_id: Option<String>,
     pub channel: Option<String>,

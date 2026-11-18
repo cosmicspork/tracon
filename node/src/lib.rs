@@ -21,6 +21,7 @@ pub mod follow;
 pub mod forge;
 pub mod gateway;
 pub mod gc;
+pub mod gc_schedule;
 pub mod git_remote;
 pub mod git_tree;
 pub mod http;

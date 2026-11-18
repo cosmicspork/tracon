@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use tokio_stream::{wrappers::BroadcastStream, Stream, StreamExt};
 
 use crate::auth::{now_ms, now_unix, Owner};
-use crate::store::{ClaimOutcome, Fill, Member, Take};
+use crate::store::{ClaimOutcome, Fill, Member, RenewedOutcome, Take};
 use crate::AppState;
 
 type ApiResult = Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)>;
@@ -460,26 +460,24 @@ pub struct ClaimBody {
 /// Win the right to act on one version of something every member holds a
 /// copy of — a credential's refresh, which revokes the copy every other
 /// holder has. `201` to the first member to ask; `409` with the holder to
-/// anyone else until that claim lapses, and with the newer version to a
-/// member asking about an old one.
+/// anyone else until that claim lapses; and `409` with `reason: "stale"` to a
+/// member asking about a version a newer one has been claimed past, or one
+/// already renewed, naming the member that renewed it (`renewed_by`) when
+/// the hub was told.
 pub async fn claim(
     State(s): State<AppState>,
     Extension(owner): Extension<Owner>,
     Json(body): Json<ClaimBody>,
 ) -> ApiResult {
     member_of(&s, &owner)?;
-    if body.key.len() != 64 || !body.key.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(err(StatusCode::BAD_REQUEST, "key must be 32-byte hex"));
-    }
+    let key = claim_key(&body.key)?;
     let ttl = body.ttl_secs.unwrap_or(120).clamp(1, MAX_CLAIM_SECS);
     let now = now_unix();
-    match s.claims.claim(
-        &body.key.to_ascii_lowercase(),
-        body.version,
-        owner.0,
-        now + ttl,
-        now,
-    ) {
+    let outcome = s
+        .claims
+        .claim(&key, body.version, owner.0, now + ttl, now)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    match outcome {
         ClaimOutcome::Granted { expires_at } => Ok((
             StatusCode::CREATED,
             Json(json!({"granted": true, "version": body.version, "expires_at": expires_at})),
@@ -488,13 +486,59 @@ pub async fn claim(
             StatusCode::CONFLICT,
             Json(json!({
                 "error": "another member holds this claim",
+                "reason": "held",
                 "holder": hex::encode(holder),
                 "version": version,
             })),
         )),
-        ClaimOutcome::Stale { version } => Err((
+        ClaimOutcome::Stale {
+            version,
+            renewed_by,
+        } => Err((
             StatusCode::CONFLICT,
-            Json(json!({"error": "a newer version has been claimed", "version": version})),
+            Json(json!({
+                "error": "a newer version has been claimed",
+                "reason": "stale",
+                "version": version,
+                "renewed_by": renewed_by.map(hex::encode),
+            })),
+        )),
+    }
+}
+
+fn claim_key(key: &str) -> Result<String, (StatusCode, Json<Value>)> {
+    if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(err(StatusCode::BAD_REQUEST, "key must be 32-byte hex"));
+    }
+    Ok(key.to_ascii_lowercase())
+}
+
+#[derive(Deserialize)]
+pub struct RenewedBody {
+    version: u64,
+}
+
+/// `POST /v0/claims/{key}/renewed`: the holder of the claim on `version`
+/// renewed it. Every later claim for that version, or one before it, is
+/// answered stale with this member as `renewed_by`. `204`, or `409` from a
+/// member that does not hold that claim.
+pub async fn claim_renewed(
+    State(s): State<AppState>,
+    Extension(owner): Extension<Owner>,
+    Path(key): Path<String>,
+    Json(body): Json<RenewedBody>,
+) -> ApiResult {
+    member_of(&s, &owner)?;
+    let key = claim_key(&key)?;
+    match s
+        .claims
+        .renewed(&key, body.version, owner.0, now_unix())
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        RenewedOutcome::Recorded => Ok((StatusCode::NO_CONTENT, Json(Value::Null))),
+        RenewedOutcome::NotHolder => Err(err(
+            StatusCode::CONFLICT,
+            "this member does not hold the claim on that version",
         )),
     }
 }

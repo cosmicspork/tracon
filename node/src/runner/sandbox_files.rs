@@ -181,7 +181,10 @@ pub fn sync_mode(volume: &str, kind: RunKind) -> Option<(Mode, Limits)> {
         RunKind::Session if is_workspace(volume) => Some((Mode::Checkout, checkout_limits())),
         RunKind::Session => Some((Mode::Whole, checkout_limits())),
         RunKind::Prepare => Some((Mode::Whole, PREPARED_LIMITS)),
-        RunKind::Check | RunKind::Probe => None,
+        // A fetch moves a ref in a session's workspace: the checkout comes
+        // back, held to a checkout's limits, as the session's own does.
+        RunKind::Fetch if is_workspace(volume) => Some((Mode::Checkout, checkout_limits())),
+        RunKind::Check | RunKind::Probe | RunKind::Fetch => None,
     }
 }
 
@@ -778,6 +781,9 @@ impl Plan {
                     mode,
                     limits,
                     nested,
+                    // A session's sandbox holds its workspace's newer copy
+                    // while it runs: a fetch's must not replace the node's.
+                    refuse_live: kind == RunKind::Fetch,
                 })
             })
             .collect();
@@ -846,6 +852,8 @@ struct Sync {
     mode: Mode,
     limits: Limits,
     nested: Vec<PathBuf>,
+    /// Refuse to take it back while a running sandbox holds the volume.
+    refuse_live: bool,
 }
 
 struct Inner {
@@ -871,6 +879,12 @@ impl Inner {
         for sync in &self.syncs {
             let lock = crate::workspace::volume_lock(&sync.volume);
             let _guard = lock.lock().await;
+            if sync.refuse_live && is_live(&sync.volume) {
+                return Err(FilesError::Refused(format!(
+                    "{} is held by a running sandbox, whose copy is the newer",
+                    sync.volume
+                )));
+            }
             let reader = self
                 .conn
                 .export_reader(&sync.target, sync.mode.exclusions())
@@ -1049,6 +1063,15 @@ pub async fn finish_named(name: &str) {
 /// Whether a running sandbox holds this volume.
 pub fn is_live(volume: &str) -> bool {
     registry().lock().unwrap().by_volume.contains_key(volume)
+}
+
+/// The connection to the running sandbox that holds this volume, and where
+/// in it the volume is: for work that has to happen in the live tree
+/// (`fetch_branch`), not in the node's copy a later sync would overwrite.
+/// `None` when no running sandbox holds it, or the one that did is gone.
+pub fn live_target(volume: &str) -> Option<(SandboxConn, String)> {
+    let (inner, target) = registry().lock().unwrap().by_volume.get(volume).cloned()?;
+    (!inner.conn.is_closed()).then(|| (inner.conn.clone(), target))
 }
 
 /// Export a volume a running sandbox holds from the sandbox itself, checked

@@ -13,7 +13,10 @@
 //! The phone's authenticator is Chromium's virtual one, driven over CDP by
 //! `spa/tests/device-driver.mjs`; the "desktop" is a page with WebAuthn
 //! removed, as the desktop app's webview is against a remote node. The
-//! verifier is the node's.
+//! verifier is the node's. The phone reads the desktop's QR codes with the
+//! app's own scanner (Settings > Scan a QR code), its camera a canvas showing
+//! the code, as an installed PWA does: a camera app would open them in the
+//! system browser, which has neither its session nor its passkey.
 //!
 //! Run only when asked for, against an interface built from this tree
 //! (`support/browser.rs`):
@@ -146,6 +149,22 @@ async fn a_window_without_passkeys_signs_in_and_confirms_an_admin_action_through
     let url = saw["sign_in_url"].as_str().unwrap_or_default();
     assert!(url.starts_with(&format!("{origin}/#approve=")), "{ctx}");
     assert_eq!(saw["approval_headline"], "Sign in another window?", "{ctx}");
+    // Scanned in the app: the approval opened where the phone already was,
+    // and the camera was let go.
+    assert_eq!(saw["scanned_url"], format!("{origin}/settings"), "{ctx}");
+    assert_eq!(saw["camera_released"], true, "{ctx}");
+    // Another node's code was refused, and nothing opened.
+    assert_eq!(
+        saw["elsewhere_refusal"],
+        "This code is for https://elsewhere.example. Open tracon there to approve it.",
+        "{ctx}"
+    );
+    assert_eq!(saw["elsewhere_stayed"], true, "{ctx}");
+    // jsQR is served by the node: scanning asked nothing of anywhere else.
+    assert!(
+        saw["phone_foreign_requests"].as_array().unwrap().is_empty(),
+        "{ctx}"
+    );
     assert_eq!(
         saw["phone_prompt_summary"], "Sign in another window",
         "{ctx}"

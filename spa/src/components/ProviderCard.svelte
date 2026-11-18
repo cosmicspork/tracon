@@ -15,6 +15,7 @@
     completionInstruction,
     disconnectLoses,
     providerLabel,
+    renewalLines,
     signInAgain,
     signInAgainTakesOver,
     signInLabel,
@@ -447,6 +448,9 @@
           {/if}
           {#if signIn.error}<span class="l bad">{signIn.error}</span>{/if}
           {#if signIn.kind === 'oauth' && expiry(signIn.expires_ms)}<span class="meta">{expiry(signIn.expires_ms)}</span>{/if}
+          {#if signIn.kind === 'oauth'}
+            {#each renewalLines(signIn, peerName) as line, i (i)}<span class="meta">{line}</span>{/each}
+          {/if}
           {#if editing === signIn.credential}
             <ChannelChoice
               legend="Channels this sign-in serves"

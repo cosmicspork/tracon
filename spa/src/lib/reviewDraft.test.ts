@@ -75,6 +75,21 @@ describe('review drafts', () => {
     expect(a.state).toBe('saved')
   })
 
+  test('an opener written on one device is found on the next', async () => {
+    const n = node()
+    const desktop = new ReviewDraftSync('r1', 'v1', () => {}, n.save, 0)
+    desktop.loaded(null, {})
+    desktop.edit({ body: 'the agent text', opener: 'Fixes the flaky sync.' })
+    await settle()
+    const loaded = n.held()
+    expect(loaded?.draft.opener).toBe('Fixes the flaky sync.')
+    expect(draftForRevision(loaded!, 'v1', '').fields.opener).toBe('Fixes the flaky sync.')
+    // A resubmission keeps it, as it keeps the other edits.
+    const resubmitted = draftForRevision(loaded!, 'v2', '')
+    expect(resubmitted.fromEarlier).toBe(true)
+    expect(resubmitted.fields.opener).toBe('Fixes the flaky sync.')
+  })
+
   test('a stopped draft saves nothing more', async () => {
     const n = node()
     const s = new ReviewDraftSync('r1', 'v1', () => {}, n.save, 20)

@@ -7,6 +7,8 @@ import {
   normalizeProviderName,
   providerCardHref,
   providerLabel,
+  renewalLines,
+  sharedSignIns,
   signInAgain,
   signInAgainTakesOver,
   signIns,
@@ -151,6 +153,81 @@ test('a node too old to list sign-ins describes its one', () => {
   ])
   expect(signIns({ ...old, state: 'pending' })).toEqual([])
   expect(signIns({ ...old, sign_ins: [] })).toEqual([])
+})
+
+const oauthSignIn = (extra: Partial<ProviderSignIn> = {}): ProviderSignIn => ({
+  credential: 'anthropic',
+  state: 'connected',
+  kind: 'oauth',
+  identity: 'op@example.com',
+  expires_ms: 1,
+  channels: ['personal'],
+  bound: ['personal'],
+  ...extra,
+})
+
+test('a sign-in says what it waits on, who last renewed it, and why it last failed', () => {
+  const name = (id: string) => ({ h: 'homelab', b: 'bazzite' })[id] ?? id
+  const at = (ms: number) => `t${ms}`
+  expect(renewalLines(oauthSignIn(), name, at)).toEqual([])
+  expect(
+    renewalLines(
+      oauthSignIn({
+        renewer: 'h',
+        renewal: { state: 'waiting', renewer: null, since_ms: 1 },
+        last_renewed: { by: 'h', at_ms: 845, version: 41 },
+      }),
+      name,
+      at,
+    ),
+  ).toEqual(['Waiting for homelab to renew.', 'Last renewed by homelab at t845 (version 41).'])
+  expect(
+    renewalLines(
+      oauthSignIn({
+        renewal: { state: 'recovering', renewer: 'h', since_ms: 1 },
+        last_failure: { reason: 'invalid_grant', at_ms: 810 },
+      }),
+      name,
+      at,
+    ),
+  ).toEqual(['This copy could not be renewed; asking homelab for the current one.', 'Last failed at t810: invalid_grant'])
+  expect(renewalLines(oauthSignIn({ renewal: { state: 'waiting', renewer: null, since_ms: 1 } }), name, at)).toEqual([
+    'Waiting for another holder to renew.',
+  ])
+})
+
+test('shared sign-ins are those several nodes hold, with the renewer they name', () => {
+  const node = (id: string, is_self: boolean, signIn: ProviderSignIn | null) =>
+    ({
+      id,
+      name: id,
+      is_self,
+      providers: [
+        {
+          name: 'anthropic',
+          state: signIn ? 'connected' : 'disconnected',
+          kind: signIn ? 'oauth' : null,
+          can_login: true,
+          identity: null,
+          expires_ms: null,
+          channels: [],
+          updated_ms: null,
+          sign_ins: signIn ? [signIn] : [],
+        },
+      ],
+    }) as unknown as NodeInfo
+  const nodes = [
+    node('b', false, oauthSignIn({ renewer: null })),
+    node('a', true, oauthSignIn({ renewer: null })),
+    node('c', false, null),
+  ]
+  expect(sharedSignIns(nodes)).toEqual([
+    { provider: 'anthropic', credential: 'anthropic', identity: 'op@example.com', holders: ['a', 'b'], renewer: null },
+  ])
+  nodes[0] = node('b', false, oauthSignIn({ renewer: 'b' }))
+  expect(sharedSignIns(nodes)[0].renewer).toBe('b')
+  // One node alone is not shared.
+  expect(sharedSignIns([nodes[1], nodes[2]])).toEqual([])
 })
 
 test('a sign-in that can no longer be renewed offers signing in again, here or on its peer', () => {

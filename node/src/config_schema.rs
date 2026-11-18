@@ -335,6 +335,7 @@ pub const KEYS: &[KeySpec] = &[
     // [review]
     live("review.max_diff_lines"),
     live("review.max_files"),
+    live("review.generated_details"),
     // [notify]
     live("notify.contact"),
     // [embed]
@@ -358,6 +359,10 @@ pub const KEYS: &[KeySpec] = &[
     live("docs.export_every_secs"),
     restart("docs.preview_listen"),
     restart("docs.preview_url"),
+    // [gc]
+    live("gc.every_secs"),
+    live("gc.archive_ended_after_secs"),
+    live("gc.caches"),
     // [[docs.kind]]
     live("docs.kind.prefix"),
     live("docs.kind.label"),
@@ -555,6 +560,13 @@ pub const NOT_BY_PEER: &[(&str, &str)] = &[
     ("mcp_server.header", WHERE_CREDENTIALS_GO),
 ];
 
+/// Keys inside a [`NOT_BY_PEER`] table a peer this node lets administer it
+/// may still change, because they decide neither who reaches it nor where a
+/// credential goes. `mesh.renew_credentials` only makes this node renew the
+/// shared sign-ins it already holds first, which Settings › Mesh offers to
+/// set on whichever holder should.
+pub const BY_PEER_ANYWAY: &[&str] = &["mesh.renew_credentials"];
+
 const WHO_REACHES: &str = "decides who may reach or administer this node, so it is changed at the node or with its own passkey, never by a peer";
 const WHERE_CREDENTIALS_GO: &str = "decides where this node sends a credential, so it is changed at the node or with its own passkey, never by a peer";
 
@@ -563,6 +575,12 @@ const WHERE_CREDENTIALS_GO: &str = "decides where this node sends a credential, 
 /// A table that only holds one (`providers.x`, `embed`) is decided by the
 /// keys an edit of it writes or removes, which are checked one by one.
 pub fn peer_refusal(key: &[&str]) -> Option<&'static str> {
+    if BY_PEER_ANYWAY
+        .iter()
+        .any(|allowed| allowed.split('.').eq(key.iter().copied()))
+    {
+        return None;
+    }
     NOT_BY_PEER
         .iter()
         .find(|(pattern, _)| {
@@ -1135,6 +1153,7 @@ mod tests {
             &["embed", "enabled"],
             &["review", "max_files"],
             &["session", "budget_tokens"],
+            &["mesh", "renew_credentials"],
         ] {
             assert!(peer_refusal(key).is_none(), "{key:?}");
         }

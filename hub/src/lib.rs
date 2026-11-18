@@ -177,6 +177,7 @@ pub fn app_with_state(state: AppState) -> Router {
                 .delete(routes::cancel_enroll),
         )
         .route("/v0/claims", post(routes::claim))
+        .route("/v0/claims/{key}/renewed", post(routes::claim_renewed))
         .route("/v0/relay/listen", get(sandbox_relay::listen))
         .route("/v0/relay/streams/{id}", get(sandbox_relay::stream))
         .route("/v0/admit", post(routes::admit))

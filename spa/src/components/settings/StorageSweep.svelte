@@ -2,7 +2,7 @@
   import Card from './Card.svelte'
   import { api } from '../../lib/api'
   import { store } from '../../lib/store.svelte'
-  import type { StorageItem } from '../../lib/types'
+  import type { StorageItem, StorageScheduled } from '../../lib/types'
 
   let items = $state<StorageItem[] | null>(null)
   let caches = $state(false)
@@ -10,6 +10,14 @@
   let busy = $state('')
   let error = $state('')
   let note = $state('')
+  let scheduled = $state<StorageScheduled | null>(null)
+
+  $effect(() => {
+    api.storageSchedule().then(
+      (result) => (scheduled = result),
+      () => (scheduled = null),
+    )
+  })
 
   const local = $derived(store.node?.loopback ?? false)
   const removable = $derived(items?.filter((item) => item.remove) ?? [])
@@ -22,6 +30,7 @@
     note = ''
     try {
       const result = await api.storageSweep(apply, caches)
+      scheduled = result
       if (apply) {
         const failed = result.items.filter((item) => item.remove && item.error)
         const removed = result.items.filter((item) => item.removed).length
@@ -43,6 +52,19 @@
   title="Runtime storage"
   note="Volumes and directories of finished sessions, workspaces and checks. Removing one ends resuming, exporting and restoring it."
 >
+  {#if scheduled}
+    <p class="dim schedule">{scheduled.scheduled_line}</p>
+    {#if scheduled.scheduled.last?.failures.length}
+      <details>
+        <summary>Not removed by the last automatic sweep · {scheduled.scheduled.last.failures.length}</summary>
+        <ul>
+          {#each scheduled.scheduled.last.failures as failure (failure.kind + failure.name)}
+            <li class="failed"><code>{failure.name}</code> <small>{failure.kind} · {failure.error}</small></li>
+          {/each}
+        </ul>
+      </details>
+    {/if}
+  {/if}
   {#if !local}
     <p class="blocked">Storage is reclaimed on the node itself.</p>
   {/if}

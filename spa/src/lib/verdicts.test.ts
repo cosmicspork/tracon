@@ -3,7 +3,9 @@ import type { ReviewerView } from './types'
 import {
   basisLabel,
   checksState,
+  composeGeneratedDetails,
   composerLabel,
+  openerFor,
   draftControl,
   publishedChange,
   requestName,
@@ -40,6 +42,43 @@ describe('verdict availability', () => {
     expect(unavailable('revise', { ...ready, reason: 'x', readiness: { ready: false } })).toBeNull()
     // A stale review is named first: binding a token would not make it approvable.
     expect(unavailable('approve', { ...ready, stale: ['a'], readiness: { ready: false } })).toContain('changed since submit')
+  })
+
+  test('approve under generated details waits for an opener', () => {
+    const blank = { required: true, text: ' \n ' }
+    expect(unavailable('approve', { ...ready, opener: blank })).toBe('write an opener above the generated details')
+    expect(unavailable('approve', { ...ready, opener: { ...blank, where: 'the desktop' } })).toBe(
+      'write the opener on the desktop',
+    )
+    expect(unavailable('approve', { ...ready, opener: { ...blank, where: 'atlas' } })).toBe('write the opener on atlas')
+    expect(unavailable('approve', { ...ready, opener: { required: true, text: 'Fixes it.' } })).toBeNull()
+    expect(unavailable('approve', { ...ready, opener: { required: false, text: '' } })).toBeNull()
+    expect(unavailable('approve', { ...ready, opener: null })).toBeNull()
+    // Sending it back needs none.
+    expect(unavailable('revise', { ...ready, reason: 'x', opener: blank })).toBeNull()
+    // A stale review is named first: an opener would not make it approvable.
+    expect(unavailable('approve', { ...ready, stale: ['a'], opener: blank })).toContain('changed since submit')
+  })
+
+  test('the opener goes above whichever description approval sends', () => {
+    const at = (on: boolean, change: boolean, describe: boolean, initial = false) =>
+      openerFor(on, { change, describe, initial })
+    expect(at(true, false, false)).toBe('body')
+    expect(at(true, false, true)).toBe('description')
+    expect(at(true, true, true)).toBe('description')
+    // Push-only: the change's text is left as it is.
+    expect(at(true, true, false)).toBeNull()
+    // A repository's first push opens no change.
+    expect(at(true, false, false, true)).toBeNull()
+    expect(at(false, false, false)).toBeNull()
+    expect(at(false, true, true)).toBeNull()
+  })
+
+  test('what the forge gets folds the agent text beneath the opener', () => {
+    expect(composeGeneratedDetails('  Fixes the flaky sync.\n', '\n## What\n\nLong text.\n')).toBe(
+      'Fixes the flaky sync.\n\n<details>\n<summary>Generated details</summary>\n\n## What\n\nLong text.\n\n</details>',
+    )
+    expect(composeGeneratedDetails('Fixes the flaky sync.', ' \n')).toBe('Fixes the flaky sync.')
   })
 
   test('a verdict that sends a reason says it needs one', () => {

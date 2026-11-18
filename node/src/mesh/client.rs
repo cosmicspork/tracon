@@ -102,6 +102,10 @@ impl HubError {
 /// Told the names of the credentials a handoff stored.
 pub type OnHandoff = Box<dyn Fn(&[String]) + Send + Sync>;
 
+/// Asked whether this node's copy of a credential, by name, is one it can
+/// hand a peer that asked for it: not one known to be dead here.
+pub type Vouch = Box<dyn Fn(&str) -> bool + Send + Sync>;
+
 pub struct MeshClient {
     identity: Arc<Identity>,
     hub_url: String,
@@ -138,6 +142,9 @@ pub struct MeshClient {
     /// Told the names of the credentials a peer's revoke dropped, for the
     /// same reason.
     on_revoke: std::sync::OnceLock<OnHandoff>,
+    /// Whether a copy asked for may be handed over ([`Vouch`]). Unset, any
+    /// newer copy is.
+    vouch: std::sync::OnceLock<Vouch>,
     /// When the member list was last read again for a sender's refused key
     /// handoff, by sender: at most once a minute each, so a peer sending
     /// handoffs for channels it is not in cannot make this node ask the hub
@@ -208,6 +215,7 @@ impl MeshClient {
             broker: std::sync::OnceLock::new(),
             on_handoff: std::sync::OnceLock::new(),
             on_revoke: std::sync::OnceLock::new(),
+            vouch: std::sync::OnceLock::new(),
             handoff_refresh: Mutex::new(HashMap::new()),
             rereading: Mutex::new(HashMap::new()),
         })
@@ -224,6 +232,46 @@ impl MeshClient {
 
     pub fn set_on_revoke(&self, f: OnHandoff) {
         let _ = self.on_revoke.set(f);
+    }
+
+    pub fn set_vouch(&self, f: Vouch) {
+        let _ = self.vouch.set(f);
+    }
+
+    /// A peer whose copy of a shared sign-in is stale asked for the current
+    /// one: hand it this node's copy when it is the same sign-in, newer than
+    /// the peer's, bound to the peer, and not known to be dead here.
+    fn answer_credential_request(&self, sender: &str, name: &str, grant_id: &str, version: u64) {
+        let Some((broker, _)) = self.broker.get() else {
+            return;
+        };
+        let copy = broker.read().unwrap().get(name).cloned();
+        let Some(copy) = copy.filter(|c| {
+            c.grant_id.as_deref() == Some(grant_id)
+                && c.grant_version > version
+                && c.nodes.iter().any(|node| node == sender)
+                && c.expires_ms.is_none_or(|expires| expires > now_ms())
+        }) else {
+            tracing::info!(from = %sender, credential = %name, version, "credential request: no newer copy here");
+            return;
+        };
+        if self.vouch.get().is_some_and(|vouch| !vouch(name)) {
+            tracing::info!(from = %sender, credential = %name, version, "credential request: this copy cannot be renewed either; not handed over");
+            return;
+        }
+        let rows = crate::broker::Broker::handoff_rows(&[(name.to_string(), copy.clone())]);
+        match self.send_credential_handoff(sender, rows) {
+            Ok(()) => tracing::info!(
+                to = %sender,
+                credential = %name,
+                from_version = version,
+                version = copy.grant_version,
+                "credential request answered with the current copy"
+            ),
+            Err(error) => {
+                tracing::warn!(to = %sender, credential = %name, %error, "credential request could not be answered")
+            }
+        }
     }
 
     pub fn set_executor(&self, executor: Arc<dyn super::forward::CommandExecutor>) {
@@ -911,6 +959,14 @@ impl MeshClient {
                     }
                 }
                 return Opened::from(!stored.is_empty());
+            }
+            Payload::CredentialRequest {
+                name,
+                grant_id,
+                grant_version,
+            } if env.is_direct() => {
+                self.answer_credential_request(sender, name, grant_id, *grant_version);
+                return Opened::Applied;
             }
             Payload::CredentialRevoke {
                 revoke_id,

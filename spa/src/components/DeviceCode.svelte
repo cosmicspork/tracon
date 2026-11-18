@@ -11,11 +11,11 @@
 <div class="device" data-testid="device-code">
   <p>
     {#if desktop}
-      Open the link in a browser signed in to this node, or scan the code with your phone, and
-      approve with your passkey there.
+      Open the link in a browser signed in to this node, or on your phone open tracon and use
+      Settings &gt; Scan a QR code, and approve with your passkey there.
     {:else}
-      Open the link on a device signed in to this node with a passkey, such as your phone (scan the
-      code), and approve there.
+      Open the link on a device signed in to this node with a passkey, or on your phone open tracon
+      and use Settings &gt; Scan a QR code, and approve there.
     {/if}
   </p>
   <div class="code" aria-label="Code to compare">

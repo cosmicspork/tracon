@@ -27,7 +27,11 @@
 //!
 //! Where sandboxes run from the bundle: a harness bundle under
 //! `bundles/` belongs to the node's version, and one of any other version is
-//! never mounted again; a repository's prepared snapshot (an image) belongs
+//! never mounted again. On Kubernetes the node serves each bundle as a tar
+//! beside them (`served-<key>.tar`, keyed by the bundle directory's path):
+//! one of a bundle it serves now stays, any other is another version's, and
+//! a `.partial` a day old was left by a pack that never finished. A
+//! repository's prepared snapshot (an image) belongs
 //! to the repository while it is the latest one prepared, and is otherwise
 //! superseded.
 //!
@@ -100,6 +104,9 @@ pub struct Owners {
     /// that are no managed clone: nothing builds or prepares for them again,
     /// so their last builds and snapshots are superseded rather than current.
     pub retired_repositories: HashSet<String>,
+    /// The file names under `bundles/` of the tars of the bundles this node
+    /// serves now (`crate::provider::kubernetes::served_tar_name`).
+    pub served_tars: HashSet<String>,
 }
 
 impl Default for Owners {
@@ -117,6 +124,7 @@ impl Default for Owners {
             version: String::new(),
             kept_images: Vec::new(),
             retired_repositories: HashSet::new(),
+            served_tars: HashSet::new(),
         }
     }
 }
@@ -447,6 +455,29 @@ pub fn classify_directory(
         )),
         "workspaces" | "workspace-staging" => Some(workspace_verdict(entry, created_ms, owners)),
         "bundles" => Some(match entry {
+            partial if partial.starts_with("served-") && partial.ends_with(".tar.partial") => {
+                if created_ms.is_none_or(|created| owners.now_ms - created < WORKSPACE_GRACE_MS) {
+                    verdict(
+                        false,
+                        "made in the last day; a pack may still be writing it",
+                    )
+                } else {
+                    verdict(
+                        true,
+                        "left by a pack of a served bundle that did not finish",
+                    )
+                }
+            }
+            tar if tar.starts_with("served-") && tar.ends_with(".tar") => {
+                if owners.served_tars.contains(tar) {
+                    verdict(false, "the tar of a bundle this node serves now")
+                } else {
+                    verdict(
+                        true,
+                        "a served bundle of another version; this node never serves it",
+                    )
+                }
+            }
             crate::service_bundle::DIR => verdict(
                 false,
                 "the release's browser bundles; the node removes other Chrome versions itself",
@@ -533,12 +564,18 @@ fn directory_items(state_dir: &Path, owners: &Owners) -> Vec<(Item, PathBuf)> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            // A publication's bundle is the one file a sweep looks at.
-            let bundle = area == "publishers" && path.extension().is_some_and(|e| e == "bundle");
+            let entry_name = entry.file_name().to_string_lossy().into_owned();
+            // The files a sweep looks at: a publication's bundle, and the
+            // tars of served bundles.
+            let bundle = match area {
+                "publishers" => path.extension().is_some_and(|e| e == "bundle"),
+                crate::bundle::DIR => is_served_tar(&entry_name),
+                _ => false,
+            } && path.is_file();
             if !path.is_dir() && !bundle {
                 continue;
             }
-            let entry = entry.file_name().to_string_lossy().into_owned();
+            let entry = entry_name;
             if let Some((remove, reason)) =
                 classify_directory(area, &entry, created_ms(&path), owners)
             {
@@ -548,6 +585,26 @@ fn directory_items(state_dir: &Path, owners: &Owners) -> Vec<(Item, PathBuf)> {
         }
     }
     items
+}
+
+/// Whether a file under `bundles/` is a served bundle's tar, or one being
+/// packed.
+fn is_served_tar(name: &str) -> bool {
+    name.starts_with("served-") && (name.ends_with(".tar") || name.ends_with(".tar.partial"))
+}
+
+/// The tars of the bundles this node serves now: its harness bundle and each
+/// catalogue service's, as `crate::provider::kubernetes` names them.
+fn served_tars(cfg: &Config) -> HashSet<String> {
+    crate::bundle::effective(cfg)
+        .into_iter()
+        .chain(
+            crate::service_bundle::named(cfg)
+                .into_iter()
+                .map(|(_, dir)| dir),
+        )
+        .map(|dir| crate::provider::kubernetes::served_tar_name(&dir))
+        .collect()
 }
 
 fn item(kind: &'static str, name: String, remove: bool, reason: String) -> Item {
@@ -737,7 +794,9 @@ pub async fn sweep(
     sweep: Sweep,
 ) -> Result<Vec<Item>, String> {
     let Sweep { caches, apply, .. } = sweep;
-    let owners = Owners::read(store, node_id, caches, &cfg.repos()).map_err(|e| e.to_string())?;
+    let mut owners =
+        Owners::read(store, node_id, caches, &cfg.repos()).map_err(|e| e.to_string())?;
+    owners.served_tars = served_tars(cfg);
     // Transfers first: one left behind holds its volume and its image.
     let (mut items, departing) = sweep_transfers(backend, &owners, apply).await;
     let volumes = backend.list_volumes().await.map_err(|e| e.to_string())?;
@@ -827,6 +886,62 @@ mod tests {
                 .unwrap()
                 .0
         );
+    }
+
+    /// On Kubernetes each release's bundle directory is served as its own
+    /// tar: only those of the bundles served now stay, and a pack's
+    /// `.partial` goes once it is a day old.
+    #[test]
+    fn only_the_tars_of_bundles_served_now_stay() {
+        use crate::provider::kubernetes::served_tar_name;
+        let state = tempfile::tempdir().unwrap();
+        let bundles = state.path().join(crate::bundle::DIR);
+        let current = bundles.join("1.2.0").join("amd64");
+        let older = bundles.join("1.1.0").join("amd64");
+        let service = bundles.join(crate::service_bundle::DIR).join("chrome");
+        std::fs::create_dir_all(&current).unwrap();
+        let (current_tar, older_tar, service_tar) = (
+            served_tar_name(&current),
+            served_tar_name(&older),
+            served_tar_name(&service),
+        );
+        let partial = served_tar_name(&older).replace(".tar", ".tar.partial");
+        for name in [&current_tar, &older_tar, &service_tar, &partial] {
+            std::fs::write(bundles.join(name), b"tar").unwrap();
+        }
+        // Neither a directory nor a served tar: not the sweep's.
+        std::fs::write(bundles.join("notes.txt"), b"").unwrap();
+
+        let mut o = owners();
+        o.version = "1.2.0".into();
+        o.served_tars = HashSet::from([current_tar.clone(), service_tar.clone()]);
+        // Every file here is just made, so the `.partial` is too new to go
+        // until the clock is a day on.
+        o.now_ms = created_ms(&bundles.join(&partial)).unwrap() + 1000;
+        let verdicts = |o: &Owners| -> std::collections::BTreeMap<String, (bool, &'static str)> {
+            directory_items(state.path(), o)
+                .into_iter()
+                .map(|(item, _)| (item.name, (item.remove, item.kind)))
+                .collect()
+        };
+        let at = |name: &str| format!("bundles/{name}");
+        let seen = verdicts(&o);
+        assert_eq!(seen[&at("1.2.0")], (false, "directory"));
+        assert_eq!(seen[&at(&current_tar)], (false, "file"));
+        assert_eq!(seen[&at(&service_tar)], (false, "file"));
+        assert_eq!(seen[&at(&older_tar)], (true, "file"));
+        assert_eq!(seen[&at(&partial)], (false, "file"));
+        assert!(!seen.contains_key(&at("notes.txt")));
+        let (_, reason) = classify_directory("bundles", &older_tar, None, &o).unwrap();
+        assert_eq!(
+            reason,
+            "a served bundle of another version; this node never serves it"
+        );
+
+        o.now_ms += WORKSPACE_GRACE_MS;
+        let seen = verdicts(&o);
+        assert_eq!(seen[&at(&partial)], (true, "file"));
+        assert_eq!(seen[&at(&current_tar)], (false, "file"));
     }
 
     #[test]

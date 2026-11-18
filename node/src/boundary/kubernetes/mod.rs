@@ -491,6 +491,11 @@ impl Backend for KubeBackend {
         Some(self.files_store())
     }
 
+    /// Every volume a run mounts is kept on the state claim here.
+    fn files_for(&self, _volume: &str) -> Option<crate::runner::sandbox_files::FilesStore> {
+        Some(self.files_store())
+    }
+
     fn registry_builder(&self) -> Option<Arc<dyn super::ImageBuilder>> {
         match &self.builder {
             Some(Ok(builder)) => Some(builder.clone()),

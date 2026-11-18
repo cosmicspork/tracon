@@ -17,6 +17,13 @@ export interface VerdictConditions {
   reason: string
   /** Whether this node can publish an approval; absent when it is not asked. */
   readiness?: { ready: boolean; problem?: string | null } | null
+  /**
+   * Under `[review] generated_details`, when approval sends a description:
+   * whether it needs an opener, what the opener holds, and where it is
+   * written when not on this screen (`the desktop`, or the node holding the
+   * review).
+   */
+  opener?: { required: boolean; text: string; where?: string | null } | null
 }
 
 /** Why `action` cannot be sent, or null when it can. */
@@ -33,12 +40,45 @@ export function unavailable(action: VerdictAction, c: VerdictConditions): string
     if (c.readiness && !c.readiness.ready) {
       return `cannot publish from this node yet: ${c.readiness.problem ?? 'its forge token is not ready'}`
     }
+    if (c.opener?.required && !c.opener.text.trim()) {
+      return c.opener.where ? `write the opener on ${c.opener.where}` : 'write an opener above the generated details'
+    }
     return null
   }
   if (!c.reason.trim()) {
     return action === 'revise' ? 'say what should change' : 'say why you are rejecting it'
   }
   return null
+}
+
+/** The label the agent's text is collapsed under, as the node publishes it. */
+export const GENERATED_DETAILS = 'Generated details'
+
+/**
+ * Which description an approval sends under `[review] generated_details`
+ * (`on`), the one the operator's opener goes above: a new change's body, or
+ * the description replacing a change's (`describe`). None for a push-only
+ * update of an open change, or a repository's first push, which opens none.
+ */
+export function openerFor(
+  on: boolean,
+  o: { change: boolean; initial: boolean; describe: boolean },
+): 'body' | 'description' | null {
+  if (!on || o.initial) return null
+  if (o.describe) return 'description'
+  return o.change ? null : 'body'
+}
+
+/**
+ * The description the forge gets: the opener, then the agent's text folded
+ * under "Generated details", or the opener alone when there is no text. The
+ * node composes the published one the same way; this is its preview.
+ */
+export function composeGeneratedDetails(opener: string, body: string): string {
+  const lead = opener.trim()
+  const rest = body.trim()
+  if (!rest) return lead
+  return `${lead}\n\n<details>\n<summary>${GENERATED_DETAILS}</summary>\n\n${rest}\n\n</details>`
 }
 
 /**

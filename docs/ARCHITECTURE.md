@@ -646,11 +646,30 @@ holder only ever replaces its copy with a newer one, so a delayed or replayed ha
 cannot undo a refresh. Because a refresh revokes every other holder's tokens, each
 version is renewed once: any holder may try, but only after the hub grants it the
 claim on that version (`POST /v0/claims`, keyed by a hash of the sign-in so the hub
-learns nothing about it), and the winner hands the renewed copy to the rest. A node
-with `[mesh] renew_credentials` tries half an hour before expiry and every other holder
-a quarter of an hour, so an always-on node renews in practice and any holder covers for
-it. Without a claim to be had — no hub, a hub older than claims, one that cannot be
-reached — only the node that signed in, first in `nodes`, renews.
+learns nothing about it). The winner tells the hub it renewed that version
+(`POST /v0/claims/{key}/renewed`) and hands the renewed copy to the rest. The hub keeps
+claims and renewals in its data directory for 30 days, so neither a restart nor a
+holder away for days lets a stale copy win a claim: a claim on a renewed version is
+answered `409` stale, naming the node that renewed it.
+
+One holder renews first, half an hour before expiry: the one with `[mesh]
+renew_credentials`, or else the only holder on Kubernetes (each node says which it is
+on the sign-ins it publishes, and Settings › Mesh offers to set one when none is); every
+other holder tries a quarter of an hour before. Without a claim to be had — no hub, a hub
+older than claims, one that cannot be reached — no holder renews and each says it is
+waiting for the renewer, except the node set to renew, in the last five minutes before
+expiry.
+
+A holder whose copy is stale (the hub says so, or the provider refuses its refresh
+token with `invalid_grant`) does not ask for a new sign-in at once. It asks the node
+that renewed it, then after a minute every other holder, for the current copy (a
+direct-sealed `CredentialRequest`, answered with a handoff by a holder whose copy is
+newer and not itself known to be dead), and asks for a new sign-in only if none arrives
+within two minutes. A node that wakes from a suspend asks every other holder of each
+shared sign-in the same way before renewing anything. Every attempt is logged at INFO
+with the credential, its version, the claim's result and the outcome, and the provider
+card shows who last renewed a copy (the copy carries it) and the last renewal on the
+node that failed.
 
 ## The gate
 
@@ -2224,12 +2243,16 @@ Three surfaces, three answers, and the differences are the point.
 Encrypted snapshots of the hub's volume to object storage, with a restore path that
 has been exercised — hub failure without a tested restore costs years of context.
 Retention is decided (2026-09-29): the node keeps everything, and the operator deletes
-by hand. Settings → Data shows what the node holds per kind (rows counted from the
+by hand, or on a schedule the operator sets; only runtime storage, never session rows,
+logs or evidence. `[gc]` runs `tracon gc --apply` on a timer (off unless `every_secs`
+is set), first archiving this node's own ended sessions untouched for
+`archive_ended_after_secs`, save one whose review is open or whose publication is not
+settled, as approving or publishing reads its workspace again. Settings → Data shows what the node holds per kind (rows counted from the
 store, directories measured on disk), where each kind that has a real delete is
 deleted, and what that delete does beyond the node; the Nodes screen carries the
 serving node's total. Documents, memories and work items delete one at a time and
 replicate the delete as a tombstone; workspaces and harness state go through Runtime
-storage once their session is archived; sessions, their logs and evidence have no
+storage once their session is archived, by hand or on that schedule; sessions, their logs and evidence have no
 delete. Tombstone semantics wait until replication makes a
 propagated delete matter, and that decision is due before it does. Plain-text export for every kind: no format readable
 only by this binary. Documents export as plain Markdown and import back by filename
