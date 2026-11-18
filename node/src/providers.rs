@@ -72,6 +72,9 @@ struct Inflight {
     owner: LoginOwner,
     channels: Vec<String>,
     share: bool,
+    /// Signing in again for the sign-in held under this credential: what the
+    /// new tokens replace in place ([`Providers::connect_again`]).
+    replace: Option<String>,
     started_ms: i64,
     cancel: CancellationToken,
     state: InflightState,
@@ -138,6 +141,10 @@ enum StoreKind {
     },
     /// New tokens for the sign-in held under this credential name.
     Refresh { credential: String },
+    /// A new sign-in for the one held under this credential name, in its
+    /// place: the same channels and the same nodes, with this node now the
+    /// sign-in's origin.
+    Again { credential: String },
 }
 
 /// What storing a sign-in changed in the broker.
@@ -387,6 +394,9 @@ impl Providers {
                                 json!(stalled.and_then(|note| note.error.clone())),
                             );
                             object.insert("shared_with".into(), json!(self.peers_of(c)));
+                            // Whose sign-in this copy is: signing in again
+                            // here makes it this node's.
+                            object.insert("origin".into(), json!(c.origin()));
                         }
                         row
                     })
@@ -406,6 +416,10 @@ impl Providers {
                     "state": state,
                     "kind": cred.map(|(_, c)| c.kind.clone()),
                     "can_login": provider.login.as_deref().and_then(Flow::for_login).is_some(),
+                    // Whether this node takes Sign in again for one of its
+                    // sign-ins from a peer's interface; absent from a node
+                    // older than it, which the peer's operator is sent to.
+                    "sign_in_again": provider.login.as_deref().and_then(Flow::for_login).is_some(),
                     "declared": self.cfg.declared_providers.contains(name),
                     "identity": cred.and_then(|(_, c)| c.identity.clone()),
                     "expires_ms": cred.and_then(|(_, c)| c.expires_ms),
@@ -558,6 +572,80 @@ impl Providers {
         owner: LoginOwner,
         local_callback: bool,
     ) -> Result<ConnectResult, ProviderError> {
+        self.begin(name, channels, share, None, owner, local_callback)
+            .await
+    }
+
+    /// Sign in again for the sign-in of `name` held here under `credential`,
+    /// one that can no longer be renewed: the login runs as a connect does,
+    /// and what it signs in to replaces that sign-in's tokens in place. It
+    /// keeps the channels the sign-in is bound to and the nodes it is shared
+    /// with, which receive the new copy by handoff; a copy shared from
+    /// another node becomes this node's own sign-in. Nothing needs
+    /// disconnecting first.
+    pub async fn connect_again(
+        self: &Arc<Self>,
+        name: &str,
+        credential: &str,
+        owner: LoginOwner,
+        local_callback: bool,
+    ) -> Result<ConnectResult, ProviderError> {
+        let channels = self.sign_in_channels(name, credential)?;
+        self.begin(
+            name,
+            channels,
+            true,
+            Some(credential.to_string()),
+            owner,
+            local_callback,
+        )
+        .await
+    }
+
+    /// The channels the subscription sign-in of `name` held here under
+    /// `credential` is bound to. Refused when `name` holds no such sign-in,
+    /// or it is an API key, which takes a new key in place instead.
+    pub fn sign_in_channels(
+        &self,
+        name: &str,
+        credential: &str,
+    ) -> Result<Vec<String>, ProviderError> {
+        let broker = self.broker.read().unwrap();
+        let held = self
+            .sign_in_named(&broker, name, Some(credential))?
+            .and_then(|named| broker.get(&named))
+            .ok_or_else(|| {
+                ProviderError::Conflict(format!(
+                    "{name} holds no sign-in named {credential} on this node"
+                ))
+            })?;
+        if held.kind != KIND_OAUTH {
+            return Err(ProviderError::Conflict(format!(
+                "{credential} holds an API key; give {name} a new key instead"
+            )));
+        }
+        Ok(held.channels.clone())
+    }
+
+    /// Whether the sign-in held under `credential` is known not to renew:
+    /// only signing in again, here or on a node that hands a copy here,
+    /// replaces it.
+    pub fn needs_reconnect(&self, credential: &str) -> bool {
+        self.renewals
+            .lock()
+            .get(credential)
+            .is_some_and(|note| note.state == NEEDS_RECONNECT)
+    }
+
+    async fn begin(
+        self: &Arc<Self>,
+        name: &str,
+        channels: Vec<String>,
+        share: bool,
+        replace: Option<String>,
+        owner: LoginOwner,
+        local_callback: bool,
+    ) -> Result<ConnectResult, ProviderError> {
         let flow = self.flow(name)?;
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
         let cancel = CancellationToken::new();
@@ -578,6 +666,7 @@ impl Providers {
                     owner,
                     channels,
                     share,
+                    replace,
                     started_ms: now_ms(),
                     cancel: cancel.clone(),
                     state: InflightState::Starting,
@@ -1004,25 +1093,27 @@ impl Providers {
         stop_capture(&slot);
         slot.cancel.cancel();
         let mesh = self.mesh.get();
-        let mut nodes = vec![self.node_id.clone()];
-        if slot.share {
-            for member in mesh
-                .map(|mesh| mesh.members_in(&slot.channels))
-                .unwrap_or_default()
-            {
-                if !nodes.contains(&member) {
-                    nodes.push(member);
+        let kind = match slot.replace {
+            Some(credential) => StoreKind::Again { credential },
+            None => {
+                let mut nodes = vec![self.node_id.clone()];
+                if slot.share {
+                    for member in mesh
+                        .map(|mesh| mesh.members_in(&slot.channels))
+                        .unwrap_or_default()
+                    {
+                        if !nodes.contains(&member) {
+                            nodes.push(member);
+                        }
+                    }
+                }
+                StoreKind::Fresh {
+                    channels: slot.channels,
+                    nodes,
                 }
             }
-        }
-        let stored = self.store(
-            name,
-            tokens,
-            StoreKind::Fresh {
-                channels: slot.channels,
-                nodes,
-            },
-        );
+        };
+        let stored = self.store(name, tokens, kind);
         match &stored {
             Ok(stored) => {
                 self.notes.lock().remove(name);
@@ -1425,7 +1516,7 @@ impl Providers {
 
     fn store(&self, name: &str, tokens: Tokens, kind: StoreKind) -> Result<Stored, ProviderError> {
         let base = self.credential_name(name)?;
-        let fresh = matches!(kind, StoreKind::Fresh { .. });
+        let fresh = !matches!(kind, StoreKind::Refresh { .. });
         let mut broker = self.broker.write().unwrap();
         let mut staged = broker.clone();
         let (credential_name, mut credential, narrowed, removed) = match kind {
@@ -1471,6 +1562,45 @@ impl Providers {
                 // renew it then.
                 credential.ensure_grant(&self.node_id);
                 credential.grant_version += 1;
+                (credential_name, credential, Vec::new(), Vec::new())
+            }
+            // A new sign-in, so a new grant every holder takes over the copy
+            // it has, minted here: this node is its origin now, whoever
+            // signed in to the one it replaces. It goes to the nodes that one
+            // listed, this node first as a sign-in made here lists it.
+            StoreKind::Again { credential } => {
+                let credential_name = credential;
+                let held = staged
+                    .get(&credential_name)
+                    .filter(|held| {
+                        held.kind == KIND_OAUTH
+                            && held.provider.as_deref() == Some(name)
+                            && broker::in_family(&credential_name, held, name, &base)
+                    })
+                    .cloned()
+                    .ok_or_else(|| {
+                        ProviderError::Failed(format!(
+                            "the {name} sign-in {credential_name} is no longer held here; connect again"
+                        ))
+                    })?;
+                let mut nodes = Vec::new();
+                if !held.nodes.is_empty() {
+                    nodes.push(self.node_id.clone());
+                    nodes.extend(
+                        held.nodes
+                            .iter()
+                            .filter(|node| **node != self.node_id)
+                            .cloned(),
+                    );
+                }
+                let credential = Credential {
+                    channels: held.channels,
+                    nodes,
+                    repos: held.repos,
+                    grant_id: Some(uuid::Uuid::now_v7().to_string()),
+                    grant_origin: Some(self.node_id.clone()),
+                    ..Default::default()
+                };
                 (credential_name, credential, Vec::new(), Vec::new())
             }
         };
@@ -1778,6 +1908,7 @@ mod tests {
             owner,
             channels: vec![],
             share: true,
+            replace: None,
             started_ms,
             cancel: CancellationToken::new(),
             state: match pending {

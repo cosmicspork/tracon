@@ -461,6 +461,8 @@ export function eventLine(e: Event): EventLine | null {
       if (source === 'exhausted') return line('wait', ['paused', 'its provider is exhausted'])
       // The node's reason carries the numbers and the way on.
       if (source === 'budget') return line('wait', ['paused', str(p.reason) || 'it spent its token budget'])
+      // Its provider refused a sign-in that can no longer be renewed.
+      if (source === 'sign_in') return line('wait', [str(p.reason) || 'waiting for a sign-in'])
       const who = source === 'watchdog' ? 'paused by the node' : 'paused by the operator'
       return line('wait', [who, ownReason(p.reason)])
     }
@@ -667,6 +669,19 @@ export function eventLine(e: Event): EventLine | null {
           return line('sys', ['not woken', note])
         default:
           return line('mark', ['exhaustion', outcome, note])
+      }
+    }
+    case 'sign_in_wait': {
+      const provider = str(p.provider)
+      switch (str(p.outcome)) {
+        case 'waiting':
+          return line('wait', [`waiting for a sign-in to ${provider || 'its provider'}`, 'it carries on once a new one is here'])
+        case 'resumed':
+          return line('mark', [`a new sign-in to ${provider || 'its provider'} arrived`, 'resumed'])
+        case 'ended':
+          return line('sys', ['no new sign-in arrived', str(p.note)])
+        default:
+          return line('mark', ['sign-in wait', str(p.outcome)])
       }
     }
     case 'uncertain': {

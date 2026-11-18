@@ -159,6 +159,9 @@ pub enum PauseSource {
     /// The session spent its token budget. Held rather than ended, so the
     /// operator can raise the budget and let the same harness carry on.
     Budget,
+    /// Its provider refused the sign-in, which can no longer be renewed:
+    /// it waits for a new one (`session::sign_in`).
+    SignIn,
 }
 
 impl PauseSource {
@@ -169,6 +172,7 @@ impl PauseSource {
             Self::Exhausted => "exhausted",
             Self::Wake => "wake",
             Self::Budget => "budget",
+            Self::SignIn => "sign_in",
         }
     }
 }
@@ -806,7 +810,10 @@ impl Supervisor {
         );
         if matches!(
             source,
-            PauseSource::Watchdog | PauseSource::Exhausted | PauseSource::Budget
+            PauseSource::Watchdog
+                | PauseSource::Exhausted
+                | PauseSource::Budget
+                | PauseSource::SignIn
         ) {
             let _ = self.store.update_session(
                 &self.session_id,

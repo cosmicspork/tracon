@@ -11,7 +11,16 @@
     prepareExternalOpen,
   } from '../lib/external'
   import { formatDuration } from '../lib/format'
-  import { completionInstruction, disconnectLoses, providerLabel, signInLabel, signIns, takesOver } from '../lib/providers'
+  import {
+    completionInstruction,
+    disconnectLoses,
+    providerLabel,
+    signInAgain,
+    signInAgainTakesOver,
+    signInLabel,
+    signIns,
+    takesOver,
+  } from '../lib/providers'
   import { store } from '../lib/store.svelte'
   import {
     declareOps,
@@ -69,6 +78,11 @@
   // A disconnect that takes the provider from channels, waiting for the
   // operator to confirm what it names.
   let confirming = $state<{ signIn: ProviderSignIn; text: string } | null>(null)
+  // Signing in again for a copy another node shared, waiting for the
+  // operator to confirm this node takes the sign-in over.
+  let confirmingAgain = $state<{ signIn: ProviderSignIn; text: string } | null>(null)
+  // The sign-in being signed in again, by credential, until it is connected.
+  let again = $state<string | null>(null)
 
   // The declared-models editor's own local copy: edited freely, saved on
   // request. Re-seeded whenever the node's own config changes under it
@@ -185,7 +199,7 @@
   const nodeName = $derived(store.nodes.find((node) => node.id === nodeId)?.name ?? nodeId.slice(0, 8))
   const mayClaimBrowser = $derived(isSelf && !managedLocal && browserCanClaimNode())
   const meshed = $derived(store.nodes.length > 1)
-  const shownState = $derived(justResult && p.state === 'disconnected' ? 'pending' : p.state)
+  const shownState = $derived(justResult && (p.state === 'disconnected' || again !== null) ? 'pending' : p.state)
   const shownUrl = $derived(p.url ?? justResult?.url ?? null)
   const completion = $derived(p.completion ?? justResult?.completion ?? null)
   const completionNote = $derived(p.completion_note ?? justResult?.completion_note ?? null)
@@ -207,6 +221,15 @@
 
   $effect(() => {
     if (p.state === 'connected' || p.state === 'failed') justResult = null
+  })
+  // Signed in again: its row is connected once more, and nothing is pending.
+  $effect(() => {
+    if (again === null || p.state === 'pending') return
+    const row = held.find((signIn) => signIn.credential === again)
+    if (!row || row.state === 'connected' || p.state === 'failed') {
+      again = null
+      justResult = null
+    }
   })
 
   onMount(() => {
@@ -238,6 +261,21 @@
     return act(async () => {
       justResult = await api.nodeConnectProvider(nodeId, p.name, picked, managedLocal || sameHostBrowser, shareSignIn)
       adding = false
+    })
+  }
+
+  // The login for that very sign-in: its channels and sharing are the node's
+  // to keep, and what it signs in to replaces the tokens in place. On a peer
+  // it runs there and is finished by pasting the code; this browser never
+  // claims the peer's callback.
+  function startSignInAgain(signIn: ProviderSignIn, confirmed = false) {
+    const text = isSelf && !confirmed ? signInAgainTakesOver(signIn, nodeId, nodeName, peerName) : null
+    confirmingAgain = text ? { signIn, text } : null
+    if (text) return
+    return act(async () => {
+      const local = isSelf && (managedLocal || sameHostBrowser)
+      justResult = await api.nodeConnectProvider(nodeId, p.name, signIn.bound, local, true, signIn.credential)
+      again = signIn.credential
     })
   }
 
@@ -386,12 +424,24 @@
       {#each held as signIn (signIn.credential)}
         <span class="signin">
           <span class="l"
-            ><span class="chip" class:bad={signIn.state === 'needs_reconnect'}>{signIn.state === 'needs_reconnect' ? 'sign in again' : 'connected'}</span>{#if signIn.identity}{' · '}{signIn.identity}{/if}{' · '}{signIn.channels.length ? signIn.channels.join(', ') : 'no channel'}{#if isSelf && editable && editing === null}{' · '}<button class="lnk" onclick={() => editChannels(signIn)} disabled={busy}>edit channels</button>{/if}{#if isSelf}{' · '}<button
+            ><span class="chip" class:bad={signIn.state !== 'connected'}>{signIn.state !== 'connected' ? 'sign in again' : 'connected'}</span>{#if signIn.identity}{' · '}{signIn.identity}{/if}{' · '}{signIn.channels.length ? signIn.channels.join(', ') : 'no channel'}{#if isSelf && editable && editing === null}{' · '}<button class="lnk" onclick={() => editChannels(signIn)} disabled={busy}>edit channels</button>{/if}{#if isSelf}{' · '}<button
                 class="lnk d"
                 onclick={() => disconnect(signIn)}
                 disabled={busy}>Disconnect</button
               >{/if}</span
           >
+          {#if shownState !== 'pending'}
+            {@const action = signInAgain(p, signIn, isSelf, nodeName)}
+            {#if action?.kind === 'elsewhere'}
+              <span class="l off">{action.text}</span>
+            {:else if action}
+              <span class="actions"
+                ><button class="btn p" onclick={() => startSignInAgain(signIn)} disabled={busy || confirmingAgain !== null}
+                  >{action.label}</button
+                ></span
+              >
+            {/if}
+          {/if}
           {#if signIn.bound.some((channel) => !signIn.channels.includes(channel))}
             <span class="l off">A copy shared from another node; a sign-in made here serves {signIn.bound.filter((channel) => !signIn.channels.includes(channel)).join(', ')}.</span>
           {/if}
@@ -598,6 +648,15 @@
       {:else}
         <span>Add the key while managing {nodeName}; it never crosses the mesh to this browser.</span>
       {/if}
+    {/if}
+    {#if confirmingAgain}
+      <span class="confirm" role="alert">
+        <span class="l warn">{confirmingAgain.text}</span>
+        <span class="actions">
+          <button class="btn p" onclick={() => confirmingAgain && startSignInAgain(confirmingAgain.signIn, true)} disabled={busy}>Sign in again</button>
+          <button class="lnk" onclick={() => (confirmingAgain = null)} disabled={busy}>Cancel</button>
+        </span>
+      </span>
     {/if}
     {#if confirming}
       <span class="confirm" role="alert">

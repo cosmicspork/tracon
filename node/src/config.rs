@@ -3116,6 +3116,10 @@ pub struct SessionDefaults {
     /// suspended: harness and container stopped, egress grant revoked,
     /// workspace kept. 0 never suspends one.
     pub suspend_published_after_secs: u64,
+    /// How long a session whose provider refused a sign-in that can no
+    /// longer be renewed waits for a new one before it ends. 0 waits for as
+    /// long as it takes.
+    pub auth_wait_secs: u64,
     /// Where worktrees are created. Outside any repo, so nothing is gitignored.
     pub worktree_root: PathBuf,
 }
@@ -3211,6 +3215,7 @@ impl Default for Config {
                 default_channel: String::new(),
                 claim_grace_secs: 60,
                 suspend_published_after_secs: 1800,
+                auth_wait_secs: 86_400,
                 worktree_root: default_worktree_root(),
             },
         }

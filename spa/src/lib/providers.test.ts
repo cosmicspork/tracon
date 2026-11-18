@@ -5,11 +5,15 @@ import {
   credentialImportToml,
   disconnectLoses,
   normalizeProviderName,
+  providerCardHref,
   providerLabel,
+  signInAgain,
+  signInAgainTakesOver,
   signIns,
+  signInsNeeded,
   takesOver,
 } from './providers'
-import type { ProviderInfo, ProviderSignIn } from './types'
+import type { NodeInfo, ProviderInfo, ProviderSignIn } from './types'
 
 test('provider labels distinguish API keys from Codex subscriptions', () => {
   expect(providerLabel('anthropic')).toBe('Anthropic')
@@ -147,4 +151,106 @@ test('a node too old to list sign-ins describes its one', () => {
   ])
   expect(signIns({ ...old, state: 'pending' })).toEqual([])
   expect(signIns({ ...old, sign_ins: [] })).toEqual([])
+})
+
+test('a sign-in that can no longer be renewed offers signing in again, here or on its peer', () => {
+  const p: ProviderInfo = {
+    name: 'anthropic',
+    state: 'connected',
+    kind: 'oauth',
+    can_login: true,
+    sign_in_again: true,
+    identity: null,
+    expires_ms: null,
+    channels: ['work'],
+    updated_ms: null,
+  }
+  const row = (state: ProviderSignIn['state'], extra: Partial<ProviderSignIn> = {}): ProviderSignIn => ({
+    credential: 'anthropic',
+    state,
+    kind: 'oauth',
+    identity: 'me@example.com',
+    expires_ms: null,
+    channels: ['work'],
+    bound: ['work'],
+    ...extra,
+  })
+  // Connected: nothing to do, on either card.
+  expect(signInAgain(p, row('connected'), true, 'bazzite')).toBeNull()
+  expect(signInAgain(p, row('connected'), false, 'homelab')).toBeNull()
+  // This node's card.
+  expect(signInAgain(p, row('needs_reconnect'), true, 'bazzite')).toEqual({ kind: 'here', label: 'Sign in again' })
+  expect(signInAgain(p, row('failed'), true, 'bazzite')).toEqual({ kind: 'here', label: 'Sign in again' })
+  // A peer's card: run on the peer, named.
+  expect(signInAgain(p, row('needs_reconnect'), false, 'homelab')).toEqual({
+    kind: 'peer',
+    label: 'Sign in again on homelab',
+  })
+  // A peer that does not take it says where to go instead of failing.
+  const older: ProviderInfo = { ...p, sign_in_again: undefined }
+  expect(signInAgain(older, row('needs_reconnect'), false, 'homelab')).toEqual({
+    kind: 'elsewhere',
+    text: "Open homelab's own UI to sign in again.",
+  })
+  expect(signInAgain(p, row('needs_reconnect', { credential: '' }), false, 'homelab')?.kind).toBe('elsewhere')
+  // An API key takes a new key in place; a provider with no login has none.
+  expect(signInAgain(p, row('needs_reconnect', { kind: 'api_key' }), true, 'bazzite')).toBeNull()
+  expect(signInAgain({ ...p, can_login: false }, row('needs_reconnect'), true, 'bazzite')).toBeNull()
+})
+
+test('signing in again for a shared copy names the nodes it then shares with', () => {
+  const names: Record<string, string> = { b: 'bazzite', h: 'homelab', m: 'mac' }
+  const name = (id: string) => names[id] ?? id
+  const copy: ProviderSignIn = {
+    credential: 'anthropic',
+    state: 'needs_reconnect',
+    kind: 'oauth',
+    identity: null,
+    expires_ms: null,
+    channels: ['work'],
+    bound: ['work'],
+    shared_with: ['b', 'm'],
+    origin: 'b',
+  }
+  expect(signInAgainTakesOver(copy, 'h', 'homelab', name)).toBe(
+    "This is a copy bazzite shared. Signing in again here makes homelab the sign-in's origin; it then shares it with bazzite, mac.",
+  )
+  expect(signInAgainTakesOver({ ...copy, shared_with: [] }, 'h', 'homelab', name)).toContain('no other node holds it')
+  // Its own sign-in, or one from a node too old to say: nothing to confirm.
+  expect(signInAgainTakesOver({ ...copy, origin: 'h' }, 'h', 'homelab', name)).toBeNull()
+  expect(signInAgainTakesOver({ ...copy, origin: undefined }, 'h', 'homelab', name)).toBeNull()
+})
+
+test('the banner names each provider whose sign-in a channel still uses and cannot renew', () => {
+  const p = (state: ProviderSignIn['state'], channels: string[]): ProviderInfo => ({
+    name: 'anthropic',
+    state: 'connected',
+    kind: 'oauth',
+    can_login: true,
+    identity: null,
+    expires_ms: null,
+    channels,
+    updated_ms: null,
+    sign_ins: [{ credential: 'anthropic', state, kind: 'oauth', identity: null, expires_ms: null, channels, bound: ['work'] }],
+  })
+  const node = (id: string, name: string, extra: Partial<NodeInfo>): NodeInfo => ({ id, name, ...extra }) as NodeInfo
+  const nodes = [
+    node('b', 'bazzite', { is_self: true, reachable: true, providers: [p('connected', ['work'])] }),
+    node('h', 'homelab', { is_self: false, reachable: true, providers: [p('needs_reconnect', ['work'])] }),
+    node('m', 'mac', { is_self: false, reachable: false, providers: [p('needs_reconnect', ['work'])] }),
+    node('x', 'spare', { is_self: false, reachable: true, providers: [p('needs_reconnect', [])] }),
+  ]
+  // The serving node reads its own listing, not the one its hello carries.
+  expect(signInsNeeded(nodes, [p('needs_reconnect', ['work'])])).toEqual([
+    {
+      provider: 'anthropic',
+      nodes: [
+        { id: 'b', name: 'bazzite' },
+        { id: 'h', name: 'homelab' },
+      ],
+    },
+  ])
+  expect(signInsNeeded(nodes, [p('connected', ['work'])])).toEqual([{ provider: 'anthropic', nodes: [{ id: 'h', name: 'homelab' }] }])
+  expect(signInsNeeded(nodes.slice(0, 1), [p('connected', ['work'])])).toEqual([])
+  expect(providerCardHref('h')).toBe('/settings?node=h#connections')
 })

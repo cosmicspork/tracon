@@ -928,6 +928,15 @@ async fn note_provider_error(
             }),
         );
     }
+    // A sign-in that can no longer be renewed is refused however often the
+    // harness asks: the session waits for a new one instead.
+    if cause == exhaustion::Cause::Auth {
+        let manager = s.manager.clone();
+        let (session_id, provider) = (session_id.to_string(), provider.to_string());
+        tokio::spawn(async move {
+            manager.provider_auth_refused(&session_id, &provider).await;
+        });
+    }
     if cause == exhaustion::Cause::Exhausted {
         s.manager
             .provider_exhausted(

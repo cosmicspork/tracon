@@ -186,6 +186,7 @@ pub const KEYS: &[KeySpec] = &[
     live("session.default_channel"),
     live("session.claim_grace_secs"),
     live("session.suspend_published_after_secs"),
+    live("session.auth_wait_secs"),
     restart("session.worktree_root").path(PathKind::Root),
     // [consulta]
     restart("consulta.command").exec(),

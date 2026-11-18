@@ -454,6 +454,12 @@ pub enum Command {
         /// signed in. A peer on an older build names nothing, which shares.
         #[serde(default = "shares")]
         share: bool,
+        /// Sign in again for the sign-in the owner holds under this
+        /// credential, in its place: its own channels and sharing, which
+        /// `channels` and `share` then only repeat. Additive: an older owner
+        /// does not know it, and refuses the statement, which covers it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replace: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         statement: Option<AdminStatement>,
     },
@@ -1287,6 +1293,7 @@ mod tests {
             name: "anthropic".into(),
             channels: vec!["personal".into()],
             share: false,
+            replace: None,
             statement: None,
         })
         .unwrap();
@@ -1300,6 +1307,7 @@ mod tests {
                 name: "a".into(),
                 channels: vec![],
                 share: true,
+                replace: None,
                 statement: None,
             }
         );

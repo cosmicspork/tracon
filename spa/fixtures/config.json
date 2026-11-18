@@ -180,6 +180,7 @@
     ],
     "session": {
       "approval_expiry_secs": 86400,
+      "auth_wait_secs": 86400,
       "budget_tokens": 2000000,
       "claim_grace_secs": 60,
       "default_channel": "personal",
@@ -589,6 +590,22 @@
       "exec_path": false,
       "fs_path": false,
       "key": "session.suspend_published_after_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "session.auth_wait_secs",
       "path": null,
       "secret": false,
       "shape": {

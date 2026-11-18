@@ -5398,6 +5398,143 @@ async fn the_node_wakes_an_exhausted_session_or_carries_it_on() {
 /// A session held at its budget, over the API: resuming it as it is and
 /// raising the budget to what it has already spent are both refused; raising
 /// it past that records the change and the same session carries on.
+/// A session whose provider refuses a sign-in that can no longer be renewed
+/// waits for a new one rather than ending its turn as answered, and carries
+/// on by itself once a new copy is here (here, a handoff from the node that
+/// signed in again). A refusal of a sign-in that may still renew waits only
+/// once that renewal fails.
+#[tokio::test]
+async fn a_session_refused_by_an_expired_sign_in_waits_for_a_new_one() {
+    let Orientation {
+        store,
+        manager,
+        adapter,
+        row,
+        cfg,
+        tools,
+        ..
+    } = orientation_setup("sign-in-wait", None, 0, &[], Phase::Plan).await;
+    manager.set_default_adapter(adapter.clone());
+    let providers = tracon::providers::Providers::new(
+        cfg.clone(),
+        tools.broker.clone(),
+        proto::envelope::DataKey::from_bytes([3u8; 32]),
+        "n1".into(),
+        Bus::new(),
+    );
+    manager.set_providers(providers.clone());
+    let put = |version: u64, expires_ms: i64| {
+        tools.broker.write().unwrap().put(
+            "anthropic",
+            tracon::broker::Credential {
+                kind: tracon::broker::KIND_OAUTH.into(),
+                provider: Some("anthropic".into()),
+                channels: vec!["personal".into()],
+                nodes: vec!["n0".into(), "n1".into()],
+                grant_id: Some("g1".into()),
+                grant_version: version,
+                grant_origin: Some("n0".into()),
+                expires_ms: Some(expires_ms),
+                env: [("ACCESS_TOKEN".to_string(), format!("t{version}"))].into(),
+                ..Default::default()
+            },
+        );
+    };
+    let wait = |want: &'static str| {
+        let (store, id) = (store.clone(), row.id.clone());
+        async move {
+            for _ in 0..300 {
+                let s = store.get_session(&id).unwrap().unwrap();
+                if s.state == want && s.turn_active == 0 {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            false
+        }
+    };
+    assert!(wait("running").await);
+
+    // Renewable as far as this node knows: nothing changes yet.
+    put(1, now_ms() + 3_600_000);
+    manager.provider_auth_refused(&row.id, "anthropic").await;
+    manager.wake_signed_in().await;
+    assert_eq!(
+        store.get_session(&row.id).unwrap().unwrap().state,
+        "running"
+    );
+    assert!(manager.sign_in_wait(&row.id).is_none());
+
+    // That copy then runs out with nothing renewing it: the session waits.
+    put(1, now_ms() - 1);
+    manager.wake_signed_in().await;
+    assert!(wait("paused").await);
+    let paused = store.get_session(&row.id).unwrap().unwrap();
+    assert_eq!(
+        paused.last_error.as_deref(),
+        Some("waiting for a sign-in to Anthropic")
+    );
+    let waiting = manager.sign_in_wait(&row.id).unwrap();
+    assert_eq!(waiting["provider"], "anthropic");
+    assert_eq!(waiting["credential"], "anthropic");
+    assert!(waiting["deadline_ms"].as_i64().unwrap() > now_ms());
+
+    // A second refusal, or a sweep with nothing new, leaves it waiting.
+    manager.provider_auth_refused(&row.id, "anthropic").await;
+    manager.wake_signed_in().await;
+    assert_eq!(store.get_session(&row.id).unwrap().unwrap().state, "paused");
+
+    // The new sign-in arrives by handoff: it carries on by itself.
+    put(2, now_ms() + 3_600_000);
+    providers.handoff_received(&["anthropic".to_string()]);
+    for _ in 0..300 {
+        manager.wake_signed_in().await;
+        if manager.sign_in_wait(&row.id).is_none() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(manager.sign_in_wait(&row.id).is_none());
+    assert!(wait("running").await);
+    let events: Vec<_> = store
+        .events_after(&row.id, 0, 500)
+        .unwrap()
+        .into_iter()
+        .map(|e| (e.kind, e.payload))
+        .collect();
+    assert!(events
+        .iter()
+        .any(|(k, p)| k == "session_paused" && p["source"] == "sign_in"));
+    assert!(events
+        .iter()
+        .any(|(k, p)| k == "sign_in_wait" && p["outcome"] == "waiting"));
+    assert!(events
+        .iter()
+        .any(|(k, p)| k == "sign_in_wait" && p["outcome"] == "resumed"));
+    assert!(events
+        .iter()
+        .any(|(k, p)| k == "session_resumed" && p["source"] == "wake"));
+    // It is told to carry on from the call that failed.
+    let mut told = false;
+    for _ in 0..300 {
+        told = store
+            .events_after(&row.id, 0, 500)
+            .unwrap()
+            .into_iter()
+            .any(|e| {
+                e.kind == "user_prompt"
+                    && e.payload["text"]
+                        .as_str()
+                        .is_some_and(|t| t.contains("A new sign-in to Anthropic"))
+            });
+        if told {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(told, "{events:?}");
+}
+
 #[tokio::test]
 async fn raising_the_budget_lets_a_session_held_at_it_carry_on() {
     let Orientation {

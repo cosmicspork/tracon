@@ -6,6 +6,7 @@ import type {
   Askable,
   Continuation,
   SessionExhaustion,
+  SignInWait,
   ExternalEvent,
   ExternalView,
   AuthorityGrant,
@@ -357,6 +358,8 @@ export const api = {
       ceiling: Ceiling
       /** Absent from a node that predates exhaustion policies. */
       exhaustion?: SessionExhaustion | null
+      /** Set while it waits for a new sign-in. Absent from an older node. */
+      sign_in_wait?: SignInWait | null
       /** Absent from a node that predates `show_work`. */
       shown_work?: ShownWork[]
       /** What this session's reviews put on the forge. Absent from older nodes. */
@@ -883,11 +886,15 @@ export const api = {
     channels: string[],
     localCallback = false,
     share = true,
+    /** Sign in again for the sign-in held under this credential, in its
+        place: its own channels and sharing (`channels` should repeat them). */
+    replace = '',
   ) =>
     call<ProviderConnectResult>(`POST`, `/api/nodes/${nodeId}/providers/${name}/connect`, {
       channels,
       local_callback: localCallback,
       share,
+      ...(replace ? { replace } : {}),
     }),
   nodeProviderCode: (nodeId: string, name: string, code: string) =>
     call<{ ok: boolean }>('POST', `/api/nodes/${nodeId}/providers/${name}/code`, { code }),

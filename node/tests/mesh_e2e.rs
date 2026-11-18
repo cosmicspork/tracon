@@ -270,11 +270,13 @@ fn confirmed(from: &Identity, target: &str, command: Command) -> Command {
             name,
             channels,
             share,
+            replace,
             ..
         } => Command::ProviderConnect {
             name,
             channels,
             share,
+            replace,
             statement: Some(statement),
         },
         Command::ProviderCode { name, code, .. } => Command::ProviderCode {
@@ -1731,6 +1733,7 @@ async fn a_peer_outside_a_channel_cannot_drive_what_is_in_it() {
                 name: "anthropic".into(),
                 channels: vec!["private".into()],
                 share: true,
+                replace: None,
                 statement: None,
             },
         ),
@@ -1766,6 +1769,7 @@ async fn a_peer_outside_a_channel_cannot_drive_what_is_in_it() {
                 name: "anthropic".into(),
                 channels: vec!["personal".into()],
                 share: true,
+                replace: None,
                 statement: None,
             },
         )
@@ -2263,6 +2267,7 @@ async fn a_peers_provider_sign_in_needs_an_admin_peer_and_a_confirmation() {
         name: "anthropic".into(),
         channels: vec!["personal".into()],
         share: true,
+        replace: None,
         statement: None,
     };
 
@@ -2328,6 +2333,7 @@ async fn a_peers_provider_sign_in_needs_an_admin_peer_and_a_confirmation() {
             name: "openai".into(),
             channels: vec!["personal".into()],
             share: true,
+            replace: None,
             statement: None,
         },
     );
@@ -2338,6 +2344,7 @@ async fn a_peers_provider_sign_in_needs_an_admin_peer_and_a_confirmation() {
         name: "anthropic".into(),
         channels: vec!["personal".into()],
         share: true,
+        replace: None,
         statement,
     };
     let result = a.client.command(&bi, swapped, t).await;

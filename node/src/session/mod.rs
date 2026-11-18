@@ -6,6 +6,7 @@ pub mod exhaustion;
 pub mod external;
 pub mod materialize;
 pub mod placing;
+pub mod sign_in;
 pub mod state;
 pub mod supervisor;
 pub mod waits;
@@ -592,6 +593,8 @@ pub struct Manager {
     /// Sessions placed off this node's own runtime (on DigitalOcean): the
     /// rest of `live` is what counts against `[placement] local_limit`.
     elsewhere: Arc<parking_lot::Mutex<std::collections::HashSet<String>>>,
+    /// Sessions waiting for a new sign-in to their provider.
+    sign_in_waits: Arc<sign_in::SignInWaits>,
 }
 
 /// The manager's continuation guard, held. Every path that carries a session
@@ -637,6 +640,7 @@ impl Manager {
             restart: Arc::default(),
             continuing: Arc::default(),
             elsewhere: Arc::default(),
+            sign_in_waits: Arc::default(),
         }
     }
 
