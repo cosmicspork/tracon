@@ -2755,21 +2755,35 @@ impl Manager {
                     }
                     let start = sync.source_ref.clone();
                     let onto_base = sync.onto_base;
+                    let empty = sync.empty.then(|| sync.default.clone());
                     synced = Some(sync);
-                    crate::workspace::seed_from_clone(
-                        &git,
-                        &repo,
-                        &branch,
-                        start.as_deref(),
-                        onto_base,
-                        id,
-                    )
-                    .await?
+                    match empty {
+                        // An empty repository: nothing to start from, so
+                        // the session starts on an orphan branch whose first
+                        // commit the review can publish as the repository's.
+                        Some(default) => {
+                            crate::workspace::seed_empty(&git, &branch, &default, id).await?
+                        }
+                        None => {
+                            crate::workspace::seed_from_clone(
+                                &git,
+                                &repo,
+                                &branch,
+                                start.as_deref(),
+                                onto_base,
+                                id,
+                            )
+                            .await?
+                        }
+                    }
                 };
                 let stage = crate::workspace::staging_path(id);
-                let base = crate::workspace::head_of(&git, &stage).await?;
+                let base = match synced.as_ref().is_some_and(|sync| sync.empty) {
+                    true => None,
+                    false => Some(crate::workspace::head_of(&git, &stage).await?),
+                };
                 crate::workspace::import(self.backend.as_ref(), &workspace, &stage).await?;
-                (workspace, Some(base))
+                (workspace, base)
             }
         };
         let snapshot = crate::workspace::export(self.backend.as_ref(), &workspace).await?;
@@ -2808,10 +2822,15 @@ impl Manager {
                 "workspace_id": workspace.id,
                 "volume": workspace.volume,
                 "branch": branch,
-                "source": if spec.workspace_id.is_some() { "resumed" } else { "imported" },
+                "source": match (&spec.workspace_id, &synced) {
+                    (Some(_), _) => "resumed",
+                    (None, Some(sync)) if sync.empty => "empty repository",
+                    (None, _) => "imported",
+                },
                 "base": base,
                 "synced": synced.as_ref().map(|sync| json!({
-                    "source_ref": format!("origin/{}", sync.source),
+                    "source_ref": (!sync.empty).then(|| format!("origin/{}", sync.source)),
+                    "empty": sync.empty,
                     "source_commit": sync.commit,
                     "fetched_ms": sync.fetched_ms,
                     "stale": stale,

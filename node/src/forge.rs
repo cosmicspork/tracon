@@ -1211,7 +1211,14 @@ pub struct Synced {
     /// branch it continues: the work merges into it.
     pub onto_base: bool,
     /// The commit the session starts from: `source`'s tip as last fetched.
-    pub commit: String,
+    /// `None` for an empty repository, which has no commit to start from.
+    pub commit: Option<String>,
+    /// The forge holds no branches at all: an empty repository, nothing
+    /// pushed to it yet. The session starts on an orphan branch, and `default`
+    /// (`source` too) is the branch its first commit is meant for: the base
+    /// the session named, else the one the clone's unborn `HEAD` names, else
+    /// `main`.
+    pub empty: bool,
     /// When the clone last fetched from its forge successfully, as the node
     /// recorded it (`FETCHED_AT`); `None` before the node has.
     pub fetched_ms: Option<i64>,
@@ -1241,6 +1248,13 @@ pub struct Synced {
 /// back to the default, since work meant for that line would land on another.
 /// Only a branch name will do: a revision such as `main~3` is not one, so no
 /// caller chooses an arbitrary commit this way.
+///
+/// A forge that answered the fetch with no branches at all holds an empty
+/// repository: there is no `origin/HEAD` to follow, and the session starts
+/// with nothing (`empty`), so its first commit can be published as the
+/// repository's first (`initial_push`). A clone with no branches whose fetch
+/// failed is not taken for one: that fails the start, since the forge may
+/// hold branches it could not be asked about.
 pub async fn sync_managed(
     repo: &Path,
     credential: &crate::git_remote::Credential<'_>,
@@ -1263,12 +1277,22 @@ pub async fn sync_managed(
             let _ = tokio::time::timeout(Duration::from_secs(60), command.output()).await;
         }
     }
-    let head = local_git(
+    let head = match local_git(
         repo,
         &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
     )
     .await
-    .map_err(|e| format!("the clone has no origin/HEAD to start from: {e}"))?;
+    {
+        Ok(head) => head,
+        Err(_) if stale.is_none() && no_forge_branches(repo).await => {
+            return sync_empty(repo, base).await;
+        }
+        Err(error) => {
+            return Err(format!(
+                "the clone has no origin/HEAD to start from: {error}"
+            ))
+        }
+    };
     let default = head
         .strip_prefix("origin/")
         .filter(|name| !name.is_empty() && !name.starts_with('-'))
@@ -1304,17 +1328,84 @@ pub async fn sync_managed(
         }
         None => local_git(repo, &["rev-parse", "HEAD"]).await?,
     };
-    let fetched_ms = std::fs::read_to_string(repo.join(".git").join(FETCHED_AT))
-        .ok()
-        .and_then(|at| at.trim().parse().ok());
     Ok(Synced {
         default,
         source,
         source_ref,
         onto_base,
-        commit,
-        fetched_ms,
+        commit: Some(commit),
+        empty: false,
+        fetched_ms: fetched_ms(repo),
         stale,
+    })
+}
+
+/// When the clone last fetched successfully, as `FETCHED_AT` records it.
+fn fetched_ms(repo: &Path) -> Option<i64> {
+    std::fs::read_to_string(repo.join(".git").join(FETCHED_AT))
+        .ok()
+        .and_then(|at| at.trim().parse().ok())
+}
+
+/// Whether the clone holds no branch of its forge at all, as the last fetch
+/// left it: an empty repository. A clone it cannot be read from is not one.
+async fn no_forge_branches(repo: &Path) -> bool {
+    local_git(
+        repo,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/remotes/origin/",
+        ],
+    )
+    .await
+    .is_ok_and(|listed| {
+        listed
+            .lines()
+            .all(|name| name.is_empty() || name == "refs/remotes/origin/HEAD")
+    })
+}
+
+/// Whether `name` is a branch name Git would accept, and not an option.
+async fn branch_name(repo: &Path, name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('-')
+        && local_git(repo, &["check-ref-format", &format!("refs/heads/{name}")])
+            .await
+            .is_ok()
+}
+
+/// `sync_managed` for a clone of an empty repository, just fetched: the
+/// branch its first commit is meant for is `base` when the session names a
+/// branch name, else the one the clone's unborn `HEAD` names (the forge's
+/// default, where the clone learned it), else `main`. The clone's tree is
+/// emptied of anything gathered; the session reads nothing else from it.
+async fn sync_empty(repo: &Path, base: Option<&str>) -> Result<Synced, String> {
+    let mut default = None;
+    if let Some(base) = base {
+        if !branch_name(repo, base).await {
+            return Err(format!("`{base}` is not a branch name to start from"));
+        }
+        default = Some(base.to_string());
+    }
+    if default.is_none() {
+        if let Ok(unborn) = local_git(repo, &["symbolic-ref", "--short", "HEAD"]).await {
+            if branch_name(repo, &unborn).await {
+                default = Some(unborn);
+            }
+        }
+    }
+    let default = default.unwrap_or_else(|| "main".to_string());
+    local_git(repo, &["clean", "-ffdx"]).await?;
+    Ok(Synced {
+        source: default.clone(),
+        default,
+        source_ref: None,
+        onto_base: false,
+        commit: None,
+        empty: true,
+        fetched_ms: fetched_ms(repo),
+        stale: None,
     })
 }
 
@@ -2035,7 +2126,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(synced.default, "main");
-        assert_eq!(synced.commit, tip);
+        assert_eq!(synced.commit.as_deref(), Some(tip.as_str()));
         assert_eq!(synced.stale, None);
         assert!(synced.fetched_ms.is_some());
         // Written after the sync, so only the seed can keep it out: a
@@ -2083,11 +2174,93 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(synced.commit, fetched);
+        assert_eq!(synced.commit.as_deref(), Some(fetched.as_str()));
         assert!(synced.stale.is_some());
         // When the last fetch that succeeded ran, not when this one failed.
         assert_eq!(synced.fetched_ms, at.trim().parse().ok());
         assert_eq!(sh(&clone, "git rev-parse main"), fetched);
+        let _ = std::fs::remove_dir_all(clone.parent().unwrap());
+    }
+
+    /// An empty repository (#937): the forge has no branches and so no
+    /// `origin/HEAD`, and the session starts on an orphan branch named for
+    /// its base rather than failing, so its first commit can be published
+    /// as the repository's first. A clone with no branches whose fetch
+    /// failed is not taken for an empty repository.
+    #[tokio::test]
+    async fn a_session_on_an_empty_repository_starts_on_an_orphan_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        sh(tmp.path(), "git init -q --bare -b trunk upstream.git");
+        let owner = format!("empty-{}", uuid::Uuid::now_v7().simple());
+        let clone = managed_root(&crate::config::Config::state_dir())
+            .join("github.com")
+            .join(owner)
+            .join("proj");
+        std::fs::create_dir_all(clone.parent().unwrap()).unwrap();
+        sh(
+            clone.parent().unwrap(),
+            &format!(
+                "git clone -q {} proj 2>/dev/null",
+                tmp.path().join("upstream.git").display()
+            ),
+        );
+        let anonymous = crate::git_remote::Credential::Anonymous;
+        let lock = clone_lock(&clone);
+        let _guard = lock.lock().await;
+
+        let synced = sync_managed(&clone, &anonymous, Some("main"), Some("main"))
+            .await
+            .unwrap();
+        assert!(synced.empty);
+        assert_eq!(synced.default, "main");
+        assert_eq!(synced.source, "main");
+        assert_eq!(synced.source_ref, None);
+        assert_eq!(synced.commit, None);
+        assert_eq!(synced.stale, None);
+
+        // With no base named, the branch the clone's unborn HEAD names.
+        let unborn = sh(&clone, "git symbolic-ref --short HEAD");
+        let synced = sync_managed(&clone, &anonymous, Some("feat/x"), None)
+            .await
+            .unwrap();
+        assert!(synced.empty);
+        assert_eq!(synced.default, unborn);
+
+        // A base that is no branch name is refused, not started on.
+        assert!(sync_managed(&clone, &anonymous, None, Some("a..b"))
+            .await
+            .is_err());
+
+        let id = format!("seed-empty-{}", uuid::Uuid::now_v7());
+        let workspace = crate::workspace::seed_empty("git", "main", "main", &id)
+            .await
+            .unwrap();
+        let stage = crate::workspace::staging_path(&workspace.id);
+        assert_eq!(sh(&stage, "git symbolic-ref HEAD"), "refs/heads/main");
+        assert!(crate::workspace::head_of("git", &stage).await.is_err());
+        let worktree = stage.to_str().unwrap();
+        assert_eq!(crate::review::default_base(worktree).await.unwrap(), "main");
+        // Its first commit is the whole change, compared with nothing.
+        sh(
+            &stage,
+            "echo hi > README && git add README \
+             && git -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -qm first",
+        );
+        assert_eq!(
+            crate::review::range_base(worktree, "main").await.unwrap(),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&stage);
+
+        // The same clone, its forge unreachable: not known to be empty.
+        sh(
+            &clone,
+            "git remote set-url origin /nonexistent/upstream.git",
+        );
+        let error = sync_managed(&clone, &anonymous, None, Some("main"))
+            .await
+            .unwrap_err();
+        assert!(error.contains("no origin/HEAD"), "{error}");
         let _ = std::fs::remove_dir_all(clone.parent().unwrap());
     }
 
@@ -2112,7 +2285,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(synced.default, "trunk");
-        assert_eq!(synced.commit, tip);
+        assert_eq!(synced.commit.as_deref(), Some(tip.as_str()));
         assert_eq!(synced.stale, None);
         assert_eq!(sh(&clone, "git branch --show-current"), "trunk");
         let _ = std::fs::remove_dir_all(clone.parent().unwrap());
@@ -2146,7 +2319,7 @@ mod tests {
             synced.source_ref.as_deref(),
             Some("refs/remotes/origin/fix/thing")
         );
-        assert_eq!(synced.commit, pr);
+        assert_eq!(synced.commit.as_deref(), Some(pr.as_str()));
         assert_eq!(sh(&clone, "git rev-parse main"), tip);
         assert_eq!(sh(&clone, "git rev-parse HEAD"), tip);
         assert_eq!(sh(&clone, "git branch --show-current"), "main");
@@ -2188,7 +2361,7 @@ mod tests {
                 .unwrap();
             assert_eq!(synced.source, "main", "{other}");
             assert_eq!(synced.source_ref, None, "{other}");
-            assert_eq!(synced.commit, tip, "{other}");
+            assert_eq!(synced.commit.as_deref(), Some(tip.as_str()), "{other}");
         }
         let _ = std::fs::remove_dir_all(clone.parent().unwrap());
     }
@@ -2224,7 +2397,7 @@ mod tests {
             synced.source_ref.as_deref(),
             Some("refs/remotes/origin/legacy")
         );
-        assert_eq!(synced.commit, legacy);
+        assert_eq!(synced.commit.as_deref(), Some(legacy.as_str()));
         assert!(synced.onto_base);
         assert_eq!(sh(&clone, "git rev-parse HEAD"), tip);
 
@@ -2260,14 +2433,14 @@ mod tests {
             .unwrap();
         assert_eq!(synced.source, "fix/thing");
         assert!(!synced.onto_base);
-        assert_eq!(synced.commit, pr);
+        assert_eq!(synced.commit.as_deref(), Some(pr.as_str()));
 
         let synced = sync_managed(&clone, &anonymous, Some("feat/new"), Some("main"))
             .await
             .unwrap();
         assert_eq!(synced.source, "main");
         assert_eq!(synced.source_ref, None);
-        assert_eq!(synced.commit, tip);
+        assert_eq!(synced.commit.as_deref(), Some(tip.as_str()));
 
         for missing in ["nope", "legacy~1", "-x"] {
             let error = sync_managed(&clone, &anonymous, Some("feat/new"), Some(missing))
