@@ -15,6 +15,7 @@
 //!   runs the session there, anything else ends it.
 //! - **Refuse**: nowhere can take it; the session ends with why.
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -204,6 +205,91 @@ pub fn answer(store: &Store, id: &str) -> Result<Answer, crate::store::StoreErro
 /// repository its work came from.
 pub fn resolve(cfg: &crate::config::Config, channel: &str, origin: Option<&Path>) -> Resolved {
     cfg.live().placement.resolve(channel, origin)
+}
+
+/// What counts against `[placement] local_limit`: the live sessions on the
+/// node's own runtime, and the ones placed there and still starting. A start
+/// takes minutes between its placement and its harness being up (the
+/// workspace, an image pull), and a burst of starts that only counted live
+/// sessions would each see the same free slots.
+#[derive(Default)]
+pub struct Slots {
+    /// Held while one start decides where it runs and takes its slot, so two
+    /// starts cannot both see the same one free.
+    deciding: tokio::sync::Mutex<()>,
+    held: parking_lot::Mutex<Held>,
+}
+
+#[derive(Default)]
+struct Held {
+    /// Sessions in `start`: `true` once placed on the node's own runtime.
+    starting: HashMap<String, bool>,
+    /// Sessions placed off this node's runtime (on DigitalOcean), starting
+    /// or live.
+    elsewhere: HashSet<String>,
+}
+
+/// A session in `start`, held until it returns: by then the session is live,
+/// or it never will be and its slot is free again.
+pub struct Starting {
+    slots: Arc<Slots>,
+    id: String,
+}
+
+impl Drop for Starting {
+    fn drop(&mut self) {
+        self.slots.held.lock().starting.remove(&self.id);
+    }
+}
+
+impl Slots {
+    /// `id` is starting, until the guard is dropped.
+    pub fn starting(self: &Arc<Self>, id: &str) -> Starting {
+        self.held.lock().starting.insert(id.to_string(), false);
+        Starting {
+            slots: self.clone(),
+            id: id.to_string(),
+        }
+    }
+
+    /// Held from counting the sessions here to taking a slot.
+    pub async fn deciding(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.deciding.lock().await
+    }
+
+    /// `id` runs on the node's own runtime: it holds a slot from now on.
+    pub fn local(&self, id: &str) {
+        if let Some(local) = self.held.lock().starting.get_mut(id) {
+            *local = true;
+        }
+    }
+
+    /// `id` runs elsewhere: it holds none.
+    pub fn elsewhere(&self, id: &str) {
+        self.held.lock().elsewhere.insert(id.to_string());
+    }
+
+    /// Sessions on the node's own runtime now, besides `id`: the `live`
+    /// ones not placed elsewhere, and the ones placed here still starting.
+    pub fn running_locally(&self, live: &[String], id: &str) -> u32 {
+        let mut held = self.held.lock();
+        let Held {
+            starting,
+            elsewhere,
+        } = &mut *held;
+        elsewhere.retain(|other| live.contains(other) || starting.contains_key(other));
+        let mut here: HashSet<&String> = live
+            .iter()
+            .filter(|other| !elsewhere.contains(*other))
+            .collect();
+        here.extend(
+            starting
+                .iter()
+                .filter(|(_, local)| **local)
+                .map(|(other, _)| other),
+        );
+        here.into_iter().filter(|other| *other != id).count() as u32
+    }
 }
 
 #[cfg(test)]
@@ -420,5 +506,49 @@ mod tests {
             answer(&store, "missing").unwrap(),
             Answer::Declined(_)
         ));
+    }
+
+    #[test]
+    fn a_session_placed_here_holds_its_slot_until_its_start_returns() {
+        let slots = Arc::new(Slots::default());
+        let live: Vec<String> = Vec::new();
+        let a = slots.starting("a");
+        let b = slots.starting("b");
+        // Not placed yet: holds nothing.
+        assert_eq!(slots.running_locally(&live, "c"), 0);
+        slots.local("a");
+        slots.elsewhere("b");
+        assert_eq!(slots.running_locally(&live, "c"), 1);
+        assert_eq!(slots.running_locally(&live, "a"), 0);
+        // Live now and still in `start`: counted once.
+        let live = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(slots.running_locally(&live, "c"), 1);
+        drop(a);
+        drop(b);
+        assert_eq!(slots.running_locally(&live, "c"), 1);
+        // Ended: nothing left.
+        assert_eq!(slots.running_locally(&[], "c"), 0);
+    }
+
+    #[test]
+    fn a_start_that_fails_frees_its_slot() {
+        let slots = Arc::new(Slots::default());
+        let failed = slots.starting("a");
+        slots.local("a");
+        assert_eq!(slots.running_locally(&[], "b"), 1);
+        drop(failed);
+        assert_eq!(slots.running_locally(&[], "b"), 0);
+    }
+
+    #[test]
+    fn a_session_starting_elsewhere_stays_elsewhere_once_live() {
+        let slots = Arc::new(Slots::default());
+        let _there = slots.starting("there");
+        slots.elsewhere("there");
+        // Another start counts while `there` is not live yet: it is not
+        // forgotten as elsewhere.
+        assert_eq!(slots.running_locally(&[], "other"), 0);
+        let live = vec!["there".to_string()];
+        assert_eq!(slots.running_locally(&live, "other"), 0);
     }
 }

@@ -589,9 +589,9 @@ pub struct Manager {
     restart: Arc<crate::restart::Restart>,
     /// Held while a continuation is checked and started; see [`Continuing`].
     continuing: Arc<Mutex<()>>,
-    /// Sessions placed off this node's own runtime (on DigitalOcean): the
-    /// rest of `live` is what counts against `[placement] local_limit`.
-    elsewhere: Arc<parking_lot::Mutex<std::collections::HashSet<String>>>,
+    /// What counts against `[placement] local_limit`: the live sessions
+    /// not placed on DigitalOcean, and the ones placed here still starting.
+    slots: Arc<placing::Slots>,
 }
 
 /// The manager's continuation guard, held. Every path that carries a session
@@ -636,7 +636,7 @@ impl Manager {
             told: Arc::default(),
             restart: Arc::default(),
             continuing: Arc::default(),
-            elsewhere: Arc::default(),
+            slots: Arc::default(),
         }
     }
 
@@ -2476,18 +2476,18 @@ impl Manager {
             .is_some_and(|row| row.state == SessionState::Starting.as_str()))
     }
 
-    /// Sessions running on this node's own runtime now, besides `id`.
+    /// Sessions running on this node's own runtime now, or placed there and
+    /// still starting, besides `id`.
     async fn running_locally(&self, id: &str) -> u32 {
         let live: Vec<String> = self.live.lock().await.keys().cloned().collect();
-        let mut elsewhere = self.elsewhere.lock();
-        elsewhere.retain(|other| live.contains(other));
-        live.iter()
-            .filter(|other| *other != id && !elsewhere.contains(*other))
-            .count() as u32
+        self.slots.running_locally(&live, id)
     }
 
     /// Decide where a starting session runs (`placing`), asking the
     /// operator first when that is what the decision is, and record it.
+    /// Placed here, the session holds a slot of `local_limit` until its
+    /// start returns; the count and the slot are taken under one lock, so
+    /// starts at the same moment do not all see the same free slot.
     async fn place(
         &self,
         id: &str,
@@ -2500,8 +2500,10 @@ impl Manager {
         let resolved = placing::resolve(&self.cfg, channel, origin);
         let runtime = do_runtime::global().filter(|_| do_runtime::enabled(&self.cfg));
         if !placing::in_play(runtime.is_some(), &resolved) {
+            self.slots.local(id);
             return Ok(placing::Placed::Local);
         }
+        let deciding = self.slots.deciding().await;
         let mut providers = Vec::new();
         if let Some(kind) = ProviderKind::of_backend(self.backend.kind()) {
             let node = self.store.get_node(&self.node_id).ok().flatten();
@@ -2539,7 +2541,7 @@ impl Manager {
                 let runtime = runtime.ok_or_else(|| {
                     anyhow::anyhow!("DigitalOcean was chosen but is not running on this node")
                 })?;
-                self.elsewhere.lock().insert(id.to_string());
+                self.slots.elsewhere(id);
                 Ok::<_, anyhow::Error>(placing::Placed::DigitalOcean {
                     runtime,
                     requirements: resolved.requirements.clone(),
@@ -2549,11 +2551,16 @@ impl Manager {
             Placement::Place {
                 provider: ProviderKind::DigitalOcean,
             } => elsewhere(runtime),
-            Placement::Place { .. } => Ok(placing::Placed::Local),
+            Placement::Place { .. } => {
+                self.slots.local(id);
+                Ok(placing::Placed::Local)
+            }
             Placement::Refuse { reason } => {
                 anyhow::bail!("no sandbox provider can take this session: {reason}")
             }
             Placement::Ask { reason, offer } => {
+                // The operator may take minutes: other starts decide meanwhile.
+                drop(deciding);
                 let card = placing::ask(
                     &self.store,
                     &self.node_id,
@@ -2668,6 +2675,9 @@ impl Manager {
         kickoff: bool,
         reopened: Option<Reopened>,
     ) -> anyhow::Result<()> {
+        // Until this returns, the session's slot is held if it is placed
+        // here; by then it is live, or it never will be.
+        let _starting = self.slots.starting(id);
         if !self.startable(id)? {
             return Ok(());
         }
