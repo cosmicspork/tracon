@@ -170,6 +170,9 @@ pub enum RunKind {
     /// A short probe that runs nothing a repository brings: `--version`, a
     /// conversation lookup, an image's self-check, the boundary's probe pod.
     Probe,
+    /// `fetch_branch`'s Git in a session's workspace, in a sandbox of its
+    /// own while no sandbox of the session's holds the workspace.
+    Fetch,
 }
 
 impl RunKind {
@@ -179,6 +182,7 @@ impl RunKind {
             Self::Check => "check",
             Self::Prepare => "prepare",
             Self::Probe => "probe",
+            Self::Fetch => "fetch",
         }
     }
 }

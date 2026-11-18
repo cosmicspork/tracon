@@ -85,7 +85,7 @@ fn safe_id(id: &str) -> String {
 /// clearing) would otherwise interleave a remove-and-rename with a reader,
 /// handing back a torn directory, content that was never the tree
 /// `validate_tree` just approved, or no directory at all.
-pub(crate) fn volume_lock(volume: &str) -> Arc<AsyncMutex<()>> {
+pub fn volume_lock(volume: &str) -> Arc<AsyncMutex<()>> {
     static LOCKS: std::sync::LazyLock<StdMutex<HashMap<String, Arc<AsyncMutex<()>>>>> =
         std::sync::LazyLock::new(|| StdMutex::new(HashMap::new()));
     LOCKS

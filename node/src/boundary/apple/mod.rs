@@ -681,6 +681,11 @@ impl Backend for AppleBackend {
         Some(self.files_store())
     }
 
+    /// Every volume a run mounts is the node's here.
+    fn files_for(&self, _volume: &str) -> Option<FilesStore> {
+        Some(self.files_store())
+    }
+
     async fn prepared_snapshots(&self) -> Vec<String> {
         let ours = format!("{}-", crate::sandbox_images::snapshot_repo());
         let mut pinned: Vec<String> = self

@@ -384,6 +384,13 @@ pub trait Backend: Send + Sync {
     fn sandbox_files_store(&self) -> Option<crate::runner::sandbox_files::FilesStore> {
         None
     }
+    /// The node's store when it keeps `volume`, or is to keep a new one of
+    /// this name, in the runtime's place: a run is sent its tree over the
+    /// files channel and the runner locks it per send and per take-back.
+    /// `None` for a volume the runtime holds and mounts.
+    fn files_for(&self, _volume: &str) -> Option<crate::runner::sandbox_files::FilesStore> {
+        None
+    }
     /// What builds a DigitalOcean template's source and pushes it to a
     /// registry the runtime pulls from, where that is not the node's own
     /// Podman: a cluster's BuildKit. `None` where nothing here can.
