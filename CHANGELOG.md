@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.53.0](https://github.com/cosmicspork/tracon/compare/v0.52.0...v0.53.0) (2026-11-18)
+
+
+### Features
+
+* **node:** Kubernetes placement counts cluster capacity, and an unschedulable pod overflows or fails clearly ([#966](https://github.com/cosmicspork/tracon/issues/966)) ([09a422d](https://github.com/cosmicspork/tracon/commit/09a422dfaf9bd6cd9a1a4b28ea46fd6a3762beda))
+* **node:** plugin manifest, fetch and install store ([#949](https://github.com/cosmicspork/tracon/issues/949)) ([fd3f44c](https://github.com/cosmicspork/tracon/commit/fd3f44ca4302524060d7b55429d3240a2a1d3877))
+* **node:** publish a review straight to its base branch ([#965](https://github.com/cosmicspork/tracon/issues/965)) ([3d32a6c](https://github.com/cosmicspork/tracon/commit/3d32a6c4a81c1a680bcfa334a60eceb59ebed788))
+* **node:** scheduled runtime-storage sweep that archives old ended sessions ([#961](https://github.com/cosmicspork/tracon/issues/961)) ([7a44a49](https://github.com/cosmicspork/tracon/commit/7a44a494e0b119237b3e7d5fe5a76033de0bd912))
+* **node:** sign in again on an expired sign-in, and sessions wait for it ([#968](https://github.com/cosmicspork/tracon/issues/968)) ([26ba112](https://github.com/cosmicspork/tracon/commit/26ba112c1dce69da1d20ee428be828654a4619e1))
+* **review:** optional "Generated details" mode with an operator-written opener ([#962](https://github.com/cosmicspork/tracon/issues/962)) ([01edbe4](https://github.com/cosmicspork/tracon/commit/01edbe4a1fa66a8cf735f76fc17e37cbbe524dbb))
+* **spa:** scan a QR code from Settings to approve a device sign-in ([#964](https://github.com/cosmicspork/tracon/issues/964)) ([45c5911](https://github.com/cosmicspork/tracon/commit/45c5911a74e22a91dcccf82f8a366ca9814e2373))
+
+
+### Bug Fixes
+
+* **desktop:** count only this node's own work before restarting it after an app update ([#955](https://github.com/cosmicspork/tracon/issues/955)) ([8f3f30e](https://github.com/cosmicspork/tracon/commit/8f3f30e2076c243d1b4a879f9545f32ba8930b2c))
+* **dev:** count only this node's sessions before node-swap stops it ([#948](https://github.com/cosmicspork/tracon/issues/948)) ([26738a6](https://github.com/cosmicspork/tracon/commit/26738a60832cece4c7cfaa3e4fd0c9611f9494c0))
+* **digitalocean:** give a build-only repository its image's template ([#956](https://github.com/cosmicspork/tracon/issues/956)) ([a3b7da5](https://github.com/cosmicspork/tracon/commit/a3b7da592adc3e7a20d453759cc59c15cfc9b4f0))
+* **node:** gc removes served bundle tars of earlier versions ([#957](https://github.com/cosmicspork/tracon/issues/957)) ([f8aed72](https://github.com/cosmicspork/tracon/commit/f8aed72549d9ade710f4db8f2d4d271f5a19a03b))
+* **node:** placement's local_limit counts sessions still starting ([#963](https://github.com/cosmicspork/tracon/issues/963)) ([b547aa0](https://github.com/cosmicspork/tracon/commit/b547aa0b357569057d7e9c825056f691557cab94))
+* **node:** renew a shared sign-in from one holder, recover a stale copy from a peer ([#967](https://github.com/cosmicspork/tracon/issues/967)) ([6bc9d8b](https://github.com/cosmicspork/tracon/commit/6bc9d8bcc5b1fcb2ba388f6bb5a21924e9617592))
+* **node:** run fetch_branch in the live session sandbox, and stop it deadlocking on its own lock ([#959](https://github.com/cosmicspork/tracon/issues/959)) ([f6e35b4](https://github.com/cosmicspork/tracon/commit/f6e35b43e1bbff875b45894bdb5329e610b290b4))
+* **node:** serve before fetching release bundles at startup ([#958](https://github.com/cosmicspork/tracon/issues/958)) ([a34c189](https://github.com/cosmicspork/tracon/commit/a34c189817c904b94c6accc9f57bc989175f7346))
+* **node:** start a session on an empty repository as an orphan branch ([#960](https://github.com/cosmicspork/tracon/issues/960)) ([7f71c04](https://github.com/cosmicspork/tracon/commit/7f71c04d3f6ac341aefe17a876a905d950d485bb))
+
 ## [0.52.0](https://github.com/cosmicspork/tracon/compare/v0.51.2...v0.52.0) (2026-11-17)
 
 
