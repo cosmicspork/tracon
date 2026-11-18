@@ -405,12 +405,18 @@ pub async fn check_all(b: &KubeBackend, cfg: &Config, deep: bool) -> BoundaryRep
         }
     };
     let runtime = sandbox_runtime(b, &provider).await;
-    let runtime_ok = runtime.ok;
-    checks.push(runtime);
-    if !runtime_ok {
-        rest(&mut checks, "not checked: runtime unavailable");
+    if !runtime.ok {
+        for id in [
+            CheckId::HarnessUnprivileged,
+            CheckId::NoRuntimeSocket,
+            CheckId::NetworkIsolated,
+        ] {
+            checks.push(CheckResult::unchecked(id, &runtime));
+        }
+        checks.insert(0, runtime);
         return BoundaryReport { checks };
     }
+    checks.push(runtime);
     match create_sandbox_probe(&provider).await {
         Ok(pod) => {
             checks.push(check_unprivileged(&pod));
@@ -463,8 +469,16 @@ async fn sandbox_runtime(
         Err(e) => return CheckResult::fail(CheckId::Runtime, e.to_string()),
     };
     // The node's own bundle: fetched and checked for its release unless it
-    // is given one, then packed for the init containers.
-    if crate::bundle::managed(&b.cfg) {
+    // is given one, then packed for the init containers. While the node's
+    // own converge runs (as it does from its start) it is that converge's
+    // to fetch: the check waits for it rather than holding the node's
+    // start, and its listeners, for the download.
+    let building = crate::boundary::reconcile::running();
+    if building {
+        if let Some(why) = crate::boundary::checks::awaited_bundles(&b.cfg) {
+            return CheckResult::pending(CheckId::Runtime, why);
+        }
+    } else if crate::bundle::managed(&b.cfg) {
         if let Err(e) = crate::bundle::ensure(&b.cfg).await {
             return CheckResult::fail(CheckId::Runtime, format!("harness bundle: {e}"));
         }
@@ -474,8 +488,10 @@ async fn sandbox_runtime(
         Err(e) => return CheckResult::fail(CheckId::Runtime, format!("harness bundle: {e}")),
     };
     // The catalogue's bundles, which a session's pod copies in the same way.
-    if let Err(e) = crate::service_bundle::ensure(&b.cfg).await {
-        return CheckResult::fail(CheckId::Runtime, format!("browser bundle: {e}"));
+    if !building {
+        if let Err(e) = crate::service_bundle::ensure(&b.cfg).await {
+            return CheckResult::fail(CheckId::Runtime, format!("browser bundle: {e}"));
+        }
     }
     if let Some(missing) = crate::service_bundle::missing(&b.cfg, false) {
         return CheckResult::fail(CheckId::Runtime, missing);

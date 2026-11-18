@@ -697,6 +697,10 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     let backend = boundary::backend_for(&cfg).await;
     tracing::info!(runtime = backend.kind(), "boundary backend");
     let self_reconciles = cfg.boundary.auto_reconcile && backend.converges();
+    // The node serves first and converges after (`boundary_upkeep`, once the
+    // listeners are bound): marked pending, the startup check below waits on
+    // what that converge fetches (a release's bundles are minutes on a slow
+    // line) and says so, rather than fetching it before anything listens.
     if self_reconciles {
         boundary::reconcile::mark_pending();
     }
@@ -1374,8 +1378,16 @@ pub(crate) async fn verify_node(
         f.detail = format!("{}; {note}", f.detail);
     }
     let ready = failed.is_none();
-    if let Some(f) = &failed {
-        tracing::warn!(check = f.id.as_str(), detail = %f.detail, "refusing to run harnesses");
+    match &failed {
+        Some(f) if f.pending => tracing::info!(
+            check = f.id.as_str(),
+            detail = %f.detail,
+            "not running harnesses until the boundary is set up"
+        ),
+        Some(f) => {
+            tracing::warn!(check = f.id.as_str(), detail = %f.detail, "refusing to run harnesses")
+        }
+        None => {}
     }
     let found = if ready {
         let runner = backend.runner(

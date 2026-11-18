@@ -1054,13 +1054,18 @@ fn boundary_lines(checked: &serde_json::Value) -> (Vec<String>, Option<String>) 
     let mut failed = None;
     for c in checked["checks"]["checks"].as_array().into_iter().flatten() {
         let ok = c["ok"].as_bool().unwrap_or(false);
+        let pending = c["pending"].as_bool().unwrap_or(false);
         let id = c["id"].as_str().unwrap_or("?");
         if !ok && failed.is_none() {
             failed = Some(id.to_string());
         }
         lines.push(format!(
             "{} {:<22} {}",
-            if ok { "ok  " } else { "FAIL" },
+            match (ok, pending) {
+                (true, _) => "ok  ",
+                (false, true) => "WAIT",
+                (false, false) => "FAIL",
+            },
             id,
             c["detail"].as_str().unwrap_or_default()
         ));
@@ -4056,6 +4061,17 @@ mod tests {
             {"id": "runtime", "ok": true, "detail": "ok"},
         ]}, "providers": []});
         assert_eq!(super::boundary_lines(&passed).1, None);
+
+        // A check waiting on the node's own fetch says so, and still fails.
+        let waiting = serde_json::json!({"checks": {"checks": [
+            {"id": "runtime", "ok": false, "pending": true, "detail": "fetching the 0.52.0 harness bundle"},
+        ]}, "providers": []});
+        let (lines, failed) = super::boundary_lines(&waiting);
+        assert_eq!(
+            lines,
+            ["WAIT runtime                fetching the 0.52.0 harness bundle"]
+        );
+        assert_eq!(failed.as_deref(), Some("runtime"));
     }
 
     /// A port something listens on is in use; a free one, or port 0, is not.
