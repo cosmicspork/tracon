@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { ApiError } from './api'
-import { combineLoads, errorText, hasAnswer, isNotFound, LOADED, LOADING, loadPhase, settledLoad } from './load'
+import { combineLoads, errorText, hasAnswer, isNotFound, LOADED, LOADING, loadPhase, refetchOnOpen, settledLoad } from './load'
 
 test('a list is loading, failed or answered', () => {
   expect(loadPhase(LOADING)).toBe('loading')
@@ -45,4 +45,16 @@ test('only a 404 means not found', () => {
   expect(isNotFound(new ApiError(404, 'no such approval'))).toBe(true)
   expect(isNotFound(new ApiError(500, 'database is locked'))).toBe(false)
   expect(isNotFound(new TypeError('Failed to fetch'))).toBe(false)
+})
+
+test('a stream that opens refetches what the first fetch could not load', () => {
+  const failed = { loaded: false, error: 'Load failed' }
+  // A page served from cache while the node restarted: its first fetch failed
+  // and nothing else would try again.
+  expect(refetchOnOpen(false, false, [failed, LOADED])).toBe(true)
+  // The first fetch answered, or is still answering: no second one.
+  expect(refetchOnOpen(false, false, [LOADED, LOADED])).toBe(false)
+  expect(refetchOnOpen(false, true, [LOADING, LOADING])).toBe(false)
+  // After a drop, frames may have been missed whatever the loads say.
+  expect(refetchOnOpen(true, false, [LOADED, LOADED])).toBe(true)
 })

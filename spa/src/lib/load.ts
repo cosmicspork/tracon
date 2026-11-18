@@ -54,5 +54,17 @@ export function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
+/**
+ * Whether the stream opening should refetch the snapshots. After a drop,
+ * frames may have been missed. On the first open it depends on the page's own
+ * first fetch: one that failed (a page served from cache while the node was
+ * restarting) is not tried again by anything else, so its errors would outlive
+ * the outage.
+ */
+export function refetchOnOpen(wasConnected: boolean, refetching: boolean, loads: LoadStatus[]): boolean {
+  if (wasConnected) return true
+  return !refetching && loads.some((s) => loadPhase(s) !== 'ready')
+}
+
 export const LOADING: LoadStatus = { loaded: false, error: null }
 export const LOADED: LoadStatus = { loaded: true, error: null }
