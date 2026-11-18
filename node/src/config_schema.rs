@@ -357,6 +357,10 @@ pub const KEYS: &[KeySpec] = &[
     live("docs.export_every_secs"),
     restart("docs.preview_listen"),
     restart("docs.preview_url"),
+    // [gc]
+    live("gc.every_secs"),
+    live("gc.archive_ended_after_secs"),
+    live("gc.caches"),
     // [[docs.kind]]
     live("docs.kind.prefix"),
     live("docs.kind.label"),

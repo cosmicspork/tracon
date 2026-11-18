@@ -72,6 +72,8 @@ pub struct Config {
     pub embed: Embed,
     pub external: External,
     pub docs: Docs,
+    /// The runtime-storage sweep on a timer: off unless set.
+    pub gc: Gc,
     pub work: Work,
     /// Hosts the node attaches a stored credential to, on behalf of a client
     /// that never holds it.
@@ -741,6 +743,24 @@ pub struct Docs {
     /// kind added, renamed or removed applies to every document already
     /// there: a removed kind's documents read as `other`.
     pub kind: Vec<DocKind>,
+}
+
+/// `[gc]`: what `tracon gc --apply` does, on a timer the operator sets
+/// (`crate::gc_schedule`). Off by default; every key is read again before
+/// each run.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Gc {
+    /// How often the sweep runs, in seconds. 0 (the default) is off; less
+    /// than an hour is an hour.
+    pub every_secs: u64,
+    /// Archive this node's ended sessions (closed, killed_budget, failed)
+    /// untouched for this long before each sweep. Unset, nothing is
+    /// archived, and the sweep frees only what is archived already.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archive_ended_after_secs: Option<u64>,
+    /// Dependency caches are candidates too, as `tracon gc --caches`.
+    pub caches: bool,
 }
 
 /// One operator-configured document kind.
@@ -3143,6 +3163,7 @@ impl Default for Config {
             embed: Embed::default(),
             external: External::default(),
             docs: Docs::default(),
+            gc: Gc::default(),
             work: Work::default(),
             upstreams: Upstreams::default(),
             placement: Default::default(),

@@ -2224,12 +2224,16 @@ Three surfaces, three answers, and the differences are the point.
 Encrypted snapshots of the hub's volume to object storage, with a restore path that
 has been exercised — hub failure without a tested restore costs years of context.
 Retention is decided (2026-09-29): the node keeps everything, and the operator deletes
-by hand. Settings → Data shows what the node holds per kind (rows counted from the
+by hand, or on a schedule the operator sets; only runtime storage, never session rows,
+logs or evidence. `[gc]` runs `tracon gc --apply` on a timer (off unless `every_secs`
+is set), first archiving this node's own ended sessions untouched for
+`archive_ended_after_secs`, save one whose review is open or whose publication is not
+settled, as approving or publishing reads its workspace again. Settings → Data shows what the node holds per kind (rows counted from the
 store, directories measured on disk), where each kind that has a real delete is
 deleted, and what that delete does beyond the node; the Nodes screen carries the
 serving node's total. Documents, memories and work items delete one at a time and
 replicate the delete as a tombstone; workspaces and harness state go through Runtime
-storage once their session is archived; sessions, their logs and evidence have no
+storage once their session is archived, by hand or on that schedule; sessions, their logs and evidence have no
 delete. Tombstone semantics wait until replication makes a
 propagated delete matter, and that decision is due before it does. Plain-text export for every kind: no format readable
 only by this binary. Documents export as plain Markdown and import back by filename

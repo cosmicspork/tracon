@@ -2114,6 +2114,30 @@ export interface StorageItem {
   error?: string
 }
 
+/** The runtime-storage sweep on the node's timer (`[gc]`), and its last run. */
+export interface StorageSchedule {
+  /** The interval in force; null while the sweep is off. */
+  every_secs: number | null
+  next_ms: number | null
+  last: {
+    started_ms: number
+    finished_ms: number
+    archived: number
+    /** Sessions left unarchived because their review or publication is open. */
+    held: string[]
+    removed: number
+    bytes: number
+    failures: { kind: string; name: string; error: string }[]
+    error?: string
+  } | null
+}
+
+export interface StorageScheduled {
+  scheduled: StorageSchedule
+  /** The schedule as one line, as `tracon gc` prints it. */
+  scheduled_line: string
+}
+
 /** A label an external harness called under on a channel, and what is known of it. */
 export interface ExternalLane {
   channel: string
