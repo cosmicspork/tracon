@@ -3,7 +3,9 @@
   // shared channels, devices, mesh, policy, and maintenance retain distinct
   // scopes so a local host change is never mistaken for a peer or device change.
   import { onMount, tick } from 'svelte'
+  import { isTauri } from '@tauri-apps/api/core'
   import LaunchManifest from '../components/LaunchManifest.svelte'
+  import QrScanner from '../components/QrScanner.svelte'
   import { api } from '../lib/api'
   import { admin } from '../lib/admin'
   import ChannelMeters from '../components/ChannelMeters.svelte'
@@ -68,12 +70,18 @@
   import { hashToken, loginUrl, mintToken } from '../lib/settings'
   import { contextOf, saveOps, type SaveOutcome } from '../lib/config-form'
   import { router } from '../lib/router.svelte'
+  import { openApproval } from '../lib/approving.svelte'
+  import { canScan, scanEnvironment } from '../lib/scan'
   import { SETTINGS_SECTIONS, settingsSection } from '../lib/routes'
   import { store } from '../lib/store.svelte'
   import type { UpdateStatus } from '../lib/desktop-update'
   import type { AuthorityGrant, BoundaryCheck, BoundaryResult, ChannelInfo, ProviderCapabilities, ConfigOp, EnrollStatus, ExhaustionChoice, ExhaustionPolicy, NodeConfig, PolicyRule, ReviewTrigger } from '../lib/types'
 
   const local = $derived(store.node?.loopback ?? false)
+  // A phone reads a device approval's QR here, in the app that holds the
+  // session and the passkey. Not in the desktop app: it is the window that
+  // asks, not the one that approves.
+  const scannable = canScan(scanEnvironment(typeof window !== 'undefined' && isTauri()))
   const origin = typeof location === 'undefined' ? '' : location.origin
   const params = $derived(new URLSearchParams(router.search))
   // Old anchors (#maintenance, #devices, #data, #repositories) are moved to
@@ -631,6 +639,17 @@
 <div class="h4">
   Settings
   <b>{store.node?.name ?? 'this node'}</b>
+  {#if scannable}
+    <span class="scan">
+      <QrScanner
+        label="Scan a QR code"
+        accept={['approve']}
+        onresult={(r) => {
+          if (r.kind === 'approve') openApproval(r.id)
+        }}
+      />
+    </span>
+  {/if}
 </div>
 
 <nav class="section-nav" aria-label="Settings sections" bind:this={sectionNav}>
@@ -1225,6 +1244,10 @@
 {/key}
 
 <style>
+  .scan {
+    margin-left: auto;
+    align-self: center;
+  }
   .panel {
     display: grid;
     gap: 12px;

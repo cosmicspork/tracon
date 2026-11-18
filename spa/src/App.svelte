@@ -22,7 +22,8 @@
   import RestartBanner from './components/RestartBanner.svelte'
   import { attention } from './lib/attention'
   import { stashToken, tokenFromHash } from './lib/auth'
-  import { approvalFromHash, stashApproval, stashedApproval } from './lib/device'
+  import { approving, closeApproval, openApproval } from './lib/approving.svelte'
+  import { approvalFromHash } from './lib/device'
   import { clock } from './lib/clock.svelte'
   import { servingBanner } from './lib/nodes'
   import { hubLight, nodeLight, runningHere } from './lib/railStatus'
@@ -45,26 +46,21 @@
   }
   // A device approval's address (`#approve=<id>`), opened from a window that
   // cannot make a passkey: the same treatment. Held through a login, then
-  // shown in place of the interface until it is decided or closed.
+  // shown in place of the interface until it is decided or closed. A code
+  // scanned in the app opens one the same way (`lib/approving.svelte.ts`).
   {
     const a = approvalFromHash(location.hash)
     if (a) {
-      stashApproval(a)
+      openApproval(a)
       history.replaceState(null, '', location.pathname + location.search)
     }
-  }
-  let approving = $state(stashedApproval())
-  function doneApproving() {
-    stashApproval(null)
-    approving = null
   }
   // An approval link opened in a tab already showing the interface changes
   // only the fragment, so nothing above runs again.
   window.addEventListener('hashchange', () => {
     const a = approvalFromHash(location.hash)
     if (!a) return
-    stashApproval(a)
-    approving = a
+    openApproval(a)
     history.replaceState(history.state, '', location.pathname + location.search)
   })
 
@@ -150,8 +146,8 @@
 
 {#if store.authRequired}
   <Login />
-{:else if approving}
-  <DeviceApproval id={approving} ondone={doneApproving} />
+{:else if approving.id}
+  <DeviceApproval id={approving.id} ondone={closeApproval} />
 {:else if screen.name === 'doc-preview'}
   <DocPreview channel={screen.channel} slug={screen.slug} />
 {:else}
