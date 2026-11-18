@@ -1515,6 +1515,10 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
                                     # scheduled, pull its image and start before the run is given
                                     # up with the reason it was waiting. Only the start: a started
                                     # check or preparation runs until it ends or its own timeout
+# unschedulable_grace_secs = 60     # (under [runtime.kubernetes]) how long a sandbox pod may stay
+                                    # unschedulable before the node acts: a session's pod is placed
+                                    # again with this runtime full, a check's or preparation's fails
+                                    # with "could not be scheduled: <the scheduler's message>"
 # image_pull_secrets = []           # (under [runtime.kubernetes]) Secrets sandbox pods pull with; empty
                                     # leaves them to the namespace's default service account
 # shm_size = "1Gi"                  # (under [runtime.kubernetes]) memory-backed /dev/shm for browsers;
@@ -1617,7 +1621,9 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
 # digitalocean = "off"              # off | overflow (only once every local provider is full) | prefer.
                                     # A node whose own boundary is not verified asks first: a card
                                     # offers DigitalOcean, and nothing moves without it
-# local_limit = 4                   # sessions on this node's own runtime at once; one more is full
+# local_limit = 4                   # sessions on this node's own runtime at once; one more is full.
+                                    # On Kubernetes an extra cap: the cluster's room counts too
+                                    # (see "Room and overflow" under "As a Kubernetes pod")
 # [placement.channel.acme]          # one channel's requirements
 # client = true                     # client work: route must be node-only, and no open resolver
 # forbid_digitalocean = true
@@ -2225,10 +2231,43 @@ and an emptyDir at `/tmp` that `TMPDIR` names.
   sent. Caches are sent in and come back only from a preparation.
 - **Placement.** Pods sit beside this node's own pod (`tracon.dev/role=node` and
   `tracon.dev/node=<prefix>`, its `[boundary] resource_prefix`) by pod affinity on
-  `kubernetes.io/hostname`, through the scheduler: a machine with no room refuses
-  the pod (`out_of_cpu`, `out_of_memory`, ...). The node's pod must carry both labels
+  `kubernetes.io/hostname`, through the scheduler. The node's pod must carry both labels
   (the base Deployment sets `tracon.dev/node: tracon`), which the `runtime` check reads
   back from its own pod (`TRACON_POD_NAME`).
+- **Room and overflow.** With `[placement] digitalocean` on (or a requirement set), each
+  starting session asks the API how much room the node pod's machine has
+  (`TRACON_NODE_NAME`; affinity keeps every sandbox there): its allocatable CPU and
+  memory, less the requests of every pod bound to it that has not ended, in any
+  namespace. A cordoned machine, or one with a `NoSchedule` or `NoExecute` taint, has
+  none. The runtime is **full** when a session's pod and one check's pod
+  (`[runtime.kubernetes.resources.session]` plus `[...resources.command]`, as
+  configured) do not fit together: that reserve keeps room for the session's checks.
+  `[placement] local_limit` stays an extra cap, and whichever is reached first makes it
+  full, so `overflow` moves the session to DigitalOcean with no count to tune. The read
+  is kept for 3 seconds, so a burst of starts reads it once; two sessions that start
+  together can both fit on paper, which the grace below catches. The placement event's
+  `capacity` carries `free_cpu` and `needs_cpu` (millicores), `free_memory` and
+  `needs_memory` (bytes) and `fits`, and the session log says why ("runs on DigitalOcean
+  · the cluster has 630 Mi free, a session and its checks need 1.5 Gi"); Settings shows
+  the same beside the runtime's capabilities. It needs read-only `get` and `list` on
+  `nodes` and `pods` cluster-wide (`clusterrole.yaml` and `clusterrolebinding.yaml` in
+  the base; an overlay that sets `namespace:` carries the binding's subject with it).
+  Without them it places by session count alone, as before, and each placement event
+  says so (`capacity.unread`).
+- **A pod that cannot be scheduled.** While any sandbox pod starts, the node reads its
+  `PodScheduled` condition. One the scheduler keeps `Unschedulable` (no room, a taint, a
+  cordon) for `[runtime.kubernetes] unschedulable_grace_secs` (60 by default) is given
+  up: a session's pod, before its harness starts, is deleted and the session placed
+  again with this runtime counted full, so it moves to DigitalOcean under `overflow` or
+  `prefer` (or the operator is asked, as placement asks), and otherwise ends with the
+  scheduler's message (`client` work, a repository that forbids DigitalOcean,
+  `digitalocean = "off"`); the placement event records why. A check's or a
+  preparation's pod fails its run with "could not be scheduled: 0/1 nodes are
+  available: 1 Insufficient memory ...", the check's result, instead of waiting until
+  its timeout; checks run where their session's boundary is. A session's start is
+  bounded at 90 seconds, so a grace longer than that ends the start before it is placed
+  again. A pod the kubelet itself refuses (`OutOfcpu`, ...) is refused at once
+  (`out_of_cpu`, `out_of_memory`, ...).
 - **Route.** A sandbox dials the node pod's address on `sandbox_port` (7426) over TLS
   pinned to the node's certificate. Its policy, `tracon-sandbox`, selects this node's
   sandboxes (`tracon.dev/role=sandbox`, `tracon.dev/node=<prefix>`) and allows that

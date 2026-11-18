@@ -954,6 +954,7 @@ impl DoRuntime {
             capacity,
             health,
             closed: self.spend(cfg).filter(|s| s.at()).map(|s| s.reason()),
+            room: None,
         }
     }
 
@@ -1047,6 +1048,7 @@ impl DoRuntime {
             lines,
             capabilities: Some(caps),
             enforced: true,
+            room: None,
             elsewhere: Some(Elsewhere {
                 reach,
                 dial,

@@ -1775,6 +1775,13 @@ export interface ProviderCapabilities {
   enforced: boolean
   /** Absent for the node's own runtime, and from a node that predates it. */
   elsewhere?: Elsewhere
+  /**
+   * A Kubernetes runtime's room for one more session and its checks
+   * (`free_cpu`, `free_memory`, `needs_cpu`, `needs_memory` in millicores
+   * and bytes, `fits`), or `unread` with why it was not read. Absent
+   * elsewhere, and from an older node.
+   */
+  room?: Record<string, unknown>
 }
 
 export interface BoundaryResult {

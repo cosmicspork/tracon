@@ -28,6 +28,7 @@ use super::{Backend, BoundaryError, BoundaryReport, EgressGrant};
 use crate::config::Config;
 use crate::gateway::proxy::{GrantSpec, Grants, Refusal};
 use crate::provider::kubernetes::pod::{DigestIdentity, KubeSpec, PodEnv};
+use crate::provider::kubernetes::room::{self, Fit};
 use crate::runner::{Mount, Runner};
 
 /// The manifests a node of this kind expects around it, printed by
@@ -50,7 +51,13 @@ pub struct KubeBackend {
     /// `internal_cidrs` entry that is not an address block, which turns
     /// per-client egress off and fails the runtime check.
     refusal: Result<Refusal, String>,
+    /// The last read of the cluster's room for a session, and when: a burst
+    /// of starts reads it once (`ROOM_FRESH`).
+    room: tokio::sync::Mutex<Option<(std::time::Instant, Result<Fit, String>)>>,
 }
+
+/// How long a read of the cluster's room stands for the starts after it.
+const ROOM_FRESH: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// The builder `[runtime.kubernetes.builder]` configures, if any, staging on
 /// the state volume. Its build steps reach the node's egress proxy, served
@@ -120,6 +127,7 @@ impl KubeBackend {
             grants,
             refusal,
             builder,
+            room: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -421,6 +429,28 @@ impl Backend for KubeBackend {
             runtime.detail = format!("{}; {builder}", runtime.detail);
         }
         report
+    }
+
+    /// The node pod's machine's room, read at most every `ROOM_FRESH`.
+    async fn room(&self) -> Option<Result<Fit, String>> {
+        let mut last = self.room.lock().await;
+        if let Some((at, read)) = last.as_ref() {
+            if at.elapsed() < ROOM_FRESH {
+                return Some(read.clone());
+            }
+        }
+        let read = match &self.env {
+            Err(why) => Err(why.clone()),
+            Ok(env) => match self.client().await {
+                Err(why) => Err(why),
+                Ok(client) => {
+                    let needs = room::needs(&self.cfg.runtime.kubernetes.resources);
+                    room::read(&client, &env.node_name, needs).await
+                }
+            },
+        };
+        *last = Some((std::time::Instant::now(), read.clone()));
+        Some(read)
     }
 
     async fn converge(&self, _cfg: &Config) -> Result<bool, BoundaryError> {

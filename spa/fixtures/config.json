@@ -1304,6 +1304,22 @@
       "editable_by_peer": true,
       "exec_path": false,
       "fs_path": false,
+      "key": "runtime.kubernetes.unschedulable_grace_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
       "key": "runtime.kubernetes.image_pull_secrets",
       "path": null,
       "secret": false,

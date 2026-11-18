@@ -1183,6 +1183,21 @@ mod tests {
             .collect();
         asserted.sort();
         assert_eq!(granted, asserted);
+        // Placement's read of the cluster's room: read-only, nodes and pods,
+        // and nothing else cluster-wide.
+        let capacity = file("clusterrole.yaml");
+        assert!(capacity.contains("kind: ClusterRole"), "{capacity}");
+        assert!(
+            capacity.contains(r#"resources: ["nodes", "pods"]"#),
+            "{capacity}"
+        );
+        assert!(capacity.contains(r#"verbs: ["get", "list"]"#), "{capacity}");
+        assert_eq!(capacity.matches("resources:").count(), 1, "{capacity}");
+        let binding = file("clusterrolebinding.yaml");
+        assert!(binding.contains("name: tracon-node-capacity"), "{binding}");
+        for listed in ["clusterrole.yaml", "clusterrolebinding.yaml"] {
+            assert!(kustomization.contains(listed), "{listed}:\n{kustomization}");
+        }
         let node = file("networkpolicy-node.yaml");
         assert!(node.contains("tracon.dev/role: sandbox"), "{node}");
         assert!(node.contains("tracon.dev/node: tracon"), "{node}");

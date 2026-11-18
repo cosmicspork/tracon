@@ -304,6 +304,13 @@ pub struct HarnessImage {
 pub trait Backend: Send + Sync {
     /// `podman` or `kubernetes`; shown in logs and `/api/nodes`.
     fn kind(&self) -> &'static str;
+    /// How much room the runtime has for one more session and its checks,
+    /// for placement (`provider::kubernetes::room`): `None` where it has no
+    /// such measure and counts sessions alone, `Err` with why where it could
+    /// not be read.
+    async fn room(&self) -> Option<Result<crate::provider::kubernetes::room::Fit, String>> {
+        None
+    }
     /// `tracon setup`: make what the boundary needs exist. Idempotent.
     async fn setup(&self, cfg: &Config, rebuild: bool) -> Result<(), BoundaryError>;
     /// What the node runs on its own (`reconcile`): `setup`, touching only

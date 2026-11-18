@@ -2061,6 +2061,12 @@ pub struct Kubernetes {
     /// still waiting. Only the start is bounded here: a started command runs
     /// until it ends or its caller stops it, as it does under Podman.
     pub start_timeout_secs: u64,
+    /// How long a sandbox pod may stay unschedulable (its `PodScheduled`
+    /// condition `False`, reason `Unschedulable`) before the node acts: a
+    /// session's pod is deleted and placed again with this runtime counted
+    /// full, and a check's or a preparation's fails with the scheduler's
+    /// message. Bounded by `start_timeout_secs`, which still applies.
+    pub unschedulable_grace_secs: u64,
     /// Requests and limits for sandbox pods, `[runtime.kubernetes.resources]`.
     pub resources: KubeResources,
     /// Secrets a sandbox pod pulls its image with. Empty leaves the pod
@@ -2330,6 +2336,7 @@ impl Default for Kubernetes {
             builder: None,
             // A first pull of a repository image can be gigabytes.
             start_timeout_secs: 15 * 60,
+            unschedulable_grace_secs: 60,
             resources: KubeResources::default(),
             image_pull_secrets: Vec::new(),
             shm_size: "1Gi".into(),

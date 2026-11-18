@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 use tracon_sandbox::node::{SandboxConn, SandboxServer};
 
 pub use capabilities::{Capabilities, CapabilityReport};
-pub use placement::{place, Candidate, Placement};
+pub use placement::{place, Candidate, Placement, Room};
 pub use requirements::{DoMode, Requirements};
 
 use crate::boundary::BoundaryReport;

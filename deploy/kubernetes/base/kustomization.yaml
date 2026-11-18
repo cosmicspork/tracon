@@ -4,6 +4,8 @@ resources:
   - serviceaccount.yaml
   - role.yaml
   - rolebinding.yaml
+  - clusterrole.yaml
+  - clusterrolebinding.yaml
   - pvc.yaml
   - networkpolicy-node.yaml
   - networkpolicy-node-build.yaml

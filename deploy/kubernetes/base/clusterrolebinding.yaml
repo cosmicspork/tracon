@@ -1,0 +1,15 @@
+# The node's service account, in the namespace it runs in: an overlay that
+# sets `namespace:` rewrites the subject's namespace with it; applied as is,
+# the base runs in `default`.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tracon-node-capacity
+subjects:
+  - kind: ServiceAccount
+    name: tracon-node
+    namespace: default
+roleRef:
+  kind: ClusterRole
+  name: tracon-node-capacity
+  apiGroup: rbac.authorization.k8s.io

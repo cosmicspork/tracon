@@ -238,6 +238,7 @@ pub const KEYS: &[KeySpec] = &[
         .host_only(),
     restart("runtime.kubernetes.gateway_host"),
     restart("runtime.kubernetes.start_timeout_secs"),
+    restart("runtime.kubernetes.unschedulable_grace_secs"),
     restart("runtime.kubernetes.image_pull_secrets"),
     restart("runtime.kubernetes.internal_cidrs"),
     restart("runtime.kubernetes.sandbox_port"),
