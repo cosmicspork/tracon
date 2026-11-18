@@ -2393,7 +2393,12 @@ pub struct Mesh {
     /// How many owner streams this node may have open at once.
     pub stream_max_concurrent: usize,
     /// Renew shared subscription credentials first. Set it on a node that is
-    /// always on; every other holder steps in only if this one has not.
+    /// always on; every other holder steps in only if this one has not, and
+    /// only with the hub's claim. Unset, a node on Kubernetes that is the
+    /// only one among a sign-in's holders renews first anyway. The one node
+    /// that renews a shared sign-in without a claim, in its last five minutes,
+    /// when the hub cannot be reached. A peer this node lets administer it
+    /// may set it (Settings › Mesh offers to).
     pub renew_credentials: bool,
     /// The peers (node ids) this node lets administer it over the mesh:
     /// read and edit its `node.toml`, and sign its providers in and out,

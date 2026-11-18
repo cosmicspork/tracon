@@ -130,6 +130,22 @@ export interface ProviderSignIn {
   /** Private to the serving node. */
   error?: string | null
   shared_with?: string[]
+  /** For a subscription sign-in: how many times it has been renewed. Absent
+      from older builds, as is everything below. */
+  version?: number
+  /** What the node says about renewing the shared sign-ins it holds: set to
+      renew first (`[mesh] renew_credentials`), or always on (Kubernetes). */
+  renews?: 'configured' | 'always_on' | null
+  /** The node that renews this shared sign-in first, as the node works it
+      out; null when none does and every holder waits for the hub's claim. */
+  renewer?: string | null
+  /** What the node is waiting on: another holder to renew (`waiting`), or a
+      peer's current copy of one it could not renew (`recovering`). */
+  renewal?: { state: 'waiting' | 'recovering'; renewer: string | null; since_ms: number } | null
+  /** Who made the last renewal of this copy, and when. */
+  last_renewed?: { by: string; at_ms: number | null; version: number } | null
+  /** Private to the serving node: the last renewal there that failed. */
+  last_failure?: { reason: string; at_ms: number } | null
 }
 
 /** What the broker will say about a credential: bindings and key names, never a value. */

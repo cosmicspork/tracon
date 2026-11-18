@@ -1059,11 +1059,23 @@ async fn a_subscription_signed_in_once_is_shared_and_renewed_by_one_holder_at_a_
         pa.refresh("anthropic", "anthropic"),
         pb.refresh("anthropic", "anthropic")
     );
-    let mut outcomes = [ra.unwrap(), rb.unwrap()];
-    outcomes.sort_by_key(|o| *o == Refreshed::Renewed);
+    let outcomes = [ra.unwrap(), rb.unwrap()];
+    // The loser is told the version is held, or, when the winner already
+    // renewed it, that its copy is stale; it never refreshes either way.
     assert_eq!(
-        outcomes,
-        [Refreshed::LeftToAnotherHolder, Refreshed::Renewed]
+        outcomes
+            .iter()
+            .filter(|o| **o == Refreshed::Renewed)
+            .count(),
+        1,
+        "{outcomes:?}"
+    );
+    assert!(
+        outcomes.iter().all(|o| matches!(
+            o,
+            Refreshed::Renewed | Refreshed::LeftToAnotherHolder | Refreshed::Recovering
+        )),
+        "{outcomes:?}"
     );
     assert_eq!(fake.with(|f| f.refreshes), before + 1);
     wait_for("both to hold version 3", || {
@@ -1071,6 +1083,177 @@ async fn a_subscription_signed_in_once_is_shared_and_renewed_by_one_holder_at_a_
     })
     .await;
     assert_eq!(version(&a), version(&b));
+}
+
+/// Three nodes in `personal`, each with its own providers on the node's
+/// broker and mesh client, as `serve` wires them.
+async fn trio() -> (
+    Vec<Node>,
+    Vec<Arc<tracon::providers::Providers>>,
+    support::oauth_fake::OAuthFake,
+) {
+    let ids = [identity(1), identity(2), identity(3)];
+    let both: &[&str] = &[MESH_CHANNEL, "personal"];
+    let admitted: Vec<(&Identity, &[&str])> = ids.iter().map(|id| (id, both)).collect();
+    let hub = support::mesh::start_hub(&admitted).await;
+    let mesh = Keyring::genesis(&ids[0].x25519_public(), &DataKey::generate());
+    let personal = Keyring::genesis(&ids[0].x25519_public(), &DataKey::generate());
+    let mut nodes = vec![
+        node(
+            1,
+            "alpha",
+            &hub,
+            &[(MESH_CHANNEL, mesh.clone()), ("personal", personal.clone())],
+        )
+        .await,
+    ];
+    for (seed, name) in [(2u8, "beta"), (3, "gamma")] {
+        let id = &ids[seed as usize - 1];
+        let rings = [
+            (
+                MESH_CHANNEL,
+                mesh.wrap_for(&ids[0], &id.x25519_public()).unwrap(),
+            ),
+            (
+                "personal",
+                personal.wrap_for(&ids[0], &id.x25519_public()).unwrap(),
+            ),
+        ];
+        nodes.push(node(seed, name, &hub, &rings).await);
+    }
+    for n in &nodes {
+        n.client.hello().await.unwrap();
+    }
+    for n in &nodes {
+        for other in &nodes {
+            let id = other.id.node_id();
+            wait_for("every node to see every other", || {
+                n.store
+                    .get_node(&id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|row| row.reachable == 1 && row.x25519_pub.is_some())
+            })
+            .await;
+        }
+        n.client.refresh_members().await.unwrap();
+    }
+    let fake = support::oauth_fake::OAuthFake::start().await;
+    let providers = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let p = tracon::providers::Providers::with_endpoints(
+                Arc::new(Config::default()),
+                n.broker.clone(),
+                DataKey::from_bytes([40 + i as u8; 32]),
+                fake.endpoints(),
+                n.id.node_id(),
+                Bus::new(),
+            );
+            p.set_mesh(n.client.clone());
+            let receiver = p.clone();
+            n.client
+                .set_on_handoff(Box::new(move |names| receiver.handoff_received(names)));
+            let vouching = p.clone();
+            n.client
+                .set_vouch(Box::new(move |name| vouching.can_hand_over(name)));
+            p
+        })
+        .collect();
+    (nodes, providers, fake)
+}
+
+/// A holder that missed two renewals — asleep through both handoffs — is
+/// told its copy is stale when it next tries, with who renewed it; it gets
+/// the current copy from that node and stays connected without spending its
+/// dead refresh token.
+#[tokio::test]
+async fn a_holder_that_missed_two_renewals_recovers_the_copy_from_the_renewer() {
+    state::isolate();
+    let (nodes, providers, fake) = trio().await;
+    let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
+    let (pa, pb, pc) = (&providers[0], &providers[1], &providers[2]);
+    let result = pa
+        .connect(
+            "anthropic",
+            vec!["personal".into()],
+            true,
+            tracon::providers::LoginOwner::Local,
+            false,
+        )
+        .await
+        .unwrap();
+    let authorized = fake.authorize(&result.url);
+    pa.code(
+        "anthropic",
+        &format!("{}#{}", support::oauth_fake::GOOD_CODE, authorized.state),
+        &tracon::providers::LoginOwner::Local,
+    )
+    .await
+    .unwrap();
+    let version = |n: &Node| {
+        n.broker
+            .read()
+            .unwrap()
+            .get("anthropic")
+            .map(|c| c.grant_version)
+    };
+    wait_for("B and C to receive the sign-in", || {
+        version(b) == Some(0) && version(c) == Some(0)
+    })
+    .await;
+    assert_eq!(
+        a.broker
+            .read()
+            .unwrap()
+            .get("anthropic")
+            .unwrap()
+            .nodes
+            .len(),
+        3
+    );
+    // C's copy as it was when it went to sleep.
+    let asleep = c.broker.read().unwrap().get("anthropic").unwrap().clone();
+
+    use tracon::providers::Refreshed;
+    assert_eq!(
+        pa.refresh("anthropic", "anthropic").await.unwrap(),
+        Refreshed::Renewed
+    );
+    wait_for("B to receive version 1", || version(b) == Some(1)).await;
+    assert_eq!(
+        pb.refresh("anthropic", "anthropic").await.unwrap(),
+        Refreshed::Renewed
+    );
+    wait_for("A to receive version 2", || version(a) == Some(2)).await;
+    wait_for("C to receive version 2", || version(c) == Some(2)).await;
+    // C slept through both handoffs: it still holds version 0.
+    c.broker.write().unwrap().put("anthropic", asleep);
+    let refreshes = fake.with(|f| f.refreshes);
+
+    assert_eq!(
+        pc.refresh("anthropic", "anthropic").await.unwrap(),
+        Refreshed::Recovering
+    );
+    let row = |p: &tracon::providers::Providers| {
+        p.list_private()
+            .into_iter()
+            .find(|value| value["name"] == "anthropic")
+            .unwrap()["sign_ins"][0]
+            .clone()
+    };
+    assert_eq!(row(pc)["renewal"]["renewer"], b.id.node_id(), "{}", row(pc));
+    wait_for("C to recover version 2 from B", || version(c) == Some(2)).await;
+    let recovered = row(pc);
+    assert_eq!(recovered["state"], "connected", "{recovered}");
+    assert!(recovered["renewal"].is_null(), "{recovered}");
+    assert_eq!(recovered["last_renewed"]["by"], b.id.node_id());
+    assert_eq!(fake.with(|f| f.refreshes), refreshes, "C spent nothing");
+    assert_eq!(
+        c.broker.read().unwrap().get("anthropic").unwrap().env["ACCESS_TOKEN"],
+        b.broker.read().unwrap().get("anthropic").unwrap().env["ACCESS_TOKEN"]
+    );
 }
 
 fn held_review(id: &str, owner: &str) -> tracon::store::ReviewRow {

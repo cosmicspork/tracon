@@ -475,10 +475,47 @@ impl EnrollSlots {
 
 // ---------------------------------------------------------------- claims
 
+#[derive(Clone, Serialize, Deserialize)]
 struct Claim {
     version: u64,
+    #[serde(with = "hex_key")]
     holder: [u8; 32],
     expires_at: u64,
+    /// The highest version a holder said it renewed, by whom and when. A
+    /// claim for it or any version before it is stale, so the copy that
+    /// version revoked is never spent again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    renewed: Option<Renewed>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Renewed {
+    version: u64,
+    #[serde(with = "hex_key")]
+    by: [u8; 32],
+    at: u64,
+}
+
+impl Claim {
+    /// When the key was last acted on: what its retention counts from.
+    fn touched(&self) -> u64 {
+        self.renewed
+            .as_ref()
+            .map_or(self.expires_at, |r| r.at.max(self.expires_at))
+    }
+}
+
+mod hex_key {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(key: &[u8; 32], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&hex::encode(key))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 32], D::Error> {
+        let text = String::deserialize(d)?;
+        proto::keys::key32(&text).ok_or_else(|| serde::de::Error::custom("not a 32-byte hex key"))
+    }
 }
 
 pub enum ClaimOutcome {
@@ -491,27 +528,71 @@ pub enum ClaimOutcome {
         version: u64,
     },
     /// The key has moved past this version: the caller holds a stale copy.
+    /// `renewed_by` is the member that renewed the newest version recorded,
+    /// which holds a copy newer than the caller's.
     Stale {
         version: u64,
+        renewed_by: Option<[u8; 32]>,
     },
+}
+
+pub enum RenewedOutcome {
+    Recorded,
+    /// The member does not hold the claim on that version, so it is not the
+    /// one that renewed it.
+    NotHolder,
 }
 
 /// "One member acts on version N of this thing": the only first-writer-wins
 /// decision the hub makes about content it cannot read. A key is opaque to
-/// the hub. Memory only, like enrollment: a claim lives for minutes, and one
-/// lost to a restart can at worst be granted a second time.
+/// the hub.
+///
+/// Kept on disk when the hub has a data directory: a claim lives for
+/// minutes, but what it remembers — that a version was claimed, and renewed —
+/// must outlive a restart, or a holder whose copy that renewal revoked is
+/// granted the claim and spends a dead token.
 #[derive(Default)]
 pub struct Claims {
     claims: Mutex<HashMap<String, Claim>>,
+    path: Option<PathBuf>,
 }
 
-/// How long a claim is kept once lapsed, so a late claim for an old version
-/// is still told it is stale.
-const CLAIM_MEMORY_SECS: u64 = 24 * 60 * 60;
+/// How long a key is remembered after it was last claimed or renewed, so a
+/// late claim for an old version is still told it is stale. Longer than a
+/// subscription refresh token lives, so a holder away the whole time is
+/// still told, rather than granted the claim.
+pub const CLAIM_MEMORY_SECS: u64 = 30 * 24 * 60 * 60;
+
+const CLAIMS_FILE: &str = "claims.json";
 
 impl Claims {
+    /// In memory: tests and a hub without a data directory.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Kept in `{data_dir}/claims.json`, read back from it.
+    pub fn open(data_dir: &Path) -> io::Result<Self> {
+        fs::create_dir_all(data_dir)?;
+        let path = data_dir.join(CLAIMS_FILE);
+        let claims = match fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other)?,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => HashMap::new(),
+            Err(e) => return Err(e),
+        };
+        Ok(Self {
+            claims: Mutex::new(claims),
+            path: Some(path),
+        })
+    }
+
+    fn save(&self, claims: &HashMap<String, Claim>) -> io::Result<()> {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        let bytes = serde_json::to_vec(claims).map_err(io::Error::other)?;
+        let dir = path.parent().unwrap_or(Path::new("."));
+        atomic_write(dir, CLAIMS_FILE, &bytes)
     }
 
     pub fn claim(
@@ -521,29 +602,74 @@ impl Claims {
         holder: [u8; 32],
         expires_at: u64,
         now: u64,
-    ) -> ClaimOutcome {
+    ) -> io::Result<ClaimOutcome> {
         let mut claims = self.claims.lock().unwrap();
-        claims.retain(|_, c| c.expires_at + CLAIM_MEMORY_SECS > now);
-        match claims.get(key) {
-            Some(c) if c.version > version => ClaimOutcome::Stale { version: c.version },
+        claims.retain(|_, c| c.touched() + CLAIM_MEMORY_SECS > now);
+        let outcome = match claims.get(key) {
+            Some(c) if c.renewed.as_ref().is_some_and(|r| r.version >= version) => {
+                let renewed = c.renewed.as_ref().expect("checked");
+                return Ok(ClaimOutcome::Stale {
+                    version: c.version.max(renewed.version + 1),
+                    renewed_by: Some(renewed.by),
+                });
+            }
+            Some(c) if c.version > version => {
+                return Ok(ClaimOutcome::Stale {
+                    version: c.version,
+                    renewed_by: c.renewed.as_ref().map(|r| r.by),
+                })
+            }
             Some(c) if c.version == version && c.holder != holder && c.expires_at > now => {
-                ClaimOutcome::Held {
+                return Ok(ClaimOutcome::Held {
                     holder: c.holder,
                     version: c.version,
-                }
+                })
             }
-            _ => {
+            existing => {
+                let renewed = existing.and_then(|c| c.renewed.clone());
                 claims.insert(
                     key.to_string(),
                     Claim {
                         version,
                         holder,
                         expires_at,
+                        renewed,
                     },
                 );
                 ClaimOutcome::Granted { expires_at }
             }
+        };
+        self.save(&claims)?;
+        Ok(outcome)
+    }
+
+    /// Record that `by` renewed `version` of `key`: from then on a claim
+    /// for it, or any version before it, is stale and names `by`.
+    pub fn renewed(
+        &self,
+        key: &str,
+        version: u64,
+        by: [u8; 32],
+        now: u64,
+    ) -> io::Result<RenewedOutcome> {
+        let mut claims = self.claims.lock().unwrap();
+        let Some(claim) = claims
+            .get_mut(key)
+            .filter(|c| c.version == version && c.holder == by)
+        else {
+            return Ok(RenewedOutcome::NotHolder);
+        };
+        if claim.renewed.as_ref().is_none_or(|r| r.version <= version) {
+            claim.renewed = Some(Renewed {
+                version,
+                by,
+                at: now,
+            });
         }
+        // Renewed: the claim has done its work and holds nobody up.
+        claim.expires_at = claim.expires_at.min(now);
+        self.save(&claims)?;
+        Ok(RenewedOutcome::Recorded)
     }
 }
 
@@ -673,40 +799,121 @@ mod tests {
         let c = Claims::new();
         let (a, b) = ([1u8; 32], [2u8; 32]);
         assert!(matches!(
-            c.claim("k", 3, a, 100, 0),
+            c.claim("k", 3, a, 100, 0).unwrap(),
             ClaimOutcome::Granted { .. }
         ));
         // The holder asking again is the same claim, renewed.
         assert!(matches!(
-            c.claim("k", 3, a, 120, 10),
+            c.claim("k", 3, a, 120, 10).unwrap(),
             ClaimOutcome::Granted { .. }
         ));
         assert!(matches!(
-            c.claim("k", 3, b, 150, 10),
+            c.claim("k", 3, b, 150, 10).unwrap(),
             ClaimOutcome::Held { holder, version: 3 } if holder == a
         ));
         // A copy older than the claimed version is stale, whoever asks.
         assert!(matches!(
-            c.claim("k", 2, b, 150, 10),
-            ClaimOutcome::Stale { version: 3 }
+            c.claim("k", 2, b, 150, 10).unwrap(),
+            ClaimOutcome::Stale {
+                version: 3,
+                renewed_by: None
+            }
         ));
         // The next version is anyone's.
         assert!(matches!(
-            c.claim("k", 4, b, 150, 10),
+            c.claim("k", 4, b, 150, 10).unwrap(),
             ClaimOutcome::Granted { .. }
         ));
         assert!(matches!(
-            c.claim("k", 4, a, 150, 20),
+            c.claim("k", 4, a, 150, 20).unwrap(),
             ClaimOutcome::Held { .. }
         ));
         // A lapsed claim frees its version for another member.
         assert!(matches!(
-            c.claim("k", 4, a, 300, 200),
+            c.claim("k", 4, a, 300, 200).unwrap(),
             ClaimOutcome::Granted { .. }
         ));
         assert!(matches!(
-            c.claim("other", 1, b, 300, 200),
+            c.claim("other", 1, b, 300, 200).unwrap(),
             ClaimOutcome::Granted { .. }
+        ));
+    }
+
+    #[test]
+    fn a_renewed_version_is_stale_to_every_member_and_names_the_renewer() {
+        let c = Claims::new();
+        let (a, b) = ([1u8; 32], [2u8; 32]);
+        assert!(matches!(
+            c.claim("k", 41, a, 100, 0).unwrap(),
+            ClaimOutcome::Granted { .. }
+        ));
+        // Only the holder of the claim on that version says it renewed it.
+        assert!(matches!(
+            c.renewed("k", 41, b, 10).unwrap(),
+            RenewedOutcome::NotHolder
+        ));
+        assert!(matches!(
+            c.renewed("k", 40, a, 10).unwrap(),
+            RenewedOutcome::NotHolder
+        ));
+        assert!(matches!(
+            c.renewed("k", 41, a, 10).unwrap(),
+            RenewedOutcome::Recorded
+        ));
+        // Long after the claim lapsed, a holder still on version 41, or one
+        // before it, is stale and told who renewed it — the renewer itself
+        // included.
+        let later = 10 + 20 * 24 * 60 * 60;
+        for (who, version) in [(b, 41), (b, 39), (a, 41)] {
+            assert!(matches!(
+                c.claim("k", version, who, later + 120, later).unwrap(),
+                ClaimOutcome::Stale { version: 42, renewed_by: Some(by) } if by == a
+            ));
+        }
+        // The renewed copy is anyone's to claim next.
+        assert!(matches!(
+            c.claim("k", 42, b, later + 120, later).unwrap(),
+            ClaimOutcome::Granted { .. }
+        ));
+        assert!(matches!(
+            c.claim("k", 41, b, later + 120, later).unwrap(),
+            ClaimOutcome::Stale { version: 42, renewed_by: Some(by) } if by == a
+        ));
+        // Forgotten only well past a refresh token's life.
+        let gone = later + 120 + CLAIM_MEMORY_SECS;
+        assert!(matches!(
+            c.claim("k", 41, b, gone + 120, gone).unwrap(),
+            ClaimOutcome::Granted { .. }
+        ));
+    }
+
+    #[test]
+    fn claims_survive_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = ([1u8; 32], [2u8; 32]);
+        {
+            let c = Claims::open(dir.path()).unwrap();
+            assert!(matches!(
+                c.claim("k", 7, a, 100, 0).unwrap(),
+                ClaimOutcome::Granted { .. }
+            ));
+            assert!(matches!(
+                c.renewed("k", 7, a, 20).unwrap(),
+                RenewedOutcome::Recorded
+            ));
+            assert!(matches!(
+                c.claim("held", 1, a, 500, 20).unwrap(),
+                ClaimOutcome::Granted { .. }
+            ));
+        }
+        let c = Claims::open(dir.path()).unwrap();
+        assert!(matches!(
+            c.claim("k", 7, b, 400, 300).unwrap(),
+            ClaimOutcome::Stale { version: 8, renewed_by: Some(by) } if by == a
+        ));
+        assert!(matches!(
+            c.claim("held", 1, b, 400, 300).unwrap(),
+            ClaimOutcome::Held { holder, version: 1 } if holder == a
         ));
     }
 

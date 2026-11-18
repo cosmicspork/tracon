@@ -1017,7 +1017,7 @@
       "apply": "restart",
       "editable": true,
       "editable_at_node": true,
-      "editable_by_peer": false,
+      "editable_by_peer": true,
       "exec_path": false,
       "fs_path": false,
       "key": "mesh.renew_credentials",
@@ -1026,8 +1026,7 @@
       "shape": {
         "kind": "bool",
         "optional": false
-      },
-      "why_not_by_peer": "decides who may reach or administer this node, so it is changed at the node or with its own passkey, never by a peer"
+      }
     },
     {
       "admin": true,

@@ -854,6 +854,8 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
             mesh.set_on_handoff(Box::new(move |names| receiver.handoff_received(names)));
             let revoked = providers.clone();
             mesh.set_on_revoke(Box::new(move |names| revoked.credentials_revoked(names)));
+            let vouching = providers.clone();
+            mesh.set_vouch(Box::new(move |name| vouching.can_hand_over(name)));
         }
         let probe_state = state.clone();
         let probe_backend = backend.clone();
