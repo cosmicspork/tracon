@@ -533,6 +533,9 @@ export const api = {
       revision_id?: string
       /** With approve: what goes to the forge, as the operator left it. */
       outputs?: ReviewOutputs
+      /** With approve, under `[review] generated_details`: the operator's
+       * opener. The node composes the published description from it. */
+      opener?: string
     },
   ) => call<{ state: string; published?: string }>('POST', `/api/reviews/${id}/verdict`, verdict),
   /** Retry a publication exactly as it was approved: the node reads the

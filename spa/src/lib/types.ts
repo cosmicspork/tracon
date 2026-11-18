@@ -638,6 +638,13 @@ export interface ReviewDetails {
    * `moved` and `unreachable` leave them empty, with the reason.
    */
   owner_detail?: OwnerDetail | null
+  /**
+   * Whether a description an approval sends goes out behind an opener the
+   * operator writes, the agent's text collapsed beneath it
+   * (`[review] generated_details` on the node that owns the review). Absent
+   * from a node that predates it.
+   */
+  generated_details?: boolean
   stale: string[]
   /** Pinned to the revision at submit time; never the live work item. */
   requirements: PinnedRequirements | null
@@ -818,6 +825,8 @@ export interface ReviewDraftFields {
   branch?: string
   /** Under `keep`: each commit's message, by sha, where it was edited. */
   messages?: Record<string, string>
+  /** The opener written above the generated details, under `[review] generated_details`. */
+  opener?: string
 }
 
 /** A review draft as the node holds it. */

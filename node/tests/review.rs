@@ -5659,6 +5659,192 @@ async fn the_operators_edited_outputs_are_what_the_forge_receives() {
     assert!(!gh.contains("agent's wording"), "{gh}");
 }
 
+// ---- generated details behind the operator's opener ----
+
+fn generated_details(c: &mut Config) {
+    c.review.generated_details = true;
+}
+
+const GENERATED: &str =
+    "Fixes the flaky sync.\n\n<details>\n<summary>Generated details</summary>\n\n\
+    ## What\n\nThe agent's long account.\n\n</details>";
+
+/// Under `[review] generated_details`, a new change is described only
+/// behind words the operator wrote: an approval without them is refused
+/// before anything is pushed, and one with them publishes, and records, the
+/// opener with the agent's text folded beneath it.
+#[tokio::test]
+async fn a_new_change_goes_out_only_behind_the_operators_opener() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, generated_details).await;
+    let id = f.submit().await;
+    let (_, detail) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(detail["generated_details"], true, "{detail}");
+    f.forget_logs();
+    let verdict = format!("/api/reviews/{id}/verdict");
+
+    for opener in [json!(null), json!(""), json!(" \n\t")] {
+        let (status, body) = f
+            .call(
+                "POST",
+                &verdict,
+                Some(json!({
+                    "verdict": "approve",
+                    "title": "fix: the sync",
+                    "body": "## What\n\nThe agent's long account.",
+                    "opener": opener,
+                })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(
+            body["error"]["message"],
+            "write an opener above the generated details"
+        );
+    }
+    assert!(
+        f.gh_log().is_empty(),
+        "nothing is published: {}",
+        f.gh_log()
+    );
+    assert_ne!(f.store.get_review(&id).unwrap().unwrap().state, "approved");
+
+    let (status, body) = f
+        .call(
+            "POST",
+            &verdict,
+            Some(json!({
+                "verdict": "approve",
+                "title": "fix: the sync",
+                "body": "## What\n\nThe agent's long account.",
+                "opener": "  Fixes the flaky sync.\n",
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let gh = f.gh_log();
+    assert!(gh.contains("pr create"), "{gh}");
+    assert!(gh.contains(&format!("--body {GENERATED}")), "{gh}");
+    let r = f.store.get_review(&id).unwrap().unwrap();
+    assert_eq!(r.state, "approved");
+    assert_eq!(r.approved_body(), GENERATED);
+    // A retry republishes exactly this.
+    assert_eq!(f.publication(&id).body.as_deref(), Some(GENERATED));
+}
+
+/// No agent text, no empty fold: the opener is the whole description.
+#[tokio::test]
+async fn an_empty_generated_body_publishes_the_opener_alone() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, generated_details).await;
+    let id = f.submit().await;
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({
+                "verdict": "approve",
+                "title": "fix: the sync",
+                "body": "",
+                "opener": "Fixes the flaky sync.",
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let gh = f.gh_log();
+    assert!(gh.contains("--body Fixes the flaky sync.\n"), "{gh}");
+    assert!(!gh.contains("<details>"), "{gh}");
+}
+
+/// Replacing an open change's description is held to the same opener.
+#[tokio::test]
+async fn a_replaced_description_needs_the_opener() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, generated_details).await;
+    let base = f.base_sha();
+    f.forge_holds(&base);
+    gh_forge(&f, pull_seven(&base));
+    let described = review_id(
+        &f.submit_update(json!({ "forge": {
+            "description": { "title": "fix: the sync", "body": "## What\n\nThe agent's long account." },
+        }}))
+        .await,
+    );
+    f.forget_logs();
+
+    // The revision's own description is what goes when none is edited, so
+    // it is what needs the opener.
+    let (status, body) = f.approve(&described).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(
+        body["error"]["message"],
+        "write an opener above the generated details"
+    );
+    assert!(!f.gh_log().contains("PATCH"), "{}", f.gh_log());
+
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{described}/verdict"),
+            Some(json!({ "verdict": "approve", "opener": "Fixes the flaky sync." })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let gh = f.gh_log();
+    assert!(gh.contains("api -X PATCH repos/owner/name/pulls/7"), "{gh}");
+    assert!(gh.contains(&format!("body={GENERATED}")), "{gh}");
+}
+
+/// Pushing to an open change sends no description, so it needs no opener.
+#[tokio::test]
+async fn a_push_only_update_needs_no_opener() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, generated_details).await;
+    let base = f.base_sha();
+    f.forge_holds(&base);
+    gh_forge(&f, pull_seven(&base));
+    let id = review_id(
+        &f.submit_update(json!({ "forge": { "comment": "ready again" } }))
+            .await,
+    );
+    f.forget_logs();
+
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let gh = f.gh_log();
+    assert!(gh.contains("body=ready again\n"), "{gh}");
+    assert!(!gh.contains("<details>"), "{gh}");
+}
+
+/// With the setting off, as it is by default, the body is published as
+/// approved and an opener sent anyway changes nothing.
+#[tokio::test]
+async fn without_generated_details_the_body_goes_out_as_approved() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = f.submit().await;
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({
+                "verdict": "approve",
+                "title": "fix: the sync",
+                "body": "The agent's long account.",
+                "opener": "ignored",
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let gh = f.gh_log();
+    assert!(gh.contains("--body The agent's long account."), "{gh}");
+    assert!(!gh.contains("ignored") && !gh.contains("<details>"), "{gh}");
+    assert_eq!(
+        f.store.get_review(&id).unwrap().unwrap().approved_body(),
+        "The agent's long account."
+    );
+}
+
 /// A commit already on the change is a prose-only update: nothing is pushed,
 /// and the comment still lands.
 #[tokio::test]

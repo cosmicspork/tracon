@@ -1184,6 +1184,10 @@ pub struct ReviewLimits {
     /// mostly deletions, and those are not what a reviewer reads line by line.
     pub max_diff_lines: i64,
     pub max_files: usize,
+    /// Publish an approved description as the operator's opener with the
+    /// agent's text collapsed beneath it under "Generated details", and
+    /// refuse an approval that sends a description without an opener.
+    pub generated_details: bool,
 }
 
 impl Default for ReviewLimits {
@@ -1191,6 +1195,7 @@ impl Default for ReviewLimits {
         Self {
             max_diff_lines: 10_000,
             max_files: 200,
+            generated_details: false,
         }
     }
 }
