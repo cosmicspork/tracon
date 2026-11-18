@@ -16,6 +16,7 @@
   import { humanizeError } from '../lib/errors'
   import { errorText, isNotFound } from '../lib/load'
   import { exhaustionNote } from '../lib/exhaustion'
+  import { providerCardHref, providerLabel } from '../lib/providers'
   import { budgetProblem, heldAtBudget, suggestedBudget } from '../lib/budget'
   import { externalAgent, formatAge, formatBudget, formatTokens } from '../lib/format'
   import { runtimeNote as runtimeNoteFor, usageNote as usageNoteFor } from '../lib/usage'
@@ -30,6 +31,7 @@
     type OperatorQuestion,
     type SessionExhaustion,
     type SessionRuntime,
+    type SignInWait,
     type SessionUsage,
     type ShownWork as ShownWorkItem,
   } from '../lib/types'
@@ -47,6 +49,7 @@
   let runtime = $state<SessionRuntime | null>(null)
   let ceiling = $state<CeilingInfo | null>(null)
   let exhaustion = $state<SessionExhaustion | null>(null)
+  let signInWait = $state<SignInWait | null>(null)
   const exhausted = $derived(exhaustionNote(exhaustion))
   // The box's timing rules live in lib/draft; the component only holds the text.
   const box = draftBox((text) => api.saveDraft(id, text).catch(() => {}))
@@ -84,6 +87,7 @@
     runtime = result.runtime ?? null
     ceiling = result.ceiling
     exhaustion = result.exhaustion ?? null
+    signInWait = result.sign_in_wait ?? null
     shownWork = result.shown_work ?? []
     publications = result.publications ?? []
   }
@@ -541,6 +545,15 @@
         context are kept; a higher budget lets it carry on</b
       >
       {@render budgetForm()}
+    </div>
+  {:else if session.state === 'paused' && signInWait}
+    <div class="banner">
+      waiting for a sign-in to {providerLabel(signInWait.provider)} <b
+        >· its sign-in can no longer be renewed; it carries on by itself once a new one is here{signInWait.deadline_ms
+          ? `, and ends if none is by ${new Date(signInWait.deadline_ms).toLocaleString()}`
+          : ''}</b
+      >
+      <a class="lnk" href={providerCardHref(signInWait.node_id)}>Sign in again</a>
     </div>
   {:else if session.state === 'paused' && exhausted}
     <div class="banner dim">

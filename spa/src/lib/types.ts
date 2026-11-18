@@ -87,10 +87,14 @@ export interface ProviderConnectResult {
 /** One model provider on the serving node, from `/api/providers` and the `providers` stream event. */
 export interface ProviderInfo {
   name: string
-  state: 'connected' | 'pending' | 'failed' | 'disconnected'
+  /** `needs_reconnect`: the sign-in it is described by can no longer be renewed. */
+  state: 'connected' | 'pending' | 'failed' | 'disconnected' | 'needs_reconnect'
   kind: 'api_key' | 'oauth' | null
   /** Whether the harness has a login flow for it; otherwise it takes an API key. */
   can_login: boolean
+  /** Whether the node takes Sign in again for one of its sign-ins from a
+      peer's interface. Absent from an older node: its own UI does it. */
+  sign_in_again?: boolean
   /** Whether node.toml names it, rather than only the node's built-in
       defaults. Absent from a node older than this field. */
   declared?: boolean
@@ -118,7 +122,9 @@ export interface ProviderSignIn {
   /** The credential it is held under: what a disconnect or a change of
       channels names. Empty for the one sign-in an older node describes. */
   credential: string
-  state: 'connected' | 'needs_reconnect'
+  /** `needs_reconnect` (or `failed`): it can no longer be renewed, and only
+      signing in again replaces it. */
+  state: 'connected' | 'needs_reconnect' | 'failed'
   kind: 'api_key' | 'oauth' | null
   identity: string | null
   expires_ms: number | null
@@ -146,6 +152,20 @@ export interface ProviderSignIn {
   last_renewed?: { by: string; at_ms: number | null; version: number } | null
   /** Private to the serving node: the last renewal there that failed. */
   last_failure?: { reason: string; at_ms: number } | null
+  /** The node whose sign-in this copy is. Private to the serving node, and
+      absent from older builds. */
+  origin?: string | null
+}
+
+/** What a session waiting for a new sign-in to its provider waits on. */
+export interface SignInWait {
+  provider: string
+  credential: string
+  /** The node holding the sign-in: where to sign in again. */
+  node_id: string
+  since_ms: number
+  /** When it ends if no sign-in arrives; null waits for as long as it takes. */
+  deadline_ms: number | null
 }
 
 /** What the broker will say about a credential: bindings and key names, never a value. */

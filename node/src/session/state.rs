@@ -281,6 +281,11 @@ pub mod event_kind {
     /// The node acted on an exhaustion once it was due (`outcome`: resumed,
     /// continued, held, abandoned; `note`; `continued_by`).
     pub const EXHAUSTION_WAKE: &str = "exhaustion_wake";
+    /// The provider refused the session's sign-in and it cannot be renewed,
+    /// so the session waits for a new one (`outcome`: waiting, with
+    /// `provider`, `credential`, `deadline_ms`), carries on once one is here
+    /// (resumed), or waited past `[session] auth_wait_secs` (ended, `note`).
+    pub const SIGN_IN_WAIT: &str = "sign_in_wait";
     /// The harness issued the same tool call, unchanged, several times in a
     /// row within one turn (`what`, `count`, `title`, `kind`). Recorded and
     /// surfaced, never acted on: repeating a command is also what a great

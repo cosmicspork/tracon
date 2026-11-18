@@ -1599,6 +1599,8 @@ pub async fn get_session(
     Ok(Json(json!({
         "session": row,
         "waiting": waiting,
+        // Waiting for a new sign-in to its provider (`session::sign_in`).
+        "sign_in_wait": s.manager.sign_in_wait(&id),
         "questions": questions,
         "publications": s.store().session_publications(&id).unwrap_or_default()
             .into_iter()
@@ -6081,6 +6083,11 @@ pub struct ConnectBody {
     /// channels it is made for.
     #[serde(default)]
     pub confirm: bool,
+    /// Sign in again for the sign-in held under this credential, in its
+    /// place (`Providers::connect_again`): its own channels and sharing,
+    /// whatever `channels` and `share` say.
+    #[serde(default)]
+    pub replace: Option<String>,
 }
 
 fn share_by_default() -> bool {
@@ -6094,6 +6101,7 @@ impl Default for ConnectBody {
             local_callback: false,
             share: share_by_default(),
             confirm: false,
+            replace: None,
         }
     }
 }
@@ -6108,7 +6116,7 @@ pub async fn connect_provider(
 ) -> ApiResult<Json<serde_json::Value>> {
     let body = body.map(|Json(body)| body).unwrap_or_default();
     let local_callback = callback_allowed(&s, local, body.local_callback);
-    connect_local(&s, &name, body.channels, body.share, local_callback)
+    connect_local(&s, &name, body, local_callback)
         .await
         .map(Json)
 }
@@ -6128,21 +6136,25 @@ fn callback_allowed(s: &AppState, local: bool, requested: bool) -> bool {
 async fn connect_local(
     s: &AppState,
     name: &str,
-    channels: Vec<String>,
-    share: bool,
+    body: ConnectBody,
     local_callback: bool,
 ) -> ApiResult<serde_json::Value> {
-    let channels = chosen_channels(s.store(), channels, false)?;
-    let result = providers_of(s)?
-        .connect(
-            name,
-            channels,
-            share,
-            crate::providers::LoginOwner::Local,
-            local_callback,
-        )
-        .await
-        .map_err(provider_err)?;
+    let owner = crate::providers::LoginOwner::Local;
+    let result = match body.replace.as_deref() {
+        Some(credential) => {
+            providers_of(s)?
+                .connect_again(name, credential, owner, local_callback)
+                .await
+        }
+        None => {
+            // The channels are refused before any provider is asked.
+            let channels = chosen_channels(s.store(), body.channels, false)?;
+            providers_of(s)?
+                .connect(name, channels, body.share, owner, local_callback)
+                .await
+        }
+    }
+    .map_err(provider_err)?;
     serde_json::to_value(result).map_err(|error| {
         ApiError(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -6406,7 +6418,7 @@ pub async fn node_connect_provider(
             .await
             .map_err(super::peer_admin::refused)?;
         let local_callback = callback_allowed(&s, local, body.local_callback);
-        return connect_local(&s, &name, body.channels, body.share, local_callback)
+        return connect_local(&s, &name, body, local_callback)
             .await
             .map(Json)
             .map_err(super::peer_admin::refused);
@@ -6415,11 +6427,15 @@ pub async fn node_connect_provider(
         &s,
         &parts,
         &node_id,
-        &format!("Sign in to {name}"),
+        &match &body.replace {
+            Some(credential) => format!("Sign in to {name} again for {credential}"),
+            None => format!("Sign in to {name}"),
+        },
         |statement| proto::frame::Command::ProviderConnect {
             name: name.clone(),
             channels: body.channels.clone(),
             share: body.share,
+            replace: body.replace.clone(),
             statement,
         },
         PROVIDER_CONNECT_TIMEOUT,
@@ -7074,6 +7090,31 @@ fn forwarded_scope(s: &AppState, sender: &str, command: &proto::frame::Command) 
         // serves more. Being in each of them is what a peer needs, unless
         // the provider's credential here is bound to no channel: that is
         // this node's alone, and the sign-in would take it over.
+        // Signing in again takes the place of a sign-in held here, so it is
+        // held to the channels that one binds, whatever the command says;
+        // one bound to none is this node's alone.
+        C::ProviderConnect {
+            name,
+            replace: Some(credential),
+            ..
+        } => {
+            let binds = providers_of(s)?
+                .sign_in_channels(name, credential)
+                .map_err(provider_err)?;
+            if binds.is_empty() {
+                return Err(ApiError(
+                    StatusCode::FORBIDDEN,
+                    format!(
+                        "the {name} sign-in {credential} on this node is bound to no channel; \
+                         sign in again on this node itself"
+                    ),
+                ));
+            }
+            for channel in &binds {
+                sender_in_channel(s, sender, channel, "sign-in")?;
+            }
+            Ok(())
+        }
         C::ProviderConnect { name, channels, .. } => {
             for channel in channels {
                 sender_in_channel(s, sender, channel, "sign-in")?;
@@ -7471,38 +7512,54 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                 name,
                 channels,
                 share,
+                replace,
                 ..
-            } => match chosen_channels(self.store(), channels, false)
-                .and_then(|channels| Ok((providers_of(self)?, channels)))
-            {
-                Ok((providers, channels)) => providers
-                    .connect(
-                        &name,
-                        channels,
-                        share,
-                        crate::providers::LoginOwner::Peer(sender.to_string()),
-                        false,
-                    )
-                    .await
-                    .inspect(|_| {
-                        // The code that finishes this sign-in rides on this
-                        // confirmation (`mesh::admin::admit`).
-                        if let Some(admitted) = &admitted {
-                            providers.confirm_login(
-                                &name,
-                                &crate::providers::LoginOwner::Peer(sender.to_string()),
-                                &admitted.actor(),
-                            );
-                        }
-                    })
-                    .and_then(|result| {
-                        serde_json::to_value(result).map_err(|error| {
-                            crate::providers::ProviderError::Failed(error.to_string())
+            } => {
+                let owner = crate::providers::LoginOwner::Peer(sender.to_string());
+                // Signing in again keeps the channels of the sign-in it
+                // replaces; only a new sign-in names its own.
+                // A new sign-in's channels are refused before any provider
+                // is asked.
+                let chosen = match &replace {
+                    Some(_) => Ok(None),
+                    None => chosen_channels(self.store(), channels, false).map(Some),
+                };
+                let started = match chosen.and_then(|chosen| Ok((providers_of(self)?, chosen))) {
+                    Ok((providers, None)) => {
+                        let credential = replace.as_deref().unwrap_or_default();
+                        Ok((
+                            providers.clone(),
+                            providers
+                                .connect_again(&name, credential, owner.clone(), false)
+                                .await,
+                        ))
+                    }
+                    Ok((providers, Some(channels))) => Ok((
+                        providers.clone(),
+                        providers
+                            .connect(&name, channels, share, owner.clone(), false)
+                            .await,
+                    )),
+                    Err(error) => Err(error),
+                };
+                match started {
+                    Ok((providers, result)) => result
+                        .inspect(|_| {
+                            // The code that finishes this sign-in rides on
+                            // this confirmation (`mesh::admin::admit`).
+                            if let Some(admitted) = &admitted {
+                                providers.confirm_login(&name, &owner, &admitted.actor());
+                            }
                         })
-                    })
-                    .map_err(provider_err),
-                Err(error) => Err(error),
-            },
+                        .and_then(|result| {
+                            serde_json::to_value(result).map_err(|error| {
+                                crate::providers::ProviderError::Failed(error.to_string())
+                            })
+                        })
+                        .map_err(provider_err),
+                    Err(error) => Err(error),
+                }
+            }
             C::ProviderCode { name, code, .. } => match providers_of(self) {
                 Ok(providers) => providers
                     .code(

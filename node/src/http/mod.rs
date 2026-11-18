@@ -871,6 +871,9 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
             let b = probe_backend.clone();
             tokio::spawn(async move {
                 let _ = api::probe_models_into_store(&s, b.as_ref()).await;
+                // A session waiting for this sign-in carries on now rather
+                // than at the next tick.
+                s.manager.wake_signed_in().await;
             });
         }));
         // Every provider change lands in this node's row and rides the hello,
@@ -1091,6 +1094,9 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
                 // A session waiting out its provider's limit is woken here,
                 // and one bound for its fallback is carried on.
                 manager.wake_exhausted().await;
+                // A session waiting for a sign-in carries on once one is
+                // here, or ends once it has waited too long.
+                manager.wake_signed_in().await;
                 // A suspended session whose item another node closed ends
                 // here, and is not carried on.
                 manager.end_closed_suspended().await;

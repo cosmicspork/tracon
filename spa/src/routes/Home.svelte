@@ -16,6 +16,7 @@
   import ReviewCard from '../components/ReviewCard.svelte'
   import SessionRow from '../components/SessionRow.svelte'
   import SetupCard from '../components/SetupCard.svelte'
+  import SignInBanner from '../components/SignInBanner.svelte'
   import { api } from '../lib/api'
   import { attention, type Thread } from '../lib/attention'
   import { defaultChannel, rememberedChannel } from '../lib/channel'
@@ -164,6 +165,7 @@
 {#if loadPhase(known) !== 'ready'}
   <LoadGate status={known} what="this node" onretry={refetch} retrying={store.refetching} />
 {/if}
+<SignInBanner />
 {#if policyBehind}
   <div class="banner">This build ships working agreements v{policyBehind.shipped} <b>· v{policyBehind.running} is installed and still decides requests.</b> <a href="/settings#policies">Review and apply</a></div>
 {/if}

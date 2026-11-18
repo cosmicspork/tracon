@@ -3,6 +3,7 @@
   // shows what landed lately; this is where the rest of it lives.
   import LoadGate from '../components/LoadGate.svelte'
   import SessionRow from '../components/SessionRow.svelte'
+  import SignInBanner from '../components/SignInBanner.svelte'
   import TransferInbox from '../components/TransferInbox.svelte'
   import { api } from '../lib/api'
   import { isTerminalState } from '../lib/queue'
@@ -28,6 +29,8 @@
     void call.then(() => store.refetch()).catch(() => store.refetch())
   }
 </script>
+
+<SignInBanner />
 
 <!-- A session exported from another node arrives here: it becomes a session
      of this node's own, so it is started where sessions are listed. -->

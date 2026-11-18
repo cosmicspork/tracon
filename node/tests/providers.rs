@@ -1141,6 +1141,132 @@ async fn a_credential_that_arrives_by_handoff_is_published() {
     assert!(frames.try_recv().is_err());
 }
 
+/// Signing in again for a sign-in that can no longer be renewed: a fresh
+/// login whose tokens replace that sign-in's in place, under the same name,
+/// for the same channels, shared with the same nodes, with no disconnect.
+#[tokio::test]
+async fn signing_in_again_replaces_a_stalled_sign_in_in_place_and_shares_it_again() {
+    state::isolate();
+    let fake = OAuthFake::start().await;
+    fake.with(|f| f.expires_in = 60);
+    let (p, broker, _bus) = providers(fake.endpoints());
+    let mesh = Arc::new(FakeMesh {
+        members: vec!["n2".into(), "n3".into()],
+        ..Default::default()
+    });
+    p.set_mesh(mesh.clone());
+    sign_in_anthropic(&p, &fake, true).await;
+    let before = broker.read().unwrap().get("anthropic").unwrap().clone();
+    fake.with(|f| f.reject_refresh = true);
+    let loop_task = tokio::spawn(p.clone().refresh_loop());
+    eventually("the loop to notice", || {
+        listed(&p, "anthropic")["sign_ins"][0]["renewal"]["state"] == "recovering"
+            || p.needs_reconnect("anthropic")
+    })
+    .await;
+    loop_task.abort();
+    // No other holder has a newer copy: only a new sign-in will do.
+    p.expire_recoveries(tracon::store::now_ms() + 24 * 3600 * 1000);
+    assert!(p.needs_reconnect("anthropic"));
+    assert_eq!(
+        listed(&p, "anthropic")["sign_ins"][0]["state"],
+        "needs_reconnect"
+    );
+    assert_eq!(listed(&p, "anthropic")["sign_ins"][0]["origin"], "n1");
+    assert_eq!(listed(&p, "anthropic")["sign_in_again"], true);
+    mesh.handed.lock().unwrap().clear();
+
+    // Only a subscription sign-in this node holds is signed in again.
+    assert!(matches!(
+        p.connect_again("anthropic", "anthropic@nowhere", LoginOwner::Local, false)
+            .await
+            .unwrap_err(),
+        ProviderError::Conflict(_)
+    ));
+
+    fake.with(|f| f.reject_refresh = false);
+    let result = p
+        .connect_again("anthropic", "anthropic", LoginOwner::Local, false)
+        .await
+        .unwrap();
+    assert_eq!(result.completion, LoginCompletion::Paste);
+    assert_eq!(p.login_channels("anthropic").unwrap(), ["work"]);
+    let authorized = fake.authorize(&result.url);
+    p.code(
+        "anthropic",
+        &format!("{}#{}", oauth_fake::GOOD_CODE, authorized.state),
+        &LoginOwner::Local,
+    )
+    .await
+    .unwrap();
+
+    let after = broker.read().unwrap().get("anthropic").unwrap().clone();
+    assert_eq!(broker.read().unwrap().names(), ["anthropic"]);
+    assert_eq!(after.channels, before.channels);
+    assert_eq!(after.nodes, ["n1", "n2", "n3"]);
+    assert_eq!(after.grant_origin.as_deref(), Some("n1"));
+    assert!(after.supersedes(&before), "every holder takes the new copy");
+    assert_ne!(
+        after.env.get("ACCESS_TOKEN"),
+        before.env.get("ACCESS_TOKEN")
+    );
+    assert!(!p.needs_reconnect("anthropic"));
+    assert_eq!(listed(&p, "anthropic")["sign_ins"][0]["state"], "connected");
+    let handed = mesh.handed.lock().unwrap();
+    assert_eq!(handed.len(), 1);
+    assert_eq!(handed[0].0, "anthropic");
+    assert_eq!(handed[0].2, ["n2", "n3"]);
+    assert_eq!(handed[0].1.grant_id, after.grant_id);
+}
+
+/// Signing in again for a copy another node shared makes this node the
+/// sign-in's origin, sharing it with every node the old origin listed.
+#[tokio::test]
+async fn signing_in_again_for_a_shared_copy_makes_this_node_its_origin() {
+    state::isolate();
+    let fake = OAuthFake::start().await;
+    let (p, broker, _bus) = providers(fake.endpoints());
+    let mesh = Arc::new(FakeMesh::default());
+    p.set_mesh(mesh.clone());
+    let copy = Credential {
+        kind: KIND_OAUTH.into(),
+        provider: Some("anthropic".into()),
+        channels: vec!["work".into()],
+        nodes: vec!["n0".into(), "n1".into(), "n2".into()],
+        grant_id: Some(uuid::Uuid::now_v7().to_string()),
+        grant_version: 4,
+        grant_origin: Some("n0".into()),
+        expires_ms: Some(1),
+        env: [("ACCESS_TOKEN".to_string(), "old".to_string())].into(),
+        ..Default::default()
+    };
+    broker.write().unwrap().put("anthropic", copy.clone());
+    let row = &listed(&p, "anthropic")["sign_ins"][0];
+    assert_eq!(row["origin"], "n0");
+    assert_eq!(row["shared_with"], serde_json::json!(["n0", "n2"]));
+
+    let result = p
+        .connect_again("anthropic", "anthropic", LoginOwner::Local, false)
+        .await
+        .unwrap();
+    let authorized = fake.authorize(&result.url);
+    p.code(
+        "anthropic",
+        &format!("{}#{}", oauth_fake::GOOD_CODE, authorized.state),
+        &LoginOwner::Local,
+    )
+    .await
+    .unwrap();
+    let after = broker.read().unwrap().get("anthropic").unwrap().clone();
+    assert_eq!(after.grant_origin.as_deref(), Some("n1"));
+    assert_eq!(after.nodes, ["n1", "n0", "n2"]);
+    assert_eq!(after.channels, ["work"]);
+    assert!(after.supersedes(&copy));
+    let handed = mesh.handed.lock().unwrap();
+    assert_eq!(handed.len(), 1);
+    assert_eq!(handed[0].2, ["n0", "n2"]);
+}
+
 /// Adding a channel to a shared sign-in keeps its tokens, reaches the new
 /// channel's members, and is a newer copy every holder takes.
 #[tokio::test]
