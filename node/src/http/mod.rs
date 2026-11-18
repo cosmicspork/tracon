@@ -141,7 +141,10 @@ pub fn router(state: AppState) -> Router {
             "/api/admin/restart",
             post(admin::restart_node).delete(admin::cancel_restart),
         )
-        .route("/api/maintenance/storage", post(admin::storage))
+        .route(
+            "/api/maintenance/storage",
+            get(admin::storage_schedule).post(admin::storage),
+        )
         .route("/api/maintenance/data", get(admin::data))
         .route("/api/admin/maintenance/install", post(admin::install))
         .route("/api/admin/maintenance/uninstall", post(admin::uninstall))
@@ -1176,6 +1179,9 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
 
     // The documents written back out as files, when `[docs] export_dir` says where.
     tokio::spawn(crate::corpus::export::run(store.clone(), cfg.clone()));
+
+    // `tracon gc --apply` on the operator's timer, when `[gc] every_secs` sets one.
+    tokio::spawn(crate::gc_schedule::Schedule::new().run(state.manager.clone(), cfg.clone()));
 
     tracing::info!(%listen, "serving");
     // Started: a restore of last-good is recorded and told; serving a short

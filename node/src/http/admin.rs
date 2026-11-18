@@ -638,6 +638,18 @@ pub async fn storage(
     body: Option<Json<StorageSweep>>,
 ) -> ApiResult<Json<Value>> {
     let body = body.map(|Json(body)| body).unwrap_or_default();
+    // Removing waits for nothing: a scheduled run under way is said, and
+    // this one is asked for again once it ends. A preview removes nothing
+    // and needs no turn.
+    let _held = match body.apply {
+        true => Some(crate::gc_schedule::lock().try_lock().map_err(|_| {
+            ApiError::new(
+                StatusCode::CONFLICT,
+                "a sweep is running; ask again once it has finished",
+            )
+        })?),
+        false => None,
+    };
     let items = crate::gc::sweep(
         s.manager.backend().as_ref(),
         &s.cfg,
@@ -652,7 +664,24 @@ pub async fn storage(
     )
     .await
     .map_err(|error| ApiError::new(StatusCode::BAD_GATEWAY, error))?;
-    Ok(Json(json!({ "applied": body.apply, "items": items })))
+    let mut out = scheduled();
+    out["applied"] = json!(body.apply);
+    out["items"] = json!(items);
+    Ok(Json(out))
+}
+
+/// The scheduled sweep (`[gc]`): when it last ran and what it did, when it
+/// runs next, and all that as the line Settings and `tracon gc` show.
+fn scheduled() -> Value {
+    let scheduled = crate::gc_schedule::status();
+    let line = crate::gc_schedule::describe(&scheduled, crate::store::now_ms());
+    json!({ "scheduled": scheduled, "scheduled_line": line })
+}
+
+/// `GET /api/maintenance/storage`: the scheduled sweep alone, with nothing
+/// listed or removed.
+pub async fn storage_schedule() -> Json<Value> {
+    Json(scheduled())
 }
 
 /// `GET /api/maintenance/data`: what this node holds, kind by kind, how

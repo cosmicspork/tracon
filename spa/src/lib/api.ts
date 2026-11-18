@@ -17,6 +17,7 @@ import type {
   CeilingInfo as Ceiling,
   CredentialSummary,
   StorageItem,
+  StorageScheduled,
   DataInventory,
   McpServerStatus,
   DocKindInfo,
@@ -448,7 +449,12 @@ export const api = {
   mcpServers: (refresh = false) =>
     call<{ servers: McpServerStatus[] }>('GET', `/api/mcp-servers${refresh ? '?refresh=true' : ''}`),
   storageSweep: (apply: boolean, caches: boolean) =>
-    call<{ applied: boolean; items: StorageItem[] }>('POST', '/api/maintenance/storage', { apply, caches }),
+    call<{ applied: boolean; items: StorageItem[] } & StorageScheduled>('POST', '/api/maintenance/storage', {
+      apply,
+      caches,
+    }),
+  /** The sweep on the node's timer (`[gc]`): its last run and its next. */
+  storageSchedule: () => call<StorageScheduled>('GET', '/api/maintenance/storage'),
   /** A channel keeps its work and takes no new sessions. */
   archiveChannel: (name: string) => api.putChannelBindings(name, { archived: Date.now() }),
   unarchiveChannel: (name: string) => api.putChannelBindings(name, { archived: null }),

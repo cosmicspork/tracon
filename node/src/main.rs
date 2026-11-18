@@ -895,6 +895,9 @@ async fn main() -> Result<()> {
             } else if !apply {
                 println!("{listed} to remove; run again with --apply to remove them");
             }
+            if let Some(line) = v["scheduled_line"].as_str() {
+                println!("{line}");
+            }
             if failed > 0 {
                 anyhow::bail!("{failed} could not be removed");
             }
