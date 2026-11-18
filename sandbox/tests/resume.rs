@@ -357,3 +357,42 @@ async fn a_sandbox_that_shuts_down_ends_its_run_rather_than_being_awaited() {
     assert_eq!(sandbox.conn.connections(), 2);
     assert!(sandbox.finish().await.success());
 }
+
+/// A tree being sent when the connection drops is sent again, whole, once
+/// the sandbox is back, rather than failing as an "inactive stream".
+#[tokio::test]
+async fn a_tree_cut_off_mid_send_is_sent_again_when_the_sandbox_is_back() {
+    let sandbox = start().await;
+    let work = support::scratch();
+    let source = work.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    for i in 0..64 {
+        std::fs::write(source.join(format!("f{i}")), vec![i as u8; 1024 * 1024]).unwrap();
+    }
+    let inside = work.path().join("inside");
+    let importing = {
+        let conn = sandbox.conn.clone();
+        let (source, inside) = (source.clone(), inside.clone());
+        tokio::spawn(async move {
+            conn.import_dir(&source, &inside, tracon_sandbox::protocol::Exclusions::None)
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    sandbox.conn.sever();
+    let _back = taken_back(&sandbox.node.server, &sandbox.node.listener).await;
+    let summary = tokio::time::timeout(Duration::from_secs(30), importing)
+        .await
+        .expect("the send finished")
+        .unwrap()
+        .unwrap();
+    assert_eq!(summary.files, 64);
+    for i in 0..64 {
+        assert_eq!(
+            std::fs::read(inside.join(format!("f{i}"))).unwrap(),
+            vec![i as u8; 1024 * 1024]
+        );
+    }
+    assert_eq!(sandbox.conn.connections(), 2);
+    assert!(sandbox.finish().await.success());
+}

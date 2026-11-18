@@ -1182,21 +1182,60 @@ impl SandboxConn {
         exclusions: Exclusions,
         limits: Option<Limits>,
     ) -> Result<TreeSummary, SandboxError> {
+        let dir = dir.into();
+        loop {
+            let live = self.live().await?;
+            let error = match self
+                .import_dir_on(&live, local, &dir, exclusions, limits)
+                .await
+            {
+                Ok(summary) => return Ok(summary),
+                Err(error) => error,
+            };
+            // A stream the connection closed under the packer fails its next
+            // write as h2's "inactive stream", which names no connection;
+            // whether the connection went is asked of it instead. The archive
+            // is packed afresh, so a resend after a redial is the whole tree.
+            let maybe_connection =
+                error.of_connection() || matches!(error, SandboxError::Files(FilesError::Io(_)));
+            if !self.worth_retrying(&live, maybe_connection).await {
+                return Err(error);
+            }
+            tracing::info!(run = %self.inner.run, dir = %dir.display(), "the sandbox came back; sending the tree again");
+        }
+    }
+
+    async fn import_dir_on(
+        &self,
+        live: &Live,
+        local: &Path,
+        dir: &Path,
+        exclusions: Exclusions,
+        limits: Option<Limits>,
+    ) -> Result<TreeSummary, SandboxError> {
         let args = protocol::encode_args(&ImportRequest {
-            dir: dir.into(),
+            dir: dir.to_path_buf(),
             limits,
         });
         let (response, stream) = self
-            .send(request(Method::POST, path::IMPORT, Some(args)), false)
+            .send_on(live, request(Method::POST, path::IMPORT, Some(args)), false)
             .await?;
         let (packed, mut writer) =
             files::pack_async(local.to_path_buf(), exclusions, H2Writer::new(stream)).await;
-        match packed {
-            Ok(_) => writer.shutdown().await?,
+        let sent = match packed {
+            Ok(_) => writer.shutdown().await.map_err(SandboxError::from),
             Err(error) => {
                 writer.reset();
-                return Err(error.into());
+                Err(error.into())
             }
+        };
+        if let Err(error) = sent {
+            // The sandbox's own refusal (a limit, a path it would not write)
+            // explains a failed send better than the reset it causes.
+            return match tokio::time::timeout(DROP_GRACE, checked(response)).await {
+                Ok(Err(refused @ SandboxError::Remote { .. })) => Err(refused),
+                _ => Err(error),
+            };
         }
         json_body(checked(response).await?).await
     }
