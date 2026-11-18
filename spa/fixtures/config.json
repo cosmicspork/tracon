@@ -2782,6 +2782,22 @@
       "editable_by_peer": true,
       "exec_path": false,
       "fs_path": false,
+      "key": "review.generated_details",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
       "key": "notify.contact",
       "path": null,
       "secret": false,
