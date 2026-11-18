@@ -75,7 +75,11 @@
   {#if ended}
     <span class="mono age" title="ended {when}">ran {formatDuration(session.updated_ms - session.created_ms)}</span>
   {:else}
-    <span class="mono age" title="last update {when}">{formatAge(session.updated_ms, clock.now)}</span>
+    <!-- Time since it started: the last update moves with every refetch and
+         every event, which reads as a timer restarting. -->
+    <span class="mono age" title="started {new Date(session.created_ms).toLocaleString()} · last update {when}"
+      >{formatAge(session.created_ms, clock.now)}</span
+    >
   {/if}
   <span class="t">
     <em>{kind}</em>
@@ -128,8 +132,9 @@
   }
   .arch.gap {
     background: none;
+    cursor: default;
   }
-  .arch:hover {
+  button.arch:hover {
     color: var(--ink);
     background: var(--s2);
   }
