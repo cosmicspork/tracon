@@ -457,7 +457,10 @@ impl Notifier {
                     (
                         Kind::Review,
                         format!("Review — {}", r.title),
-                        format!("+{} −{}", r.added, r.removed),
+                        match direct_warning(r) {
+                            Some(warning) => format!("{warning} · +{} −{}", r.added, r.removed),
+                            None => format!("+{} −{}", r.added, r.removed),
+                        },
                         format!("tracon-review-{}", r.id),
                     )
                 };
@@ -828,6 +831,13 @@ pub async fn run_with(
                 .reset(tokio::time::Instant::now() + std::time::Duration::from_millis(debounce_ms));
         }
     }
+}
+
+/// What a review's notification says first when it pushes straight to its
+/// base and the operator is warned of that (`[publish] warn_direct`).
+fn direct_warning(r: &crate::store::ReviewRow) -> Option<String> {
+    let target = serde_json::from_str::<crate::review::publish::Target>(&r.target).ok()?;
+    (target.direct && target.warn_direct).then(|| format!("Pushes straight to {}", target.base))
 }
 
 #[cfg(test)]

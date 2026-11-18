@@ -850,6 +850,22 @@
       "editable_by_peer": true,
       "exec_path": false,
       "fs_path": false,
+      "key": "publish.warn_direct",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
       "key": "github.dispatch.*",
       "path": null,
       "secret": false,
@@ -2012,6 +2028,23 @@
       "shape": {
         "kind": "bool",
         "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "repo",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "repo.warn_direct",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": true
       }
     },
     {

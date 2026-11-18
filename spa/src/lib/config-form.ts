@@ -179,6 +179,9 @@ export function labelOf(name: string): { label: string; unit?: string } {
 
 /** What a key means where its name alone does not say, by its schema key. */
 const KEY_HELP: Record<string, string> = {
+  'publish.warn_direct':
+    'Warn on the review, its card and its notification when a review pushes straight to its base with no pull or merge request. A repository entry or the channel’s publish binding may say otherwise.',
+  'repo.warn_direct': 'Whether a review that pushes straight to this repository’s base is warned of, in place of [publish] warn_direct.',
   'spend.infra_usd_per_day':
     'The most DigitalOcean sandbox time may cost per local day. At the limit, new sessions stay off DigitalOcean until the day turns; running ones are not stopped. Empty or 0: no limit.',
   'providers.*.price.input_per_mtok': 'Model price: what input tokens cost. Inference only; sandbox time is priced from DigitalOcean.',

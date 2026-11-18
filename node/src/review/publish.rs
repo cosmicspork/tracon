@@ -113,6 +113,17 @@ pub struct Target {
     /// change. Settled again by every submit.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub initial: bool,
+    /// `branch` is the base, and the base exists on the forge: publication
+    /// fast-forwards the base to the approved revision and opens no change.
+    /// Asked for by submitting with `branch` equal to `base`; settled again
+    /// by every submit.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub direct: bool,
+    /// For a direct target: the operator is warned that it pushes straight
+    /// to the base (`[publish] warn_direct`, as the repository, the channel
+    /// and the node resolved it at submit).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub warn_direct: bool,
 }
 
 /// Where an external review's worktree was: its repository and branch.
@@ -284,6 +295,38 @@ pub struct Intent {
     /// it squashes onto. A commit made in publication is never signed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signed: Vec<String>,
+    /// For a direct target: what protects the base on the forge, as it was
+    /// read at submit. The review page reads it again when it opens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection: Option<BaseProtection>,
+}
+
+/// What protects a base on the forge, in the words the review page shows,
+/// for a review that pushes straight to it. Tracon does not refuse on it:
+/// the forge is the authority, and this only says before approval what the
+/// forge will do.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BaseProtection {
+    /// Each rule found, e.g. `requires a pull request`, `required checks
+    /// title, spa`, `push restricted`. Empty: nothing protects it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub found: Vec<String>,
+    /// Why the forge will refuse a direct push, when a rule says it will.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejects: Option<String>,
+    /// The lookup failed, and why: then nothing is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unknown: Option<String>,
+}
+
+impl BaseProtection {
+    /// A lookup that failed, said as `protection unknown`.
+    pub fn unknown(reason: impl Into<String>) -> Self {
+        Self {
+            unknown: Some(reason.into()),
+            ..Self::default()
+        }
+    }
 }
 
 /// What a refusal to update a change that is no longer open says, so a
@@ -753,12 +796,45 @@ async fn attempt(
     // leased push always looks, because what it may replace is exactly what
     // it was reviewed on. A first commit looks too: it was reviewed against
     // nothing, so a base the forge gained since is not what was approved.
-    let observed = if p.resume || p.target.change.is_some() || p.lease.is_some() || p.target.initial
+    // A direct push looks too: it fast-forwards the base from exactly the
+    // commit it was reviewed against.
+    let observed = if p.resume
+        || p.target.change.is_some()
+        || p.lease.is_some()
+        || p.target.initial
+        || p.target.direct
     {
         Some(remote_sha(cfg, &publisher, &credential, &refname).await?)
     } else {
         None
     };
+    if p.target.direct {
+        let reviewed = p.lease.ok_or_else(|| {
+            PublishError::Target(format!(
+                "nothing records which commit of {} this was reviewed against, so it cannot \
+                 be fast-forwarded from it; submit it again",
+                p.target.base
+            ))
+        })?;
+        match &observed {
+            Some(Some(found)) if found == pushing || found == reviewed => {}
+            Some(Some(found)) => {
+                return Err(PublishError::Target(format!(
+                    "{} moved to {found:.8} since this was reviewed; fetch, rebase and submit \
+                     again",
+                    p.target.base
+                )))
+            }
+            Some(None) => {
+                return Err(PublishError::Target(format!(
+                    "{} is not a branch on the forge any more, so there is nothing to \
+                     fast-forward; nothing was pushed",
+                    p.target.base
+                )))
+            }
+            None => {}
+        }
+    }
     if let (Some(Some(found)), Some(lease)) = (&observed, p.lease) {
         if found != pushing && found != lease {
             return Err(PublishError::LeaseLost {
@@ -795,7 +871,7 @@ async fn attempt(
             // before anything is pushed: a stacked change whose base was
             // merged and deleted since it was submitted would otherwise leave
             // its branch on the forge with nothing for a change to open into.
-            if p.target.change.is_none() && !p.target.initial {
+            if p.target.change.is_none() && !p.target.initial && !p.target.direct {
                 let base = format!("refs/heads/{}", p.target.base);
                 if ls_remote(cfg, &publisher, &credential, &base)
                     .await?
@@ -809,7 +885,8 @@ async fn attempt(
             let refspec = format!("{}:refs/heads/{}", pushing, p.target.branch);
             // A rewrite is forced only over the commit it was reviewed
             // against; anything else there makes the forge refuse it.
-            let lease = match (p.rewrite, p.lease) {
+            // A direct push is never forced: the base only fast-forwards.
+            let lease = match (p.rewrite && !p.target.direct, p.lease) {
                 (true, Some(lease)) => Some(format!("--force-with-lease={refname}:{lease}")),
                 _ => None,
             };
@@ -840,8 +917,9 @@ async fn attempt(
     }
     p.journal.opening().map_err(PublishError::Broker)?;
     // A repository's first commit is its base: there is nothing for a change
-    // to merge into, and the branch the push made is what was published.
-    if p.target.initial {
+    // to merge into, and the branch the push made is what was published. A
+    // direct push moved the base itself, and opens no change either.
+    if p.target.initial || p.target.direct {
         let url = branch_url(provider, &remote, &p.target.branch);
         p.journal.opened(&url).map_err(PublishError::Broker)?;
         return Ok(url);
@@ -1136,6 +1214,183 @@ pub async fn open_change_for_branch(
             change.get(url_key)?.as_str()?.to_string(),
         ))
     }))
+}
+
+/// What protects `target.base` on the forge, for a review that pushes
+/// straight to it. On GitHub, the rulesets that apply to the branch (readable
+/// with read access) and its classic protection where this credential can
+/// read it; on GitLab, the protected branch. A lookup that fails says why, as
+/// `protection unknown`; it never refuses anything.
+pub async fn base_protection(
+    provider: Provider,
+    cfg: &Config,
+    dir: &Path,
+    env: &BTreeMap<String, String>,
+    target: &Target,
+) -> BaseProtection {
+    let base = &target.base;
+    match provider {
+        Provider::Github => {
+            let rules = format!("repos/{}/rules/branches/{base}", target.project);
+            let rules = match forge_api(provider, cfg, dir, env, "GET", &rules, &[]).await {
+                Ok(rules) => rules,
+                Err(error) => return BaseProtection::unknown(error.to_string()),
+            };
+            let classic = format!("repos/{}/branches/{base}/protection", target.project);
+            let classic = match forge_api(provider, cfg, dir, env, "GET", &classic, &[]).await {
+                Ok(classic) => Ok(Some(classic)),
+                Err(PublishError::Refused { stderr, .. })
+                    if stderr.contains("Branch not protected") =>
+                {
+                    Ok(None)
+                }
+                Err(error) => Err(error.to_string()),
+            };
+            github_protection(base, &rules, classic)
+        }
+        Provider::Gitlab => {
+            let path = format!(
+                "projects/{}/protected_branches/{}",
+                gitlab_project(&target.project),
+                base.replace('/', "%2F")
+            );
+            match forge_api(provider, cfg, dir, env, "GET", &path, &[]).await {
+                Ok(found) => gitlab_protection(base, Some(&found)),
+                Err(PublishError::Refused { stderr, .. }) if stderr.contains("404") => {
+                    gitlab_protection(base, None)
+                }
+                Err(error) => BaseProtection::unknown(error.to_string()),
+            }
+        }
+    }
+}
+
+/// What GitHub's rules for `base` (`GET …/rules/branches/{base}`) and its
+/// classic protection (`None` when the branch has none, an error when this
+/// credential cannot read it) say about a direct push.
+pub fn github_protection(
+    base: &str,
+    rules: &Value,
+    classic: Result<Option<Value>, String>,
+) -> BaseProtection {
+    let mut requires_change = false;
+    let mut merge_queue = false;
+    let mut restricted = false;
+    let mut signed = false;
+    let mut checks: Vec<String> = Vec::new();
+    let mut found = Vec::new();
+    for rule in rules.as_array().into_iter().flatten() {
+        match rule["type"].as_str().unwrap_or_default() {
+            "pull_request" => requires_change = true,
+            "merge_queue" => merge_queue = true,
+            "update" => restricted = true,
+            "required_signatures" => signed = true,
+            "required_status_checks" => checks.extend(
+                rule["parameters"]["required_status_checks"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|check| check["context"].as_str().map(str::to_string)),
+            ),
+            _ => {}
+        }
+    }
+    match classic {
+        Ok(Some(classic)) => {
+            requires_change |= classic["required_pull_request_reviews"].is_object();
+            restricted |= classic["restrictions"].is_object();
+            signed |= classic["required_signatures"]["enabled"] == true;
+            let required = &classic["required_status_checks"];
+            checks.extend(
+                required["contexts"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|check| check.as_str().map(str::to_string)),
+            );
+            checks.extend(
+                required["checks"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|check| check["context"].as_str().map(str::to_string)),
+            );
+        }
+        Ok(None) => {}
+        Err(error) => found.push(format!(
+            "classic branch protection not readable with this credential ({error})"
+        )),
+    }
+    checks.sort();
+    checks.dedup();
+    let mut said = Vec::new();
+    if requires_change {
+        said.push("requires a pull request".to_string());
+    }
+    if merge_queue {
+        said.push("requires a merge queue".to_string());
+    }
+    if !checks.is_empty() {
+        said.push(format!("required checks {}", checks.join(", ")));
+    }
+    if signed {
+        said.push("requires signed commits".to_string());
+    }
+    if restricted {
+        said.push("push restricted".to_string());
+    }
+    said.extend(found);
+    let rejects = if requires_change {
+        Some(format!("{base} requires a pull request"))
+    } else if merge_queue {
+        Some(format!("{base} only takes changes through its merge queue"))
+    } else if restricted {
+        Some(format!("{base} restricts who may push to it"))
+    } else {
+        None
+    };
+    BaseProtection {
+        found: said,
+        rejects: rejects.map(|why| rejection(&why)),
+        unknown: None,
+    }
+}
+
+/// What GitLab's protected branch for `base` (`None` when it is not
+/// protected) says about a direct push.
+pub fn gitlab_protection(base: &str, protected: Option<&Value>) -> BaseProtection {
+    let Some(protected) = protected else {
+        return BaseProtection::default();
+    };
+    let levels: Vec<&Value> = protected["push_access_levels"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .collect();
+    let nobody = !levels.is_empty() && levels.iter().all(|level| level["access_level"] == 0);
+    let mut found = vec!["protected".to_string()];
+    if nobody {
+        found.push("no one may push".to_string());
+    } else if !levels.is_empty() {
+        let who: Vec<&str> = levels
+            .iter()
+            .filter_map(|level| level["access_level_description"].as_str())
+            .collect();
+        found.push(format!("push restricted to {}", who.join(", ")));
+    }
+    if protected["code_owner_approval_required"] == true {
+        found.push("requires code owner approval".to_string());
+    }
+    BaseProtection {
+        found,
+        rejects: nobody.then(|| rejection(&format!("{base} allows no direct pushes"))),
+        unknown: None,
+    }
+}
+
+/// What the review page says of a rule that will refuse a direct push.
+fn rejection(why: &str) -> String {
+    format!("{why}; this push will be rejected. Resubmit on a branch to open a change.")
 }
 
 async fn edit_description(
@@ -2083,6 +2338,76 @@ async fn output(cli: &str, mut command: Command) -> Result<String, PublishError>
 mod tests {
     use super::*;
 
+    #[test]
+    fn github_rules_that_require_a_change_say_the_push_will_be_rejected() {
+        let rules = serde_json::json!([
+            { "type": "pull_request", "parameters": {} },
+            { "type": "required_status_checks", "parameters": { "required_status_checks": [
+                { "context": "title" }, { "context": "spa" }
+            ] } },
+            { "type": "deletion" },
+        ]);
+        let found = github_protection("main", &rules, Ok(None));
+        assert_eq!(
+            found.found,
+            ["requires a pull request", "required checks spa, title"]
+        );
+        assert_eq!(
+            found.rejects.as_deref(),
+            Some(
+                "main requires a pull request; this push will be rejected. Resubmit on a branch \
+                 to open a change."
+            )
+        );
+        assert_eq!(found.unknown, None);
+
+        // Checks alone name what runs; classic restrictions reject.
+        let checks = serde_json::json!([{ "type": "required_status_checks", "parameters": {
+            "required_status_checks": [{ "context": "title" }] } }]);
+        let found = github_protection("main", &checks, Ok(None));
+        assert_eq!(found.rejects, None);
+        let classic = serde_json::json!({
+            "required_status_checks": { "contexts": ["title", "ci"] },
+            "restrictions": { "users": [] },
+        });
+        let found = github_protection("main", &checks, Ok(Some(classic)));
+        assert_eq!(
+            found.found,
+            ["required checks ci, title", "push restricted"]
+        );
+        assert!(found
+            .rejects
+            .unwrap()
+            .starts_with("main restricts who may push"));
+
+        // Classic protection this credential cannot read is said, not guessed.
+        let found = github_protection("main", &serde_json::json!([]), Err("HTTP 403".into()));
+        assert_eq!(found.rejects, None);
+        assert!(found.found[0].contains("not readable"), "{:?}", found.found);
+        assert!(github_protection("main", &serde_json::json!([]), Ok(None))
+            .found
+            .is_empty());
+    }
+
+    #[test]
+    fn a_gitlab_branch_nobody_may_push_to_rejects_the_push() {
+        assert_eq!(gitlab_protection("main", None), BaseProtection::default());
+        let maintainers = serde_json::json!({ "push_access_levels": [
+            { "access_level": 40, "access_level_description": "Maintainers" }
+        ] });
+        let found = gitlab_protection("main", Some(&maintainers));
+        assert_eq!(found.found, ["protected", "push restricted to Maintainers"]);
+        assert_eq!(found.rejects, None);
+        let nobody = serde_json::json!({ "push_access_levels": [
+            { "access_level": 0, "access_level_description": "No one" }
+        ] });
+        let found = gitlab_protection("main", Some(&nobody));
+        assert!(found
+            .rejects
+            .unwrap()
+            .starts_with("main allows no direct pushes; this push will be rejected"));
+    }
+
     /// The opener leads and the agent's text folds away beneath it, with the
     /// blank lines the forges need to render Markdown inside `<details>`.
     #[test]
@@ -2222,6 +2547,8 @@ encoding ISO-8859-1\n\nsubject\n";
             repo: None,
             change: None,
             initial: false,
+            direct: false,
+            warn_direct: false,
         };
         let outputs = Outputs {
             description: Some(Description {
@@ -2334,6 +2661,8 @@ encoding ISO-8859-1\n\nsubject\n";
             repo: None,
             change: None,
             initial: false,
+            direct: false,
+            warn_direct: false,
         };
         let args = open_change_args(Provider::Gitlab, &target, "fix: x", "b".into(), false);
         assert_eq!(
@@ -2381,6 +2710,8 @@ encoding ISO-8859-1\n\nsubject\n";
             repo: None,
             change: None,
             initial: false,
+            direct: false,
+            warn_direct: false,
         };
         let err = publish(
             &broker,
@@ -2404,6 +2735,8 @@ encoding ISO-8859-1\n\nsubject\n";
             repo: None,
             change: None,
             initial: false,
+            direct: false,
+            warn_direct: false,
         };
         let err = publish(
             &crate::broker::Broker::default().shared(),
@@ -2435,6 +2768,8 @@ encoding ISO-8859-1\n\nsubject\n";
             repo: None,
             change: None,
             initial: false,
+            direct: false,
+            warn_direct: false,
         };
         let journal = NoJournal;
         let outputs = Outputs::default();
@@ -2492,6 +2827,8 @@ encoding ISO-8859-1\n\nsubject\n";
             repo: None,
             change: None,
             initial: false,
+            direct: false,
+            warn_direct: false,
         };
         let state = ChangeState {
             url: "https://github.test/pull/7".into(),

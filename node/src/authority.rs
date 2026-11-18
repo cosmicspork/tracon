@@ -576,7 +576,7 @@ pub async fn publish_review(
         .unwrap_or_else(|| intent.forge.clone())
         .resolve(&target, title, body);
     // Nothing a person did not approve is opened ready to merge.
-    if !operator && target.change.is_none() && !target.initial {
+    if !operator && target.change.is_none() && !target.initial && !target.direct {
         outputs.draft = true;
     }
     // A resubmission waits in the node's running checks before it is saved
@@ -604,6 +604,13 @@ pub async fn publish_review(
                 "this pushes {} as the repository's first commit, and a change pushed to {branch} \
                  would have no base to merge into; approve it on {}",
                 target.base, target.branch
+            )));
+        }
+        if target.direct {
+            return Err(PublishError::Conflict(format!(
+                "this pushes straight to {}; a branch is named at submit, so have the agent \
+                 resubmit on {branch} to open a change",
+                target.base
             )));
         }
         if !crate::review::prose::ref_name(branch) {

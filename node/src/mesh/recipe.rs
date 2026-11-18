@@ -48,6 +48,7 @@ pub const LOCAL_ONLY: &[&str] = &[
     "prepare_credentials",
     "commits",
     "style",
+    "warn_direct",
 ];
 
 /// What one node offers another for a repository. Unknown fields are refused
@@ -368,6 +369,7 @@ impl RepoRecipe {
                 "prepare_credentials" => !entry.prepare_credentials.is_empty(),
                 "commits" => entry.commits.is_some(),
                 "style" => entry.style.is_some(),
+                "warn_direct" => entry.warn_direct.is_some(),
                 _ => false,
             })
             .collect();
@@ -654,6 +656,7 @@ mod tests {
             prepare_credentials: vec!["nova".into()],
             commits: Some(crate::config::Commits::Keep),
             style: None,
+            warn_direct: Some(false),
         }
     }
 
@@ -671,6 +674,7 @@ mod tests {
             "/var/home",
             "prepare_credentials",
             "commits",
+            "warn_direct",
             "path",
         ] {
             assert!(!text.contains(leaked), "{leaked} leaked into {text}");
@@ -780,7 +784,7 @@ mod tests {
         assert_eq!(applied.entry.dockerfile.as_deref(), Some("Dockerfile"));
         assert_eq!(applied.entry.checks, Some(vec!["just all".to_string()]));
         assert!(!applied.entry.session_egress);
-        assert_eq!(applied.kept, ["path", "commits"]);
+        assert_eq!(applied.kept, ["path", "commits", "warn_direct"]);
 
         // A pinned image stays unless the operator replaces it.
         mine.image = Some(format!("localhost/app@sha256:{}", "b".repeat(64)));

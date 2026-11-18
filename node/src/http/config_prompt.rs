@@ -100,6 +100,9 @@ const SENSITIVE: &[&str] = &[
     "embed.enabled",
     "publish.commits",
     "repo.commits",
+    // Turning it off removes the warning before a push straight to a base.
+    "publish.warn_direct",
+    "repo.warn_direct",
     "gateway.forward_port",
     "placement",
     // Where sessions run, and the listener and address sandboxes reach the

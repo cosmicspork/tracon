@@ -181,6 +181,22 @@ and body, is a retry answered with that review (`already_submitted`) only when
 its `base` matches or is left out. Naming another base revises the review
 under the same rule, rather than handing back the old target.
 
+**A review can push straight to its base.** A repository's build-out commits
+to `main`, and `submit_review` with `branch` equal to `base` half-worked there:
+publication pushed the base, then failed to open a change from the base into
+itself. Such a target is now `direct`: approval fast-forwards the base from the
+commit the revision was captured against (refused, with nothing pushed, if the
+base moved since), opens no change, and returns the branch's address, as a first
+commit into an empty repository does. The push is never forced, a `rewrite` or a
+`change` with it is refused at submit, and the approval card cannot rename its
+branch. Nothing opts in, so the operator is warned instead (`[publish]
+warn_direct`, on by default, overridable per repository and per channel), and the
+card shows what protects the base on the forge: GitHub's rulesets for the
+branch, its classic protection where the credential can read it, or GitLab's
+protected branch. A base that requires a pull request is named as a push that
+will be rejected; submit still goes through, since the forge decides, and a
+rejected push is a publication error with the forge's message.
+
 **One session per client, not per channel.** The first cut keyed the
 attachment on the channel alone, so two terminals on one channel shared a
 session: one card queue, one pause, one idle clock, one log. `initialize` now

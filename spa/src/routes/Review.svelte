@@ -7,6 +7,8 @@
   import CheckDetail from '../components/CheckDetail.svelte'
   import { tick } from 'svelte'
   import CloseTask from '../components/CloseTask.svelte'
+  import DirectPush from '../components/DirectPush.svelte'
+  import type { BaseProtection } from '../lib/direct'
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
@@ -84,6 +86,8 @@
   let forgeState = $state<ForgeState | null>(null)
   /** Whether the change it updates is a draft and why, as the node last knew it. */
   let changeDraft = $state<ChangeDraft | null>(null)
+  /** For a push straight to the base: what protects it, as the forge said when this opened. */
+  let protection = $state<BaseProtection | null>(null)
   /** Why no reviewer is reading it, as the node last found. */
   let reviewerReason = $state<string | null>(null)
   let reviewerStarting = $state(false)
@@ -201,6 +205,7 @@
         publication = d.publication ?? null
         forgeState = d.forge_state ?? null
         changeDraft = d.change_draft ?? null
+        protection = d.protection ?? null
         reviewerReason = d.review_session_reason ?? null
         reviewerStarting = d.review_session_starting ?? false
         reviewerView = d.reviewer ?? null
@@ -481,6 +486,8 @@
   const change = $derived<{ number: number; url: string } | null>(target?.change ?? null)
   /** The forge had no branches: approval pushes the base itself and opens no change. */
   const initial = $derived(target?.initial === true)
+  /** Approval fast-forwards the base itself and opens no change. */
+  const direct = $derived(target?.direct === true)
   /**
    * Whether the review's title and body are only your summary. They describe
    * a new change when it has no description of its own, as every review did
@@ -528,7 +535,7 @@
         ? message.trim()
         : undefined,
     branch:
-      change === null && !initial && branchName.trim() && branchName.trim() !== target?.branch
+      change === null && !initial && !direct && branchName.trim() && branchName.trim() !== target?.branch
         ? branchName.trim()
         : undefined,
     messages: !squashing && Object.keys(reworded).length ? reworded : undefined,
@@ -902,6 +909,10 @@
     {/if}
   </div>
 
+  {#if direct && !closed}
+    <DirectPush {target} provider={review.provider} from={intent.lease} protection={protection ?? intent.protection} />
+  {/if}
+
   <dl class="kv">
     <dt>{review.state === 'approved' ? 'Published' : 'Publishes'}</dt>
     <dd class="m">
@@ -911,11 +922,15 @@
         updates <a href={change.url} target="_blank" rel="noreferrer">{noun} {change.number}</a>
       {:else if initial}
         the repository's first commit, no {noun}
+      {:else if direct}
+        straight to {target?.base}, no {noun}
       {:else}
         new {noun}{intent.forge.draft ? ' (draft)' : ''}
       {/if}
       {#if initial}
         → {target?.project} · {target?.branch}
+      {:else if direct}
+        → {target?.project} · {target?.base} from {intent.lease?.slice(0, 8)}
       {:else}
         → {target?.project} · {outputs.branch ?? target?.branch} into {target?.base}
       {/if}
@@ -1355,7 +1370,7 @@
     {#if squashing && !remoteOwner}
       <CommitMessage label="commit message" bind:value={message} disabled={busy || publishing || closed || surface.phone} />
     {/if}
-    {#if change === null && !initial && !remoteOwner}
+    {#if change === null && !initial && !direct && !remoteOwner}
       <label class="branch">
         Branch
         <input class="edit mono" bind:value={branchName} disabled={busy || publishing || closed || surface.phone} />
