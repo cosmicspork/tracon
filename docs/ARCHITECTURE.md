@@ -646,11 +646,30 @@ holder only ever replaces its copy with a newer one, so a delayed or replayed ha
 cannot undo a refresh. Because a refresh revokes every other holder's tokens, each
 version is renewed once: any holder may try, but only after the hub grants it the
 claim on that version (`POST /v0/claims`, keyed by a hash of the sign-in so the hub
-learns nothing about it), and the winner hands the renewed copy to the rest. A node
-with `[mesh] renew_credentials` tries half an hour before expiry and every other holder
-a quarter of an hour, so an always-on node renews in practice and any holder covers for
-it. Without a claim to be had — no hub, a hub older than claims, one that cannot be
-reached — only the node that signed in, first in `nodes`, renews.
+learns nothing about it). The winner tells the hub it renewed that version
+(`POST /v0/claims/{key}/renewed`) and hands the renewed copy to the rest. The hub keeps
+claims and renewals in its data directory for 30 days, so neither a restart nor a
+holder away for days lets a stale copy win a claim: a claim on a renewed version is
+answered `409` stale, naming the node that renewed it.
+
+One holder renews first, half an hour before expiry: the one with `[mesh]
+renew_credentials`, or else the only holder on Kubernetes (each node says which it is
+on the sign-ins it publishes, and Settings › Mesh offers to set one when none is); every
+other holder tries a quarter of an hour before. Without a claim to be had — no hub, a hub
+older than claims, one that cannot be reached — no holder renews and each says it is
+waiting for the renewer, except the node set to renew, in the last five minutes before
+expiry.
+
+A holder whose copy is stale (the hub says so, or the provider refuses its refresh
+token with `invalid_grant`) does not ask for a new sign-in at once. It asks the node
+that renewed it, then after a minute every other holder, for the current copy (a
+direct-sealed `CredentialRequest`, answered with a handoff by a holder whose copy is
+newer and not itself known to be dead), and asks for a new sign-in only if none arrives
+within two minutes. A node that wakes from a suspend asks every other holder of each
+shared sign-in the same way before renewing anything. Every attempt is logged at INFO
+with the credential, its version, the claim's result and the outcome, and the provider
+card shows who last renewed a copy (the copy carries it) and the last renewal on the
+node that failed.
 
 ## The gate
 

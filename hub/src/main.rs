@@ -1,7 +1,7 @@
 //! tracon hub binary. Configuration by environment:
 //!
 //! - `TRACON_HUB_ADDR` — listen address (default `127.0.0.1:8080`; the image sets `0.0.0.0:8080`).
-//! - `TRACON_HUB_DATA_DIR` — durable frames and members. Unset means in memory, with a loud warning.
+//! - `TRACON_HUB_DATA_DIR` — durable frames, members and claims. Unset means in memory, with a loud warning.
 //! - `TRACON_HUB_ADMIT` — comma-separated node ids admitted into `@mesh` at startup (bootstrap).
 //! - `TRACON_HUB_MAX_SKEW_SECS` (300), `TRACON_HUB_RETAIN_DAYS` (14),
 //!   `TRACON_HUB_MAX_CHANNEL_BYTES` (268435456), `TRACON_HUB_ENROLL_TTL_SECS` (600).
@@ -295,6 +295,11 @@ async fn serve() {
     }
 
     let mut state = state_for(frames, members.clone(), cfg, pokes, replica);
+    if let Some(dir) = &data_dir {
+        state.claims = Arc::new(
+            hub::store::Claims::open(std::path::Path::new(dir)).expect("read claims.json"),
+        );
+    }
     let relay_addr = std::env::var("TRACON_HUB_RELAY_ADDR").ok();
     match std::env::var("TRACON_HUB_RELAY_DOMAIN").ok() {
         Some(domain) => {

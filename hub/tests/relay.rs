@@ -307,6 +307,44 @@ async fn a_claim_is_won_by_one_member() {
     assert_eq!(st, StatusCode::BAD_REQUEST);
 }
 
+/// The winner says it renewed its version; from then on a claim for that
+/// version is stale and names it, and only the winner can say so.
+#[tokio::test]
+async fn a_renewed_claim_is_stale_and_names_the_renewer() {
+    let (a, b, _) = ids();
+    let h = hub_with(&[(&a, &[MESH_CHANNEL]), (&b, &[MESH_CHANNEL])]);
+    let key = "cd".repeat(32);
+    let claim = json!({"key": key, "version": 41, "ttl_secs": 60}).to_string();
+    let renewed = format!("/v0/claims/{key}/renewed");
+    let (st, v) = s(&h, &a, "POST", "/v0/claims", &claim).await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+
+    let (st, _) = s(
+        &h,
+        &b,
+        "POST",
+        &renewed,
+        &json!({"version": 41}).to_string(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "only the holder renewed it");
+    let (st, _) = s(
+        &h,
+        &a,
+        "POST",
+        &renewed,
+        &json!({"version": 41}).to_string(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+
+    let (st, v) = s(&h, &b, "POST", "/v0/claims", &claim).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["reason"], "stale");
+    assert_eq!(v["renewed_by"], a.node_id());
+    assert_eq!(v["version"], 42);
+}
+
 #[tokio::test]
 async fn enrollment_lifecycle_and_admit() {
     let (a, b, c) = ids();

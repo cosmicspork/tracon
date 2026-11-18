@@ -29,6 +29,7 @@
   import MeshAdministration from '../components/settings/MeshAdministration.svelte'
   import NodeList from '../components/settings/NodeList.svelte'
   import PeerConfig from '../components/settings/PeerConfig.svelte'
+  import SharedSignIns from '../components/settings/SharedSignIns.svelte'
   import PolicyManagement from '../components/settings/PolicyManagement.svelte'
   import ModelPicker from '../components/ModelPicker.svelte'
   import Card from '../components/settings/Card.svelte'
@@ -1111,6 +1112,7 @@
     {/if}
   </Card>
   <NodeList />
+  <SharedSignIns />
   <MeshAdministration />
   <HubRollups />
 {/if}
