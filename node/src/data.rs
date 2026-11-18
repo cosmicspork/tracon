@@ -1,7 +1,8 @@
 //! What the node holds, kind by kind, for the data pane in Settings.
 //!
 //! Retention is decided: the node keeps everything and the operator deletes
-//! by hand. This is the account that makes that workable: each kind of data,
+//! by hand, or on a schedule the operator sets (`[gc]`, which removes only
+//! runtime storage, never session rows, logs or evidence). This is the account that makes that workable: each kind of data,
 //! how many there are and what they weigh, where it is deleted if it can be,
 //! and what a delete does beyond this node. Read-only; the deletes stay where
 //! they already are.
@@ -169,7 +170,7 @@ const KINDS: &[Kind] = &[
         tables: &[],
         dirs: &["workspaces", "workspace-staging"],
         delete: Some(RUNTIME_STORAGE),
-        propagation: "This node only. Removing one ends resuming, exporting and restoring.",
+        propagation: "This node only. Removed by hand, or by the [gc] schedule once its session is archived. Removing one ends resuming, exporting and restoring.",
     },
     Kind {
         kind: "harness",
@@ -184,7 +185,7 @@ const KINDS: &[Kind] = &[
         ],
         dirs: &["sessions", "harness-state"],
         delete: Some(RUNTIME_STORAGE),
-        propagation: "This node only. Removing one ends resuming the session.",
+        propagation: "This node only. Removed by hand, or by the [gc] schedule once its session is archived. Removing one ends resuming the session.",
     },
 ];
 

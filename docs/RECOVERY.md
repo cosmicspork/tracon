@@ -44,7 +44,13 @@ already on disk and needs nothing running at all.
 
 A workspace or harness-state volume that `tracon gc --apply` removed is gone;
 the sweep only takes those of archived or vanished sessions, so export one first
-if it may be needed.
+if it may be needed. With `[gc]` set in `node.toml`, the node runs the same sweep
+on its own timer, and with `archive_ended_after_secs` it first archives this node's
+ended sessions untouched that long (never one whose review is open or whose
+publication is not settled): export a session's workspace before then, or leave
+`[gc]` unset. `tracon gc` and **Settings → Maintenance → Runtime storage** say when
+the last automatic sweep ran, what it did, and when the next one is due. Session
+rows, their logs and evidence are never removed by it.
 
 Often the fastest answer is none of these: an execute session that submitted
 anything has a branch on the forge, and that branch is a normal clone away.

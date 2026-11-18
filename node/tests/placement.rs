@@ -21,6 +21,10 @@ use axum::http::{Request, StatusCode};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+use tracon::adapter::{
+    AdapterError, HarnessAdapter, HarnessEvent, HarnessHandle, HarnessVersion, LaunchSpec,
+    ModelOption, ProtocolSupport,
+};
 use tracon::boundary::{Backend, BoundaryError, BoundaryReport};
 use tracon::broker::Broker;
 use tracon::config::{Config, Provider, SHAPE_ANTHROPIC};
@@ -96,6 +100,54 @@ impl Backend for PodmanLike {
     }
 }
 
+/// The fake harness, each launch of which runs until the test ends: the
+/// fake alone keeps only its latest harness, and one that exits frees its
+/// session's slot, which a count of the slots must not depend on.
+struct Lasting {
+    fake: NamedFake,
+    held: std::sync::Mutex<Vec<tokio::sync::mpsc::Sender<HarnessEvent>>>,
+}
+
+#[async_trait]
+impl HarnessAdapter for Lasting {
+    fn id(&self) -> &'static str {
+        self.fake.id()
+    }
+    fn pinned_version(&self) -> &str {
+        self.fake.pinned_version()
+    }
+    fn protocol(&self) -> ProtocolSupport {
+        self.fake.protocol()
+    }
+    async fn version(&self, r: &dyn Runner) -> Result<HarnessVersion, AdapterError> {
+        self.fake.version(r).await
+    }
+    async fn probe_models(
+        &self,
+        r: &dyn Runner,
+        wiring: &tracon::gateway::model::Wiring,
+    ) -> Result<Vec<ModelOption>, AdapterError> {
+        self.fake.probe_models(r, wiring).await
+    }
+    async fn launch(
+        &self,
+        r: &dyn Runner,
+        spec: LaunchSpec,
+    ) -> Result<
+        (
+            Box<dyn HarnessHandle>,
+            tokio::sync::mpsc::Receiver<HarnessEvent>,
+        ),
+        AdapterError,
+    > {
+        let launched = self.fake.launch(r, spec).await?;
+        if let Some(tx) = self.fake.inner.tx.lock().await.clone() {
+            self.held.lock().unwrap().push(tx);
+        }
+        Ok(launched)
+    }
+}
+
 fn node_row(ready: bool) -> NodeRow {
     NodeRow {
         id: "n1".into(),
@@ -134,7 +186,7 @@ fn repo(owner: &str) -> String {
     format!("github.com/{owner}/repo")
 }
 
-async fn node(fake: &FakeDo, client_repo: &str) -> Node {
+async fn node(fake: &FakeDo, client_repo: &str, local_limit: u32) -> Node {
     let store = Arc::new(Store::open_in_memory().unwrap());
     store.put_node(&node_row(false)).unwrap();
     let mut cfg = Config::default();
@@ -152,7 +204,7 @@ async fn node(fake: &FakeDo, client_repo: &str) -> Node {
         },
     );
     cfg.placement.digitalocean = DoMode::Overflow;
-    cfg.placement.local_limit = Some(1);
+    cfg.placement.local_limit = Some(local_limit);
     cfg.placement.repo.push(RepoPlacement {
         path: client_repo.into(),
         client: true,
@@ -164,6 +216,7 @@ async fn node(fake: &FakeDo, client_repo: &str) -> Node {
         image: IMAGE.into(),
         listen: "127.0.0.1:0".into(),
         node_addr: "127.0.0.1:443".into(),
+        limit: 16,
         ..Settings::default()
     };
     let cfg = Arc::new(cfg);
@@ -197,7 +250,10 @@ async fn node(fake: &FakeDo, client_repo: &str) -> Node {
         do_runtime.ensure_template(IMAGE).await,
         TemplateState::Ready { .. }
     ));
-    assert!(runtime::install(do_runtime));
+    // The runtime is the process's: a second node here finds the first's,
+    // around the same stand-in.
+    runtime::install(do_runtime);
+    assert!(runtime::global().is_some());
     assert!(runtime::enabled(&cfg));
 
     let broker: Broker = toml::from_str(BROKER).unwrap();
@@ -225,7 +281,10 @@ async fn node(fake: &FakeDo, client_repo: &str) -> Node {
     let app = tracon::http::router(AppState {
         manager: manager.clone(),
         cfg,
-        adapter: Arc::new(NamedFake::new("claude")),
+        adapter: Arc::new(Lasting {
+            fake: NamedFake::new("claude"),
+            held: Default::default(),
+        }),
         node_id: "n1".into(),
         tools: tools.clone(),
         mesh: None,
@@ -338,7 +397,7 @@ async fn placement_asks_overflows_and_keeps_client_work_home() {
     let client_repo = repo("placement-client");
     let client_path =
         tracon::forge::managed_root(&Config::state_dir()).join("github.com/placement-client/repo");
-    let node = node(&fake, &client_path.to_string_lossy()).await;
+    let node = node(&fake, &client_path.to_string_lossy(), 1).await;
 
     // The node's boundary is not verified: the session is made, and its
     // operator is asked whether to run it on DigitalOcean instead.
@@ -467,4 +526,62 @@ async fn placement_asks_overflows_and_keeps_client_work_home() {
         .unwrap()
         .iter()
         .any(|l| l["capability"] == "dns" && l["value"] == "provider-open"));
+
+    burst_at_the_local_limit(&fake, &client_path.to_string_lossy()).await;
+}
+
+/// `local_limit` counts sessions placed here and still starting: a burst of
+/// starts takes exactly the free slots and overflows the rest, and a start
+/// that fails after its placement frees its slot. (Run inside the test
+/// above: the DigitalOcean runtime is the process's.)
+async fn burst_at_the_local_limit(fake: &FakeDo, client_repo: &str) {
+    let node = node(fake, client_repo, 2).await;
+    node.store.put_node(&node_row(true)).unwrap();
+
+    // A launch manifest that fetches over the network is refused, after
+    // the session was placed: it fails starting, holding a slot until then.
+    let broken = tracon::manifest::SkillEntry {
+        name: "fetched".into(),
+        description: "fetched at launch".into(),
+        source: "https://example.com/skill.git".into(),
+        digest: String::new(),
+        warnings: vec!["runs scripts".into()],
+        files: Vec::new(),
+    };
+    node.store.manifest_put_skill("personal", &broken).unwrap();
+    let failed = node.start(&repo("placement-burst-fails")).await;
+    let placed = node.event(&failed, "placement", 0).await;
+    assert_eq!(placed["provider"], "podman", "{placed}");
+    let row = node.settled(&failed).await;
+    assert_ne!(row.state, "running", "{row:?}");
+    assert!(node
+        .store
+        .manifest_remove("personal", "skill", "fetched")
+        .unwrap());
+
+    let repos: Vec<String> = (0..4)
+        .map(|n| repo(&format!("placement-burst-{n}")))
+        .collect();
+    let (a, b, c, d) = tokio::join!(
+        node.start(&repos[0]),
+        node.start(&repos[1]),
+        node.start(&repos[2]),
+        node.start(&repos[3]),
+    );
+    let ids = [a, b, c, d];
+    let mut providers = Vec::new();
+    for id in &ids {
+        let placed = node.event(id, "placement", 0).await;
+        assert_eq!(placed["decision"], "place", "{placed}");
+        providers.push(placed["provider"].as_str().unwrap().to_string());
+    }
+    providers.sort();
+    assert_eq!(
+        providers,
+        ["digitalocean", "digitalocean", "podman", "podman"],
+        "two run here, the rest overflow"
+    );
+    for id in &ids {
+        node.event(id, "session_started", 0).await;
+    }
 }

@@ -3,8 +3,11 @@
 // authenticator (CDP `WebAuthn`). The "desktop" is a page with no WebAuthn at
 // all, as the desktop app's webview is against a remote node: it signs in by
 // having the phone approve it, then removes a passkey, which the phone
-// confirms for it. The verdicts are in `node/tests/device_pwa.rs`, which
-// stands the node up and runs this.
+// confirms for it. The phone reads each of the desktop's QR codes with the
+// app's own scanner (Settings > Scan a QR code), its camera replaced by a
+// canvas showing that code; headless Chromium on Linux has no
+// BarcodeDetector, so this is jsQR reading it. The verdicts are in
+// `node/tests/device_pwa.rs`, which stands the node up and runs this.
 //
 //   bun spa/tests/device-driver.mjs '<json config>'
 //
@@ -23,6 +26,11 @@ const seen = {
   sign_in_url: null,
   code_shown_to_phone: null,
   approval_headline: null,
+  elsewhere_refusal: null,
+  elsewhere_stayed: null,
+  scanned_url: null,
+  camera_released: null,
+  phone_foreign_requests: [],
   phone_prompt_summary: null,
   desktop_signed_in: false,
   step_up_code: null,
@@ -48,8 +56,49 @@ let step = 'start'
 try {
   // The phone: paired by QR, with a passkey.
   const phoneCtx = await browser.newContext({ viewport: { width: 390, height: 844 } })
+  // The phone's camera: a canvas showing whatever QR `__showQr` was last
+  // given, as a live stream. Every stream handed out is kept to check that
+  // the scanner stopped it.
+  await phoneCtx.addInitScript(() => {
+    let svg = ''
+    window.__showQr = (s) => {
+      svg = s
+    }
+    window.__cameraStreams = []
+    navigator.mediaDevices.getUserMedia = async () => {
+      const canvas = document.createElement('canvas')
+      canvas.width = 640
+      canvas.height = 480
+      const g = canvas.getContext('2d')
+      const img = new Image()
+      img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`
+      await img.decode()
+      const draw = () => {
+        g.fillStyle = '#fff'
+        g.fillRect(0, 0, canvas.width, canvas.height)
+        g.drawImage(img, 160, 80, 320, 320)
+      }
+      draw()
+      setInterval(draw, 50)
+      const stream = canvas.captureStream(15)
+      window.__cameraStreams.push(stream)
+      return stream
+    }
+  })
   const phone = await phoneCtx.newPage()
   phone.on('pageerror', (e) => seen.phone_page_errors.push(String(e)))
+  phone.on('request', (r) => {
+    const url = r.url()
+    if (url.startsWith('data:') || url.startsWith('about:') || url.startsWith('blob:')) return
+    if (new URL(url).origin !== config.origin) seen.phone_foreign_requests.push(new URL(url).origin)
+  })
+  // Scan what the phone's camera shows with the app's own scanner.
+  const scan = async (svg) => {
+    await phone.evaluate((s) => window.__showQr(s), svg)
+    await phone.getByTestId('qr-scan').click()
+  }
+  const cameraReleased = () =>
+    phone.evaluate(() => window.__cameraStreams.every((s) => s.getTracks().every((t) => t.readyState === 'ended')))
   step = 'virtual authenticator'
   const cdp = await phoneCtx.newCDPSession(phone)
   await cdp.send('WebAuthn.enable')
@@ -92,12 +141,33 @@ try {
   seen.sign_in_code = (await desktop.getByTestId('device-user-code').textContent())?.trim() ?? null
   seen.sign_in_url = await desktop.getByTestId('device-open').getAttribute('href')
 
-  // The phone opens the link (a fresh load, as a new tab would be).
+  const signInQr = await desktop.getByTestId('device-code').locator('.qr svg').evaluate((e) => e.outerHTML)
+
+  // A code for another node is refused where it was scanned: nothing opens.
+  step = 'phone scans a code for another origin'
+  await phone.goto(`${config.origin}/settings`)
+  await phone.getByTestId('qr-scan').waitFor({ timeout })
+  const before = phone.url()
+  const elsewhereQr = await phone.evaluate(async (text) => {
+    const res = await fetch('/api/auth/qr', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text }),
+    })
+    return (await res.json()).svg
+  }, `https://elsewhere.example/#approve=${'a'.repeat(22)}`)
+  await scan(elsewhereQr)
+  seen.elsewhere_refusal = (await phone.getByTestId('qr-scan-refusal').textContent({ timeout }))?.trim() ?? null
+  seen.elsewhere_stayed = phone.url() === before && (await phone.getByTestId('device-approval').count()) === 0
+  await phone.getByTestId('qr-scan-close').click()
+
+  // The phone scans the desktop's QR in the app, which holds the session.
   step = 'phone approves the sign-in'
-  await phone.goto('about:blank')
-  await phone.goto(seen.sign_in_url)
+  await scan(signInQr)
   await phone.getByTestId('device-approval').waitFor({ timeout })
   seen.approval_headline = (await phone.getByTestId('device-approval-headline').textContent())?.trim() ?? null
+  seen.scanned_url = phone.url()
+  seen.camera_released = await cameraReleased()
   // The phone does not show the code: the operator types the desktop's.
   seen.code_shown_to_phone = (await phone.getByTestId('device-approval').textContent())?.includes(seen.sign_in_code) ?? null
   await phone.getByTestId('device-approval-code').fill(seen.sign_in_code.toLowerCase())
@@ -128,9 +198,10 @@ try {
   seen.step_up_code = (await desktopPrompt.getByTestId('device-user-code').textContent())?.trim() ?? null
   seen.step_up_url = await desktopPrompt.getByTestId('device-open').getAttribute('href')
 
+  const stepUpQr = await desktopPrompt.getByTestId('device-code').locator('.qr svg').evaluate((e) => e.outerHTML)
+
   step = 'phone confirms for the desktop'
-  await phone.goto('about:blank')
-  await phone.goto(seen.step_up_url)
+  await scan(stepUpQr)
   await phone.getByTestId('device-approval').waitFor({ timeout })
   seen.step_up_headline = (await phone.getByTestId('device-approval-headline').textContent())?.trim() ?? null
   await phone.getByTestId('device-approval-code').fill(seen.step_up_code)

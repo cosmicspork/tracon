@@ -404,7 +404,8 @@ pub(super) async fn peer_job(
 }
 
 /// The repository's snapshot, prepared here as its own sessions would have
-/// it: its image built, then `prepare` run and snapshotted.
+/// it: its image built, then `prepare` run and snapshotted. An entry that
+/// prepares nothing has its image itself.
 async fn prepare_repo(
     runtime: &Arc<super::runtime::DoRuntime>,
     builder: &Builder,
@@ -412,18 +413,12 @@ async fn prepare_repo(
     repository: &str,
     key: &str,
 ) -> Result<String, String> {
-    use crate::repo_image::Ensured;
     let backend = builder.backend.as_ref();
-    match crate::repo_image::ensure_base(backend, &builder.cfg, &builder.store, path, false).await {
-        Ensured::Stale { error, .. } => return Err(format!("{repository}'s image: {error}")),
-        Ensured::Unavailable { reason } => return Err(format!("{repository}'s image: {reason}")),
-        _ => {}
-    }
+    let ensured =
+        crate::repo_image::ensure_base(backend, &builder.cfg, &builder.store, path, false).await;
     let environment = crate::environment::environment_for(&builder.cfg, &builder.store, Some(path));
-    if environment.prepare.is_empty() {
-        return Err(format!(
-            "{repository}'s entry here prepares nothing, so it has no template of its own"
-        ));
+    if let Some(image) = unprepared(repository, &ensured, environment.prepare.is_empty())? {
+        return Ok(image);
     }
     // A snapshot this makes is taken for the key as it is made.
     runtime.expect_snapshot(path, key);
@@ -439,6 +434,28 @@ async fn prepare_repo(
     runtime.unexpect_snapshot(path);
     snapshot
         .ok_or_else(|| format!("{repository} could not be prepared here; the node's log says why"))
+}
+
+/// What `ensure_base` made of the repository's image (`ensured`) comes to
+/// before anything is prepared: an image that could not be built refuses
+/// the template, and with nothing to prepare (`bare`) the image itself is
+/// the template's. `None` goes on to prepare it.
+fn unprepared(
+    repository: &str,
+    ensured: &crate::repo_image::Ensured,
+    bare: bool,
+) -> Result<Option<String>, String> {
+    use crate::repo_image::Ensured;
+    match ensured {
+        Ensured::Stale { error, .. } => Err(format!("{repository}'s image: {error}")),
+        Ensured::Unavailable { reason } => Err(format!("{repository}'s image: {reason}")),
+        _ if !bare => Ok(None),
+        Ensured::Current(image) | Ensured::Rebuilt(image) => Ok(Some(image.clone())),
+        Ensured::Unconfigured => Err(format!(
+            "{repository}'s entry here neither builds an image nor prepares anything, so it has \
+             no template of its own"
+        )),
+    }
 }
 
 /// Refuse a key this node does not compute for the same thing.
@@ -524,6 +541,39 @@ mod tests {
         assert_eq!(adverts[0].state, AdvertState::Ready);
         again.forget(std::slice::from_ref(&record.name));
         assert!(!again.holds(&record.name));
+    }
+
+    /// An entry that builds its image and prepares nothing has that image
+    /// as its template; one that does neither has none of its own, and an
+    /// image that could not be built refuses either.
+    #[test]
+    fn a_build_only_entry_is_its_own_template() {
+        use crate::repo_image::Ensured;
+        let repo = "github.com/acme/app";
+        let image = || "localhost/tracon-repo-app@sha256:aaaa".to_string();
+        assert_eq!(
+            unprepared(repo, &Ensured::Current(image()), true),
+            Ok(Some(image()))
+        );
+        assert_eq!(
+            unprepared(repo, &Ensured::Rebuilt(image()), true),
+            Ok(Some(image()))
+        );
+        assert_eq!(
+            unprepared(repo, &Ensured::Current(image()), false),
+            Ok(None)
+        );
+        assert_eq!(unprepared(repo, &Ensured::Unconfigured, false), Ok(None));
+        let why = unprepared(repo, &Ensured::Unconfigured, true).unwrap_err();
+        assert!(why.contains("neither builds"), "{why}");
+        let stale = Ensured::Stale {
+            using: image(),
+            error: "rustup: exit 1".into(),
+        };
+        for bare in [true, false] {
+            let why = unprepared(repo, &stale, bare).unwrap_err();
+            assert!(why.contains("rustup: exit 1"), "{why}");
+        }
     }
 
     #[test]

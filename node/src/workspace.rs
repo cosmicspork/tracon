@@ -85,7 +85,7 @@ fn safe_id(id: &str) -> String {
 /// clearing) would otherwise interleave a remove-and-rename with a reader,
 /// handing back a torn directory, content that was never the tree
 /// `validate_tree` just approved, or no directory at all.
-pub(crate) fn volume_lock(volume: &str) -> Arc<AsyncMutex<()>> {
+pub fn volume_lock(volume: &str) -> Arc<AsyncMutex<()>> {
     static LOCKS: std::sync::LazyLock<StdMutex<HashMap<String, Arc<AsyncMutex<()>>>>> =
         std::sync::LazyLock::new(|| StdMutex::new(HashMap::new()));
     LOCKS
@@ -795,6 +795,46 @@ pub async fn seed_from_clone(
         Some(&stage),
         "branch",
         ["checkout", "-B", branch, "HEAD"],
+    )
+    .await?;
+    sanitize_git(&stage)?;
+    Ok(Workspace {
+        id: id.to_string(),
+        volume: volume_name(id),
+        snapshot: snapshot_path(id),
+    })
+}
+
+/// Seed a session on a managed clone of an empty repository (`Synced::empty`):
+/// a new repository with nothing in it, on `branch` with no commit yet (an
+/// orphan), whose `origin/HEAD` names `origin/<base>` as a clone's would.
+/// `origin/<base>` itself does not exist, so a review of the work is compared
+/// with nothing and can be published as the repository's first commit. The
+/// clone has no commit to give, so nothing is read from it.
+pub async fn seed_empty(
+    git: &str,
+    branch: &str,
+    base: &str,
+    id: &str,
+) -> Result<Workspace, WorkspaceError> {
+    for name in [branch, base] {
+        if name.is_empty() || name.starts_with('-') {
+            return Err(WorkspaceError::Git {
+                op: "init",
+                message: format!("{name:?} is not a branch name"),
+            });
+        }
+    }
+    let stage = staging_path(id);
+    let _ = std::fs::remove_dir_all(&stage);
+    std::fs::create_dir_all(&stage)?;
+    run_git(git, Some(&stage), "init", ["init", "-q", "-b", branch]).await?;
+    let default = format!("refs/remotes/origin/{base}");
+    run_git(
+        git,
+        Some(&stage),
+        "symbolic-ref",
+        ["symbolic-ref", "refs/remotes/origin/HEAD", default.as_str()],
     )
     .await?;
     sanitize_git(&stage)?;

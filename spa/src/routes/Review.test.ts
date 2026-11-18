@@ -46,3 +46,49 @@ test("a peer's reviewer control says when its owner is away, and shows the owner
     expect(chain.slice(at, next === -1 ? undefined : next)).toContain('{#if reviewerRefusal}')
   }
 })
+
+test('under generated details the opener sits above the agent text, which is collapsed and still editable', () => {
+  const at = markup.indexOf('{#snippet generated(')
+  expect(at).toBeGreaterThan(-1)
+  const snippet = markup.slice(at, markup.indexOf('{/snippet}', at))
+  const opener = snippet.indexOf('bind:value={opener}')
+  const details = snippet.indexOf('<details class="generated">')
+  expect(opener).toBeGreaterThan(-1)
+  expect(snippet).toContain('placeholder="What this is and why it matters"')
+  // Collapsed by default: no `open` on it.
+  expect(details).toBeGreaterThan(opener)
+  expect(snippet).not.toContain('<details class="generated" open')
+  expect(snippet.slice(details)).toContain('{GENERATED_DETAILS}')
+  expect(snippet.slice(details)).toContain('bind:value={body}')
+  expect(snippet.slice(details)).toContain('bind:value={descBody}')
+  // And a preview of what the forge gets.
+  expect(snippet).toContain('{composed}')
+})
+
+test('the opener shows only where approval sends a description, and only with the setting on', () => {
+  expect(review).toContain('openerFor(generatedDetails && !closed, { change: change !== null, initial, describe })')
+  // A new change's body, or the description replacing a change's; otherwise the plain editor.
+  expect(markup).toContain("{#if opening === 'body'}\n      {@render generated('body')}\n    {:else}")
+  expect(markup).toContain("{#if opening === 'description'}\n      {@render generated('description')}\n    {:else}")
+  // Nothing else renders it: "Comment on the …" never gets one.
+  expect(markup.split("{@render generated(").length - 1).toBe(2)
+})
+
+test('approval is gated on the opener and carries it to the node, which composes the body', () => {
+  const conditions = review.slice(review.indexOf('const conditions = $derived('))
+  expect(conditions.slice(0, conditions.indexOf('})\n'))).toContain('opener: opening')
+  expect(review).toContain("where: remoteOwner ? nodeLabel(store.nodes, remoteOwner) : surface.phone ? 'the desktop' : null")
+  const decide = review.slice(review.indexOf('async function decide('))
+  const call = decide.slice(0, decide.indexOf('})\n'))
+  expect(call).toContain("opener: verdict === 'approve' && opening ? opener : undefined")
+  // The body and description go as written; the wrapping is the node's.
+  expect(call).toContain("body: verdict === 'approve' ? body : undefined")
+  expect(call).not.toContain('composed')
+})
+
+test('the opener is part of the review draft', () => {
+  const fields = review.slice(review.indexOf('function draftFields()'))
+  expect(fields.slice(0, fields.indexOf('\n  }\n'))).toContain('opener: opener || undefined')
+  const apply = review.slice(review.indexOf('function applyDraft('))
+  expect(apply.slice(0, apply.indexOf('\n  }\n'))).toContain('if (d.opener !== undefined) opener = d.opener')
+})

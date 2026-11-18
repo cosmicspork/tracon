@@ -397,6 +397,26 @@ impl Templates {
         }
     }
 
+    /// Seen ready, as `ensure` records a template it finds ready.
+    #[cfg(test)]
+    pub(super) fn seen_ready(&self, image: &str) -> String {
+        let name = self.name_for(image).unwrap();
+        self.states.lock().unwrap().insert(
+            name.clone(),
+            TemplateState::Ready {
+                template_id: name.clone(),
+            },
+        );
+        self.ready.lock().unwrap().insert(
+            digest_of(image).unwrap().to_string(),
+            Known {
+                name: name.clone(),
+                services: self.current_services(),
+            },
+        );
+        name
+    }
+
     /// Where the template `name` stands, as this node process last saw it.
     pub fn state_named(&self, name: &str) -> Option<TemplateState> {
         self.states.lock().unwrap().get(name).cloned()
@@ -604,23 +624,8 @@ mod tests {
         assert_eq!(given.current_services(), None);
     }
 
-    /// Seen ready, as `ensure` records a template it finds ready.
     fn seen_ready(t: &Templates, image: &str) -> String {
-        let name = t.name_for(image).unwrap();
-        t.states.lock().unwrap().insert(
-            name.clone(),
-            TemplateState::Ready {
-                template_id: name.clone(),
-            },
-        );
-        t.ready.lock().unwrap().insert(
-            digest_of(image).unwrap().to_string(),
-            Known {
-                name: name.clone(),
-                services: t.current_services(),
-            },
-        );
-        name
+        t.seen_ready(image)
     }
 
     /// A bundle arriving renames the image's template. Sandboxes keep

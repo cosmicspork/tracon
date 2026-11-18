@@ -638,6 +638,13 @@ export interface ReviewDetails {
    * `moved` and `unreachable` leave them empty, with the reason.
    */
   owner_detail?: OwnerDetail | null
+  /**
+   * Whether a description an approval sends goes out behind an opener the
+   * operator writes, the agent's text collapsed beneath it
+   * (`[review] generated_details` on the node that owns the review). Absent
+   * from a node that predates it.
+   */
+  generated_details?: boolean
   stale: string[]
   /** Pinned to the revision at submit time; never the live work item. */
   requirements: PinnedRequirements | null
@@ -824,6 +831,8 @@ export interface ReviewDraftFields {
   branch?: string
   /** Under `keep`: each commit's message, by sha, where it was edited. */
   messages?: Record<string, string>
+  /** The opener written above the generated details, under `[review] generated_details`. */
+  opener?: string
 }
 
 /** A review draft as the node holds it. */
@@ -1663,6 +1672,8 @@ export function permissionOptions(p: Permission): { option_id: string; name: str
 export interface BoundaryCheck {
   id: string
   ok: boolean
+  /** Not passed yet, and not failed: the node is fetching what it needs. */
+  pending?: boolean
   detail: string
 }
 
@@ -2130,6 +2141,30 @@ export interface StorageItem {
   reason: string
   removed?: boolean
   error?: string
+}
+
+/** The runtime-storage sweep on the node's timer (`[gc]`), and its last run. */
+export interface StorageSchedule {
+  /** The interval in force; null while the sweep is off. */
+  every_secs: number | null
+  next_ms: number | null
+  last: {
+    started_ms: number
+    finished_ms: number
+    archived: number
+    /** Sessions left unarchived because their review or publication is open. */
+    held: string[]
+    removed: number
+    bytes: number
+    failures: { kind: string; name: string; error: string }[]
+    error?: string
+  } | null
+}
+
+export interface StorageScheduled {
+  scheduled: StorageSchedule
+  /** The schedule as one line, as `tracon gc` prints it. */
+  scheduled_line: string
 }
 
 /** A label an external harness called under on a channel, and what is known of it. */

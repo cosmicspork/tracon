@@ -438,6 +438,15 @@ pub async fn served_service_bundle(
     packed(dir, served).await
 }
 
+/// The file name, under the served directory, of the tar of the bundle at
+/// `dir`: keyed by the directory's path, so each release's bundle directory
+/// gets its own and `crate::gc` can tell which ones are still served.
+pub fn served_tar_name(dir: &Path) -> String {
+    use sha2::Digest as _;
+    let key = hex::encode(sha2::Sha256::digest(dir.as_os_str().as_encoded_bytes()));
+    format!("served-{}.tar", &key[..16])
+}
+
 async fn packed(dir: &Path, served: &Path) -> Result<Arc<ServedBundle>, ProviderError> {
     static MADE: OnceLock<tokio::sync::Mutex<HashMap<PathBuf, Arc<ServedBundle>>>> =
         OnceLock::new();
@@ -447,9 +456,7 @@ async fn packed(dir: &Path, served: &Path) -> Result<Arc<ServedBundle>, Provider
             return Ok(bundle.clone());
         }
     }
-    use sha2::Digest as _;
-    let key = hex::encode(sha2::Sha256::digest(dir.as_os_str().as_encoded_bytes()));
-    let path = served.join(format!("served-{}.tar", &key[..16]));
+    let path = served.join(served_tar_name(dir));
     let (from, to) = (dir.to_path_buf(), path.clone());
     let bundle = tokio::task::spawn_blocking(move || write_tar(&from, &to))
         .await

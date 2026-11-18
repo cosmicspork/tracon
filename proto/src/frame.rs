@@ -436,6 +436,12 @@ pub enum Command {
         /// outputs are published.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         outputs: Option<serde_json::Value>,
+        /// The operator's opener for a description published under the
+        /// owning node's `[review] generated_details`. Additive and optional:
+        /// a peer on an older build sends none, and the owner refuses an
+        /// approval it needs one for.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        opener: Option<String>,
     },
     /// Contract 3: a peer's providers, driven from another node's interface.
     /// The paste-back flow is request/response shaped — start the login and
@@ -1257,6 +1263,7 @@ mod tests {
             head_sha: Some("abc".into()),
             revision_id: Some("rev-2".into()),
             outputs: None,
+            opener: None,
         })
         .unwrap();
         assert_eq!(v["op"], "verdict");

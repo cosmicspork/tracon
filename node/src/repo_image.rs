@@ -702,14 +702,21 @@ pub const STOCK_BASE: &str = "stock base";
 /// operator gave it (`[digitalocean] image`).
 pub const OPERATOR_IMAGE: &str = "operator image";
 
+/// `image_source` for a session in its repository's own image: the one its
+/// entry names or builds.
+pub const REPOSITORY_IMAGE: &str = "repository image";
+
 /// The `image_source` of a session placed on another provider, which
 /// started from `started_in`'s template there. Its [`SessionImage`] holds
-/// nothing of this node's runtime, so it cannot say.
-pub fn source_elsewhere(started_in: &str, base: &str) -> &'static str {
+/// nothing of this node's runtime, so it cannot say. `toolchain` is the
+/// image its repository's entry names or builds here, if any.
+pub fn source_elsewhere(started_in: &str, base: &str, toolchain: &str) -> &'static str {
     if crate::sandbox_images::is_snapshot(started_in) {
         crate::sandbox_images::SNAPSHOT_SOURCE
     } else if started_in == base {
         STOCK_BASE
+    } else if started_in == toolchain {
+        REPOSITORY_IMAGE
     } else {
         OPERATOR_IMAGE
     }
@@ -727,7 +734,7 @@ impl SessionImage {
                 crate::sandbox_images::SNAPSHOT_SOURCE
             }
             (Some(image), _) if *image == crate::sandbox_images::base_image(cfg) => STOCK_BASE,
-            (Some(_), _) => "repository image",
+            (Some(_), _) => REPOSITORY_IMAGE,
         }
     }
 
@@ -1774,13 +1781,23 @@ mod tests {
             "localhost/{}-snapshot-mesa-fb857314f4@sha256:ece8",
             crate::config::resource_prefix()
         );
+        let repository = "localhost/tracon-repo-app@sha256:aaaa";
         assert_eq!(
-            source_elsewhere(&snapshot, base),
+            source_elsewhere(&snapshot, base, repository),
             crate::sandbox_images::SNAPSHOT_SOURCE
         );
-        assert_eq!(source_elsewhere(base, base), STOCK_BASE);
+        assert_eq!(source_elsewhere(base, base, base), STOCK_BASE);
+        // An entry that prepares nothing has its image's own template.
         assert_eq!(
-            source_elsewhere("registry.example/team/sandbox@sha256:aaaa", base),
+            source_elsewhere(repository, base, repository),
+            REPOSITORY_IMAGE
+        );
+        assert_eq!(
+            source_elsewhere(
+                "registry.example/team/sandbox@sha256:aaaa",
+                base,
+                repository
+            ),
             OPERATOR_IMAGE
         );
     }

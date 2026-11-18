@@ -131,12 +131,14 @@ pub fn refresh(app: &AppHandle, state: &Arc<State>) {
     }));
 
     let pending_update = state.node_update.lock().unwrap().clone();
+    let restart_now = state.restart_now.lock().unwrap().clone();
     let Ok(menu) = build_menu(
         app,
         &queue,
         connected,
         failed.as_deref(),
         pending_update.as_deref(),
+        restart_now.as_deref(),
     ) else {
         return;
     };
@@ -149,19 +151,58 @@ fn build_menu(
     connected: bool,
     failed: Option<&str>,
     pending_update: Option<&str>,
+    restart_now: Option<&[String]>,
 ) -> tauri::Result<Menu<tauri::Wry>> {
     let menu = Menu::new(app)?;
 
-    // A node restart the app is holding back until sessions end, said where
-    // the operator will look when the tray icon changes.
-    if let Some(line) = pending_update {
-        menu.append(&MenuItem::with_id(
+    // A node restart the app is holding back until the node's work is done,
+    // and what it waits for, said where the operator will look when the tray
+    // icon changes.
+    if let Some(lines) = pending_update {
+        for line in lines.lines() {
+            menu.append(&MenuItem::with_id(
+                app,
+                "noop-update",
+                truncate(line),
+                false,
+                None::<&str>,
+            )?)?;
+        }
+    }
+    // Once that restart has waited long enough, it can be had now. That ends
+    // sessions, so, like killing one, it is a level down, beside the list of
+    // what it ends.
+    if let Some(closing) = restart_now {
+        let now = Submenu::new(app, "Restart the node now", true)?;
+        for label in closing.iter().take(MAX_LISTED) {
+            now.append(&MenuItem::with_id(
+                app,
+                "noop",
+                truncate(label),
+                false,
+                None::<&str>,
+            )?)?;
+        }
+        if closing.len() > MAX_LISTED {
+            now.append(&MenuItem::with_id(
+                app,
+                "noop",
+                format!("… and {} more", closing.len() - MAX_LISTED),
+                false,
+                None::<&str>,
+            )?)?;
+        }
+        if !closing.is_empty() {
+            now.append(&PredefinedMenuItem::separator(app)?)?;
+        }
+        now.append(&MenuItem::with_id(
             app,
-            "noop-update",
-            truncate(line),
-            false,
+            "restart-now",
+            restart_now_label(closing.len()),
+            true,
             None::<&str>,
         )?)?;
+        menu.append(&now)?;
     }
 
     // A node this app started and could not keep running is a different
@@ -275,6 +316,15 @@ fn build_menu(
     Ok(menu)
 }
 
+/// The item that restarts the node at once, saying what it ends.
+fn restart_now_label(closing: usize) -> String {
+    match closing {
+        0 => "Restart now".into(),
+        1 => "Restart now, ending this session".into(),
+        n => format!("Restart now, ending these {n} sessions"),
+    }
+}
+
 /// A menu is not a place for a paragraph.
 fn truncate(s: &str) -> String {
     const MAX: usize = 60;
@@ -290,6 +340,11 @@ fn on_menu(app: &AppHandle, id: &str) {
         "open" => crate::show_window(app),
         "quit" => crate::quit(app),
         "noop" => {}
+        "restart-now" => {
+            if let Some(state) = app.try_state::<Arc<State>>() {
+                state.restart_now_asked.notify_one();
+            }
+        }
         "update:install" => {
             let updater = app.state::<Arc<updater::Updater>>().inner().clone();
             let handle = app.clone();

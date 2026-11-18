@@ -14,20 +14,19 @@ pub async fn check_all(cfg: &Config, deep: bool) -> BoundaryReport {
     let mut checks = Vec::new();
 
     let runtime = check_runtime(cfg).await;
-    let runtime_ok = runtime.ok;
-    checks.push(runtime);
-
-    if !runtime_ok {
+    if !runtime.ok {
         // Without a runtime the remaining checks cannot be answered honestly.
         for id in [
             CheckId::HarnessUnprivileged,
             CheckId::NoRuntimeSocket,
             CheckId::NetworkIsolated,
         ] {
-            checks.push(CheckResult::fail(id, "not checked: runtime unavailable"));
+            checks.push(CheckResult::unchecked(id, &runtime));
         }
+        checks.insert(0, runtime);
         return BoundaryReport { checks };
     }
+    checks.push(runtime);
 
     let mut spec = RunSpec::from_config(cfg);
     // Verify the same mount set a session runs, not a bare spec: the socket
@@ -70,15 +69,16 @@ async fn check_runtime(cfg: &Config) -> CheckResult {
     // While the node is fetching them itself, the remedy is to wait; the
     // desktop app reads "run `tracon setup`" as its cue to run one.
     let building = crate::boundary::reconcile::running();
+    if building {
+        if let Some(why) = crate::boundary::checks::awaited_bundles(cfg) {
+            return CheckResult::pending(CheckId::Runtime, why);
+        }
+    }
     let bundle = crate::bundle::effective(cfg).unwrap_or_default();
     if !bundle.join("bin/tracon-sandbox").is_file() {
         return CheckResult::fail(
             CheckId::Runtime,
             match crate::bundle::managed(cfg) {
-                true if building => format!(
-                    "the harness bundle {} is not here yet; the node is fetching it",
-                    bundle.display()
-                ),
                 true => format!(
                     "the harness bundle {} is not here; the node fetches it from {} when it sets up its boundary (`tracon setup`)",
                     bundle.display(),
@@ -96,13 +96,16 @@ async fn check_runtime(cfg: &Config) -> CheckResult {
     }
     let base = crate::sandbox_images::base_image(cfg);
     if podman(&["image", "exists", &base]).await.is_err() {
-        return CheckResult::fail(
-            CheckId::Runtime,
-            match building {
-                true => format!("image {base} is missing; the node is pulling it"),
-                false => format!("image {base} is missing; run `tracon setup`"),
-            },
-        );
+        return match building {
+            true => CheckResult::pending(
+                CheckId::Runtime,
+                format!("image {base} is missing; the node is pulling it"),
+            ),
+            false => CheckResult::fail(
+                CheckId::Runtime,
+                format!("image {base} is missing; run `tracon setup`"),
+            ),
+        };
     }
     CheckResult::ok(
         CheckId::Runtime,

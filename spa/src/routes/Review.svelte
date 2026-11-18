@@ -47,9 +47,12 @@
   import type { ReviewCommit, ReviewDraftFields } from '../lib/types'
   import {
     CLOSED_STATES,
+    GENERATED_DETAILS,
     basisLabel,
     checksState,
+    composeGeneratedDetails,
     composerLabel,
+    openerFor,
     lostOwner,
     ownersReviewer,
     publishedChange,
@@ -104,6 +107,13 @@
   let descBody = $state('')
   let commenting = $state(false)
   let comment = $state('')
+  /**
+   * Under `[review] generated_details` on the node that owns the review: a
+   * description approval sends opens with `opener`, the agent's text
+   * collapsed beneath it.
+   */
+  let generatedDetails = $state(false)
+  let opener = $state('')
   /** The squashed commit's message, and what it was before you edited it. */
   let message = $state('')
   let proposedMessage = ''
@@ -212,6 +222,8 @@
         descBody = intent.forge.description?.body ?? ''
         commenting = intent.forge.comment !== undefined
         comment = intent.forge.comment ?? ''
+        generatedDetails = d.generated_details ?? false
+        opener = ''
         proposedMessage = proposedCommitMessage(intent)
         message = proposedMessage
         commitMessages = {}
@@ -262,6 +274,8 @@
       message: draftedMessage(message, proposedMessage),
       branch: branchName,
       messages: editedMessages(),
+      // Left out while empty, so a draft is what it was before openers.
+      opener: opener || undefined,
     }
   }
 
@@ -276,6 +290,7 @@
     if (d.comment !== undefined) comment = d.comment
     if (d.message !== undefined) message = d.message
     if (d.branch !== undefined) branchName = d.branch
+    if (d.opener !== undefined) opener = d.opener
     // Written against an earlier revision, an edit of a commit this one no
     // longer has is dropped.
     if (d.messages !== undefined) {
@@ -346,9 +361,6 @@
   /** The verdict whose reason is being written, if one is. */
   let composing = $state<'revise' | 'reject' | null>(null)
   let reasonInput = $state<HTMLTextAreaElement | null>(null)
-  const conditions = $derived({ busy, publishing, stale, reason, readiness })
-  const approveBlocked = $derived(unavailable('approve', conditions))
-  const sendBlocked = $derived(composing ? unavailable(composing, conditions) : null)
 
   /** Open the reason composer for a verdict that needs one. */
   function compose(action: 'revise' | 'reject') {
@@ -482,6 +494,32 @@
    * before a revision could say otherwise.
    */
   const summaryOnly = $derived(change !== null || describe)
+  /**
+   * Which description the opener goes above, under generated details: the
+   * new change's body or the description replacing the change's. Null when
+   * approval sends none, or the setting is off.
+   */
+  const opening = $derived(openerFor(generatedDetails && !closed, { change: change !== null, initial, describe }))
+  /** What the forge gets as the description, with the opener over it. */
+  const composed = $derived(
+    opening ? composeGeneratedDetails(opener, opening === 'description' ? descBody : body) : '',
+  )
+  const conditions = $derived({
+    busy,
+    publishing,
+    stale,
+    reason,
+    readiness,
+    opener: opening
+      ? {
+          required: true,
+          text: opener,
+          where: remoteOwner ? nodeLabel(store.nodes, remoteOwner) : surface.phone ? 'the desktop' : null,
+        }
+      : null,
+  })
+  const approveBlocked = $derived(unavailable('approve', conditions))
+  const sendBlocked = $derived(composing ? unavailable(composing, conditions) : null)
   /** Whether the reviewed tree ships as one commit rather than the agent's. */
   const squashing = $derived(intent.squash_onto !== undefined)
   /** Under `keep`: the commit messages you changed, by sha. */
@@ -632,6 +670,9 @@
         // A mirrored review's outputs are the owner's revision's own; this
         // screen never read them, so it sends no edit of them.
         outputs: verdict === 'approve' && !remoteOwner ? outputs : undefined,
+        // The node composes the published description from it; it never
+        // takes one already wrapped.
+        opener: verdict === 'approve' && opening ? opener : undefined,
         // An edit is a request for changes, never an approval of something
         // the operator changed: the agent applies it and resubmits.
         patch: verdict === 'revise' && patch ? patch : undefined,
@@ -1169,6 +1210,46 @@
     {/if}
   {/snippet}
 
+  <!-- Under generated details: your opener leads the description, the
+       agent's text folds beneath it. `which` is the text it goes above. -->
+  {#snippet generated(which: 'body' | 'description')}
+    {@const locked = busy || publishing || surface.phone || remoteOwner !== null}
+    <label class="opener">
+      <span class="h5"
+        >Opener <b
+          >{remoteOwner
+            ? `written on ${nodeLabel(store.nodes, remoteOwner)}`
+            : surface.phone
+              ? 'written on the desktop'
+              : 'yours, in your words · leads the description'}</b
+        ></span
+      >
+      <textarea
+        class="edit body grow"
+        bind:value={opener}
+        use:autogrow={opener}
+        placeholder="What this is and why it matters"
+        disabled={locked}
+      ></textarea>
+    </label>
+    <details class="generated">
+      <summary>{GENERATED_DETAILS} <b>the agent's text · collapsed on the forge</b></summary>
+      {#if which === 'body'}
+        <textarea class="edit body grow" bind:value={body} use:autogrow={body} disabled={busy || publishing || surface.phone}></textarea>
+      {:else}
+        <textarea class="edit body grow" bind:value={descBody} use:autogrow={descBody} disabled={busy || publishing || surface.phone}></textarea>
+      {/if}
+    </details>
+    <details class="generated preview">
+      <summary
+        >What the forge gets <b
+          >{opener.trim() ? `your opener, then ${GENERATED_DETAILS} collapsed` : 'nothing until you write the opener'}</b
+        ></summary
+      >
+      {#if opener.trim()}<pre>{composed}</pre>{/if}
+    </details>
+  {/snippet}
+
   {#if authorship && authorship.misattributed.length > 0}
     <div class="banner">
       not authored as {authorship.identity.login}
@@ -1197,7 +1278,11 @@
       Title and body <b>{closed ? 'as decided' : surface.phone ? 'edited on the desktop' : 'edit before approving if you want to'}</b>
     </div>
     <input class="edit" bind:value={title} disabled={busy || publishing || closed || surface.phone} />
-    <textarea class="edit body grow" bind:value={body} use:autogrow={body} disabled={busy || publishing || closed || surface.phone}></textarea>
+    {#if opening === 'body'}
+      {@render generated('body')}
+    {:else}
+      <textarea class="edit body grow" bind:value={body} use:autogrow={body} disabled={busy || publishing || closed || surface.phone}></textarea>
+    {/if}
   {/if}
 
   <div class="h4">On the forge <b>{closed ? 'as decided' : remoteOwner ? `as the agent asked · edited on ${nodeLabel(store.nodes, remoteOwner)}` : surface.phone ? 'edited on the desktop' : 'what approval sends besides the commits'}</b></div>
@@ -1210,7 +1295,11 @@
   </label>
   {#if describe}
     <input class="edit" bind:value={descTitle} placeholder="title" disabled={busy || publishing || closed || surface.phone} />
-    <textarea class="edit body grow" bind:value={descBody} use:autogrow={descBody} disabled={busy || publishing || closed || surface.phone}></textarea>
+    {#if opening === 'description'}
+      {@render generated('description')}
+    {:else}
+      <textarea class="edit body grow" bind:value={descBody} use:autogrow={descBody} disabled={busy || publishing || closed || surface.phone}></textarea>
+    {/if}
   {/if}
   <label class="toggle">
     <input type="checkbox" bind:checked={commenting} disabled={busy || publishing || closed || surface.phone} />
@@ -1937,6 +2026,37 @@
   }
   .md :global(.no-fetch) {
     color: var(--dim);
+  }
+  .opener {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .opener .h5,
+  .generated summary {
+    font-size: 12.5px;
+    color: var(--ink);
+  }
+  .opener .h5 b,
+  .generated summary b {
+    font-weight: 400;
+    color: var(--dim);
+  }
+  .generated {
+    margin: 4px 0;
+  }
+  .generated summary {
+    cursor: pointer;
+    padding: 2px 0;
+  }
+  .generated pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font: 12px var(--mono);
+    background: var(--s2);
+    border-radius: 4px;
+    padding: 8px 10px;
+    margin: 4px 0 0;
   }
   .toggle {
     display: flex;
