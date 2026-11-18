@@ -1839,6 +1839,8 @@ max_diff_lines = 10000              # added lines (removed ones do not count, th
                                     # ten times this); a bigger submission is refused before any check runs.
                                     # An update to an open change counts only what it adds to the change's branch
 max_files = 200
+generated_details = false           # a description an approval sends opens with words you write; the agent's
+                                    # text follows, collapsed under "Generated details"
 
 [notify]
 # contact = "mailto:you@example.com"    # what a push service may write to about this sender; falls back to [auth] public_origin

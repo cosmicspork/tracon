@@ -334,6 +334,7 @@ pub const KEYS: &[KeySpec] = &[
     // [review]
     live("review.max_diff_lines"),
     live("review.max_files"),
+    live("review.generated_details"),
     // [notify]
     live("notify.contact"),
     // [embed]

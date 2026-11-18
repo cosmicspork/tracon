@@ -152,6 +152,33 @@ pub struct Description {
     pub body: String,
 }
 
+/// The fixed label the agent's text is collapsed under when
+/// `[review] generated_details` is on.
+pub const GENERATED_DETAILS: &str = "Generated details";
+
+/// Why an approval under `[review] generated_details` is refused when it
+/// sends a description without an opener. The review screen says the same.
+pub const OPENER_MISSING: &str = "write an opener above the generated details";
+
+/// A description as published under `[review] generated_details`: the
+/// operator's `opener`, then the agent's `body` collapsed beneath it. The
+/// blank lines inside `<details>` are what make GitHub and GitLab render the
+/// Markdown in it. An empty body publishes the opener alone; a blank opener
+/// is `None`, since the point is that a person wrote the first words.
+pub fn compose_generated_details(opener: &str, body: &str) -> Option<String> {
+    let opener = opener.trim();
+    if opener.is_empty() {
+        return None;
+    }
+    let body = body.trim();
+    if body.is_empty() {
+        return Some(opener.to_string());
+    }
+    Some(format!(
+        "{opener}\n\n<details>\n<summary>{GENERATED_DETAILS}</summary>\n\n{body}\n\n</details>"
+    ))
+}
+
 /// What a revision ships under the operator's name besides its tree: what
 /// the forge shows, and the message and branch the tree is pushed with. The
 /// review's own title and body are the operator's summary; they reach the
@@ -2055,6 +2082,40 @@ async fn output(cli: &str, mut command: Command) -> Result<String, PublishError>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The opener leads and the agent's text folds away beneath it, with the
+    /// blank lines the forges need to render Markdown inside `<details>`.
+    #[test]
+    fn generated_details_fold_the_agents_text_beneath_the_opener() {
+        assert_eq!(
+            compose_generated_details("  Fixes the flaky sync.\n", "\n## What\n\nLong text.\n")
+                .as_deref(),
+            Some(
+                "Fixes the flaky sync.\n\n<details>\n<summary>Generated details</summary>\n\n\
+                 ## What\n\nLong text.\n\n</details>"
+            )
+        );
+    }
+
+    /// No agent text, no empty fold: the opener is the whole description.
+    #[test]
+    fn generated_details_without_a_body_are_the_opener_alone() {
+        assert_eq!(
+            compose_generated_details("Fixes the flaky sync.", "").as_deref(),
+            Some("Fixes the flaky sync.")
+        );
+        assert_eq!(
+            compose_generated_details("Fixes the flaky sync.", " \n\t").as_deref(),
+            Some("Fixes the flaky sync.")
+        );
+    }
+
+    /// A blank opener is no opener, whatever the body.
+    #[test]
+    fn generated_details_need_an_opener_with_words_in_it() {
+        assert_eq!(compose_generated_details("", "body"), None);
+        assert_eq!(compose_generated_details(" \n\t ", "body"), None);
+    }
 
     /// Only the signature headers go, continuation lines and all; a message
     /// line that merely looks like one is the message's.
