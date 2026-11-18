@@ -296,15 +296,6 @@ impl PodmanBackend {
         RunSpec::from_config(&self.cfg)
     }
 
-    /// The node's own store when it keeps `volume`, or when it is to keep a
-    /// new one of this name. A volume it does not (a dependency cache, or a
-    /// workspace a node made before its trees were its own) is Podman's.
-    fn files_for(&self, volume: &str) -> Option<crate::runner::sandbox_files::FilesStore> {
-        let store = crate::runner::sandbox_files::FilesStore::for_node();
-        let keeps = store.holds(volume) || crate::runner::sandbox_files::backs(volume);
-        keeps.then_some(store)
-    }
-
     /// The runner for `spec`: a sandbox per command, over the protocol.
     fn runner_with(&self, spec: RunSpec) -> Arc<dyn Runner> {
         protocol_runner(&self.cfg, spec)
@@ -354,6 +345,15 @@ fn user_args(user: Option<&str>) -> Vec<String> {
 
 #[async_trait]
 impl Backend for PodmanBackend {
+    /// The node's own store when it keeps `volume`, or when it is to keep a
+    /// new one of this name. A volume it does not (a dependency cache, or a
+    /// workspace a node made before its trees were its own) is Podman's.
+    fn files_for(&self, volume: &str) -> Option<crate::runner::sandbox_files::FilesStore> {
+        let store = crate::runner::sandbox_files::FilesStore::for_node();
+        let keeps = store.holds(volume) || crate::runner::sandbox_files::backs(volume);
+        keeps.then_some(store)
+    }
+
     fn kind(&self) -> &'static str {
         "podman"
     }

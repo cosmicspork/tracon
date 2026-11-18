@@ -408,8 +408,9 @@ fn a_plan_mounts_only_what_the_store_does_not_keep() {
 }
 
 /// Which trees come back from which runs: a session's workspace as its
-/// checkout and its state whole, a preparation's whole, and nothing from a
-/// check or a probe, nor from a check's copy whatever runs in it.
+/// checkout and its state whole, a preparation's whole, a fetch's workspace
+/// as its checkout, and nothing from a check or a probe, nor from a check's
+/// copy whatever runs in it.
 #[test]
 fn what_comes_back_from_which_run() {
     let mode = |volume: &str, kind| sync_mode(volume, kind).map(|(mode, _)| mode);
@@ -429,6 +430,14 @@ fn what_comes_back_from_which_run() {
         sync_mode("tracon-prep-a", RunKind::Prepare).map(|(_, l)| l),
         Some(PREPARED_LIMITS)
     );
+    // A fetch's workspace comes back as its checkout, within a checkout's
+    // limits, never whole with a preparation's; nothing else comes back.
+    assert_eq!(
+        sync_mode("tracon-workspace-a", RunKind::Fetch),
+        Some((Mode::Checkout, checkout_limits()))
+    );
+    assert_eq!(mode("tracon-scratch-a", RunKind::Fetch), None);
+    assert_eq!(mode("tracon-check-a", RunKind::Fetch), None);
     assert_eq!(mode("tracon-workspace-a", RunKind::Check), None);
     assert_eq!(mode("tracon-scratch-a", RunKind::Probe), None);
     assert_eq!(mode("tracon-check-a", RunKind::Session), None);
