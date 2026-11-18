@@ -54,9 +54,19 @@ pub struct State {
     pub node_error: Mutex<Option<String>>,
     /// A node restart this app owes and is waiting to make: the node binary
     /// changed under an update, and the running one is left to finish its
-    /// sessions first.
+    /// own work first.
     pub node_update: Mutex<Option<String>>,
+    /// Offered once that restart has waited [`RESTART_WAIT`]: the sessions
+    /// restarting the node now would end, as the node lists them.
+    pub restart_now: Mutex<Option<Vec<String>>>,
+    /// The operator chose to restart the node now.
+    pub restart_now_asked: tokio::sync::Notify,
 }
+
+/// How long a restart after an update waits for this node's work before it
+/// says it is put off and offers to restart now, as the node's own
+/// `when_idle` restart waits by default (`restart::DEFAULT_WAIT`).
+const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
 /// End the app, whatever ⌘Q is set to do. The tray's Quit and the menu's
 /// Quit both land here; only the latter consults the preference first.
@@ -65,8 +75,8 @@ pub fn quit(app: &tauri::AppHandle) {
 }
 
 /// After an app update the app carries a new node, while the terminal and
-/// the service still run the old one. Move the CLI, then the service once no
-/// session is running (an update never ends a session mid-flight), then
+/// the service still run the old one. Move the CLI, then the service once the
+/// node has no work of its own running (an update never cuts a turn off), then
 /// rebuild the boundary images if the new node finds them stale.
 async fn move_to_carried_node(
     app: tauri::AppHandle,
@@ -105,29 +115,58 @@ async fn move_to_carried_node(
         }
     }
     if steps.contains(&node::Step::RestartService) {
+        // Only this node's own work holds the restart up, as the node itself
+        // counts it; past the wait the operator may restart it anyway.
+        let started = std::time::Instant::now();
         let mut announced = false;
+        let mut put_off = false;
         loop {
-            let busy = node::running_sessions(&http, &url).await.unwrap_or(1);
-            if busy == 0 {
+            let holdup = node::holdup(&http, &url).await;
+            if holdup.as_ref().is_some_and(|h| h.busy.idle()) {
                 break;
             }
-            let line = format!(
-                "Node restarts to v{carried} when {busy} running session{} end{}",
-                if busy == 1 { "" } else { "s" },
-                if busy == 1 { "s" } else { "" }
-            );
-            say(Some(line.clone()));
-            if !announced {
+            let overdue = started.elapsed() >= RESTART_WAIT;
+            let (head, detail) = match &holdup {
+                // Not restarted blindly: a node that cannot be asked may be
+                // in the middle of something.
+                None => (
+                    format!("Node restarts to v{carried} once it answers"),
+                    "It is not answering, so it is left running".to_string(),
+                ),
+                Some(h) if overdue => (
+                    format!("Node restart to v{carried} put off"),
+                    format!("Still running: {}", h.busy.describe()),
+                ),
+                Some(h) => (
+                    format!("Node restarts to v{carried} when idle"),
+                    format!("Waiting for {}", h.busy.describe()),
+                ),
+            };
+            // "Restart now" is offered only past the wait, and only with the
+            // sessions it would end in hand.
+            let offered = overdue && holdup.is_some();
+            *state.restart_now.lock().unwrap() = holdup.filter(|_| overdue).map(|h| h.closing);
+            say(Some(format!("{head}\n{detail}")));
+            if !announced || (offered && !put_off) {
                 announced = true;
+                put_off = offered;
                 let _ = app
                     .notification()
                     .builder()
                     .title("tracon updated")
-                    .body(line)
+                    .body(format!("{head}. {detail}."))
                     .show();
             }
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {}
+                _ = state.restart_now_asked.notified() => {
+                    if state.restart_now.lock().unwrap().is_some() {
+                        break;
+                    }
+                }
+            }
         }
+        *state.restart_now.lock().unwrap() = None;
         say(Some(format!("Restarting the node to v{carried}…")));
         let Some(cli) = node::installed_path() else {
             return fail("HOME is not set".into());

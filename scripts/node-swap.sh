@@ -129,12 +129,21 @@ backups="$(dirname "$state_dir")/tracon-backups"
 stopped=0
 trap '[ "$stopped" = 0 ] || echo "node-swap: the node is stopped; \`just node-release\` starts the release again (add \`restore\` to restore the state backup too)" >&2' EXIT
 
-# Sessions the node supervises. External harnesses only lose their MCP
-# connection over a restart, so they do not hold it up. The queue lists the
-# whole mesh, so only this node's own sessions count; when its id cannot be
-# read, every session does.
+# What the node is doing itself that a stop would cut off: turns on this
+# node, required checks and review submissions in flight, as the node's own
+# restart counts them (`busy` in `GET /api/restart`), which is also what the
+# desktop app waits for before restarting it after an update. A node too old
+# to say is counted from its queue: the queue lists the whole mesh, so only
+# this node's own sessions count (all of them when its id cannot be read),
+# and external harnesses, which only lose their MCP connection over a
+# restart, never do.
 managed_running() {
-  local node
+  local status node
+  status=$(curl -fsS --max-time 3 "$url/api/restart" 2>/dev/null) || status=""
+  if [ -n "$status" ] && jq -e '.busy | type == "object"' >/dev/null 2>&1 <<<"$status"; then
+    jq '.busy | (.turns | length) + (.checks // 0) + (.reviews // 0)' <<<"$status"
+    return
+  fi
   node=$(curl -fsS --max-time 3 "$url/api/node" 2>/dev/null | jq -r '.id // empty') || node=""
   curl -fsS --max-time 3 "$url/api/queue" 2>/dev/null |
     jq --arg node "$node" '[.running[]? | select(.state != "closed" and .harness_id != "external")
@@ -145,7 +154,7 @@ managed_running() {
 stop_node() {
   local n
   n=$(managed_running)
-  [ "$n" = 0 ] || die "$n session(s) running on the node; stopping it ends them, so end them first"
+  [ "$n" = 0 ] || die "the node is busy ($n running turn(s), check(s) or review submission(s)); stopping it cuts them off, so let them finish first"
   service_stop
   stopped=1
 }
