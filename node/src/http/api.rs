@@ -6037,17 +6037,17 @@ async fn connect_local(
     body: ConnectBody,
     local_callback: bool,
 ) -> ApiResult<serde_json::Value> {
-    let providers = providers_of(s)?;
     let owner = crate::providers::LoginOwner::Local;
     let result = match body.replace.as_deref() {
         Some(credential) => {
-            providers
+            providers_of(s)?
                 .connect_again(name, credential, owner, local_callback)
                 .await
         }
         None => {
+            // The channels are refused before any provider is asked.
             let channels = chosen_channels(s.store(), body.channels, false)?;
-            providers
+            providers_of(s)?
                 .connect(name, channels, body.share, owner, local_callback)
                 .await
         }
@@ -7414,24 +7414,28 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                 let owner = crate::providers::LoginOwner::Peer(sender.to_string());
                 // Signing in again keeps the channels of the sign-in it
                 // replaces; only a new sign-in names its own.
-                let started = match providers_of(self) {
-                    Ok(providers) => match &replace {
-                        Some(credential) => Ok((
+                // A new sign-in's channels are refused before any provider
+                // is asked.
+                let chosen = match &replace {
+                    Some(_) => Ok(None),
+                    None => chosen_channels(self.store(), channels, false).map(Some),
+                };
+                let started = match chosen.and_then(|chosen| Ok((providers_of(self)?, chosen))) {
+                    Ok((providers, None)) => {
+                        let credential = replace.as_deref().unwrap_or_default();
+                        Ok((
                             providers.clone(),
                             providers
                                 .connect_again(&name, credential, owner.clone(), false)
                                 .await,
-                        )),
-                        None => match chosen_channels(self.store(), channels, false) {
-                            Ok(channels) => Ok((
-                                providers.clone(),
-                                providers
-                                    .connect(&name, channels, share, owner.clone(), false)
-                                    .await,
-                            )),
-                            Err(error) => Err(error),
-                        },
-                    },
+                        ))
+                    }
+                    Ok((providers, Some(channels))) => Ok((
+                        providers.clone(),
+                        providers
+                            .connect(&name, channels, share, owner.clone(), false)
+                            .await,
+                    )),
                     Err(error) => Err(error),
                 };
                 match started {
