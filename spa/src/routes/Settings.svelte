@@ -1185,7 +1185,7 @@
       {#if store.awake?.error}
         <p class="why"><b>Cannot keep this machine awake: {store.awake.error}</b><i>A sleep interrupts live sessions.</i></p>
       {/if}
-      {#if checks}<ul class="checks">{#each checks as c (c.id)}<li><span class="chip" class:bad={!c.ok}>{c.ok ? 'ok' : 'fail'}</span> {c.id} · <small>{c.detail}</small></li>{/each}</ul>{/if}
+      {#if checks}<ul class="checks">{#each checks as c (c.id)}<li><span class="chip" class:bad={!c.ok && !c.pending} class:warn={c.pending}>{c.ok ? 'ok' : c.pending ? 'pending' : 'fail'}</span> {c.id} · <small>{c.detail}</small></li>{/each}</ul>{/if}
       {#each sandboxes as p (p.provider)}
         {#if p.elsewhere}
           <p class="dim">Capabilities · {p.provider}{p.verified ? '' : ' · unavailable'} <Help label="About {p.provider}">What this provider promises of every sandbox it makes, and how each is reached. Placement holds sessions to these: each sandbox's isolation is read back from {p.provider} and checked against what its work requires before anything is sent in.</Help></p>

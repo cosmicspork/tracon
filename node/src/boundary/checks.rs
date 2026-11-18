@@ -31,6 +31,11 @@ impl CheckId {
 pub struct CheckResult {
     pub id: CheckId,
     pub ok: bool,
+    /// Not passed yet, and not failed either: what it needs is on its way
+    /// (the node's own converge is fetching it). Not `ok`, so nothing runs
+    /// on it meanwhile.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub pending: bool,
     pub detail: String,
 }
 
@@ -39,6 +44,7 @@ impl CheckResult {
         Self {
             id,
             ok: true,
+            pending: false,
             detail: detail.into(),
         }
     }
@@ -46,9 +52,50 @@ impl CheckResult {
         Self {
             id,
             ok: false,
+            pending: false,
             detail: detail.into(),
         }
     }
+    pub fn pending(id: CheckId, detail: impl Into<String>) -> Self {
+        Self {
+            id,
+            ok: false,
+            pending: true,
+            detail: detail.into(),
+        }
+    }
+
+    /// `id`, left unchecked because the runtime check did not pass: pending
+    /// with it, failed with it.
+    pub fn unchecked(id: CheckId, runtime: &CheckResult) -> Self {
+        match runtime.pending {
+            true => Self::pending(id, "not checked yet: waiting for the runtime"),
+            false => Self::fail(id, "not checked: runtime unavailable"),
+        }
+    }
+}
+
+/// What the node's own converge is still bringing in for its sandboxes while
+/// it runs: the release's harness bundle, or its browser bundle, whichever
+/// is not here yet. Said as the fetch's own progress when one is under way
+/// ("fetching the 0.52.0 harness bundle (31.2 MB of 118.0 MB)"). `None`
+/// once both are here, or when the node is given its bundle: what is missing
+/// then is not on its way.
+///
+/// A check that finds this while the converge runs is pending, and does not
+/// fetch the bundles a second time: the node serves while they come.
+pub fn awaited_bundles(cfg: &crate::config::Config) -> Option<String> {
+    let harness = crate::bundle::effective(cfg)
+        .filter(|_| crate::bundle::managed(cfg))
+        .filter(|bundle| !bundle.join("bin/tracon-sandbox").is_file())
+        .map(|bundle| {
+            format!(
+                "the harness bundle {} is not here yet; the node is fetching it",
+                bundle.display()
+            )
+        });
+    let missing = harness.or_else(|| crate::service_bundle::awaited(cfg))?;
+    Some(crate::bundle::fetching().unwrap_or(missing))
 }
 
 /// The outcome of the startup verification.

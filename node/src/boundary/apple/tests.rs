@@ -685,3 +685,52 @@ async fn a_sweep_removes_only_this_nodes_superseded_images() {
         );
     }
 }
+
+/// The node serves before it converges. While its own converge is pending
+/// (as it is from the node's start), the check fetches nothing and pulls
+/// nothing itself (here, a fetch that would never finish) but says the
+/// runtime is pending on the bundles, and leaves the probe unrun.
+#[tokio::test]
+async fn while_the_node_fetches_its_bundles_the_check_is_pending_not_fetching() {
+    // A release that takes every connection and answers none.
+    let release = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", release.local_addr().unwrap());
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((conn, _)) = release.accept().await {
+            held.push(conn);
+        }
+    });
+    let mut cfg = Config::default();
+    cfg.runtime.kind = crate::config::RuntimeKind::Apple;
+    cfg.sandbox.release_url = Some(url);
+    let Some(bundle) = crate::bundle::effective(&cfg) else {
+        return; // no release is built for this architecture
+    };
+    assert!(!bundle.exists(), "{}", bundle.display());
+    let fake = Arc::new(Fake::default());
+    let backend = AppleBackend::with_cli(&cfg, fake.clone());
+
+    let report = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        super::checks::check_all_while(&backend, &cfg, false, true),
+    )
+    .await
+    .expect("the check waited on a fetch");
+    let runtime = &report.checks[0];
+    assert_eq!(runtime.id, crate::boundary::CheckId::Runtime);
+    assert!(runtime.pending && !runtime.ok, "{runtime:?}");
+    assert!(runtime.detail.contains("bundle"), "{runtime:?}");
+    assert_eq!(report.checks.len(), 4);
+    assert!(
+        report.checks[1..].iter().all(|c| c.pending && !c.ok),
+        "{report:?}"
+    );
+    // Not ready: nothing runs on a bundle that is not here.
+    assert_eq!(
+        report.first_failure().map(|c| c.id),
+        Some(crate::boundary::CheckId::Runtime)
+    );
+    assert!(fake.calls.lock().unwrap().is_empty());
+    assert!(!bundle.exists());
+}

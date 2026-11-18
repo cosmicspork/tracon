@@ -1645,6 +1645,8 @@ export function permissionOptions(p: Permission): { option_id: string; name: str
 export interface BoundaryCheck {
   id: string
   ok: boolean
+  /** Not passed yet, and not failed: the node is fetching what it needs. */
+  pending?: boolean
   detail: string
 }
 
