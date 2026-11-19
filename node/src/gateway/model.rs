@@ -836,6 +836,7 @@ pub async fn handle(
         event_stream,
         ended: false,
         limits,
+        bus: Some(s.manager.bus().clone()),
     };
     out.body(Body::from_stream(counted))
         .unwrap_or_else(|_| refuse(StatusCode::BAD_GATEWAY, "bad upstream response"))
@@ -1193,6 +1194,9 @@ struct Counted {
     /// The provider's limit snapshots from this answer's headers, recorded
     /// beside its usage row.
     limits: Vec<crate::store::LimitSnapshot>,
+    /// Where the session's row goes once this call's usage lands, so the
+    /// open turn's spend shows live. None where nothing listens (tests).
+    bus: Option<crate::stream::Bus>,
 }
 
 /// Said in place of a streamed answer the upstream broke off. Without it the
@@ -1227,6 +1231,11 @@ impl Counted {
                 None
             }
         };
+        if usage_id.is_some() {
+            if let (Some(bus), Some(session_id)) = (&self.bus, &row.session_id) {
+                publish_open_turn_spend(&self.store, bus, session_id);
+            }
+        }
         for mut snap in std::mem::take(&mut self.limits) {
             snap.usage_id = usage_id;
             snap.channel = row.channel.clone();
@@ -1236,6 +1245,28 @@ impl Counted {
                 tracing::warn!(error = %e, "provider limit snapshot not recorded");
             }
         }
+    }
+}
+
+/// Publish the session's row after a call's usage landed, carrying the open
+/// turn's spend so far. One frame per finished upstream call: calls of one
+/// session are seconds apart, so this needs no coalescing.
+///
+/// A row whose turn is not open (between turns, or settled while this call
+/// was finishing) is not published: it has no live figure to show, and read
+/// between the settle's ledger write and its `tokens_used` bump it would show
+/// the turn's spend missing. The settle publishes the row itself.
+fn publish_open_turn_spend(
+    store: &crate::store::Store,
+    bus: &crate::stream::Bus,
+    session_id: &str,
+) {
+    match store.get_session(session_id) {
+        Ok(Some(row)) if row.open_turn_tokens > 0 => {
+            bus.publish(crate::stream::Frame::Session(Box::new(row)));
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, session_id, "session not read after usage"),
     }
 }
 
@@ -1353,6 +1384,7 @@ mod tests {
             event_stream: true,
             ended: false,
             limits: Vec::new(),
+            bus: None,
         };
         let chunks: Vec<_> = counted.collect().await;
         let body: String = chunks
@@ -1963,6 +1995,7 @@ mod tests {
             event_stream: true,
             ended: false,
             limits: super::super::codex_limits::parse(&headers),
+            bus: None,
         };
         let _: Vec<_> = counted.collect().await;
         let usage = store.usage_since(Some("work"), 0).unwrap();
@@ -1975,5 +2008,71 @@ mod tests {
         assert_eq!((snap.at_ms, snap.limit_id.as_str()), (1_000, "codex"));
         assert_eq!(snap.primary.unwrap().used_percent, 61.0);
         assert_eq!(snap.credits.unwrap().balance.as_deref(), Some("4.20"));
+    }
+
+    /// Each finished call of a session's open turn publishes its row with the
+    /// spend so far, so the header moves before the turn settles. Between
+    /// turns there is nothing live to show and nothing is published.
+    #[tokio::test]
+    async fn a_finished_call_publishes_the_sessions_open_turn_spend() {
+        use futures_util::StreamExt;
+        let store = Arc::new(crate::store::Store::open_in_memory().unwrap());
+        store.ensure_peer_node("n").unwrap();
+        let session: crate::store::SessionRow = serde_json::from_value(json!({
+            "id": "s1", "node_id": "n", "channel": "work", "repo_path": "/r",
+            "branch": "b", "harness_id": "fake", "harness_version": "1", "model": "m",
+            "budget_tokens": 1000, "tokens_used": 500, "state": "running",
+            "turn_active": 1, "created_ms": 0, "updated_ms": 0,
+        }))
+        .unwrap();
+        store.insert_session(&session).unwrap();
+        let bus = crate::stream::Bus::new();
+        let mut frames = bus.subscribe();
+        let call = |cache_read: i64| {
+            let sse = format!(
+                "data: {{\"type\":\"response.completed\",\"response\":{{\"usage\":{{\"input_tokens\":30,\"output_tokens\":4,\"input_tokens_details\":{{\"cached_tokens\":{cache_read}}}}}}}}}\n\n"
+            );
+            Counted {
+                inner: Box::pin(tokio_stream::once(Ok(Bytes::from(sse)))),
+                scanner: UsageScanner::new(),
+                usage: Arc::new(Mutex::new(UsageRow {
+                    channel: "work".into(),
+                    node_id: "n".into(),
+                    session_id: Some("s1".into()),
+                    provider: "codex".into(),
+                    model: None,
+                    at_ms: 1_000,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    requests: 1,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                    request_id: None,
+                })),
+                store: store.clone(),
+                done: false,
+                event_stream: true,
+                ended: false,
+                limits: Vec::new(),
+                bus: Some(bus.clone()),
+            }
+        };
+
+        let _: Vec<_> = call(0).collect().await;
+        assert!(frames.try_recv().is_err(), "no turn open, nothing live");
+
+        store.begin_turn("s1").unwrap();
+        // The second call read 20 of its 30 input tokens from a cache: shown
+        // elsewhere, never charged, so never live here either.
+        for (cache_read, expected) in [(0, 34), (20, 48)] {
+            let _: Vec<_> = call(cache_read).collect().await;
+            match frames.try_recv().unwrap() {
+                crate::stream::Frame::Session(row) => {
+                    assert_eq!((row.tokens_used, row.open_turn_tokens), (500, expected));
+                }
+                other => panic!("expected a session frame, got {}", other.name()),
+            }
+        }
+        assert_eq!(store.open_turn_spend("s1").unwrap(), 48);
     }
 }

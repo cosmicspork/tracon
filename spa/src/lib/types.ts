@@ -384,6 +384,11 @@ export interface Session {
   review_id: string | null
   budget_tokens: number
   tokens_used: number
+  /** What the open turn has spent so far through the gateway, cache reads
+   * left out; 0 between turns. Not in `tokens_used` until the turn settles,
+   * so what was spent is the sum: `spent()` in `budget.ts`. Absent from an
+   * older node. */
+  open_turn_tokens?: number
   cost_usd: number | null
   context_used: number | null
   context_size: number | null

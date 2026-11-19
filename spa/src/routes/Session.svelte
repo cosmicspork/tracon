@@ -17,7 +17,7 @@
   import { errorText, isNotFound } from '../lib/load'
   import { exhaustionNote } from '../lib/exhaustion'
   import { providerCardHref, providerLabel } from '../lib/providers'
-  import { budgetProblem, heldAtBudget, suggestedBudget } from '../lib/budget'
+  import { budgetProblem, heldAtBudget, spent, suggestedBudget } from '../lib/budget'
   import { externalAgent, formatAge, formatBudget, formatTokens } from '../lib/format'
   import { runtimeNote as runtimeNoteFor, usageNote as usageNoteFor } from '../lib/usage'
   import { repetitionHint } from '../lib/log'
@@ -322,7 +322,7 @@
   async function raiseBudget(e?: SubmitEvent) {
     e?.preventDefault()
     if (!session || raising) return
-    const problem = budgetProblem(budgetValue, session.tokens_used)
+    const problem = budgetProblem(budgetValue, spent(session))
     if (problem) {
       error = `the budget must be ${problem}`
       return
@@ -365,7 +365,7 @@
     if (session.state === 'starting') return 'starting'
     if (session.state === 'waiting_on_check') return `running ${checkCommand ?? 'the checks'}`
     if (busy) return 'a turn is running'
-    if (session.budget_tokens > 0 && session.tokens_used >= session.budget_tokens) return 'over budget'
+    if (session.budget_tokens > 0 && spent(session) >= session.budget_tokens) return 'over budget'
     return null
   })
   // A prompt to an unreachable owner is queued on this node and sent when it
@@ -413,14 +413,14 @@
       <span class="mono" title="External-agent model use happens outside Tracon's metered runtime.">usage outside Tracon · unknown</span>
     {:else}
       {#if isTerminal(session.state) || atBudget}
-        <span class="mono">{formatBudget(session.tokens_used, session.budget_tokens)} tok</span>
+        <span class="mono">{formatBudget(spent(session), session.budget_tokens)} tok</span>
       {:else}
         <button
           class="lnk mono"
           onclick={() => (editingBudget = !editingBudget)}
           disabled={unreachable !== null || remote}
           title={remote ? 'the budget is changed on the node that runs the session' : 'change the token budget'}
-          >{formatBudget(session.tokens_used, session.budget_tokens)} tok</button
+          >{formatBudget(spent(session), session.budget_tokens)} tok</button
         >
       {/if}
       {#if usageNote}
@@ -530,7 +530,7 @@
   {#if session.state === 'killed_budget'}
     <div class="banner crit">
       killed at budget <b
-        >· {formatTokens(session.tokens_used)} of {formatTokens(session.budget_tokens)} tokens ·
+        >· {formatTokens(spent(session))} of {formatTokens(session.budget_tokens)} tokens ·
         resume is a new session</b
       >
     </div>
@@ -541,7 +541,7 @@
   {:else if atBudget}
     <div class="banner">
       held at budget <b
-        >· {formatTokens(session.tokens_used)} of {formatTokens(session.budget_tokens)} tokens · its harness and
+        >· {formatTokens(spent(session))} of {formatTokens(session.budget_tokens)} tokens · its harness and
         context are kept; a higher budget lets it carry on</b
       >
       {@render budgetForm()}
@@ -629,8 +629,8 @@
     <div class="banner dim">
       budget <b
         >· {session.budget_tokens > 0
-          ? `${formatTokens(session.tokens_used)} of ${formatTokens(session.budget_tokens)} tokens spent`
-          : `${formatTokens(session.tokens_used)} tokens spent · no budget`}</b
+          ? `${formatTokens(spent(session))} of ${formatTokens(session.budget_tokens)} tokens spent`
+          : `${formatTokens(spent(session))} tokens spent · no budget`}</b
       >
       {@render budgetForm()}
     </div>

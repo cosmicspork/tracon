@@ -1423,6 +1423,7 @@ fn session_on(id: &str, channel: &str, state: &str) -> tracon::store::SessionRow
         parent_session: None,
         continued_from: None,
         manifest_digest: None,
+        open_turn_tokens: 0,
     }
 }
 
