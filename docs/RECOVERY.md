@@ -352,7 +352,16 @@ on macOS both are `~/Library/Application Support/tracon/`.
 
 Plugin processes' sockets are in the runtime directory (`$XDG_RUNTIME_DIR/tracon/p/`,
 or `/tmp/tracon-<uid>/tracon/p/`), not the state directory, and are made afresh at
-each start: there is nothing there to back up.
+each start: there is nothing there to back up. A credential lent to a plugin lives
+only in the call that carried it; nothing about a plugin holds one to restore.
+
+A plugin whose `tracon plugin ls` (or Settings › Plugins) says *its tools disagree with
+its manifest* lists tools its release does not declare, or misses one it does. It
+offers nothing and is not started again for that build. `tracon plugin update` or
+`rollback` to a build that agrees, or `tracon plugin restart <name> --channel <c>` to
+try the same build again once its data is fixed. A plugin that refuses every call at
+check 4 (the signature) after the node's identity was regenerated still holds the old
+`TRACON_NODE_KEY` from its start: `tracon plugin restart` gives it the new one.
 
 **A fresh node needs, at minimum, `node-identity.seed` and `node.db`.** The
 seed is the node's name on the mesh and the key its credentials are sealed

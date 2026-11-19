@@ -2429,7 +2429,8 @@ pub async fn get_approval(
         "result": parse(a.result.as_deref()),
         "input_schema": crate::mcp::schema::input_schema(&a.tool)
             .cloned()
-            .or_else(|| s.tools.upstream_schema(&a.tool)),
+            .or_else(|| s.tools.upstream_schema(&a.tool))
+            .or_else(|| s.tools.plugin_schema(&a.tool)),
         "format": shown.format,
         "prose_fields": shown.prose_fields,
         "locked_fields": shown.locked_fields,
@@ -2439,6 +2440,9 @@ pub async fn get_approval(
         "claimed_before_ms": before.claimed_ms,
         "options": serde_json::from_str::<Value>(crate::store::approvals::card_options(&a.tool))
             .unwrap_or_default(),
+        // A plugin's build, what it says the tool does and reaches, and what
+        // an approved run is lent: facts about the build, not a live read.
+        "plugin": s.tools.plugin_approval_context(&a),
     });
     if let (Some(Value::Object(context)), Some(out)) = (context, details.as_object_mut()) {
         out.extend(context);

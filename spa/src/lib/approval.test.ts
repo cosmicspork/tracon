@@ -8,6 +8,7 @@ import {
   grantsAccess,
   itemSections,
   outcome,
+  pluginRows,
   problemsByField,
   amendsNothing,
   issueChanges,
@@ -293,4 +294,38 @@ test('each item of a list argument is a section: its fields in schema order, and
   // A single-issue call, or a tool that takes no list, has no sections.
   expect(itemSections(issueSchema, { summary: 'One' }, 'issues', ['description'])).toEqual([])
   expect(itemSections(issueSchema, set, null, ['description'])).toEqual([])
+})
+
+test("a plugin tool's card says its build, its own word on the tool, and what is lent", () => {
+  expect(pluginRows({ plugin: null })).toEqual([])
+  expect(pluginRows({})).toEqual([])
+  const rows = pluginRows({
+    plugin: {
+      name: 'sql-review',
+      version: '0.2.0',
+      tool: 'write',
+      hint: 'write',
+      consequential: true,
+      egress: ['db.internal:1521'],
+      credentials: [
+        { name: 'sql-read', lend: 'always', bindings: ['sql-read-qa'] },
+        { name: 'sql-write', lend: 'approved', bindings: ['sql-write-qa'] },
+        { name: 'sql-admin', lend: 'always', bindings: [] },
+      ],
+    },
+  })
+  expect(rows).toEqual([
+    { key: 'Plugin', value: 'sql-review 0.2.0' },
+    { key: 'Says it', value: 'writes, consequential' },
+    { key: 'Reaches', value: 'db.internal:1521' },
+    { key: 'Lent on allow', value: 'sql-read-qa, sql-write-qa (only because you approve this card)' },
+  ])
+  const quiet = pluginRows({
+    plugin: { name: 'open', version: '1.0.0', tool: 'query', hint: 'read', consequential: false, egress: [], credentials: [] },
+  })
+  expect(quiet.slice(1)).toEqual([
+    { key: 'Says it', value: 'reads' },
+    { key: 'Reaches', value: 'declares none' },
+    { key: 'Lent on allow', value: 'nothing' },
+  ])
 })

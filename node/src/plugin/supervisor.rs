@@ -13,11 +13,21 @@
 //! lent per call. The socket is in a 0700 directory of the node's own, the
 //! data directory is `<state>/plugins/data/<plugin>/<channel>/`, 0700.
 //!
-//! It is ready once MCP `initialize` answers on its socket. A start that
+//! It is ready once MCP `initialize` answers on its socket and its
+//! `tools/list` names exactly the tools its manifest declares. A start that
 //! exits or is not ready in time is tried again after a wait that doubles
 //! from one second to a minute; one more failure after that leaves the
-//! instance unhealthy until it is asked for again or restarted. Its output
-//! is kept in memory and in a rotated file under `<state>/plugins/logs/`.
+//! instance unhealthy until it is asked for again or restarted. A plugin
+//! whose tools disagree with its manifest is unhealthy at once, and is not
+//! started again for that build until it is restarted, updated or rolled
+//! back. Its output is kept in memory and in a rotated file under
+//! `<state>/plugins/logs/`.
+//!
+//! A call holds a `Lease` on its instance: while one is out, the instance is
+//! not stopped for being idle, and its idle time counts from the end of the
+//! last call. The node's identity key (`set_signer`) signs each call's
+//! caller context (`super::context`), and its public half is what a plugin
+//! is started with as `TRACON_NODE_KEY`.
 //!
 //! The restart loop has the shape of the sandbox's service supervisor
 //! (`tracon_sandbox::inside::services`) without sharing it: that one spawns
@@ -30,8 +40,8 @@ use std::{
     os::unix::fs::{MetadataExt as _, PermissionsExt as _},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, OnceLock,
     },
     time::{Duration, Instant},
 };
@@ -44,7 +54,8 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::install;
+use super::{install, manifest::Manifest};
+use crate::mcp::upstream::RemoteTool;
 use crate::store::{plugins::REMOVED, Store};
 
 /// The contract version a plugin is started under (`TRACON_CONTRACT`).
@@ -72,6 +83,9 @@ const LOG_ROTATIONS: usize = 3;
 /// how long between tries.
 const READY_TRY: Duration = Duration::from_secs(2);
 const READY_POLL: Duration = Duration::from_millis(100);
+
+/// How long a starting instance has to list its tools.
+const LIST_WITHIN: Duration = Duration::from_secs(10);
 
 /// How the supervisor paces an instance.
 #[derive(Debug, Clone)]
@@ -143,6 +157,34 @@ pub struct Endpoint {
     pub token: Arc<str>,
     /// The archive digest of the build it runs.
     pub digest: String,
+    /// That build's manifest: what a call to it is lent is read from this,
+    /// not from whatever is active by the time the call is made.
+    pub manifest: Arc<Manifest>,
+    /// What it listed when it started, which its manifest declares.
+    pub tools: Arc<[RemoteTool]>,
+}
+
+/// The tools a plugin's build listed the last time an instance of it
+/// started, kept while no instance runs.
+#[derive(Debug, Clone)]
+pub struct Listed {
+    pub digest: String,
+    pub tools: Arc<[RemoteTool]>,
+}
+
+/// An instance held for one call: it is not stopped for being idle while a
+/// lease on it is out, and its idle time counts from when the last one was
+/// given back.
+pub struct Lease {
+    pub endpoint: Endpoint,
+    instance: Arc<Instance>,
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        self.instance.touch();
+        self.instance.in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl std::fmt::Debug for Endpoint {
@@ -196,6 +238,8 @@ struct Instance {
     state: watch::Sender<State>,
     inner: std::sync::Mutex<Inner>,
     last_used: std::sync::Mutex<Instant>,
+    /// Calls being made to it now (`Lease`).
+    in_flight: AtomicUsize,
     /// Held while it is started or stopped.
     run: tokio::sync::Mutex<Option<Run>>,
     log: Log,
@@ -251,6 +295,33 @@ struct Shared {
     node_key: String,
     idle: IdleTimeout,
     timings: Timings,
+    /// The node's identity, which signs every call.
+    signer: OnceLock<Arc<proto::keys::Identity>>,
+    /// Plugins whose build's tools disagree with its manifest: by plugin,
+    /// the build's digest and why. Not started again while that build is
+    /// active, until it is restarted.
+    refused: std::sync::Mutex<HashMap<String, (String, String)>>,
+    /// What each plugin's build listed when it last started.
+    listed: std::sync::Mutex<HashMap<String, Listed>>,
+}
+
+impl Shared {
+    /// The key a plugin is told to verify calls with: the one that signs
+    /// them, once the node has one.
+    fn node_key(&self) -> String {
+        self.signer
+            .get()
+            .map(|identity| identity.node_id())
+            .unwrap_or_else(|| self.node_key.clone())
+    }
+
+    fn refused(&self) -> std::sync::MutexGuard<'_, HashMap<String, (String, String)>> {
+        self.refused.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn listed(&self) -> std::sync::MutexGuard<'_, HashMap<String, Listed>> {
+        self.listed.lock().unwrap_or_else(|p| p.into_inner())
+    }
 }
 
 /// The node's plugin instances.
@@ -286,10 +357,35 @@ impl Supervisor {
                 node_key,
                 idle,
                 timings,
+                signer: OnceLock::new(),
+                refused: Default::default(),
+                listed: Default::default(),
             }),
             instances: Default::default(),
             closed: AtomicBool::new(false),
         }
+    }
+
+    /// Sign plugin calls with `identity`, the node's own: the key behind
+    /// its node id. Set once; a plugin started from now on is given its
+    /// public half.
+    pub fn set_signer(&self, identity: proto::keys::Identity) {
+        let _ = self.shared.signer.set(Arc::new(identity));
+    }
+
+    /// `bytes`, signed with the node's identity.
+    pub(crate) fn sign(&self, bytes: &[u8]) -> Result<ed25519_dalek::Signature, String> {
+        self.shared
+            .signer
+            .get()
+            .map(|identity| identity.sign(bytes))
+            .ok_or_else(|| "this node cannot sign plugin calls".to_string())
+    }
+
+    /// What `plugin`'s build listed the last time an instance of it
+    /// started.
+    pub fn listed(&self, plugin: &str) -> Option<Listed> {
+        self.shared.listed().get(plugin).cloned()
     }
 
     fn instances(&self) -> std::sync::MutexGuard<'_, HashMap<(String, String), Arc<Instance>>> {
@@ -307,12 +403,36 @@ impl Supervisor {
     /// off. An instance backing off is waited for, not hurried; an unhealthy
     /// or stopped one is started afresh.
     pub async fn ensure(&self, plugin: &str, channel: &str) -> Result<Endpoint, String> {
+        let instance = self.instance(plugin, channel)?;
+        self.serve(&instance).await
+    }
+
+    /// [`Self::ensure`], held for one call until the lease is dropped.
+    pub async fn lease(&self, plugin: &str, channel: &str) -> Result<Lease, String> {
+        let instance = self.instance(plugin, channel)?;
+        // Held before it is served, so an idle stop cannot fall between.
+        instance.in_flight.fetch_add(1, Ordering::SeqCst);
+        let lease = |endpoint| Lease {
+            endpoint,
+            instance: instance.clone(),
+        };
+        match self.serve(&instance).await {
+            Ok(endpoint) => Ok(lease(endpoint)),
+            Err(error) => {
+                instance.in_flight.fetch_sub(1, Ordering::SeqCst);
+                Err(error)
+            }
+        }
+    }
+
+    /// The instance of `plugin` for `channel`, made if the node has none.
+    fn instance(&self, plugin: &str, channel: &str) -> Result<Arc<Instance>, String> {
         if !component_ok(plugin) || !component_ok(channel) {
             return Err(format!(
                 "{plugin:?} on {channel:?} is not a plugin instance"
             ));
         }
-        let instance = {
+        Ok({
             let mut instances = self.instances();
             instances
                 .entry((plugin.to_string(), channel.to_string()))
@@ -323,12 +443,32 @@ impl Supervisor {
                         state: watch::channel(State::Stopped).0,
                         inner: Default::default(),
                         last_used: std::sync::Mutex::new(Instant::now()),
+                        in_flight: AtomicUsize::new(0),
                         run: Default::default(),
                         log: Log::new(log_path(&self.shared.state_dir, plugin, channel)),
                     })
                 })
                 .clone()
+        })
+    }
+
+    /// Why `plugin` is not started: its active build's tools disagreed with
+    /// its manifest when it last started.
+    fn refusal(&self, plugin: &str) -> Option<String> {
+        let (digest, why) = self.shared.refused().get(plugin).cloned()?;
+        let active = match self.shared.store.plugin_get(plugin) {
+            Ok(Some(row)) if row.state != REMOVED => row.active.map(|b| b.digest),
+            _ => None,
         };
+        (active.as_deref() == Some(digest.as_str())).then_some(why)
+    }
+
+    /// `instance`, started if it is not running, once it is ready.
+    async fn serve(&self, instance: &Arc<Instance>) -> Result<Endpoint, String> {
+        let plugin = instance.plugin.as_str();
+        if let Some(why) = self.refusal(plugin) {
+            return Err(format!("plugin {plugin} is not started: {why}"));
+        }
         instance.touch();
         // Once more if it stopped while this waited: an idle stop that began
         // before this use, or a stop for an update, which the next start
@@ -340,10 +480,10 @@ impl Supervisor {
                     return Err("the node is shutting down".into());
                 }
                 if !instance.state.borrow().live() {
-                    *run = Some(self.start(&instance));
+                    *run = Some(self.start(instance));
                 }
             }
-            match self.ready(&instance).await {
+            match self.ready(instance).await {
                 Err(None) if attempt == 0 => continue,
                 Err(None) => break,
                 Err(Some(error)) => return Err(error),
@@ -444,6 +584,7 @@ impl Supervisor {
             .get(plugin, channel)
             .ok_or_else(|| format!("plugin {plugin} has no instance on {channel}"))?;
         Self::stop(&instance, "restart").await;
+        self.shared.refused().remove(plugin);
         self.ensure(plugin, channel).await
     }
 
@@ -457,6 +598,8 @@ impl Supervisor {
             .cloned()
             .collect();
         Self::stop_all(instances, "the plugin changed").await;
+        self.shared.refused().remove(name);
+        self.shared.listed().remove(name);
     }
 
     /// Stop every instance and start none again: the node is shutting down.
@@ -636,7 +779,7 @@ async fn once(
         .arg(&data)
         .env_clear()
         .env("TRACON_PLUGIN_TOKEN", &*token)
-        .env("TRACON_NODE_KEY", &shared.node_key)
+        .env("TRACON_NODE_KEY", shared.node_key())
         .env("TRACON_CONTRACT", CONTRACT)
         .current_dir(&data)
         .stdin(std::process::Stdio::null())
@@ -704,11 +847,45 @@ async fn once(
                 }
             }
         }
+        // What it serves is what its manifest declares, no more and no
+        // less: the manifest is what the operator approved.
+        let listed = tokio::select! {
+            status = exited(&mut exit) => break 'run Outcome::Failed(status),
+            _ = stop.cancelled() => {
+                halt(pid, &mut exit, &shared.timings).await;
+                break 'run Outcome::Stopped;
+            }
+            listed = crate::mcp::upstream::list_unix(&http, plugin, LIST_WITHIN) => listed,
+        };
+        let tools = match listed {
+            Ok(tools) => tools,
+            Err(why) => {
+                halt(pid, &mut exit, &shared.timings).await;
+                break 'run Outcome::Failed(why);
+            }
+        };
+        if let Some(why) = disagreement(&build.manifest, &tools) {
+            halt(pid, &mut exit, &shared.timings).await;
+            shared
+                .refused()
+                .insert(plugin.to_string(), (build.digest.clone(), why.clone()));
+            break 'run Outcome::Fatal(why);
+        }
+        let tools: Arc<[RemoteTool]> = tools.into();
+        shared.listed().insert(
+            plugin.to_string(),
+            Listed {
+                digest: build.digest.clone(),
+                tools: tools.clone(),
+            },
+        );
         ready_at = Some(Instant::now());
         instance.inner().endpoint = Some(Endpoint {
             socket: socket.clone(),
             token: token.clone(),
             digest: build.digest.clone(),
+            manifest: Arc::new(build.manifest.clone()),
+            tools,
         });
         instance.log.line("[tracon] ready");
         // Its idle time counts from now: the use that started it is served
@@ -717,7 +894,13 @@ async fn once(
         instance.set(State::Ready);
         loop {
             let idle = (shared.idle)(plugin);
-            let left = idle.saturating_sub(instance.idle_for());
+            // A call being made puts the stop off by a whole period; its end
+            // starts the count again.
+            let left = if instance.in_flight.load(Ordering::SeqCst) > 0 {
+                idle
+            } else {
+                idle.saturating_sub(instance.idle_for())
+            };
             tokio::select! {
                 status = exited(&mut exit) => break 'run Outcome::Failed(status),
                 _ = stop.cancelled() => {
@@ -726,7 +909,9 @@ async fn once(
                 }
                 _ = tokio::time::sleep(left) => {
                     // A use since the wait began moved the deadline.
-                    if instance.idle_for() >= (shared.idle)(plugin) {
+                    if instance.idle_for() >= (shared.idle)(plugin)
+                        && instance.in_flight.load(Ordering::SeqCst) == 0
+                    {
                         // A use from here on waits for the stop and starts
                         // it again, rather than being handed this process.
                         instance.inner().endpoint = None;
@@ -749,6 +934,33 @@ async fn once(
         let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
     }
     (outcome, ready_at.map(|at| at.elapsed()).unwrap_or_default())
+}
+
+/// Why `tools`, what a start listed, is not what `manifest` declares.
+fn disagreement(manifest: &Manifest, tools: &[RemoteTool]) -> Option<String> {
+    let declared: std::collections::BTreeSet<&str> =
+        manifest.tools.iter().map(|t| t.name.as_str()).collect();
+    let listed: std::collections::BTreeSet<&str> =
+        tools.iter().map(|t| t.remote.as_str()).collect();
+    let extra: Vec<&str> = listed.difference(&declared).copied().collect();
+    let missing: Vec<&str> = declared.difference(&listed).copied().collect();
+    if extra.is_empty() && missing.is_empty() && listed.len() == tools.len() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if !extra.is_empty() {
+        parts.push(format!("lists {} not declared", extra.join(", ")));
+    }
+    if !missing.is_empty() {
+        parts.push(format!("declares {} not listed", missing.join(", ")));
+    }
+    if listed.len() != tools.len() {
+        parts.push("lists a tool twice".into());
+    }
+    Some(format!(
+        "its tools disagree with its manifest: {}",
+        parts.join("; ")
+    ))
 }
 
 /// How a process ended, in words.
@@ -1157,6 +1369,41 @@ mod tests {
         assert!(live.exists());
         assert!(!stale.exists());
         assert!(other.exists());
+    }
+
+    #[test]
+    fn what_a_start_lists_must_be_what_its_manifest_declares() {
+        let manifest = Manifest::parse(
+            "name = \"p\"\nversion = \"1.0.0\"\ncontract = 1\nexec = [\"bin/p\"]\n\n\
+             [[tool]]\nname = \"query\"\nhint = \"read\"\n\n\
+             [[tool]]\nname = \"describe\"\nhint = \"read\"\n",
+        )
+        .unwrap();
+        let tools = |names: &[&str]| -> Vec<RemoteTool> {
+            names
+                .iter()
+                .map(|n| RemoteTool {
+                    name: format!("p__{n}"),
+                    remote: n.to_string(),
+                    description: String::new(),
+                    input_schema: serde_json::json!({}),
+                })
+                .collect()
+        };
+        assert_eq!(
+            disagreement(&manifest, &tools(&["describe", "query"])),
+            None
+        );
+        assert_eq!(
+            disagreement(&manifest, &tools(&["query", "drop", "exec"])).unwrap(),
+            "its tools disagree with its manifest: lists drop, exec not declared; declares \
+             describe not listed"
+        );
+        assert!(
+            disagreement(&manifest, &tools(&["query", "describe", "query"]))
+                .unwrap()
+                .contains("lists a tool twice")
+        );
     }
 
     #[test]

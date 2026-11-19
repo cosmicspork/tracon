@@ -84,6 +84,51 @@ export interface ApprovalDetails {
    * opened. Absent for any other tool, or when Jira could not say in time.
    */
   issue?: CurrentIssue
+  /**
+   * For a plugin's tool: its build, what it says the tool does and reaches,
+   * and what an approved run is lent. Null for any other tool.
+   */
+  plugin?: PluginContext | null
+}
+
+export interface PluginContext {
+  name: string
+  version: string
+  tool: string
+  /** What the plugin says the tool does. It decides nothing. */
+  hint: 'read' | 'write'
+  consequential: boolean
+  /** Hosts it says it reaches: shown, not enforced. */
+  egress: string[]
+  credentials: PluginCredential[]
+}
+
+export interface PluginCredential {
+  /** The credential as the manifest declares it. */
+  name: string
+  /** `approved`: lent only to a call from an approved card, as this one. */
+  lend: 'always' | 'approved'
+  /** The channel's bindings it matches: what the run is lent. */
+  bindings: string[]
+}
+
+/**
+ * The rows a plugin tool's card adds: which build, what it says of the tool
+ * and where it reaches (its own word, never checked), and the credentials an
+ * approved run is lent. Empty for any other tool.
+ */
+export function pluginRows(details: Pick<ApprovalDetails, 'plugin'>): { key: string; value: string }[] {
+  const p = details.plugin
+  if (!p) return []
+  const lent = p.credentials.flatMap((c) =>
+    c.bindings.map((b) => (c.lend === 'approved' ? `${b} (only because you approve this card)` : b)),
+  )
+  return [
+    { key: 'Plugin', value: `${p.name} ${p.version}` },
+    { key: 'Says it', value: p.consequential ? `${p.hint}s, consequential` : `${p.hint}s` },
+    { key: 'Reaches', value: p.egress.length > 0 ? p.egress.join(', ') : 'declares none' },
+    { key: 'Lent on allow', value: lent.length > 0 ? lent.join(', ') : 'nothing' },
+  ]
 }
 
 export interface CurrentIssue {

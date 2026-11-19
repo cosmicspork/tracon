@@ -187,6 +187,23 @@ struct GatedCall {
     one_shot: bool,
 }
 
+/// A plugin's tool, as a namespaced name names it: the plugin, its own name
+/// for the tool, and the build active now.
+struct PluginTool {
+    plugin: String,
+    tool: String,
+    manifest: crate::plugin::manifest::Manifest,
+    digest: String,
+    /// The operator's `[[plugin]]` entry for it, if they wrote one.
+    entry: Option<crate::config::PluginEntry>,
+}
+
+/// How long starting and listing one plugin may hold up a `tools/list`.
+const PLUGIN_LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The longest description a plugin's tool is offered with.
+const PLUGIN_DESCRIPTION: usize = 2000;
+
 enum ActionRecord {
     New(String),
     Replay(Value),
@@ -446,8 +463,315 @@ impl Tools {
                 self.upstream
                     .definitions(&self.cfg.live().mcp_server, channel, &available),
             );
+            // So are a plugin's: what it lists once started, for a channel
+            // that binds a credential it declares.
+            out.extend(self.plugin_definitions(&available));
         }
         out
+    }
+
+    /// The tools of every active plugin offered to a channel that may use
+    /// `available`, as their builds last listed them. A plugin not started
+    /// yet, or refused at its start, offers nothing.
+    fn plugin_definitions(&self, available: &[&str]) -> Vec<Value> {
+        let Some(access) = self.session.get() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (name, build) in self.active_plugins(available) {
+            let Some(listed) = access
+                .manager
+                .plugins()
+                .listed(&name)
+                .filter(|l| l.digest == build.digest)
+            else {
+                continue;
+            };
+            for tool in listed.tools.iter().filter(|t| !t.name.is_empty()) {
+                let description = if tool.description.trim().is_empty() {
+                    format!("{} on plugin {name}.", tool.remote)
+                } else {
+                    format!("[plugin {name}] {}", tool.description.trim())
+                };
+                out.push(json!({
+                    "name": tool.name,
+                    "description": upstream::bounded(&description, PLUGIN_DESCRIPTION),
+                    "inputSchema": tool.input_schema,
+                }));
+            }
+        }
+        out
+    }
+
+    /// Every installed plugin's active build, by name, offered to a channel
+    /// that may use `available`.
+    fn active_plugins(&self, available: &[&str]) -> Vec<(String, crate::store::plugins::Build)> {
+        let Some(access) = self.session.get() else {
+            return Vec::new();
+        };
+        access
+            .store
+            .plugins_list()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|row| row.state != crate::store::plugins::REMOVED)
+            .filter_map(|row| Some((row.name, row.active?)))
+            .filter(|(_, build)| crate::plugin::offered(&build.manifest, available))
+            .collect()
+    }
+
+    /// Start each plugin offered to `channel` that is not running, so a
+    /// `tools/list` offers what it lists. A plugin that cannot start within
+    /// the wait offers what it last listed, if that is its active build's.
+    pub async fn refresh_plugins(&self, channel: &str, node_id: &str) {
+        let Some(access) = self.session.get() else {
+            return;
+        };
+        let names: Vec<String> = {
+            let broker = self.broker.read().unwrap();
+            let available = broker.available_to(channel, node_id);
+            self.active_plugins(&available)
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect()
+        };
+        let plugins = access.manager.plugins();
+        let starts = names.iter().map(|name| async move {
+            match tokio::time::timeout(PLUGIN_LIST_TIMEOUT, plugins.ensure(name, channel)).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(plugin = %name, %channel, %error, "a plugin could not be started to list its tools")
+                }
+                Err(_) => {
+                    tracing::warn!(plugin = %name, %channel, "a plugin did not start within the listing's wait")
+                }
+            }
+        });
+        futures_util::future::join_all(starts).await;
+    }
+
+    /// The plugin tool a namespaced name names, in the build active now.
+    fn plugin_tool(&self, name: &str) -> Option<PluginTool> {
+        let access = self.session.get()?;
+        let (prefix, rest) = name.split_once(upstream::SEPARATOR)?;
+        let row = access.store.plugin_get(prefix).ok()??;
+        if row.state == crate::store::plugins::REMOVED {
+            return None;
+        }
+        let build = row.active?;
+        build.manifest.tools.iter().find(|t| t.name == rest)?;
+        Some(PluginTool {
+            plugin: row.name,
+            tool: rest.to_string(),
+            digest: build.digest,
+            manifest: build.manifest,
+            entry: self
+                .cfg
+                .live()
+                .plugin
+                .iter()
+                .find(|p| p.name == prefix)
+                .cloned(),
+        })
+    }
+
+    /// Whether a call to a plugin's tool can be made for this caller at all:
+    /// the plugin offers its channel the tool, starts, and listed it, and
+    /// the arguments can be signed. Checked before the call is decided, so a
+    /// call that could never run never becomes an approval.
+    async fn plugin_ready(
+        &self,
+        ctx: &CallContext,
+        name: &str,
+        args: &Value,
+    ) -> Result<(), String> {
+        let Some(access) = self.session.get() else {
+            return Ok(());
+        };
+        let Some((prefix, rest)) = name.split_once(upstream::SEPARATOR) else {
+            return Ok(());
+        };
+        let Some(row) = access
+            .store
+            .plugin_get(prefix)
+            .ok()
+            .flatten()
+            .filter(|r| r.state != crate::store::plugins::REMOVED)
+        else {
+            return Ok(());
+        };
+        let Some(build) = row.active else {
+            return Err(format!("plugin {prefix} is not installed yet"));
+        };
+        if !build.manifest.tools.iter().any(|t| t.name == rest) {
+            return Err(format!("plugin {prefix} declares no tool {rest}"));
+        }
+        let offered = {
+            let broker = self.broker.read().unwrap();
+            crate::plugin::offered(
+                &build.manifest,
+                &broker.available_to(&ctx.channel, &ctx.node_id),
+            )
+        };
+        if !offered {
+            let declared: Vec<&str> = build
+                .manifest
+                .credentials
+                .iter()
+                .map(|c| c.pattern.as_str())
+                .collect();
+            return Err(format!(
+                "plugin {prefix} is not offered on channel {}: it needs a credential matching {} bound to it",
+                ctx.channel,
+                declared.join(" or ")
+            ));
+        }
+        crate::plugin::context::canonical(args).map_err(|e| e.to_string())?;
+        let endpoint = access
+            .manager
+            .plugins()
+            .ensure(prefix, &ctx.channel)
+            .await
+            .map_err(|e| format!("plugin {prefix} cannot be reached for {name}: {e}"))?;
+        if !endpoint.tools.iter().any(|t| t.remote == rest) {
+            return Err(format!("plugin {prefix} lists no tool {rest}"));
+        }
+        Ok(())
+    }
+
+    /// Call a plugin's tool that is allowed, by policy or by the operator
+    /// (`approval`), holding its instance while the call runs. It is lent
+    /// the credentials its running build declares that the channel binds,
+    /// in its signed caller context; one lent only on approval is lent only
+    /// to an approved call.
+    async fn call_plugin(
+        &self,
+        ctx: &CallContext,
+        pt: &PluginTool,
+        args: &Value,
+        approval: Option<&str>,
+    ) -> Result<Value, String> {
+        use crate::plugin::{context, manifest::Lend};
+        let access = self
+            .session
+            .get()
+            .ok_or("plugins are not available on this node")?;
+        let supervisor = access.manager.plugins();
+        let lease = supervisor
+            .lease(&pt.plugin, &ctx.channel)
+            .await
+            .map_err(|e| format!("plugin {} cannot be reached: {e}", pt.plugin))?;
+        let endpoint = &lease.endpoint;
+        if !endpoint.tools.iter().any(|t| t.remote == pt.tool) {
+            return Err(format!("plugin {} lists no tool {}", pt.plugin, pt.tool));
+        }
+        let mut credentials = std::collections::BTreeMap::new();
+        {
+            let broker = self.broker.read().unwrap();
+            for binding in broker.available_to(&ctx.channel, &ctx.node_id) {
+                let Some(declared) = endpoint
+                    .manifest
+                    .credentials
+                    .iter()
+                    .find(|c| c.matches(binding))
+                else {
+                    continue;
+                };
+                if declared.lend == Lend::Approved && approval.is_none() {
+                    continue;
+                }
+                let env = broker
+                    .env_for(binding, &ctx.channel, &ctx.node_id)
+                    .map_err(|e| e.to_string())?;
+                credentials.insert(binding.to_string(), env);
+            }
+        }
+        let caller = match &ctx.caller {
+            Caller::Session(id) => context::CallerId {
+                kind: "agent",
+                session: Some(id.clone()),
+                harness: access
+                    .store
+                    .get_session(id)
+                    .ok()
+                    .flatten()
+                    .map(|s| s.harness_id),
+            },
+            Caller::External { .. } => context::CallerId {
+                kind: "agent",
+                session: None,
+                harness: Some(crate::session::external::HARNESS_ID.to_string()),
+            },
+        };
+        let timeout = std::time::Duration::from_secs(
+            pt.entry
+                .as_ref()
+                .map(crate::config::PluginEntry::timeout_secs)
+                .unwrap_or(crate::config::PluginEntry::DEFAULT_TIMEOUT_SECS),
+        );
+        let draft = context::Draft {
+            plugin: &pt.plugin,
+            token: &endpoint.token,
+            tool: &pt.tool,
+            arguments: args,
+            caller: &caller,
+            channel: &ctx.channel,
+            approval_id: approval,
+            credentials: &credentials,
+        };
+        self.upstream
+            .call_plugin(
+                endpoint,
+                &pt.plugin,
+                &ctx.channel,
+                &pt.tool,
+                args,
+                || context::build(&draft, crate::store::now_ms(), |b| supervisor.sign(b)),
+                timeout,
+            )
+            .await
+    }
+
+    /// The input schema a plugin's running build gave one of its tools.
+    pub fn plugin_schema(&self, name: &str) -> Option<Value> {
+        let pt = self.plugin_tool(name)?;
+        let listed = self.session.get()?.manager.plugins().listed(&pt.plugin)?;
+        (listed.digest == pt.digest)
+            .then(|| listed.tools.iter().find(|t| t.remote == pt.tool))
+            .flatten()
+            .map(|t| t.input_schema.clone())
+    }
+
+    /// What a card for a plugin's tool shows besides the call: the build,
+    /// what the plugin says the tool does and reaches, which it never
+    /// decides anything by, and what the call is lent once approved.
+    pub fn plugin_approval_context(
+        &self,
+        approval: &crate::store::approvals::ApprovalRow,
+    ) -> Option<Value> {
+        let pt = self.plugin_tool(&approval.tool)?;
+        let tool = pt.manifest.tools.iter().find(|t| t.name == pt.tool)?;
+        let broker = self.broker.read().unwrap();
+        let available = broker.available_to(&approval.channel, &approval.node_id);
+        let credentials: Vec<Value> = pt
+            .manifest
+            .credentials
+            .iter()
+            .map(|c| {
+                let bindings: Vec<&str> =
+                    available.iter().copied().filter(|b| c.matches(b)).collect();
+                json!({ "name": c.name, "lend": c.lend.as_str(), "bindings": bindings })
+            })
+            .collect();
+        Some(json!({
+            "name": pt.plugin,
+            "version": pt.manifest.version,
+            "tool": pt.tool,
+            "hint": tool.hint.as_str(),
+            "consequential": tool.consequential,
+            "egress": pt.manifest.egress,
+            "credentials": credentials,
+        }))
     }
 
     /// The `[[mcp_server]]` a namespaced tool belongs to, as the node is
@@ -471,13 +795,22 @@ impl Tools {
         name: &str,
         standing: crate::policy::Standing,
     ) -> Option<Decision> {
-        let (server, remote) = self.upstream_tool(name)?;
         let policy_decision = Decision {
             verdict: standing.verdict,
             rule_id: standing.rule_id,
             reason: standing.reason,
         };
-        Some(upstream::decide(&server, &remote, policy, policy_decision))
+        if let Some(pt) = self.plugin_tool(name) {
+            let entry = upstream::Entry::plugin(&pt.plugin, pt.entry.as_ref());
+            return Some(upstream::decide(&entry, &pt.tool, policy, policy_decision));
+        }
+        let (server, remote) = self.upstream_tool(name)?;
+        Some(upstream::decide(
+            &upstream::Entry::server(&server),
+            &remote,
+            policy,
+            policy_decision,
+        ))
     }
 
     /// The input schema another server gave one of its tools, as offered.
@@ -704,6 +1037,7 @@ impl Tools {
             );
         }
         self.upstream_ready(ctx, name).await?;
+        self.plugin_ready(ctx, name, args).await?;
         // A workflow the node does not start is refused before the operator
         // is asked about it, not after.
         if let Some(refusal) = self.refusal_before_asking(ctx, name, args) {
@@ -798,7 +1132,7 @@ impl Tools {
                 return Err(error.to_string());
             }
         }
-        let result = self.dispatch(ctx, name, args, false).await;
+        let result = self.dispatch(ctx, name, args, None).await;
         // Kept even when the change was already that way: the reason is
         // what the review page says it waits on.
         if let (Ok(_), Some((review, by)), Some(access)) =
@@ -883,20 +1217,23 @@ impl Tools {
     }
 
     /// Run a call that is allowed: by policy, by a grant, or by the operator
-    /// (`one_shot`). Everything a call is checked against is checked again
-    /// here, because an approved call runs long after it was asked.
+    /// (`approval`, the card they allowed). Everything a call is checked
+    /// against is checked again here, because an approved call runs long
+    /// after it was asked.
     async fn dispatch(
         &self,
         ctx: &CallContext,
         name: &str,
         args: &Value,
-        one_shot: bool,
+        approval: Option<&str>,
     ) -> Result<Value, String> {
         // The operator may have edited the arguments in the prompt; a default
         // they removed is put back the same visible way.
         let defaulted = self.with_defaults(ctx, name, args)?;
         let args = defaulted.as_ref().unwrap_or(args);
-        let gated = GatedCall { one_shot };
+        let gated = GatedCall {
+            one_shot: approval.is_some(),
+        };
         if consequential_name(name) && consequential(name, args).is_none() {
             return Err(
                 "consequential calls require a valid operation_id and canonical arguments".into(),
@@ -1111,8 +1448,22 @@ impl Tools {
                     .ok_or("services are not available on this node")?;
                 services::call(access, ctx, name, args).await
             }
-            other => match self.upstream_tool(other) {
-                Some((server, remote)) => {
+            other => match (self.plugin_tool(other), self.upstream_tool(other)) {
+                (Some(pt), _) => {
+                    // Decided again at the last moment, as another server's
+                    // tool is.
+                    let decision = self.decide(ctx, other, args);
+                    match decision.verdict {
+                        Verdict::Deny => Err(refusal(decision)),
+                        Verdict::Ask if !gated.one_shot => {
+                            Err(format!("{other} runs only once the operator allows it"))
+                        }
+                        Verdict::Allow | Verdict::Ask => {
+                            self.call_plugin(ctx, &pt, args, approval).await
+                        }
+                    }
+                }
+                (None, Some((server, remote))) => {
                     // Decided again at the last moment: an entry edited to
                     // deny while the call waited on the operator holds.
                     let decision = self.decide(ctx, other, args);
@@ -1135,7 +1486,7 @@ impl Tools {
                         }
                     }
                 }
-                None => Err(format!("no tool named {other}")),
+                (None, None) => Err(format!("no tool named {other}")),
             },
         };
         let result = match (name, result) {
@@ -2098,7 +2449,7 @@ impl Tools {
         let name = decided.tool.clone();
         let id = id.to_string();
         tokio::spawn(async move {
-            let outcome = tools.run_approved(&ctx, &name, &run_args).await;
+            let outcome = tools.run_approved(&ctx, &name, &run_args, &id).await;
             tools.settle_approval(&id, outcome).await;
         });
         Ok(())
@@ -2250,6 +2601,7 @@ impl Tools {
         ctx: &CallContext,
         name: &str,
         args: &Value,
+        approval: &str,
     ) -> Result<Value, String> {
         let decision = self.decide(ctx, name, args);
         if decision.verdict == Verdict::Deny {
@@ -2260,7 +2612,7 @@ impl Tools {
             .manager
             .approval_runnable(ctx)
             .map_err(|e| e.to_string())?;
-        self.dispatch(ctx, name, args, true).await
+        self.dispatch(ctx, name, args, Some(approval)).await
     }
 
     async fn settle_approval(&self, id: &str, outcome: Result<Value, String>) {
@@ -2299,8 +2651,18 @@ impl Tools {
         if tool.verdict == Verdict::Deny {
             return tool;
         }
+        if let Some(pt) = self.plugin_tool(name) {
+            // What the plugin says the tool does decides nothing.
+            let entry = upstream::Entry::plugin(&pt.plugin, pt.entry.as_ref());
+            return upstream::decide(&entry, &pt.tool, &self.policy.read(), tool);
+        }
         if let Some((server, remote)) = self.upstream_tool(name) {
-            return upstream::decide(&server, &remote, &self.policy.read(), tool);
+            return upstream::decide(
+                &upstream::Entry::server(&server),
+                &remote,
+                &self.policy.read(),
+                tool,
+            );
         }
         if let Some((action, target, revision)) = consequential(name, args) {
             let Some(access) = self.session.get() else {
@@ -2512,12 +2874,21 @@ impl Tools {
             },
             "tools/list" => {
                 self.refresh_upstream(&ctx.node_id, false).await;
+                // Plan and review sessions are offered no plugin's tools, so
+                // none is started for them.
+                if matches!(
+                    self.audience(ctx),
+                    Audience::Session(crate::session::Phase::Execute) | Audience::External
+                ) {
+                    self.refresh_plugins(&ctx.channel, &ctx.node_id).await;
+                }
                 Ok(json!({ "tools": self.list_offered(ctx) }))
             }
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
-                let upstream = self.upstream_tool(name).is_some();
+                let upstream =
+                    self.upstream_tool(name).is_some() || self.plugin_tool(name).is_some();
                 self.call(ctx, name, &args)
                     .await
                     .map(|v| match v {

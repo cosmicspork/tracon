@@ -12,6 +12,7 @@
     issueChanges,
     itemSections,
     outcome,
+    pluginRows,
     problemsByField,
     amendsNothing,
     replacement,
@@ -240,6 +241,10 @@
       <dt>{a.state === 'expired' ? 'Expired' : 'Finished'}</dt>
       <dd class="m">{formatAge(a.finished_ms, clock.now)} ago</dd>
     {/if}
+    {#each pluginRows(details) as row (row.key)}
+      <dt>{row.key}</dt>
+      <dd class="m">{row.value}</dd>
+    {/each}
   </dl>
 
   {#if pending && details.claimed_before_ms !== null}

@@ -790,6 +790,9 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         store: store.clone(),
         manager: manager.clone(),
     });
+    // Plugin calls are signed with the node's identity, the key behind its
+    // node id, which each plugin is started with as `TRACON_NODE_KEY`.
+    manager.plugins().set_signer(store_key_identity);
     manager.record_egress_refusals();
     manager.report_workspace_syncs();
     // A node killed outright leaves its plugins' sockets behind.
