@@ -418,6 +418,12 @@ fn collect(
         if row.tool == crate::store::approvals::EGRESS_TOOL && !asked(&row.id) {
             continue;
         }
+        // The placement card is the node's question, answered before the
+        // harness starts and used by the start itself: the agent never
+        // asked it, so it is never brought back to the session.
+        if row.tool == crate::store::approvals::PLACE_TOOL {
+            continue;
+        }
         waits.push(Wait {
             key: approval_key(&row),
             tool: approvals::STATUS,
@@ -514,6 +520,42 @@ mod tests {
 
         let done = prompt(&[wait("q1", Some(json!({ "state": "cancelled" })))], &[]);
         assert!(done.contains("Nothing else is waiting"), "{done}");
+    }
+
+    #[test]
+    fn a_placement_card_is_not_something_the_session_waits_on() {
+        use crate::store::approvals::{PLACE_TOOL, SUCCEEDED};
+        let store = Store::open_in_memory().unwrap();
+        let card = |id: &str, tool: &str| ApprovalRow {
+            id: id.into(),
+            channel: "personal".into(),
+            session_id: Some("s1".into()),
+            node_id: "n1".into(),
+            lane: None,
+            tool: tool.into(),
+            arguments: "{}".into(),
+            request_key: format!("key-{id}"),
+            title: format!("{tool} {id}"),
+            state: SUCCEEDED.into(),
+            answer_option_id: Some("allow_once".into()),
+            edited_arguments: None,
+            result: Some(r#"{"placed":"digitalocean"}"#.into()),
+            reason: None,
+            operator_note: None,
+            claimed_ms: None,
+            created_ms: crate::store::now_ms(),
+            decided_ms: Some(crate::store::now_ms()),
+            finished_ms: Some(crate::store::now_ms()),
+            expires_ms: crate::store::now_ms() + 60_000,
+        };
+        store.insert_approval(&card("place", PLACE_TOOL)).unwrap();
+        store.insert_approval(&card("gated", "doc_write")).unwrap();
+        let ids: Vec<_> = of(&store, &Default::default(), "s1")
+            .into_iter()
+            .map(|w| w.id)
+            .collect();
+        assert_eq!(ids, ["gated"], "only the agent's own call is a wait");
+        assert!(open(&store, &Default::default(), "s1").is_empty());
     }
 
     #[test]

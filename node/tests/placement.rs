@@ -178,7 +178,7 @@ struct Node {
     app: axum::Router,
     store: Arc<Store>,
     tools: Arc<tracon::mcp::Tools>,
-    _manager: Manager,
+    manager: Manager,
 }
 
 fn repo(owner: &str) -> String {
@@ -295,7 +295,7 @@ async fn node(fake: &FakeDo, client_repo: &str, local_limit: u32) -> Node {
         app,
         store,
         tools,
-        _manager: manager,
+        manager,
     }
 }
 
@@ -354,6 +354,17 @@ impl Node {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         panic!("{id} never left starting");
+    }
+
+    /// Every prompt the session's turns were given, in order.
+    fn prompts(&self, id: &str) -> Vec<String> {
+        self.store
+            .events_after(id, 0, 1000)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "user_prompt")
+            .map(|e| e.payload["text"].as_str().unwrap_or_default().to_string())
+            .collect()
     }
 
     async fn card(&self, id: &str) -> tracon::store::approvals::ApprovalRow {
@@ -441,6 +452,24 @@ async fn placement_asks_overflows_and_keeps_client_work_home() {
     node.event(&asked, "session_started", 0).await;
     let settled = node.store.get_approval(&card.id).unwrap().unwrap();
     assert_eq!(settled.state, "succeeded");
+    // The card was the node's question, used by the start: once the
+    // session's turn ends, it is not brought back as a decision the agent
+    // was waiting on (#975), at that idle point or the backstop's next.
+    node.manager
+        .prompt(&asked, "do the work".into())
+        .await
+        .unwrap();
+    node.event(&asked, "turn_end", 0).await;
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let prompts = node.prompts(&asked);
+        assert_eq!(prompts, ["do the work"], "{prompts:?}");
+        assert!(!prompts
+            .iter()
+            .any(|p| p.contains("The operator has decided") || p.contains(&card.id)));
+    }
+    let row = node.store.get_session(&asked).unwrap().unwrap();
+    assert_eq!(row.state, "running", "{row:?}");
 
     // Refused: the session ends, and says why.
     let declined = node.start(&repo("placement-decline")).await;
