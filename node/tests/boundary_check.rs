@@ -102,3 +102,25 @@ async fn a_boundary_check_runs_deep_only_when_asked() {
     assert_eq!(deep["checks"]["checks"][0]["id"], "runtime");
     assert!(depth.asked.lock().unwrap().contains(&true));
 }
+
+/// A re-check rewrites this node's row, and that row is what the hello tells
+/// peers. Dropping the provider summary there leaves every peer showing this
+/// node as offering no model until some provider change publishes it again.
+#[tokio::test]
+async fn a_boundary_check_keeps_the_provider_summary_peers_see() {
+    let h = harness_on(Config::default(), Arc::new(Depth::default())).await;
+    let summary = json!([{"name": "anthropic", "state": "connected", "channels": ["personal"]}]);
+    h.store
+        .set_node_providers("n1", &summary.to_string())
+        .unwrap();
+
+    check(&h.operator, None).await;
+
+    let row = h.store.get_node("n1").unwrap().unwrap();
+    assert_eq!(row.is_self, 1, "the re-check records this node");
+    let kept: Value =
+        serde_json::from_str(row.providers_json.as_deref().unwrap_or("null")).unwrap();
+    assert_eq!(kept, summary);
+    // The hello carries the row's own wire shape.
+    assert_eq!(row.to_json()["providers"], summary);
+}
