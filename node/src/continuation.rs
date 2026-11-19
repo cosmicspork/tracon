@@ -194,10 +194,6 @@ impl<'a> From<&'a SessionRow> for Latest<'a> {
     }
 }
 
-fn short(id: &str) -> &str {
-    &id[..8.min(id.len())]
-}
-
 /// Whether an ended attempt left a plan to execute: a plan session that
 /// finished its phase, on an item whose plan document is there. Carrying such
 /// an attempt on executes the plan rather than planning again.
@@ -299,14 +295,14 @@ pub fn next_action(s: &Situation<'_>) -> NextAction {
         );
     };
     let state = SessionState::from_stored(latest.state);
-    let who = short(latest.id);
+    let who = crate::names::session(latest.id);
     if !state.is_terminal() {
         if s.open_permissions + s.open_questions > 0 {
             let n = s.open_permissions + s.open_questions;
             return at(
                 "answer",
                 format!(
-                    "Session {who} is waiting on you: {n} request{} to answer.",
+                    "{who} is waiting on you: {n} request{} to answer.",
                     if n == 1 { "" } else { "s" }
                 ),
                 Some(latest),
@@ -323,24 +319,20 @@ pub fn next_action(s: &Situation<'_>) -> NextAction {
             return at(
                 "resume",
                 match latest.last_error {
-                    Some(why) => format!("Session {who} is paused: {why} Resume it or stop it."),
-                    None => format!("Session {who} is paused. Resume it or stop it."),
+                    Some(why) => format!("{who} is paused: {why} Resume it or stop it."),
+                    None => format!("{who} is paused. Resume it or stop it."),
                 },
                 Some(latest),
             );
         }
-        return at(
-            "watch",
-            format!("Session {who} is working on it."),
-            Some(latest),
-        );
+        return at("watch", format!("{who} is working on it."), Some(latest));
     }
     if s.continued {
         // Only reachable for a lineage whose newest row is not its tip, which
         // ordering prevents; said plainly rather than guessed at.
         return at(
             "watch",
-            format!("Session {who} has already been carried on."),
+            format!("{who} has already been carried on."),
             Some(latest),
         );
     }
@@ -381,9 +373,7 @@ pub fn next_action(s: &Situation<'_>) -> NextAction {
     if is(EndReason::PhaseDone) && latest.phase == "plan" {
         return at(
             "continue",
-            format!(
-                "Session {who} ended without a written plan; continue planning from its workspace."
-            ),
+            format!("{who} ended without a written plan; continue planning from its workspace."),
             Some(latest),
         );
     }
@@ -399,7 +389,7 @@ pub fn next_action(s: &Situation<'_>) -> NextAction {
         return at(
             "continue",
             format!(
-                "Session {who} {}; continue from its workspace.",
+                "{who} {}; continue from its workspace.",
                 match reason {
                     "node_restart" => "was cut off by a node restart",
                     "detached" => "was detached",
@@ -421,7 +411,7 @@ pub fn next_action(s: &Situation<'_>) -> NextAction {
     };
     at(
         "change_approach",
-        format!("Session {who} {why}. Continue with a different approach, or abandon it."),
+        format!("{who} {why}. Continue with a different approach, or abandon it."),
         Some(latest),
     )
 }
@@ -508,8 +498,8 @@ pub fn view(store: &Store, subject: &Subject) -> Result<Option<Continuation>> {
     if let Some(l) = latest.filter(|l| !SessionState::from_stored(&l.state).is_terminal()) {
         if open_permissions + open_questions > 0 {
             blockers.push(format!(
-                "session {} waits on {} answer{}",
-                short(&l.id),
+                "{} waits on {} answer{}",
+                crate::names::session(&l.id),
                 open_permissions + open_questions,
                 if open_permissions + open_questions == 1 {
                     ""
@@ -519,7 +509,7 @@ pub fn view(store: &Store, subject: &Subject) -> Result<Option<Continuation>> {
             ));
         }
         if l.state == SessionState::Paused.as_str() {
-            blockers.push(format!("session {} is paused", short(&l.id)));
+            blockers.push(format!("{} is paused", crate::names::session(&l.id)));
         }
     }
 
@@ -734,10 +724,12 @@ fn blockers_of(store: &Store, item: &WorkItem) -> Result<Vec<String>> {
     for b in by {
         out.push(match b {
             Blocker::Open { id } => match store.work_get(&id)? {
-                Some(dep) => format!("“{}” ({})", dep.title, short(&id)),
-                None => format!("task {}", short(&id)),
+                Some(dep) => format!("“{}” ({})", dep.title, crate::names::task(&id)),
+                None => crate::names::task(&id),
             },
-            Blocker::Unknown { id } => format!("task {} not seen on this node", short(&id)),
+            Blocker::Unknown { id } => {
+                format!("{} not seen on this node", crate::names::task(&id))
+            }
             Blocker::Cycle => "a dependency cycle".into(),
         });
     }
@@ -1002,8 +994,8 @@ pub async fn carry_on(
         .find(|s| s.continued_from.as_deref() == Some(old.id.as_str()))
     {
         return Err(SessionError::Rejected(format!(
-            "session {} already continues this one",
-            next.id
+            "{} already continues this one",
+            crate::names::session(&next.id)
         )));
     }
     let approach = ask

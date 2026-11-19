@@ -1,6 +1,7 @@
 // What the continuation panel says about each attempt and how they connect.
 // Pure, so the wording is tested once rather than read off a screen.
 
+import { generatedName } from './names'
 import { publishedChange, requestName } from './verdicts'
 import type { Continuation, ContinuationAttempt } from './types'
 
@@ -27,11 +28,11 @@ export function attemptState(a: ContinuationAttempt): string {
   return a.state.replaceAll('_', ' ')
 }
 
-/** Which earlier attempt this one carries on, as a short id, or null for a first try. */
+/** Which earlier attempt this one carries on, by name, or null for a first try. */
 export function carries(a: ContinuationAttempt, all: ContinuationAttempt[]): string | null {
   const from = a.continued_from ?? a.parent_session
   if (!from) return null
-  return all.some((b) => b.id === from) ? from.slice(0, 8) : null
+  return all.some((b) => b.id === from) ? generatedName('session', from) : null
 }
 
 /** The verbs the panel offers, by what the node says is possible. */
@@ -54,6 +55,8 @@ export interface WorkLink {
   note?: string
   /** Shown on hover: what the short text stands for. */
   title?: string
+  /** The raw id of the record the text names: on hover and to copy. */
+  id?: string
   /** The page this bar is on. */
   here?: boolean
   external?: boolean
@@ -82,8 +85,9 @@ export function workLinks(c: Continuation, here: { itemId?: string | null; sessi
     groups.push({
       label: 'Sessions',
       links: c.attempts.map((a) => ({
-        text: `${a.phase} ${a.id.slice(0, 8)}`,
+        text: `${a.phase} ${generatedName('session', a.id)}`,
         href: `/sessions/${a.id}`,
+        id: a.id,
         title: attemptState(a),
         here: a.id === here.sessionId,
       })),

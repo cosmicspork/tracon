@@ -47,7 +47,7 @@ test('undecided offers come first, newest first', () => {
 
 test('each node an offer went to is reported', () => {
   expect(offerResultLine({ name: 'homelab', node: 'n', state: 'offered' })).toContain('its operator decides')
-  expect(offerResultLine({ name: '', node: 'abcdef0123456789', state: 'queued' })).toContain('abcdef012345')
+  expect(offerResultLine({ name: '', node: 'abcdef0123456789', state: 'queued' })).toMatch(/^node-[a-z]+-[a-z]+-\d\d: /)
   expect(offerResultLine({ name: 'old', node: 'n', state: 'refused', detail: 'older build' })).toContain('older build')
 })
 

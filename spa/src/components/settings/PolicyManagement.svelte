@@ -5,6 +5,8 @@
   import { newerShipped, policyAdmin, retryable, targetLabel, type PolicyRollout, type PolicyStatus, type SignedPolicyBundle } from '../../lib/policy-admin'
   import { store } from '../../lib/store.svelte'
   import Card from './Card.svelte'
+  import Name from '../Name.svelte'
+  import { generatedName, nodeDisplayName } from '../../lib/names'
 
   let { onapplied }: { onapplied?: () => Promise<void> } = $props()
 
@@ -93,7 +95,7 @@
     try {
       preview = await policyAdmin.preview(draft)
       previewBaseline = baseline
-      notice = `Preview signed: ${short(preview.bundle_sha256)}. Nothing has been applied.`
+      notice = `Preview signed: policy v${preview.policy.version}. Nothing has been applied.`
     } catch (e) {
       discardPreview()
       error = message(e)
@@ -148,7 +150,7 @@
       const initial = await policyAdmin.initialize()
       draft = initial.toml
       discardPreview()
-      await refreshAfterLocalMutation(`Created the initial signed policy: ${short(initial.bundle_sha256)}.`)
+      await refreshAfterLocalMutation(`Created the initial signed policy: v${initial.policy.version}.`)
     } catch (e) {
       error = message(e)
     } finally {
@@ -164,8 +166,8 @@
       await policyAdmin.retry(rollout.id)
       const refreshed = await refresh()
       notice = refreshed
-        ? `Retried ${short(rollout.bundle_sha256)}. Sent is still not applied until a receiver confirms it.`
-        : `Retried ${short(rollout.bundle_sha256)}. The status refresh failed; delivery is still not installation.`
+        ? `Retried policy v${rollout.policy_version}. Sent is still not applied until a receiver confirms it.`
+        : `Retried policy v${rollout.policy_version}. The status refresh failed; delivery is still not installation.`
     } catch (e) {
       error = message(e)
     } finally {
@@ -175,10 +177,6 @@
 
   function toggle(nodeId: string) {
     selected = selected.includes(nodeId) ? selected.filter((id) => id !== nodeId) : [...selected, nodeId]
-  }
-
-  function short(value: string | null | undefined) {
-    return value ? `${value.slice(0, 12)}…` : 'none'
   }
 
   function when(ms: number | null) {
@@ -207,7 +205,7 @@
         <p class="eyebrow">Verified installed files</p>
         {#if status.installed}
           <h3>Version {status.installed.policy.version} · {status.installed.policy.rules.length} rules</h3>
-          <p>Bundle {short(status.installed.bundle_sha256)}</p>
+          <p>Bundle <Name id={status.installed.bundle_sha256} label="policy v{status.installed.policy.version}" /></p>
         {:else}
           <h3>No verified signed policy installed</h3>
           <p>Initialize below to install the shipped rules.</p>
@@ -226,7 +224,7 @@
         <span>Installed trust identity</span>
         <code>{status.installed?.trust_identity ?? status.trust_identity ?? 'Not configured'}</code>
         {#if status.installation}
-          <small>From {status.installation.source_node ? short(status.installation.source_node) : 'unknown'} · applied {when(status.installation.applied_ms)}</small>
+          <small>From {#if status.installation.source_node}<Name id={status.installation.source_node} label={nodeDisplayName(store.nodes, status.installation.source_node)} />{:else}unknown{/if} · applied {when(status.installation.applied_ms)}</small>
         {:else}
           <small>No install record.</small>
         {/if}
@@ -268,7 +266,7 @@
         <div class="actions">
           <button class="btn" onclick={makePreview} disabled={busy || !draft.trim() || !canSign}>{busy ? 'Working…' : 'Preview & sign'}</button>
           {#if preview && previewCurrent}
-            <span class="chip">Preview {short(preview.bundle_sha256)} · baseline {short(previewBaseline)} · v{preview.policy.version} · {preview.policy.rules.length} rules</span>
+            <span class="chip">Preview <Name id={preview.bundle_sha256} label="v{preview.policy.version}" /> · baseline {#if previewBaseline && status.installed}<Name id={previewBaseline} label="v{status.installed.policy.version}" />{:else}none{/if} · {preview.policy.rules.length} rules</span>
           {/if}
         </div>
 
@@ -280,7 +278,7 @@
               {#each peers as node (node.id)}
                 <label class="target">
                   <input type="checkbox" checked={selected.includes(node.id)} onchange={() => toggle(node.id)} />
-                  <span><strong>{node.name || short(node.id)}</strong><small>{node.reachable ? 'Reachable' : 'Offline'} · {node.harness.id} {node.harness.found ?? 'unknown'}</small></span>
+                  <span><strong>{nodeDisplayName(store.nodes, node.id)}</strong><small>{node.reachable ? 'Reachable' : 'Offline'} · {node.harness.id} {node.harness.found ?? 'unknown'}</small></span>
                 </label>
               {/each}
             </div>
@@ -311,8 +309,8 @@
       <article>
         <header>
           <div>
-            <strong>Policy {short(rollout.bundle_sha256)}</strong>
-            <small>v{rollout.policy_version} · created {when(rollout.created_ms)}</small>
+            <strong>Policy <Name id={rollout.bundle_sha256} label="v{rollout.policy_version}" /></strong>
+            <small>created {when(rollout.created_ms)}</small>
           </div>
           {#if retryable(rollout)}
             <button class="lnk" onclick={() => retry(rollout)} disabled={retrying === rollout.id}>
@@ -325,8 +323,8 @@
             {@const node = peers.find((candidate) => candidate.id === target.node_id)}
             <li class:applied={target.confirmation === 'applied'} class:rejected={target.confirmation === 'rejected'} class:superseded={target.confirmation === 'superseded'}>
               <div>
-                <strong>{node?.name || short(target.node_id)}</strong>
-                <small>{short(target.node_id)} · attempts {target.attempts} · last sent {when(target.last_sent_ms)}</small>
+                <strong>{node?.name || generatedName('node', target.node_id)}</strong>
+                <small><Name kind="node" id={target.node_id} /> · attempts {target.attempts} · last sent {when(target.last_sent_ms)}</small>
               </div>
               <div class="receipt">
                 <span>{targetLabel(target)}</span>

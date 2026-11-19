@@ -1,5 +1,7 @@
 <script lang="ts">
   import ContinuationPanel from '../components/ContinuationPanel.svelte'
+  import Name from '../components/Name.svelte'
+  import PlanLink from '../components/PlanLink.svelte'
   import { api } from '../lib/api'
   import { autogrow } from '../lib/autogrow'
   import { clock } from '../lib/clock.svelte'
@@ -14,7 +16,7 @@
     priorityLabel,
     projectLabel,
     projectName,
-    short,
+    taskName,
     workLabel,
     workState,
   } from '../lib/work'
@@ -146,7 +148,7 @@
     <button class="lnk" onclick={() => { error = null; void load() }}>Retry</button>
   </div>
 {:else if !item}
-  <div class="banner crit">not found <b>· {error ?? `no task ${id.slice(0, 8)}`}</b></div>
+  <div class="banner crit">not found <b>· {error ?? `no task ${taskName(id)}`}</b></div>
 {:else}
   <div class="h4"><a class="lnk" href="/tasks">‹ Tasks</a></div>
   <div class="head {ws}">
@@ -154,7 +156,7 @@
     <span class="t">
       <em>{workLabel(item)}</em>
       {item.title}
-      <small>{short(item.id, 12)} · {item.channel} · added {formatAge(item.created_ms, clock.now)}</small>
+      <small><Name kind="task" id={item.id} /> · {item.channel} · added {formatAge(item.created_ms, clock.now)}</small>
     </span>
   </div>
 
@@ -169,27 +171,27 @@
     <dd class="m">{projectName(item, projects) ?? 'none'}</dd>
     <dt>Plan</dt>
     <dd class="m">
-      {#if item.phase_plan_slug}<a href="/docs/{item.channel}/{item.phase_plan_slug}">{item.phase_plan_slug}</a>{:else}none yet · a plan session writes it{/if}
+      {#if item.phase_plan_slug}<PlanLink channel={item.channel} slug={item.phase_plan_slug} />{:else}none yet · a plan session writes it{/if}
     </dd>
     <dt>Waits on</dt>
     <dd class="m">
       {#if item.deps.length === 0}nothing{:else}
         {#each item.deps as d (d)}
-          <span class="dep"><a href="/tasks/{d}">{short(d)}</a>{titles.has(d) ? ` ${titles.get(d)}` : ''}{#if blocking.has(d)}<span class="why">{` · ${blocking.get(d)}`}</span>{/if}{#if item.state === 'open'}<button class="lnk d" onclick={() => dropDep(d)} disabled={busy}>×</button>{/if}</span>
+          <span class="dep"><Name kind="task" id={d} href="/tasks/{d}" />{titles.has(d) ? ` ${titles.get(d)}` : ''}{#if blocking.has(d)}<span class="why">{` · ${blocking.get(d)}`}</span>{/if}{#if item.state === 'open'}<button class="lnk d" onclick={() => dropDep(d)} disabled={busy}>×</button>{/if}</span>
         {/each}
       {/if}
       {#if cycle}<span class="why">{' · part of a dependency cycle'}</span>{/if}
     </dd>
     {#if item.discovered_from}
       <dt>Discovered from</dt>
-      <dd class="m"><a href="/tasks/{item.discovered_from}">{short(item.discovered_from)}</a>{parent ? ` ${parent}` : ''}{#if item.discovered_by_session}{' · by session '}<a href="/sessions/{item.discovered_by_session}">{short(item.discovered_by_session)}</a>{/if}{#if item.discovered_by_lane}{` · by lane ${item.discovered_by_lane}`}{/if}</dd>
+      <dd class="m"><Name kind="task" id={item.discovered_from} href="/tasks/{item.discovered_from}" />{parent ? ` ${parent}` : ''}{#if item.discovered_by_session}{' · by '}<Name kind="session" id={item.discovered_by_session} href="/sessions/{item.discovered_by_session}" />{/if}{#if item.discovered_by_lane}{` · by lane ${item.discovered_by_lane}`}{/if}</dd>
     {:else if item.discovered_by_lane}
       <dt>Discovered by</dt>
       <dd class="m">lane {item.discovered_by_lane} · a harness you run yourself</dd>
     {/if}
     {#if item.closed_by_session}
       <dt>Closed</dt>
-      <dd class="m">by session <a href="/sessions/{item.closed_by_session}">{short(item.closed_by_session)}</a> · {formatAge(item.updated_ms, clock.now)} ago</dd>
+      <dd class="m">by <Name kind="session" id={item.closed_by_session} href="/sessions/{item.closed_by_session}" /> · {formatAge(item.updated_ms, clock.now)} ago</dd>
     {/if}
   </dl>
 
@@ -220,7 +222,7 @@
           <select bind:value={draft.project}>
             <option value="">No project</option>
             {#each pickableProjects(projects, item.project_id) as p (p.id)}<option value={p.id}>{projectLabel(p, projects)}</option>{/each}
-            {#if draft.project && !projects.some((p) => p.id === draft.project)}<option value={draft.project}>{short(draft.project)}</option>{/if}
+            {#if draft.project && !projects.some((p) => p.id === draft.project)}<option value={draft.project}>unlisted project</option>{/if}
           </select>
         </label>
         <button class="btn p" type="submit" disabled={busy || !draftValid}>Save</button>
@@ -235,7 +237,7 @@
     <div class="h5">Discovered from this task <b>{discovered.length}</b></div>
     <div class="chain">
       {#each discovered as d (d.id)}
-        <span>{short(item.id)}</span><span class="arr">→</span><a href="/tasks/{d.id}">{short(d.id)} {d.title}</a><span class="chip" class:ok={d.state === 'closed'}>{d.state}</span>
+        <span>{taskName(item.id)}</span><span class="arr">→</span><a href="/tasks/{d.id}" title={d.id}>{d.title}</a><span class="chip" class:ok={d.state === 'closed'}>{d.state}</span>
       {/each}
     </div>
   {/if}

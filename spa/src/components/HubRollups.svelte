@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import { nodeDisplayName } from '../lib/names'
+  import Name from './Name.svelte'
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
@@ -83,7 +85,7 @@
         </div>
         {#each rollup.summaries as summary (summary.node_id)}
           <p>
-            <code>{summary.node_id.slice(0, 8)}</code>
+            <Name id={summary.node_id} label={nodeDisplayName(store.nodes, summary.node_id)} />
             · {summary.freshness}{summary.complete ? '' : ' · partial'}
             · {summary.session_counts.running ?? 0} running
             · {summary.queued_permissions} waiting

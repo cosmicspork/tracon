@@ -1,6 +1,7 @@
 // Pure helpers over the node list: which node a thing belongs to and whether
 // the operator can act on it from here. Kept free of Svelte so they test flat.
 
+import { generatedName } from './names'
 import type { HarnessState, MeshState, ModelOption, NodeInfo, ProviderInfo } from './types'
 
 /**
@@ -27,9 +28,9 @@ export function nodeById(nodes: NodeInfo[], id: string): NodeInfo | undefined {
   return nodes.find((n) => n.id === id)
 }
 
-/** A short label for a node id when the node itself is not (yet) known. */
+/** A node's name, or its generated `node-…` name when the node itself is not (yet) known. */
 export function nodeLabel(nodes: NodeInfo[], id: string): string {
-  return nodeById(nodes, id)?.name || id.slice(0, 8)
+  return nodeById(nodes, id)?.name || generatedName('node', id)
 }
 
 /**

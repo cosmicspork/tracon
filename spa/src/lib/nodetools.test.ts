@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test'
 
+import { generatedName } from './names'
 import { mcpTool, NODE_TOOLS, nodeCallNote, nodeCallText, nodeTool, toolName } from './nodetools'
 
 test("the node's tools are known by either harness's name for them", () => {
@@ -21,10 +22,10 @@ test('review and report calls name what they wait on', () => {
     'Submit for review · fix(spa): read the worktree line',
   )
   expect(nodeCallText('submit_review', { title: 'fix: x', review_id: '01a128ee-0940' })).toBe('Resubmit for review · fix: x')
-  expect(nodeCallText('review_status', { review_id: '01a128ee-0940-7cf0-85e7-a5f3aa718404' })).toBe('Wait for review 01a128ee')
+  expect(nodeCallText('review_status', { review_id: '01a128ee-0940-7cf0-85e7-a5f3aa718404' })).toBe(`Wait for ${generatedName('review', '01a128ee-0940-7cf0-85e7-a5f3aa718404')}`)
   expect(nodeCallText('review_verdict', { verdict: 'approve', summary: 'ok' })).toBe('Give a verdict · approve')
   expect(nodeCallText('submit_report', { title: 'Why exports double' })).toBe('Submit a report · Why exports double')
-  expect(nodeCallText('report_status', { report_id: 'r-1' })).toBe('Wait for the report r-1')
+  expect(nodeCallText('report_status', { report_id: 'r-1' })).toBe('Wait for report r-1')
 })
 
 test('operator calls carry the question, the host or the title', () => {
@@ -83,10 +84,10 @@ test('documents, memory, services, setup and the work item read as actions', () 
   expect(nodeCallText('repo_setup_draft', {})).toBe("Draft the repository's setup")
   expect(nodeCallText('work_close', { summary: 'done' })).toBe('Close the task · done')
   expect(nodeCallText('work_list', { project: 'tracon', state: 'all' })).toBe('Tasks · tracon · all')
-  expect(nodeCallText('work_show', { id: '0b0e29c44da42ee5' })).toBe('Task 0b0e29c4')
+  expect(nodeCallText('work_show', { id: '0b0e29c44da42ee5' })).toBe('Show task 0b0e29c44da42ee5')
   expect(nodeCallText('work_show', {})).toBe('This task')
-  expect(nodeCallText('work_update', { id: '0b0e29c44da42ee5', title: 'Lists past 100' })).toBe('Update task 0b0e29c4 · Lists past 100')
-  expect(nodeCallText('work_delete', { id: '0b0e29c44da42ee5' })).toBe('Delete task 0b0e29c4')
+  expect(nodeCallText('work_update', { id: '0b0e29c44da42ee5', title: 'Lists past 100' })).toBe('Update task 0b0e29c44da42ee5 · Lists past 100')
+  expect(nodeCallText('work_delete', { id: '0b0e29c44da42ee5' })).toBe('Delete task 0b0e29c44da42ee5')
 })
 
 test('every tool the node offers reads as words, and an unknown one falls back to its name', () => {

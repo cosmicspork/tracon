@@ -11,6 +11,8 @@ COPY spa/package.json spa/bun.lock ./
 RUN bun install --frozen-lockfile
 COPY spa .
 COPY Cargo.toml /build/Cargo.toml
+# The generated-name word lists, which the SPA embeds from the node's copy.
+COPY proto/src/names-v1.json /build/proto/src/names-v1.json
 RUN bun run build
 
 # Third-party crates are built in their own layer, keyed on a recipe that

@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test'
+import { generatedName } from './names'
 import type { CodexLimits } from './types'
 import { codexLimitLabel, digits, externalAgent, formatAge, formatCodexLimits, formatWindow, formatBudget, formatDuration, formatExpiry, formatGrouped, formatTokens } from './format'
 
@@ -74,7 +75,7 @@ test('a typed number is shown grouped and read back as digits', () => {
 })
 
 test('an external agent is named by the tail of its id', () => {
-  expect(externalAgent('01a0e964-9d4a-7872-b04c-f7d19aa8a4b8')).toBe('agent 9aa8a4b8')
+  expect(externalAgent('01a0e964-9d4a-7872-b04c-f7d19aa8a4b8')).toBe(generatedName('agent', '01a0e964-9d4a-7872-b04c-f7d19aa8a4b8'))
   expect(externalAgent(null)).toBe('')
   expect(externalAgent(undefined)).toBe('')
   expect(externalAgent('01a0e964-9d4a-7872-b04c-f7d19aa8a4b8', 'tracon:main#4242')).toBe('tracon:main#4242')

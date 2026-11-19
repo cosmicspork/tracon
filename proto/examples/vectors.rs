@@ -204,6 +204,47 @@ fn main() {
             "sig_hex": statement.sig,
         }),
     );
+
+    // names: one id per kind, two UUIDv7s minted in the same millisecond, and
+    // the edges (an empty id, a non-ASCII one).
+    use proto::names::{generated, hash, kind};
+    let names: Vec<Value> = [
+        (kind::SESSION, "019a9e5c-7f20-7a3b-8c1d-2e3f4a5b6c7d"),
+        (kind::SESSION, "019a9e5c-7f20-7f00-b123-456789abcdef"),
+        (kind::REVIEW, "019a9e5c-7f20-7a3b-8c1d-2e3f4a5b6c7d"),
+        (kind::REPORT, "01a1e8ce-0000-7000-8000-000000000001"),
+        (kind::APPROVAL, "01a1efe2-4b5c-7d6e-9f01-23456789abcd"),
+        (
+            kind::MANIFEST,
+            "d01576094c2f1b2e8a3d5c6b7a8f9e0d1c2b3a4f5e6d7c8b9a0f1e2d3c4b5a69",
+        ),
+        (kind::AGENT, "ext-3f1c9a7b2d4e"),
+        (
+            kind::TASK,
+            "8c3e1f0a9b2d4c5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6",
+        ),
+        (kind::TRANSFER, "tr_5b7c9d1e3f"),
+        (kind::CHECK, "019a9e5d-0001-7000-8000-00000000c0de"),
+        (
+            kind::NODE,
+            "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+        ),
+        (kind::SESSION, ""),
+        (kind::SESSION, "séance-ü"),
+    ]
+    .iter()
+    .map(|(k, id)| json!({"kind": k, "id": id, "hash_hex": format!("{:016x}", hash(k, id)), "name": generated(k, id)}))
+    .collect();
+    write(
+        &out,
+        "names.json",
+        json!({
+            "domain": proto::names::DOMAIN,
+            "adjectives": proto::names::adjectives().len(),
+            "nouns": proto::names::nouns().len(),
+            "vectors": names,
+        }),
+    );
 }
 
 fn write(dir: &Path, name: &str, v: Value) {

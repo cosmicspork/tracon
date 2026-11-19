@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test'
+import { generatedName } from './names'
 import { readFileSync } from 'node:fs'
 import {
   eventLine,
@@ -323,7 +324,7 @@ test('each 0.29.0 kind reads as a sentence, not its name', () => {
     ['candidate_verified', { candidate_id: 'c', head_sha: '8c4be91f03a2d6e7b5c1', reused: true }, 'checks passed · at 8c4be91f03a2 · evidence reused'],
     ['review_decision', { source: 'operator', review_id: 'r', decision: 'approved', waiting_ms: 720_000 }, 'review approved · by the operator · after 12m waiting'],
     ['review_decision', { decision: 'revise', waiting_ms: 5000 }, 'review sent back with notes · by the operator · after 5s waiting'],
-    ['review_taken_over', { review_id: 'r', state: 'revising', from_session: '0b1c2d3e-4f50', to_session: 's2' }, 'review sent back for changes taken over · from 0b1c2d3e'],
+    ['review_taken_over', { review_id: 'r', state: 'revising', from_session: '0b1c2d3e-4f50', to_session: 's2' }, `review sent back for changes taken over · from ${generatedName('session', '0b1c2d3e-4f50')}`],
     ['review_taken_over', { review_id: 'r', state: 'new' }, 'open review taken over'],
     [
       'review_decision',
@@ -366,7 +367,8 @@ test('a published line links the forge, and a continued wake links the new sessi
   const wake = eventLine(ev('exhaustion_wake', null, { outcome: 'continued', continued_by: '0b1c2d3e-4f50', model: 'openai/gpt-5' }))!
   expect(wake.text).toBe('continued in a new session · on openai/gpt-5')
   expect(wake.href).toBe('/sessions/0b1c2d3e-4f50')
-  expect(wake.link).toBe('0b1c2d3e')
+  expect(wake.link).toBe(generatedName('session', '0b1c2d3e-4f50'))
+  expect(wake.id).toBe('0b1c2d3e-4f50')
 })
 
 test('the exhaustion line says what refused and what happens next', () => {

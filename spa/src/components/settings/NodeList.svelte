@@ -3,6 +3,8 @@
   // readiness, harness versions, what runs there and what waits on an
   // operator. It was a screen of its own; on one node it was a single row.
   import { onMount } from 'svelte'
+  import { generatedName } from '../../lib/names'
+  import Name from '../Name.svelte'
   import Card from './Card.svelte'
   import { api } from '../../lib/api'
   import { attention } from '../../lib/attention'
@@ -64,8 +66,8 @@
           <span class="bar"></span>
           <div class="head">
             <span class="nm">
-              {node.name || node.id.slice(0, 8)}
-              <small>{node.is_self ? 'serving node' : 'peer'} · {node.id.slice(0, 4)}…{node.id.slice(-4)}</small>
+              {node.name || generatedName('node', node.id)}
+              <small>{node.is_self ? 'serving node' : 'peer'} · <Name kind="node" id={node.id} /></small>
             </span>
             <span class="st">
               <span class="l" class:off={!readiness.canRun} class:bad={node.state === 'refused'} class:warn={mismatch}>

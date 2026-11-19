@@ -525,7 +525,7 @@ enum WorkCommand {
         project: Option<String>,
     },
     /// Show one item, its sessions, and what was discovered from it.
-    /// Ids here and below may be the prefixes `ls` prints.
+    /// Ids here and below may be a unique prefix or the `task-…` name `ls` prints.
     Show {
         id: String,
         #[arg(long, default_value = "personal")]
@@ -1315,7 +1315,7 @@ async fn mesh_command(cmd: MeshCommand) -> Result<()> {
             .await?;
             println!(
                 "handed {} the keys for {}",
-                &node_id[..16],
+                tracon::names::node(&node_id, m["name"].as_str()),
                 channels.join(", ")
             );
             Ok(())
@@ -2336,12 +2336,11 @@ struct NodeFacts {
 }
 
 impl NodeFacts {
-    /// "node <name> (<id8>)", or "node <id8>" when it has no name.
+    /// "node <name>", or its generated `node-…` name when it has none.
     fn describe(&self) -> String {
-        let id8 = tracon::node_target::short_id(&self.id);
         match &self.name {
-            Some(name) if !name.is_empty() => format!("node {name} ({id8})"),
-            _ => format!("node {id8}"),
+            Some(name) if !name.trim().is_empty() => format!("node {name}"),
+            _ => tracon::names::node(&self.id, None),
         }
     }
 }
@@ -2403,12 +2402,12 @@ async fn check_target_identity() -> Result<()> {
             let ours = local.node_id();
             if facts.id != ours {
                 anyhow::bail!(
-                    "{} points at {} at {}, but the state directory {} is node {}: set TRACON_URL to the node you mean",
+                    "{} points at {} at {}, but the state directory {} is {}: set TRACON_URL to the node you mean",
                     target.source,
                     facts.describe(),
                     target.url,
                     config::Config::state_dir().display(),
-                    tracon::node_target::short_id(&ours),
+                    tracon::names::node(&ours, None),
                 );
             }
             Ok(())
@@ -3297,7 +3296,8 @@ async fn doc_command(cmd: DocCommand) -> Result<()> {
     }
 }
 
-/// Resolve an id prefix against the channel's ledger.
+/// Resolve an id prefix, or a task's generated name as listings print it,
+/// against the channel's ledger.
 async fn work_resolve(channel: &str, prefix: &str) -> Result<String> {
     use reqwest::Method;
     if prefix.len() == 64 {
@@ -3311,12 +3311,33 @@ async fn work_resolve(channel: &str, prefix: &str) -> Result<String> {
     )
     .await?;
     let items = v["items"].as_array().cloned().unwrap_or_default();
-    resolve_prefix(
+    resolve_task(
         items.iter().filter_map(|i| i["id"].as_str()),
         prefix,
-        "work item",
         channel,
     )
+}
+
+/// A task by a unique id prefix or by its generated name (`task-…`), which is
+/// how `tracon work` lists it. A generated name two tasks share lists both.
+fn resolve_task<'a>(
+    ids: impl Iterator<Item = &'a str>,
+    given: &str,
+    channel: &str,
+) -> Result<String> {
+    if !given.starts_with("task-") {
+        return resolve_prefix(ids, given, "work item", channel);
+    }
+    let hits: Vec<&str> = ids.filter(|id| tracon::names::task(id) == given).collect();
+    match hits.as_slice() {
+        [one] => Ok(one.to_string()),
+        [] => anyhow::bail!("no work item is named {given} on {channel}"),
+        many => anyhow::bail!(
+            "{given} names {} work items on {channel}: {}",
+            many.len(),
+            many.join(", ")
+        ),
+    }
 }
 
 /// Resolve a memory id prefix against the channel's newest memories; an older
@@ -3514,10 +3535,7 @@ fn work_line(i: &serde_json::Value, names: &WorkNames) -> String {
                     a.iter()
                         .map(|b| match b["kind"].as_str() {
                             Some("cycle") => "cycle".to_string(),
-                            _ => {
-                                let id = b["id"].as_str().unwrap_or("?");
-                                id[..8.min(id.len())].to_string()
-                            }
+                            _ => tracon::names::task(b["id"].as_str().unwrap_or("?")),
                         })
                         .collect()
                 })
@@ -3531,8 +3549,8 @@ fn work_line(i: &serde_json::Value, names: &WorkNames) -> String {
         .map(|p| format!("  [{}]", names.project_name(p)))
         .unwrap_or_default();
     format!(
-        "{}  {:<9} {:<24} {}{project}",
-        &id[..8.min(id.len())],
+        "{:<26} {:<9} {:<24} {}{project}",
+        tracon::names::task(id),
         names.priority_name(i["priority"].as_i64().unwrap_or(0)),
         state,
         i["title"].as_str().unwrap_or("")
@@ -3674,7 +3692,10 @@ async fn work_command(cmd: WorkCommand) -> Result<()> {
                 None,
             )
             .await?;
-            println!("closed {}", v["id"].as_str().unwrap_or(&id));
+            println!(
+                "closed {}",
+                tracon::names::task(v["id"].as_str().unwrap_or(&id))
+            );
             Ok(())
         }
         WorkCommand::Dep { id, on, channel } => {
@@ -3703,7 +3724,7 @@ async fn work_command(cmd: WorkCommand) -> Result<()> {
         WorkCommand::Rm { id, channel } => {
             let id = work_resolve(&channel, &id).await?;
             node_call(Method::DELETE, &format!("/api/work/{id}"), None, None).await?;
-            println!("removed {id}");
+            println!("removed {}", tracon::names::task(&id));
             Ok(())
         }
         WorkCommand::Start {
@@ -4090,7 +4111,7 @@ fn import_replaced_shared(name: &str, nodes: &[String]) -> String {
          revokes their copies",
         nodes
             .iter()
-            .map(|n| &n[..16.min(n.len())])
+            .map(|n| tracon::names::node(n, None))
             .collect::<Vec<_>>()
             .join(", ")
     )
@@ -4298,7 +4319,7 @@ async fn credential_command(cmd: CredentialCommand) -> Result<()> {
                     Some("not_held") => "not held",
                     _ => "confirmed",
                 };
-                let mut line = format!("  {:<16} {state}", &t.node_id[..16.min(t.node_id.len())]);
+                let mut line = format!("  {:<24} {state}", store.node_display_name(&t.node_id));
                 if !t.confirmed() || t.kept() {
                     if let Some(detail) = &t.detail {
                         line.push_str(&format!(" ({detail})"));
@@ -4547,6 +4568,15 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("no work item starts with ffff on work"));
+        // The generated name `tracon work` lists a task by resolves too.
+        let by_name = |given: &str| super::resolve_task(IDS.into_iter(), given, "work");
+        let named = tracon::names::task(IDS[2]);
+        assert_eq!(by_name(&named).unwrap(), IDS[2]);
+        assert_eq!(by_name("0f80").unwrap(), IDS[2]);
+        assert!(by_name("task-nope-none-00")
+            .unwrap_err()
+            .to_string()
+            .contains("no work item is named"));
     }
 
     #[test]

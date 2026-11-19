@@ -1,5 +1,7 @@
 <script lang="ts">
   import { api } from '../lib/api'
+  import Name from '../components/Name.svelte'
+  import ScopeRef from '../components/ScopeRef.svelte'
   import { autogrow } from '../lib/autogrow'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
@@ -110,7 +112,7 @@
         <span class="body">
           {#if it.supersedes}
             <span class="replaces">
-              replaces: <em>{it.replaces ? `${it.replaces.kind} · ${it.replaces.scope}` : 'memory'}</em>{it.replaces ? it.replaces.body : `${it.supersedes.slice(0, 8)} (no longer held)`}
+              replaces: <em>{it.replaces ? `${it.replaces.kind} · ${it.replaces.scope}` : 'memory'}</em>{#if it.replaces}{it.replaces.body}{:else}<Name id={it.supersedes} label="a memory" /> no longer held{/if}
               {#if !done && it.replaces && ['active', 'promoted'].includes(it.replaces.state)}<small>Promoting this retires it; rejecting leaves it as it is.</small>{:else if !done}<small>Already {it.replaces?.state ?? 'gone'}.</small>{/if}
             </span>
           {/if}
@@ -127,8 +129,8 @@
             {bodyOf(done) ?? it.body}
           {/if}
           <small
-            >{it.scope}{it.scope_ref ? ` · ${it.scope_ref.slice(0, 8)}` : ''} · {Math.round(it.confidence * 100)}% ·
-            {formatAge(it.created_ms, clock.now)}{it.source_session ? ` · session ${it.source_session.slice(-6)}` : ''}</small
+            >{it.scope}{#if it.scope_ref}{' · '}<ScopeRef channel={promotion.channel} scope={it.scope} ref={it.scope_ref} />{/if} · {Math.round(it.confidence * 100)}% ·
+            {formatAge(it.created_ms, clock.now)}{#if it.source_session}{' · '}<Name kind="session" id={it.source_session} href="/sessions/{it.source_session}" />{/if}</small
           >
         </span>
         <span class="act">

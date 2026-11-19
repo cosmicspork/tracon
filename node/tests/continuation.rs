@@ -210,7 +210,7 @@ async fn continuing_or_changing_the_approach_carries_the_work_on_once() {
     )
     .await;
     assert_eq!(st, StatusCode::CONFLICT, "{v}");
-    assert!(v.to_string().contains(next), "{v}");
+    assert!(v.to_string().contains(&tracon::names::session(next)), "{v}");
 
     let (st, v) = call(
         &h.operator,

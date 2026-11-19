@@ -240,20 +240,15 @@ pub fn assemble(store: &Store, policy: &Policy, facts: &Facts) -> (String, Vec<M
 fn push_node(out: &mut String, facts: &Facts) {
     out.push_str("## Environment\n\n");
     out.push_str(&format!(
-        "- Node `{}` ({}…), runtime {}, harness {} {}; channel `{}`",
-        facts.node_name,
-        &facts.node_id[..8.min(facts.node_id.len())],
+        "- Node `{}`, runtime {}, harness {} {}; channel `{}`",
+        crate::names::node(facts.node_id, Some(facts.node_name)),
         facts.backend,
         facts.harness,
         facts.harness_version,
         facts.channel,
     ));
     match (facts.project_name, facts.project_id) {
-        (Some(n), Some(id)) => out.push_str(&format!(
-            ", project `{}` ({}…).\n",
-            n,
-            &id[..8.min(id.len())]
-        )),
+        (Some(n), Some(_)) => out.push_str(&format!(", project `{n}`.\n")),
         _ => out.push_str(".\n"),
     }
     out.push_str(&format!(
@@ -519,9 +514,9 @@ fn push_repository(out: &mut String, facts: &Facts) {
 fn push_work(out: &mut String, facts: &Facts, missing: &mut Vec<Missing>) {
     let Some(item) = facts.item else { return };
     out.push_str(&format!(
-        "## Work\n\n**{}** (`{}…`, phase: {})\n\n",
+        "## Work\n\n**{}** ({}, phase: {})\n\n",
         item.title,
-        &item.id[..8.min(item.id.len())],
+        crate::names::task(&item.id),
         facts.phase
     ));
     if !item.body.trim().is_empty() {
@@ -538,7 +533,8 @@ fn push_work(out: &mut String, facts: &Facts, missing: &mut Vec<Missing>) {
     }
     if let Some(from) = &item.discovered_from {
         out.push_str(&format!(
-            "Discovered from item `{}…`.\n\n",
+            "Discovered from {} (id `{}…`).\n\n",
+            crate::names::task(from),
             &from[..8.min(from.len())]
         ));
     }
@@ -1302,7 +1298,8 @@ fn push_ready(out: &mut String, facts: &Facts, mut left: usize, missing: &mut Ve
     let mut omitted_chars = 0;
     for v in facts.ready {
         let line = format!(
-            "- `{}…` {}\n",
+            "- {} (id `{}…`) {}\n",
+            crate::names::task(&v.item.id),
             &v.item.id[..8.min(v.item.id.len())],
             v.item.title
         );
