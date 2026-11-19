@@ -788,7 +788,7 @@ impl Backend for AppleBackend {
 
     /// A snapshot is a commit of the sandbox its preparation ran in, cache
     /// and all.
-    async fn seeds_session_cache(&self, base: &str, from_snapshot: bool) -> bool {
+    async fn seeds_cache(&self, base: &str, from_snapshot: bool) -> bool {
         !from_snapshot && self.files_store().holds(base)
     }
 

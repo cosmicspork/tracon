@@ -434,6 +434,9 @@ async fn redial(
 /// allows it), tear down. Must run inside a Tokio runtime, in a process where
 /// nothing else waits for children.
 pub async fn run(config: Config) -> Result<Ending, RunError> {
+    // Before anything the node sends or starts: what changed after it is
+    // what an export of `Exclusions::Unchanged` carries.
+    let started = std::time::SystemTime::now() - server::CHANGED_SLACK;
     let spawner = Spawner::new();
     // Installed before anything is started, so no exit goes unnoticed.
     let _reaper = spawner
@@ -461,6 +464,7 @@ pub async fn run(config: Config) -> Result<Ending, RunError> {
         tunnels: tunnels::Tunnels::default(),
         services: services::Supervisor::new(spawner.clone()),
         shutdown: CancellationToken::new(),
+        started,
     });
 
     let mut connection = first.connection;

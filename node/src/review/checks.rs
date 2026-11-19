@@ -885,8 +885,11 @@ struct Prepared {
 ///
 /// The cache is this run's alone. It starts as a copy of the repository's
 /// base cache — which only a preparation of the default branch ever writes —
-/// and is removed with the run, so nothing another candidate installed can be
-/// in it and nothing this one installs outlives its own evidence.
+/// or, where the run's prepared snapshot carries that cache in its image
+/// (`Backend::seeds_cache`), empty and sent over the image's own `/cache`,
+/// so it holds only what this preparation added. Either way it is removed
+/// with the run, so nothing another candidate installed can be in it and
+/// nothing this one installs outlives its own evidence.
 ///
 /// The commands are the operator's; what they execute may not be — an install
 /// runs the candidate's own lifecycle scripts unless the command says
@@ -904,11 +907,20 @@ async fn prepare_candidate(
         work: crate::config::resource_name(&format!("prep-{run_id}")),
         cache: crate::config::resource_name(&format!("prep-cache-{run_id}")),
     };
+    let from_snapshot = environment.image_source == crate::sandbox_images::SNAPSHOT_SOURCE;
     let staged = async {
         backend.import_writable(&ready.work, snapshot).await?;
-        backend
-            .clone_volume(&environment.cache_volume, &ready.cache)
+        match backend
+            .seeds_cache(&environment.cache_volume, from_snapshot)
             .await
+        {
+            true => {
+                backend
+                    .clone_volume(&environment.cache_volume, &ready.cache)
+                    .await
+            }
+            false => Ok(()),
+        }
     };
     let steps = async {
         staged.await.map_err(|error| {
@@ -1937,6 +1949,9 @@ mod tests {
         /// place of running it: the cluster with no room for its pod.
         prepare_refused: Option<&'static str>,
         check_refused: Option<&'static str>,
+        /// A runtime whose snapshot carries the cache in its image, as a
+        /// pod's or an Apple VM's does: a run from it copies no base cache.
+        snapshot_carries_cache: bool,
     }
 
     /// A run's volume by what it is for, without the id that names the run.
@@ -2061,6 +2076,9 @@ mod tests {
             "/home/harness".into()
         }
         async fn reconcile(&self, _names: &[String]) {}
+        async fn seeds_cache(&self, _base: &str, from_snapshot: bool) -> bool {
+            !(from_snapshot && self.0.snapshot_carries_cache)
+        }
         async fn clone_volume(
             &self,
             source: &str,
@@ -2295,6 +2313,66 @@ mod tests {
         .await
         .unwrap();
         assert!(!rerun.reused);
+    }
+
+    /// From a snapshot whose image carries the repository's cache, a
+    /// candidate's preparation copies no base cache: its run cache starts
+    /// empty, to be sent over the image's own `/cache`, and is still the
+    /// run's own, writable only while preparation holds its egress grant.
+    /// Where the runtime seeds caches (Podman), it is copied as before.
+    #[tokio::test]
+    async fn a_snapshots_cache_is_the_base_a_preparation_adds_to() {
+        let environment = RepoEnvironment {
+            image: format!(
+                "{}-app-0123456789ab@sha256:{}",
+                crate::sandbox_images::snapshot_repo(),
+                "a".repeat(64)
+            ),
+            image_source: crate::sandbox_images::SNAPSHOT_SOURCE,
+            checks: vec!["cargo test".into()],
+            timeout_secs: 60,
+            prepare: vec!["cargo fetch --locked".into()],
+            egress: vec!["crates".into()],
+            session_egress: Vec::new(),
+            cache_volume: "tracon-cache-base-app".into(),
+            repo: None,
+        };
+        for carries in [true, false] {
+            let recorded = std::sync::Arc::new(Recorded {
+                snapshot_carries_cache: carries,
+                ..Recorded::default()
+            });
+            let backend = RecordingBackend(recorded.clone());
+            let runner = backend.runner(Vec::new());
+            let ready = prepare_candidate(
+                &backend,
+                runner.as_ref(),
+                &environment,
+                &std::env::temp_dir(),
+                "snap1",
+                &RunToCompletion,
+            )
+            .await
+            .unwrap_or_else(|stopped| panic!("{stopped}"));
+            assert_eq!(volume_kind(&ready.cache), "run cache");
+            let log = recorded.log.lock().unwrap().clone();
+            assert_eq!(
+                log.contains(&"clone base cache > run cache".to_string()),
+                !carries,
+                "{log:?}"
+            );
+            assert_eq!(log.last().map(String::as_str), Some("close"), "{log:?}");
+            let commands = recorded.commands.lock().unwrap();
+            let prepare = &commands[0];
+            assert_eq!(prepare.image.as_deref(), Some(environment.image.as_str()));
+            let cache = prepare
+                .mounts
+                .iter()
+                .find(|m| m.target == "/cache")
+                .unwrap();
+            assert_eq!(cache.volume, ready.cache);
+            assert!(!cache.read_only);
+        }
     }
 
     /// A preparation that fails stops the execution there. The check is never

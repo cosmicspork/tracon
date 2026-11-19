@@ -329,6 +329,12 @@ pub enum Exclusions {
     /// and the repository itself; without one, everything.
     #[default]
     Checkout,
+    /// What has not changed since the sandbox started: only the files,
+    /// links and directories made or changed since then, by their change
+    /// time, which nothing in the sandbox can set back. A tree written over
+    /// what its image already held (a prepared snapshot's `/cache`) comes back
+    /// as what was added to it. Nothing says what was removed.
+    Unchanged,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

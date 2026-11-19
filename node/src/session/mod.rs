@@ -3161,7 +3161,7 @@ impl Manager {
                 );
                 let seeded = self
                     .backend
-                    .seeds_session_cache(&environment.cache_volume, image.from_snapshot(&self.cfg))
+                    .seeds_cache(&environment.cache_volume, image.from_snapshot(&self.cfg))
                     .await;
                 if seeded && !self.backend.volume_exists(&cache).await {
                     if let Err(error) = self

@@ -544,8 +544,8 @@ async fn a_session_cache_is_not_copied_from_a_base_cache_the_snapshot_holds() {
         Some(std::path::Path::new("/src/no-such-app")),
         "localhost/tracon-repo-x@sha256:0",
     );
-    assert!(!b.seeds_session_cache(&base, true).await);
-    assert!(!b.seeds_session_cache(&base, false).await);
+    assert!(!b.seeds_cache(&base, true).await);
+    assert!(!b.seeds_cache(&base, false).await);
     assert!(fake.calls.lock().unwrap().is_empty(), "no runtime involved");
 }
 
