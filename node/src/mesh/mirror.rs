@@ -466,6 +466,7 @@ mod tests {
             phase: "done".into(),
             policy_version: None,
             manifest_digest: None,
+            open_turn_tokens: 0,
             review_id: None,
             budget_tokens: 0,
             tokens_used: 0,
@@ -563,6 +564,49 @@ mod tests {
             peer.open_reviews().unwrap().is_empty(),
             "terminal reports must not re-enter the operator queue"
         );
+    }
+
+    /// The owner's live open-turn spend rides its session frame onto the
+    /// peer's bus, while the peer's own read — it holds no ledger rows for
+    /// the session — falls back to the settled figure. An older owner's
+    /// payload, without the field, still applies.
+    #[test]
+    fn a_session_frame_carries_the_owners_open_turn_spend_to_the_peer_bus() {
+        let peer = Arc::new(Store::open_in_memory().unwrap());
+        let bus = Bus::new();
+        let mut frames = bus.subscribe();
+        let mirror = Mirror {
+            store: peer.clone(),
+            bus,
+            self_id: "peer".into(),
+        };
+        let row = SessionRow {
+            state: "running".into(),
+            turn_active: 1,
+            tokens_used: 1_000,
+            open_turn_tokens: 184_000,
+            ..terminal_session()
+        };
+        let payload = Payload::Session(serde_json::json!(row));
+        assert_eq!(mirror.apply("owner", "personal", payload), Applied::Stored);
+        match frames.try_recv().unwrap() {
+            Frame::Session(s) => assert_eq!((s.tokens_used, s.open_turn_tokens), (1_000, 184_000)),
+            other => panic!("expected a session frame, got {}", other.name()),
+        }
+        let stored = peer.get_session("report-session").unwrap().unwrap();
+        assert_eq!((stored.tokens_used, stored.open_turn_tokens), (1_000, 0));
+
+        let mut older = serde_json::json!(row);
+        older.as_object_mut().unwrap().remove("open_turn_tokens");
+        older["tokens_used"] = serde_json::json!(185_000);
+        assert_eq!(
+            mirror.apply("owner", "personal", Payload::Session(older)),
+            Applied::Stored
+        );
+        match frames.try_recv().unwrap() {
+            Frame::Session(s) => assert_eq!((s.tokens_used, s.open_turn_tokens), (185_000, 0)),
+            other => panic!("expected a session frame, got {}", other.name()),
+        }
     }
 
     /// A pending `pr_comment` approval held by `node` with no session behind

@@ -70,6 +70,7 @@ fn session_row(id: &str, harness: &str, state: &str) -> SessionRow {
         parent_session: None,
         continued_from: None,
         manifest_digest: None,
+        open_turn_tokens: 0,
     }
 }
 

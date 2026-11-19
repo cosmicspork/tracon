@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { spent } from '../lib/budget'
   import { clock } from '../lib/clock.svelte'
   import { humanizeError } from '../lib/errors'
   import { externalAgent, formatAge, formatBudget, formatDuration } from '../lib/format'
@@ -92,7 +93,7 @@
         : ''}</small
     >
   </span>
-  <span class="mono">{external ? '' : formatBudget(session.tokens_used, session.budget_tokens)}</span>
+  <span class="mono">{external ? '' : formatBudget(spent(session), session.budget_tokens)}</span>
 </a>
 {#if onarchive && !legacy}
   <button

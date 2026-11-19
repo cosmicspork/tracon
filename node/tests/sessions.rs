@@ -905,6 +905,7 @@ fn insert_session_for_item(store: &Arc<Store>, budget: i64, item: Option<&str>) 
             parent_session: None,
             continued_from: None,
             manifest_digest: None,
+            open_turn_tokens: 0,
         })
         .unwrap();
     id
@@ -1930,6 +1931,7 @@ async fn reconcile_after_restart_closes_paused_sessions_and_keeps_an_external_fe
             parent_session: None,
             continued_from: None,
             manifest_digest: None,
+            open_turn_tokens: 0,
         })
         .unwrap();
 

@@ -1799,6 +1799,7 @@ impl Manager {
                     parent_session: None,
                     continued_from: None,
                     manifest_digest: None,
+                    open_turn_tokens: 0,
                 })
                 .expect("test session row");
         }
@@ -2383,6 +2384,7 @@ impl Manager {
             parent_session: spec.parent_session.clone(),
             continued_from: spec.continued_from.clone(),
             manifest_digest: None,
+            open_turn_tokens: 0,
         };
         self.store.insert_session(&row)?;
         self.store.exhaustion_choose(&id, &on_exhaustion)?;
@@ -4442,8 +4444,12 @@ impl Manager {
         if SessionState::from_stored(&row.state).is_terminal() {
             return Err(ended());
         }
-        if budget_tokens > 0 && budget_tokens <= row.tokens_used {
-            return Err(SessionError::BudgetSpent(row.tokens_used));
+        // What the gateway's budget check counts: the settled turns plus
+        // what the open one has spent so far. A budget at or under that is
+        // refused on the next call, so it is refused here instead.
+        let spent = row.tokens_used + row.open_turn_tokens;
+        if budget_tokens > 0 && budget_tokens <= spent {
+            return Err(SessionError::BudgetSpent(spent));
         }
         let changed = self.store.update_session_unless(
             id,

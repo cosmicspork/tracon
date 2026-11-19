@@ -53,6 +53,16 @@ pub mod shown;
 pub mod transfers;
 pub mod vectors;
 pub use corpus::*;
+
+/// The head of every query that reads whole `SessionRow`s: the columns, plus
+/// the open turn's spend as `open_turn_tokens`, which no column stores. It is
+/// [`Store::open_turn_spend`] as a correlated subquery, so the two never
+/// disagree. Callers append `WHERE`/`ORDER BY` against `session` unaliased.
+pub(crate) const SESSION_SELECT: &str = "SELECT session.*, \
+    (SELECT COALESCE(SUM(m.input_tokens + m.output_tokens), 0) \
+       FROM turn_usage t JOIN model_usage m ON m.session_id = t.session_id AND m.turn = t.turn \
+      WHERE t.session_id = session.id AND t.turn = session.turn AND t.state = 'open') \
+    AS open_turn_tokens FROM session";
 pub use credential_revokes::*;
 pub use device::*;
 pub use evidence::*;
@@ -360,7 +370,7 @@ impl Store {
     pub fn get_session(&self, id: &str) -> Result<Option<SessionRow>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT * FROM session WHERE id=?1",
+            &format!("{SESSION_SELECT} WHERE id=?1"),
             [id],
             SessionRow::from_row,
         )
@@ -384,8 +394,9 @@ impl Store {
     /// Every session that ever held an item, oldest first.
     pub fn sessions_of_work_item(&self, work_item_id: &str) -> Result<Vec<SessionRow>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt =
-            conn.prepare("SELECT * FROM session WHERE work_item_id=?1 ORDER BY created_ms")?;
+        let mut stmt = conn.prepare(&format!(
+            "{SESSION_SELECT} WHERE work_item_id=?1 ORDER BY created_ms"
+        ))?;
         let rows = stmt
             .query_map([work_item_id], SessionRow::from_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -397,9 +408,9 @@ impl Store {
     /// short list ask [`Store::queue_sessions`] instead.
     pub fn list_sessions(&self, state: Option<&str>) -> Result<Vec<SessionRow>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(match state {
-            Some(_) => "SELECT * FROM session WHERE state=?1 ORDER BY created_ms DESC",
-            None => "SELECT * FROM session ORDER BY created_ms DESC",
+        let mut stmt = conn.prepare(&match state {
+            Some(_) => format!("{SESSION_SELECT} WHERE state=?1 ORDER BY created_ms DESC"),
+            None => format!("{SESSION_SELECT} ORDER BY created_ms DESC"),
         })?;
         let rows = match state {
             Some(s) => stmt
@@ -421,13 +432,13 @@ impl Store {
         const TERMINAL: &str = "('closed','killed_budget','failed')";
         let conn = self.conn.lock().unwrap();
         let mut running = conn.prepare(&format!(
-            "SELECT * FROM session WHERE state NOT IN {TERMINAL} ORDER BY created_ms DESC"
+            "{SESSION_SELECT} WHERE state NOT IN {TERMINAL} ORDER BY created_ms DESC"
         ))?;
         let running: Vec<SessionRow> = running
             .query_map([], SessionRow::from_row)?
             .collect::<std::result::Result<_, _>>()?;
         let mut ended = conn.prepare(&format!(
-            "SELECT * FROM session WHERE state IN {TERMINAL} AND archived_ms IS NULL \
+            "{SESSION_SELECT} WHERE state IN {TERMINAL} AND archived_ms IS NULL \
              ORDER BY created_ms DESC LIMIT ?1"
         ))?;
         let ended: Vec<SessionRow> = ended
@@ -1333,9 +1344,9 @@ impl Store {
         since_ms: i64,
     ) -> Result<Vec<SessionRow>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT * FROM session WHERE channel = ?1 AND created_ms >= ?2 ORDER BY created_ms",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "{SESSION_SELECT} WHERE channel = ?1 AND created_ms >= ?2 ORDER BY created_ms"
+        ))?;
         let rows = stmt
             .query_map(rusqlite::params![channel, since_ms], SessionRow::from_row)?
             .collect::<std::result::Result<_, _>>()?;
@@ -2258,8 +2269,9 @@ impl Store {
 
     pub fn sessions_of_node(&self, node_id: &str) -> Result<Vec<SessionRow>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt =
-            conn.prepare("SELECT * FROM session WHERE node_id=?1 ORDER BY created_ms DESC")?;
+        let mut stmt = conn.prepare(&format!(
+            "{SESSION_SELECT} WHERE node_id=?1 ORDER BY created_ms DESC"
+        ))?;
         let rows = stmt
             .query_map([node_id], SessionRow::from_row)?
             .collect::<std::result::Result<_, _>>()?;
@@ -2860,6 +2872,15 @@ mod records {
         /// has no manifest, and on rows written before the column.
         #[serde(default)]
         pub manifest_digest: Option<String>,
+        /// What the open turn has spent so far through the gateway: input
+        /// plus output of its `model_usage` rows, cache reads left out, the
+        /// same figure the gateway's budget check adds to `tokens_used`
+        /// ([`Store::open_turn_spend`]). Derived when the row is read and
+        /// never stored: 0 between turns, and 0 again once the turn settles
+        /// into `tokens_used`. A mirror carries the owner's figure on frames
+        /// and reads 0 from its own store, which has no ledger rows.
+        #[serde(default)]
+        pub open_turn_tokens: i64,
     }
 
     fn default_phase() -> String {
@@ -2908,6 +2929,8 @@ mod records {
                 parent_session: r.get("parent_session")?,
                 continued_from: r.get("continued_from")?,
                 manifest_digest: r.get("manifest_digest")?,
+                // Only the reads built on `SESSION_SELECT` compute it.
+                open_turn_tokens: r.get("open_turn_tokens").unwrap_or(0),
             })
         }
     }
@@ -4294,6 +4317,7 @@ mod tests {
                 parent_session: None,
                 continued_from: None,
                 manifest_digest: None,
+                open_turn_tokens: 0,
             })
             .unwrap();
     }
@@ -4983,6 +5007,71 @@ mod tests {
             .resolve_permission("p1", "answered", Some("allow_once"), 60)
             .unwrap());
         assert_eq!(store.open_permissions().unwrap().len(), 0);
+    }
+
+    /// The open turn's spend rides on every session read while the turn is
+    /// open — the gateway's own figure, cache reads left out — and folds into
+    /// `tokens_used` at settle, which is never less than the live total.
+    #[test]
+    fn a_session_read_carries_the_open_turn_spend_until_it_settles() {
+        let store = Store::open_in_memory().unwrap();
+        let nid = node(&store);
+        session(&store, "s1", &nid);
+        session(&store, "s2", &nid);
+        let call = |input: i64, output: i64, cache_read: i64| {
+            store
+                .record_usage(&UsageRow {
+                    channel: "personal".into(),
+                    node_id: nid.clone(),
+                    session_id: Some("s1".into()),
+                    provider: "anthropic".into(),
+                    model: None,
+                    at_ms: now_ms(),
+                    input_tokens: input,
+                    output_tokens: output,
+                    requests: 1,
+                    cache_read_tokens: cache_read,
+                    cache_write_tokens: 0,
+                    request_id: None,
+                })
+                .unwrap();
+        };
+        let live = |id: &str| store.get_session(id).unwrap().unwrap().open_turn_tokens;
+        assert_eq!(live("s1"), 0, "between turns");
+
+        store.begin_turn("s1").unwrap();
+        call(100, 20, 50_000);
+        call(30, 4, 70_000);
+        assert_eq!(live("s1"), 154, "input and output only, never cache reads");
+        assert_eq!(live("s1"), store.open_turn_spend("s1").unwrap());
+        assert_eq!(live("s2"), 0, "another session's spend is not this one's");
+        for list in [
+            store.list_sessions(None).unwrap(),
+            store.list_sessions(Some("running")).unwrap(),
+            store.queue_sessions(10).unwrap().0,
+            store.sessions_of_node(&nid).unwrap(),
+            store.sessions_on_channel_since("personal", 0).unwrap(),
+            store.session_lineage("s1").unwrap(),
+        ] {
+            let row = list.iter().find(|r| r.id == "s1").unwrap();
+            assert_eq!(row.open_turn_tokens, 154);
+        }
+
+        let before = store.get_session("s1").unwrap().unwrap();
+        let usage = crate::metrics::settle_turn(&store, "s1", Some(150), None);
+        store
+            .update_session(
+                "s1",
+                SessionPatch {
+                    turn_active: Some(false),
+                    tokens_used: Some(before.tokens_used + usage.charged),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let after = store.get_session("s1").unwrap().unwrap();
+        assert_eq!(after.open_turn_tokens, 0, "settled");
+        assert!(after.tokens_used >= before.tokens_used + before.open_turn_tokens);
     }
 
     #[test]

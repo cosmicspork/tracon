@@ -16,7 +16,7 @@ use tracon_sync::{Applied, Change, ChangeOp};
 
 use super::vectors::Neighbour;
 
-use super::{now_ms, Result, SessionRow, Store, StoreError};
+use super::{now_ms, Result, SessionRow, Store, StoreError, SESSION_SELECT};
 
 /// Kinds a memory can be. Directives are human-authored and always injected.
 pub const KIND_DIRECTIVE: &str = "directive";
@@ -537,9 +537,11 @@ impl Store {
     pub fn session_holding(&self, work_item_id: &str) -> Result<Option<SessionRow>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT * FROM session WHERE work_item_id = ?1 AND phase != 'review'
-               AND state NOT IN ('closed', 'killed_budget', 'failed')
-             ORDER BY created_ms LIMIT 1",
+            &format!(
+                "{SESSION_SELECT} WHERE work_item_id = ?1 AND phase != 'review'
+                   AND state NOT IN ('closed', 'killed_budget', 'failed')
+                 ORDER BY created_ms LIMIT 1"
+            ),
             [work_item_id],
             SessionRow::from_row,
         )
