@@ -110,6 +110,10 @@ pub enum Status {
     Paused,
     Exited {
         code: i32,
+        /// The runtime says the kernel's out-of-memory killer ended it
+        /// (Kubernetes' `OOMKilled`, Podman's `OOMKilled`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        oom_killed: bool,
     },
     /// The provider no longer knows it, or cannot say.
     Lost,
@@ -504,8 +508,20 @@ mod tests {
             serde_json::json!({"state": "paused"})
         );
         assert_eq!(
-            serde_json::to_value(Status::Exited { code: 3 }).unwrap(),
+            serde_json::to_value(Status::Exited {
+                code: 3,
+                oom_killed: false
+            })
+            .unwrap(),
             serde_json::json!({"state": "exited", "code": 3})
+        );
+        assert_eq!(
+            serde_json::to_value(Status::Exited {
+                code: 137,
+                oom_killed: true
+            })
+            .unwrap(),
+            serde_json::json!({"state": "exited", "code": 137, "oom_killed": true})
         );
     }
 

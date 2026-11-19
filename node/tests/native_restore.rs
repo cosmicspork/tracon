@@ -15,8 +15,8 @@ use tokio::sync::{mpsc, oneshot};
 use support::rows::session_row;
 use support::state;
 use tracon::adapter::{
-    AdapterError, HarnessAdapter, HarnessCompat, HarnessEvent, HarnessHandle, HarnessVersion,
-    LaunchSpec, ModelOption, ProtocolSupport, Resume, TurnResult,
+    AdapterError, ExitCause, HarnessAdapter, HarnessCompat, HarnessEvent, HarnessHandle,
+    HarnessVersion, LaunchSpec, ModelOption, ProtocolSupport, Resume, TurnResult,
 };
 use tracon::runner::Runner;
 use tracon::session::supervisor::{Command, Prompted, Relaunch, Supervisor};
@@ -241,12 +241,40 @@ impl Rig {
         assert_eq!(done.await.unwrap(), Ok(Prompted::Sent));
     }
 
-    /// The current process dies.
+    /// The current process dies, SIGKILLed.
     async fn die(&self) {
+        self.exit(ExitCause {
+            signal: Some(9),
+            ..Default::default()
+        })
+        .await;
+    }
+
+    async fn exit(&self, cause: ExitCause) {
         let tx = self.adapter.events.lock().unwrap().last().unwrap().clone();
-        tx.send(HarnessEvent::Exited { code: Some(137) })
-            .await
-            .unwrap();
+        tx.send(HarnessEvent::Exited {
+            code: Some(137),
+            cause,
+        })
+        .await
+        .unwrap();
+    }
+
+    /// The current process starts a tool call.
+    async fn calls(&self, title: &str) {
+        let tx = self.adapter.events.lock().unwrap().last().unwrap().clone();
+        tx.send(HarnessEvent::ToolCall(tracon::adapter::types::ToolCall {
+            tool_call_id: "c1".into(),
+            title: title.into(),
+            kind: Some("execute".into()),
+            status: Some("in_progress".into()),
+            raw_input: Some(json!({ "command": "cargo test --lib" })),
+            content: vec![],
+            locations: vec![],
+            parent_tool_call_id: None,
+        }))
+        .await
+        .unwrap();
     }
 
     fn gateway_counted(&self, input: i64) {
@@ -274,6 +302,7 @@ async fn a_harness_that_dies_mid_turn_is_started_again_and_carries_the_turn_on()
     let rig = Rig::start().await;
     rig.prompt("do the thing").await;
     rig.gateway_counted(400);
+    rig.calls("Bash").await;
     rig.die().await;
 
     rig.wait("the restart", |r| !r.events("harness_restarted").is_empty())
@@ -281,6 +310,7 @@ async fn a_harness_that_dies_mid_turn_is_started_again_and_carries_the_turn_on()
     let restarted = &rig.events("harness_restarted")[0];
     assert_eq!(restarted["outcome"], "restored");
     assert_eq!(restarted["exit_code"], 137);
+    assert_eq!(restarted["cause"], "killed by SIGKILL (exit 137)");
     assert_eq!(restarted["interrupted_turn"], true);
     assert_eq!(
         *rig.adapter.resumed.lock().unwrap(),
@@ -305,11 +335,42 @@ async fn a_harness_that_dies_mid_turn_is_started_again_and_carries_the_turn_on()
     let prompts = rig.events("user_prompt");
     assert_eq!(prompts.len(), 2);
     assert_eq!(prompts[1]["origin"], "node");
-    assert!(prompts[1]["text"]
-        .as_str()
-        .unwrap()
-        .contains("outcome unknown"));
+    // It is told it died, how, what it was doing, and what went with it.
+    let told = prompts[1]["text"].as_str().unwrap();
+    assert!(told.contains("died during the last turn"), "{told}");
+    assert!(told.contains("killed by SIGKILL (exit 137)"), "{told}");
+    assert!(
+        told.contains("The last tool call was `Bash` (unfinished)"),
+        "{told}"
+    );
+    assert!(told.contains("background"), "{told}");
+    assert!(told.contains("outcome is unknown"), "{told}");
     assert_eq!(rig.state(), "running");
+}
+
+/// A harness the out-of-memory killer ended would die the same way again:
+/// the session ends saying so rather than starting it.
+#[tokio::test]
+async fn a_harness_killed_for_memory_is_not_started_again() {
+    let rig = Rig::start().await;
+    rig.prompt("do the thing").await;
+    rig.exit(ExitCause {
+        signal: Some(9),
+        oom_killed: true,
+        ..Default::default()
+    })
+    .await;
+
+    rig.wait("the end", |r| r.state() == "closed").await;
+    let row = rig.store.get_session(&rig.id).unwrap().unwrap();
+    assert_eq!(row.end_reason.as_deref(), Some("harness_died"));
+    let error = row.last_error.unwrap();
+    assert!(error.contains("out-of-memory"), "{error}");
+    let restarted = rig.events("harness_restarted");
+    assert_eq!(restarted.len(), 1);
+    assert_eq!(restarted[0]["outcome"], "refused");
+    assert!(rig.adapter.resumed.lock().unwrap().is_empty());
+    assert_eq!(rig.events("turn_end").len(), 1);
 }
 
 #[tokio::test]
@@ -323,8 +384,9 @@ async fn the_turn_failing_before_the_exit_arrives_comes_to_the_same() {
             turn_id: 1,
             kind: "error",
             payload: json!({
-                "error": "peer closed",
+                "error": "tracon-agent died mid-turn (peer closed before responding)",
                 "event_barrier_error": "tracon-agent event pump stopped",
+                "harness_died": true,
             }),
             tokens: 0,
         })
@@ -378,7 +440,12 @@ async fn a_harness_that_keeps_dying_ends_the_session() {
     assert_eq!(restarted.len(), 3);
     assert_eq!(restarted[2]["outcome"], "refused");
     let row = rig.store.get_session(&rig.id).unwrap().unwrap();
-    assert_eq!(row.end_reason.as_deref(), Some("harness_exit"));
+    assert_eq!(row.end_reason.as_deref(), Some("harness_died"));
+    assert!(
+        row.last_error.as_deref().unwrap().contains("SIGKILL"),
+        "{:?}",
+        row.last_error
+    );
     // Every cut turn was settled once.
     assert!(rig
         .events("turn_end")

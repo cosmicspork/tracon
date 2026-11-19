@@ -215,7 +215,7 @@ async fn services_run_inside_with_the_sandboxs_own_egress(
     let mut stdin = session.stdin;
     stdin.write_all(b"done\n").await.unwrap();
     drop(stdin);
-    assert_eq!(session.done.await.unwrap(), 0);
+    assert_eq!(session.done.await.unwrap().code, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -394,7 +394,8 @@ async fn a_session_runs_on_digitalocean_minus_digitalocean() {
         Some("pong: hello model")
     );
     drop(stdin);
-    assert_eq!(spawned.done.await.unwrap(), 0);
+    assert_eq!(spawned.done.await.unwrap().code, 0);
+    tracon::runner::protocol::settled("tracon-h-do1").await;
     assert_eq!(seen.lock().unwrap().as_slice(), ["hello model"]);
     assert_eq!(
         std::fs::read_to_string(store.tree("tracon-workspace-do1").unwrap().join("out.txt"))

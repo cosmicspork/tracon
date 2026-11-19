@@ -21,6 +21,9 @@ const attempt = (over: Partial<ContinuationAttempt>): ContinuationAttempt => ({
 test('an attempt says how it ended, and why when it failed', () => {
   expect(attemptState(attempt({ end_reason: 'node_restart' }))).toBe('node restarted')
   expect(attemptState(attempt({ end_reason: 'error', last_error: 'tests red' }))).toBe('failed: tests red')
+  expect(attemptState(attempt({ end_reason: 'harness_died', last_error: 'killed by SIGKILL (exit 137)' }))).toBe(
+    'harness died: killed by SIGKILL (exit 137)',
+  )
   expect(attemptState(attempt({ end_reason: 'something_new' }))).toBe('something new')
   expect(attemptState(attempt({ state: 'waiting_on_you' }))).toBe('waiting on you')
 })

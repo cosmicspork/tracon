@@ -15,9 +15,9 @@ use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    AdapterError, HarnessAdapter, HarnessCompat, HarnessEvent, HarnessHandle, HarnessVersion,
-    LaunchSpec, Layout, ModelOption, PermissionReply, PermissionRequest, ProtocolSupport, Resume,
-    TurnResult,
+    AdapterError, ExitCause, HarnessAdapter, HarnessCompat, HarnessEvent, HarnessHandle,
+    HarnessVersion, LaunchSpec, Layout, ModelOption, PermissionReply, PermissionRequest,
+    ProtocolSupport, Resume, TurnResult,
 };
 use crate::adapter::types::{self, methods};
 use crate::config::{SHAPE_OPENAI, SHAPE_OPENAI_CODEX};
@@ -328,6 +328,8 @@ struct Session {
     /// The highest update sequence taken: an update at or below it was taken
     /// already, from this process or the one it replaced.
     last_seq: Arc<AtomicU64>,
+    /// How the process ended, once it has.
+    exit: oneshot::Receiver<Result<crate::runner::Exit, crate::runner::RunnerError>>,
 }
 
 /// Await a handshake request while draining inbound traffic into `buffered`,
@@ -379,12 +381,14 @@ impl Session {
         resume: Option<&Resume>,
     ) -> Result<Self, AdapterError> {
         let (peer, mut incoming, read) = Peer::new(child.stdin, child.stdout);
+        let (exit_tx, exit) = oneshot::channel();
         let mut startup = StartupTasks {
             tasks: vec![
                 tokio::spawn(read),
-                // Await the exit so the child is reaped, not a zombie.
+                // Await the exit so the child is reaped, not a zombie, and
+                // the pump can say how it ended.
                 tokio::spawn(async move {
-                    let _ = child.done.await;
+                    let _ = exit_tx.send(child.done.await);
                 }),
             ],
         };
@@ -459,6 +463,7 @@ impl Session {
             agent_name,
             protocol_version: init.protocol_version,
             last_seq: Arc::new(AtomicU64::new(resume.map_or(0, |r| r.last_seq))),
+            exit,
         })
     }
 
@@ -508,12 +513,39 @@ impl Session {
                 },
             }
         }
-        let _ = tx.send(HarnessEvent::Exited { code: None }).await;
+        // A barrier asked from here on fails at once: the turn that asks it
+        // died with the process.
+        drop(barriers);
+        let (code, cause) = match tokio::time::timeout(EXIT_WAIT, self.exit).await {
+            Ok(Ok(exit)) => ExitCause::of(exit),
+            _ => (
+                None,
+                ExitCause::unknown(
+                    "tracon-agent closed its connection and its exit was not reported",
+                ),
+            ),
+        };
+        let _ = tx.send(HarnessEvent::Exited { code, cause }).await;
     }
 }
 
+/// How long the pump waits, once the agent's connection has closed, for its
+/// process's exit status.
+const EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 fn rpc_error(e: acp::rpc::RpcClientError) -> AdapterError {
     AdapterError::Protocol(e.to_string())
+}
+
+/// A turn's request failing because the agent's connection is gone: the
+/// process died under it.
+fn turn_error(e: acp::rpc::RpcClientError) -> AdapterError {
+    match e {
+        acp::rpc::RpcClientError::PeerClosed | acp::rpc::RpcClientError::Io(_) => {
+            AdapterError::HarnessDied(format!("tracon-agent died mid-turn ({e})"))
+        }
+        e => rpc_error(e),
+    }
 }
 
 /// Handle one inbound message. False when the event channel closed.
@@ -678,8 +710,11 @@ impl NativeHandle {
         method: &str,
         params: &impl serde::Serialize,
     ) -> Result<(TurnResult, Option<bool>), AdapterError> {
-        let res: types::PromptResult =
-            self.peer.request(method, params).await.map_err(rpc_error)?;
+        let res: types::PromptResult = self
+            .peer
+            .request(method, params)
+            .await
+            .map_err(turn_error)?;
         let compacted = res.extra.get("compacted").and_then(Value::as_bool);
         Ok((
             TurnResult {
@@ -768,9 +803,9 @@ impl HarnessHandle for NativeHandle {
         self.barrier_tx
             .send(done)
             .await
-            .map_err(|_| AdapterError::Protocol("tracon-agent event pump stopped".into()))?;
+            .map_err(|_| AdapterError::HarnessDied("tracon-agent event pump stopped".into()))?;
         wait.await
-            .map_err(|_| AdapterError::Protocol("tracon-agent event barrier stopped".into()))
+            .map_err(|_| AdapterError::HarnessDied("tracon-agent event barrier stopped".into()))
     }
 
     async fn close(&self) -> Result<(), AdapterError> {

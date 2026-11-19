@@ -474,3 +474,66 @@ async fn probe_models_falls_back_to_aliases_when_none_declared() {
     );
     assert!(models.iter().all(|m| m.value == m.name));
 }
+
+/// A harness killed in the middle of a turn (as the OOM killer does) fails
+/// that turn as a death, says how it died, and takes no other turn: a prompt
+/// after it fails at once instead of waiting for a `result` nothing will send.
+#[tokio::test]
+async fn a_harness_killed_mid_turn_fails_its_turn_as_dead_and_takes_no_other() {
+    state::isolate();
+    let a = ClaudeAdapter::new("2.1.295");
+    assert!(a.restorable());
+    let (handle, mut rx) = a
+        .launch(
+            &FakeRunner,
+            spec_env(vec![("FAKE_CLAUDE_DIE_MID_TURN".into(), "1".into())]),
+        )
+        .await
+        .unwrap();
+    let first = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        handle.prompt("run the tests".into()),
+    )
+    .await
+    .expect("the turn ended with the process");
+    assert!(
+        matches!(first, Err(AdapterError::HarnessDied(_))),
+        "{first:?}"
+    );
+
+    let mut called = None;
+    let exited = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                HarnessEvent::ToolCall(call) => called = Some(call.title),
+                HarnessEvent::Exited { code, cause } => return Some((code, cause)),
+                _ => {}
+            }
+        }
+        None
+    })
+    .await
+    .expect("the exit came")
+    .expect("the stream said it exited");
+    assert_eq!(called.as_deref(), Some("Bash"));
+    let (code, cause) = exited;
+    assert_eq!(code, Some(137));
+    assert_eq!(cause.signal, Some(9));
+    assert_eq!(cause.describe(code), "killed by SIGKILL (exit 137)");
+
+    let second = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        handle.prompt("are you there?".into()),
+    )
+    .await
+    .expect("a prompt on a dead harness fails at once");
+    assert!(
+        matches!(second, Err(AdapterError::HarnessDied(_))),
+        "{second:?}"
+    );
+    // Its conversation can be carried on by a new process.
+    assert_eq!(
+        handle.resume_point().map(|r| r.harness_session_id),
+        Some(handle.harness_session_id().to_string())
+    );
+}

@@ -252,7 +252,8 @@ async fn the_template_image_runs_a_session_as_a_digitalocean_sandbox_would() {
     tokio::io::AsyncReadExt::read_to_string(&mut { session.stdout }, &mut stdout)
         .await
         .unwrap();
-    assert_eq!(session.done.await.unwrap(), 0, "{stdout}");
+    assert_eq!(session.done.await.unwrap().code, 0, "{stdout}");
+    tracon::runner::protocol::settled("spike-p8-h-1").await;
     assert_eq!(
         stdout.lines().collect::<Vec<_>>(),
         [

@@ -43,6 +43,8 @@
               ? 'Ended · node restarted'
             : session.end_reason === 'provider_exhausted'
               ? 'Ended · provider exhausted'
+            : session.end_reason === 'harness_died'
+              ? 'Ended · harness died'
               : session.end_reason === 'continued'
                 ? 'Continued'
             : session.end_reason === 'item_close'

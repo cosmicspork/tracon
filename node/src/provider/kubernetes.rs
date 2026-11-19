@@ -84,8 +84,8 @@ use tracon_sandbox::node::{SandboxConn, SandboxError, SandboxServer};
 
 use self::pod::{
     harness_status, normalize_image_id, pending_reason, pod_labels, quota_refused, refusal,
-    refusal_error, KubeSpec, Refusal, Sizing, HARNESS_CONTAINER, NODE_LABEL, PROBE_GATE,
-    ROLE_LABEL, SCRATCH_MOUNT, SESSION_LABEL, SHM_VOLUME,
+    refusal_error, sandbox_status, KubeSpec, Refusal, Sizing, HARNESS_CONTAINER, NODE_LABEL,
+    PROBE_GATE, ROLE_LABEL, SCRATCH_MOUNT, SESSION_LABEL, SHM_VOLUME,
 };
 use super::capabilities::{
     Capabilities, Dns, ImageIdentityKind, Privilege, Route, RuntimeSocket, Tier,
@@ -1781,19 +1781,7 @@ impl SandboxProvider for KubeSandboxProvider {
             Ok(None) => return Ok(Status::Lost),
             Err(error) => return Err(failed(format!("get pod {}: {error}", handle.0))),
         };
-        let status = pod.status.unwrap_or_default();
-        Ok(match status.phase.as_deref().unwrap_or_default() {
-            "Pending" | "" => Status::Starting,
-            "Running" => Status::Running,
-            "Succeeded" | "Failed" => Status::Exited {
-                code: harness_status(&status)
-                    .and_then(|c| c.state.as_ref())
-                    .and_then(|s| s.terminated.as_ref())
-                    .map(|t| t.exit_code)
-                    .unwrap_or(-1),
-            },
-            _ => Status::Lost,
-        })
+        Ok(sandbox_status(&pod.status.unwrap_or_default()))
     }
 
     async fn image_identity(&self, handle: &Handle) -> Result<ImageIdentity, ProviderError> {

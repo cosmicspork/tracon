@@ -504,6 +504,28 @@ pub(crate) fn harness_status(status: &PodStatus) -> Option<&ContainerStatus> {
         .or_else(|| statuses.first())
 }
 
+/// Where a sandbox pod is in its life. One that ended keeps its harness
+/// container's exit code and whether the kubelet says the OOM killer ended it
+/// (`terminated.reason` `OOMKilled`), since the pod is never restarted
+/// (`restartPolicy: Never`) and that is the only place it is said.
+pub(crate) fn sandbox_status(status: &PodStatus) -> crate::provider::Status {
+    use crate::provider::Status;
+    match status.phase.as_deref().unwrap_or_default() {
+        "Pending" | "" => Status::Starting,
+        "Running" => Status::Running,
+        "Succeeded" | "Failed" => {
+            let terminated = harness_status(status)
+                .and_then(|c| c.state.as_ref())
+                .and_then(|s| s.terminated.as_ref());
+            Status::Exited {
+                code: terminated.map(|t| t.exit_code).unwrap_or(-1),
+                oom_killed: terminated.and_then(|t| t.reason.as_deref()) == Some("OOMKilled"),
+            }
+        }
+        _ => Status::Lost,
+    }
+}
+
 /// Why a pod has not started, in the words an operator can act on. The pod
 /// status has no "pulling" state: a pull shows as `ContainerCreating`, and the
 /// pod's events (which a runner holds no right to read) say the rest.

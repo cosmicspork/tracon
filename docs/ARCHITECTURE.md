@@ -497,17 +497,29 @@ it has done a week of real work. See `agent/README.md`. It speaks Chat Completio
 wire is the harness's concern: the gateway forwards either body untouched, adding only the
 credential and, for Codex, the account id.
 
-It is also the one harness whose session outlives its process. The agent journals each
-session ahead of every step, so when its process dies the supervisor starts it again on
-the same session scratch with `session/load` (`HarnessAdapter::restorable`,
-`LaunchSpec::resume`): open permissions expire, a turn it died in is settled as
-interrupted at what the gateway counted, and the node sends one prompt of its own
-(`user_prompt` with `origin: node`) to carry the work on. The agent answers each call
-it was running with "outcome unknown" and each it had not started with "not run", so
-nothing runs twice unasked. Each restart is recorded as `harness_restarted`; after two
-in one piece of work, or three in a session, the next exit ends the session as
-`harness_exit`, as an exit of any other harness does. A node restart still ends the
-session (`node_restart`).
+Its session outlives its process. The agent journals each session ahead of every step,
+so when its process dies the supervisor starts it again on the same session scratch with
+`session/load` (`HarnessAdapter::restorable`, `LaunchSpec::resume`): open permissions
+expire, a turn it died in is settled as interrupted at what the gateway counted, and the
+node sends one prompt of its own (`user_prompt` with `origin: node`) to carry the work
+on. The agent answers each call it was running with "outcome unknown" and each it had not
+started with "not run", so nothing runs twice unasked. Claude Code is restorable the same
+way, by `--resume` of its own conversation record on the harness state volume. A death
+is a typed signal (`AdapterError::HarnessDied`): the turn it cut fails with it, the dead
+handle refuses every later turn at once, and the supervisor dispatches nothing (no
+decision brought back, no queued message) until the exit is in, or 10 s have passed
+without it. The exit then says how it died (exit code, signal, an out-of-memory kill the
+sandbox saw in its cgroup's `memory.events`, a pod's `OOMKilled`), and arrives as soon
+as the process is gone: the protocol runner takes the sandbox's files back and removes
+it behind the exit, and `kill` or a new spawn under the same name waits for that. The
+relaunch prompt names the death, its cause, the last tool call and that background
+commands are gone. Each restart is recorded as `harness_restarted`. A relaunch is given
+only to a sandbox on this node's own runtime; one on DigitalOcean is gone by the time its
+exit is known, and is not relaunched. A harness the OOM killer ended is not relaunched
+either, and after two restarts in one piece of work, or three in a session, the next
+death is not. Each of those ends the session as `harness_died`, with the cause in its
+`last_error` and `error` event, and `tracon session continue` carries it on in a new
+session. A node restart still ends the session (`node_restart`).
 
 It keeps a long session inside the model's window itself, since no vendor does it for
 it. Before a request that would come within 15 % (at least 16k tokens) of the window

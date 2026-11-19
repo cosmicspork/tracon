@@ -920,7 +920,10 @@ impl SandboxProvider for AppleProvider {
             "running" | "stopping" => Status::Running,
             // `container` keeps no exit code; the node has it from the
             // sandbox's connection when there was one.
-            "stopped" => Status::Exited { code: -1 },
+            "stopped" => Status::Exited {
+                code: -1,
+                oom_killed: false,
+            },
             _ => Status::Lost,
         })
     }
@@ -1723,7 +1726,10 @@ mod tests {
         *s.fake.inspect.lock().unwrap() = Some(doc.to_string());
         assert_eq!(
             s.provider.status(&handle).await.unwrap(),
-            Status::Exited { code: -1 }
+            Status::Exited {
+                code: -1,
+                oom_killed: false
+            }
         );
         assert_eq!(
             s.provider.capacity().await.unwrap(),

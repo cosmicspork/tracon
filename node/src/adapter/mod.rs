@@ -386,9 +386,104 @@ pub enum HarnessEvent {
     Decided(PermissionRequest),
     Models(Vec<ModelOption>),
     Other(Value),
+    /// The harness process is gone. `code` as a container's would read
+    /// (128 and the signal for a signal), `None` when nothing reported one;
+    /// `cause` is what else its runtime said.
     Exited {
         code: Option<i32>,
+        cause: ExitCause,
     },
+}
+
+/// What a harness's runtime said of how it ended, beyond its code.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExitCause {
+    /// The signal that killed it, when one did.
+    pub signal: Option<i32>,
+    /// The kernel's out-of-memory killer ended it.
+    pub oom_killed: bool,
+    /// Why there is no status, when there is none.
+    pub unknown: Option<String>,
+    /// The node ended it because its handshake was refused (a version or
+    /// protocol it does not drive, an MCP server it could not reach): a new
+    /// process would be refused the same way, so it is not started again.
+    pub refused: bool,
+}
+
+impl ExitCause {
+    /// A runner's report of an exit, as the event carries it.
+    pub fn of(
+        exit: Result<crate::runner::Exit, crate::runner::RunnerError>,
+    ) -> (Option<i32>, Self) {
+        match exit {
+            Ok(exit) => (
+                Some(exit.code),
+                Self {
+                    signal: exit
+                        .signal
+                        .or_else(|| (129..=192).contains(&exit.code).then(|| exit.code - 128)),
+                    oom_killed: exit.oom_killed,
+                    ..Default::default()
+                },
+            ),
+            Err(error) => (
+                None,
+                Self {
+                    unknown: Some(error.to_string()),
+                    ..Default::default()
+                },
+            ),
+        }
+    }
+
+    /// No status, for `why`.
+    pub fn unknown(why: impl Into<String>) -> Self {
+        Self {
+            unknown: Some(why.into()),
+            ..Default::default()
+        }
+    }
+
+    /// How it ended, in a few words: "killed by the out-of-memory killer
+    /// (exit 137)", "killed by SIGKILL (exit 137)", "exited with code 1", or
+    /// "exit status unknown" and why, only when nothing reported one.
+    pub fn describe(&self, code: Option<i32>) -> String {
+        let code_said = code.map(|c| format!(" (exit {c})")).unwrap_or_default();
+        if self.oom_killed {
+            return format!("killed by the out-of-memory killer{code_said}");
+        }
+        if let Some(signal) = self.signal {
+            return format!("killed by {}{code_said}", signal_name(signal));
+        }
+        match (code, &self.unknown) {
+            (Some(code), _) => format!("exited with code {code}"),
+            (None, Some(why)) => format!("exit status unknown: {why}"),
+            (None, None) => "exit status unknown".into(),
+        }
+    }
+
+    /// The fields an `error` event carries about it.
+    pub fn detail(&self, code: Option<i32>) -> Value {
+        serde_json::json!({
+            "harness_exit_code": code,
+            "signal": self.signal,
+            "oom_killed": self.oom_killed,
+            "cause": self.describe(code),
+        })
+    }
+}
+
+fn signal_name(signal: i32) -> String {
+    match signal {
+        1 => "SIGHUP".into(),
+        2 => "SIGINT".into(),
+        6 => "SIGABRT".into(),
+        9 => "SIGKILL".into(),
+        11 => "SIGSEGV".into(),
+        13 => "SIGPIPE".into(),
+        15 => "SIGTERM".into(),
+        other => format!("signal {other}"),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -465,6 +560,11 @@ pub enum AdapterError {
     /// of: the session can be continued in a new one, not asked again.
     #[error("{0}")]
     ConversationGone(String),
+    /// The harness process is gone: the turn it was in can never be
+    /// answered, and the handle takes no other. The supervisor relaunches
+    /// the harness or ends the session on this, never turns again on it.
+    #[error("{0}")]
+    HarnessDied(String),
     #[error("{0}")]
     Protocol(String),
 }
@@ -608,6 +708,33 @@ pub trait HarnessHandle: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_exit_is_described_by_what_reported_it() {
+        use super::ExitCause;
+        use crate::runner::Exit;
+        let (code, cause) = ExitCause::of(Ok(Exit::code(137)));
+        assert_eq!(code, Some(137));
+        assert_eq!(cause.describe(code), "killed by SIGKILL (exit 137)");
+        let (code, cause) = ExitCause::of(Ok(Exit {
+            code: 137,
+            signal: Some(9),
+            oom_killed: true,
+        }));
+        assert_eq!(
+            cause.describe(code),
+            "killed by the out-of-memory killer (exit 137)"
+        );
+        assert_eq!(ExitCause::default().describe(Some(1)), "exited with code 1");
+        assert_eq!(ExitCause::default().describe(None), "exit status unknown");
+        let (code, cause) = ExitCause::of(Err(crate::runner::RunnerError::Other(
+            "it stopped answering".into(),
+        )));
+        assert_eq!(
+            cause.describe(code),
+            "exit status unknown: it stopped answering"
+        );
+    }
+
     #[test]
     fn a_merged_catalogue_keeps_one_spelling_of_each_model() {
         let option = |value: &str| super::ModelOption {

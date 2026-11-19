@@ -285,7 +285,11 @@ fn layout() -> Layout {
 struct Harness {
     stdin: Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
     lines: Lines<BufReader<Box<dyn tokio::io::AsyncRead + Send + Unpin>>>,
-    done: futures_core::future::BoxFuture<'static, Result<i32, tracon::runner::RunnerError>>,
+    done: futures_core::future::BoxFuture<
+        'static,
+        Result<tracon::runner::Exit, tracon::runner::RunnerError>,
+    >,
+    name: String,
 }
 
 impl Layout {
@@ -317,6 +321,7 @@ impl Harness {
             stdin: spawned.stdin,
             lines: BufReader::new(spawned.stdout).lines(),
             done: spawned.done,
+            name: name.to_string(),
         }
     }
 
@@ -347,6 +352,8 @@ impl Harness {
         let _ = tokio::time::timeout(Duration::from_secs(30), self.done)
             .await
             .expect("the harness ended");
+        // Its trees come back behind its exit.
+        tracon::runner::protocol::settled(&self.name).await;
     }
 }
 
@@ -485,6 +492,7 @@ async fn a_sessions_trees_go_in_come_back_and_resume() {
     harness.run(&format!("echo seven > {w}/a.txt")).await;
     runner().kill(name).await.unwrap();
     let _ = tokio::time::timeout(Duration::from_secs(30), harness.done).await;
+    tracon::runner::protocol::settled(name).await;
     assert_eq!(read(tree().join("a.txt")), "seven\n");
     // A loop cut off from its node redials until its window passes; it
     // reaps any child of this process meanwhile, so it ends before the next
@@ -499,6 +507,7 @@ async fn a_sessions_trees_go_in_come_back_and_resume() {
     harness.run(&format!("echo nine > {w}/a.txt")).await;
     provider.lose(name);
     let _ = tokio::time::timeout(Duration::from_secs(30), harness.done).await;
+    tracon::runner::protocol::settled(name).await;
     assert_eq!(read(tree().join("a.txt")), "eight\n");
     provider.settle().await;
 

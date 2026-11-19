@@ -610,6 +610,13 @@
         <a class="lnk" href="/sessions/{continuedAs.id}">continued as {continuedAs.id.slice(0, 8)}</a>
       {/if}
     </div>
+  {:else if session.end_reason === 'harness_died'}
+    <div class="banner crit">
+      its harness died <b>· {session.last_error ?? 'it was not started again'} · its workspace is kept</b>
+      {#if continuedAs}
+        <a class="lnk" href="/sessions/{continuedAs.id}">continued as {continuedAs.id.slice(0, 8)}</a>
+      {/if}
+    </div>
   {:else if session.end_reason === 'item_close'}
     <div class="banner ok">ended at task close <b>· the task is closed{session.work_item_id ? ` · ${session.work_item_id.slice(0, 8)}` : ''}</b></div>
   {:else if session.end_reason === 'phase_done'}
