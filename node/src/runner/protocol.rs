@@ -247,6 +247,9 @@ pub struct ProtocolRunner {
     /// What each sandbox's isolation, read back from the provider once it
     /// has connected, must satisfy before anything is sent into it.
     requirements: Option<crate::provider::Requirements>,
+    /// What each sandbox is made with. Left at the default for a local
+    /// provider, which would turn a memory floor into a limit.
+    resources: Resources,
     /// How long a run's token may wait to be redeemed; `None` for as long
     /// as the run lasts.
     token_window: Option<Duration>,
@@ -274,6 +277,7 @@ impl ProtocolRunner {
             bundled_harness: false,
             sandbox_services: false,
             requirements: None,
+            resources: Resources::default(),
             token_window: None,
             env: Vec::new(),
             service_refusal: None,
@@ -337,6 +341,13 @@ impl ProtocolRunner {
     /// before any file, tunnel or command reaches it.
     pub fn with_requirements(mut self, requirements: crate::provider::Requirements) -> Self {
         self.requirements = Some(requirements);
+        self
+    }
+
+    /// Make every sandbox with `resources`: for a provider elsewhere that
+    /// sizes what it makes by them (DigitalOcean's memory floor).
+    pub fn with_resources(mut self, resources: Resources) -> Self {
+        self.resources = resources;
         self
     }
 
@@ -564,7 +575,7 @@ impl ProtocolRunner {
                 .create(&CreateSpec {
                     name: Some(name),
                     image,
-                    resources: &Resources::default(),
+                    resources: &self.resources,
                     mounts: provided,
                     bootstrap: &bootstrap,
                     labels: &cmd.labels,

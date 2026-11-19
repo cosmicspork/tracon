@@ -25,7 +25,7 @@ use tracon::provider::capabilities::{
 };
 use tracon::provider::{
     Capacity, CreateSpec, Handle, ImageIdentity, Network, ProviderError, ProviderKind,
-    SandboxProvider, Status,
+    Requirements, Resources, SandboxProvider, Status,
 };
 use tracon::runner::protocol::ProtocolRunner;
 use tracon::runner::{Mount, Runner, RunnerCommand};
@@ -57,6 +57,8 @@ struct Loopback {
     relays: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
     created: Mutex<Vec<(String, String, Vec<Mount>)>>,
+    /// What each create was asked to make the sandbox with.
+    resources: Mutex<Vec<Resources>>,
     destroyed: Mutex<Vec<String>>,
     /// Destroyed, until made again.
     gone: Mutex<std::collections::HashSet<String>>,
@@ -115,6 +117,7 @@ impl SandboxProvider for Loopback {
             spec.image.to_string(),
             spec.mounts.to_vec(),
         ));
+        self.resources.lock().unwrap().push(spec.resources.clone());
         let path = self.path(&name);
         self.paths
             .lock()
@@ -673,7 +676,12 @@ async fn a_sandbox_left_running_is_taken_back_by_the_next_node_process() {
 
 async fn a_capture_runs_with_its_env_cwd_and_exit_code() {
     let provider = Loopback::new(false);
-    let r = runner(provider.clone());
+    // A memory floor among its requirements is DigitalOcean's to read: a
+    // local provider would turn it into a limit, so it is never passed on.
+    let r = runner(provider.clone()).with_requirements(Requirements {
+        memory: Some("4Gi".into()),
+        ..Requirements::default()
+    });
     let work = tempfile::tempdir().unwrap();
     let workdir = work.path().to_string_lossy().into_owned();
     let mut cmd = sh(
@@ -705,6 +713,10 @@ async fn a_capture_runs_with_its_env_cwd_and_exit_code() {
         ]
     );
     assert_eq!(*provider.destroyed.lock().unwrap(), vec![name]);
+    assert_eq!(
+        *provider.resources.lock().unwrap(),
+        vec![Resources::default()]
+    );
     provider.settle().await;
 }
 
@@ -797,7 +809,7 @@ async fn a_sandbox_with_the_wrong_token_is_refused_and_removed() {
 async fn the_podman_provider_takes_the_supervisors_connection_past_a_bad_one() {
     use tokio::io::AsyncWriteExt as _;
     use tracon::provider::podman::{CliError, PodmanCli, PodmanOptions, PodmanProvider};
-    use tracon::provider::{Bootstrap, Resources};
+    use tracon::provider::Bootstrap;
 
     struct Script;
     #[async_trait]

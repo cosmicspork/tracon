@@ -407,6 +407,7 @@ pub const KEYS: &[KeySpec] = &[
     live("placement.channel.*.require.privilege"),
     live("placement.channel.*.require.runtime_socket"),
     live("placement.channel.*.require.image_identity"),
+    live("placement.channel.*.require.memory"),
     // [[placement.repo]]
     live("placement.repo.path"),
     live("placement.repo.client"),
@@ -417,6 +418,7 @@ pub const KEYS: &[KeySpec] = &[
     live("placement.repo.require.privilege"),
     live("placement.repo.require.runtime_socket"),
     live("placement.repo.require.image_identity"),
+    live("placement.repo.require.memory"),
     // [digitalocean]: the provider is built at start.
     restart("digitalocean.credential"),
     restart("digitalocean.region"),
@@ -991,6 +993,29 @@ mod tests {
             stale.is_empty(),
             "config_schema::KEYS names keys no Config struct reads: {stale:?}"
         );
+    }
+
+    #[test]
+    fn a_placement_memory_floor_applies_to_the_next_session_like_the_rest_of_require() {
+        for require in [
+            &["placement", "repo", "require"][..],
+            &["placement", "channel", "acme", "require"][..],
+        ] {
+            for key in ["tier", "memory"] {
+                let path: Vec<&str> = require.iter().copied().chain([key]).collect();
+                assert_eq!(lookup(&path).apply, Apply::Live, "{path:?}");
+            }
+        }
+        assert_eq!(
+            lookup(&["placement", "repo", "require", "memory"]).key,
+            "placement.repo.require.memory"
+        );
+        assert_eq!(
+            lookup(&["placement", "channel", "acme", "require", "memory"]).key,
+            "placement.channel.*.require.memory"
+        );
+        // The node-wide size still takes a restart.
+        assert_eq!(lookup(&["digitalocean", "size"]).apply, Apply::Restart);
     }
 
     #[test]

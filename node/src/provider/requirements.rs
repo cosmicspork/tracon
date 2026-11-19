@@ -13,10 +13,13 @@
 //! forbid_digitalocean = true
 //! [placement.repo.require]
 //! tier = ["microvm"]
+//! memory = "4Gi"
 //! ```
 //!
 //! Each requirement is the set of values it accepts; a capability left out
-//! accepts any. Where a channel, a repository and the client defaults all
+//! accepts any. `memory` is no capability but a floor on the sandbox's
+//! memory, which a provider that sizes what it makes (DigitalOcean) meets;
+//! it never refuses a provider. Where a channel, a repository and the client defaults all
 //! speak, a provider must satisfy every one of them: the stricter wins, and
 //! nothing a repository says loosens what its channel or its being client
 //! work requires.
@@ -60,6 +63,10 @@ pub struct Requirements {
     pub runtime_socket: Option<Vec<RuntimeSocket>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_identity: Option<Vec<ImageIdentityKind>>,
+    /// The least memory the sandbox is made with, as a Kubernetes quantity
+    /// (`"4Gi"`). Where several speak, the larger wins.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<String>,
 }
 
 /// One `[placement.channel.<name>]` entry.
@@ -173,7 +180,29 @@ impl Requirements {
             };
         }
         each_capability!(m);
+        out.memory = match (&self.memory, &other.memory) {
+            (Some(a), Some(b)) => Some(match memory_bytes(b) > memory_bytes(a) {
+                true => b.clone(),
+                false => a.clone(),
+            }),
+            (a, b) => a.clone().or_else(|| b.clone()),
+        };
         out
+    }
+
+    /// The memory floor in bytes; `None` when none is set (or it does not
+    /// parse, which `validate` refuses).
+    pub fn memory_bytes(&self) -> Option<u64> {
+        self.memory.as_deref().and_then(memory_bytes)
+    }
+
+    /// Whether these ask anything of a provider's capabilities: a memory
+    /// floor alone does not, so it never refuses one.
+    pub fn constrains_capabilities(&self) -> bool {
+        Self {
+            memory: None,
+            ..self.clone()
+        } != Self::any()
     }
 
     /// Why a provider with `caps` does not satisfy these, or `Ok`.
@@ -212,6 +241,26 @@ impl Requirements {
         each_capability!(m);
         None
     }
+
+    /// Why the memory floor is not one the node can hold a sandbox to.
+    fn bad_memory(&self) -> Option<String> {
+        let memory = self.memory.as_deref()?;
+        match memory_bytes(memory) {
+            Some(_) => None,
+            None => Some(format!(
+                "require.memory {memory:?} is not a memory size: write a Kubernetes quantity \
+                 above zero, such as \"4Gi\""
+            )),
+        }
+    }
+}
+
+/// A memory quantity in bytes, rounded up: `None` for one that does not
+/// parse or is zero.
+fn memory_bytes(quantity: &str) -> Option<u64> {
+    crate::config::kube_quantity(quantity)
+        .filter(|bytes| *bytes >= 1.0)
+        .map(|bytes| bytes.ceil() as u64)
 }
 
 impl Placement {
@@ -244,11 +293,14 @@ impl Placement {
     }
 }
 
-/// Refuse a `[placement]` table the node could not honour: an accept list
-/// that accepts nothing, a repository entry with no path or named twice, or
+/// Refuse a `[placement]` table the node could not honour: a memory floor
+/// that is not a size, an accept list that accepts nothing, a repository entry with no path or named twice, or
 /// requirements that leave a client entry nothing to run on.
 pub fn validate(placement: &Placement) -> Result<(), String> {
     let held = |what: String, client: bool, require: &Requirements| {
+        if let Some(why) = require.bad_memory() {
+            return Err(format!("placement {what}: {why}"));
+        }
         if let Some(field) = require.empty_list() {
             return Err(format!(
                 "placement {what}: require.{field} accepts nothing; leave it out to accept any"
@@ -470,6 +522,7 @@ mod tests {
             privilege: Some(vec![Privilege::Unprivileged]),
             runtime_socket: Some(vec![RuntimeSocket::Absent]),
             image_identity: Some(vec![ImageIdentityKind::Exact]),
+            memory: None,
         };
         let worst = Capabilities {
             tier: Tier::Container,
@@ -575,5 +628,69 @@ mod tests {
         let twice =
             validate(&parse("[[repo]]\npath = \"a/b\"\n[[repo]]\npath = \"a/b\"")).unwrap_err();
         assert!(twice.contains("named twice"), "{twice}");
+    }
+
+    #[test]
+    fn a_memory_floor_parses_and_the_larger_wins() {
+        let p = parse(
+            r#"
+            [channel.acme.require]
+            memory = "2Gi"
+
+            [[repo]]
+            path = "acme/site"
+            [repo.require]
+            memory = "4Gi"
+            "#,
+        );
+        assert_eq!(p.channel["acme"].require.memory.as_deref(), Some("2Gi"));
+        let r = p.resolve("acme", Some(Path::new("/src/acme/site")));
+        assert_eq!(r.requirements.memory.as_deref(), Some("4Gi"));
+        assert_eq!(r.requirements.memory_bytes(), Some(4 << 30));
+        let floor = |m: &str| Requirements {
+            memory: Some(m.into()),
+            ..Requirements::default()
+        };
+        // Either way round, and against none.
+        assert_eq!(floor("2Gi").and(&floor("4Gi")), floor("4Gi"));
+        assert_eq!(floor("4Gi").and(&floor("2Gi")), floor("4Gi"));
+        assert_eq!(floor("4Gi").and(&Requirements::any()), floor("4Gi"));
+        assert_eq!(Requirements::any().and(&floor("2Gi")), floor("2Gi"));
+        // Client work keeps its floor.
+        assert_eq!(
+            Requirements::client_work()
+                .and(&floor("4Gi"))
+                .memory_bytes(),
+            Some(4 << 30)
+        );
+    }
+
+    #[test]
+    fn a_memory_floor_never_refuses_a_provider() {
+        let floor = Requirements {
+            memory: Some("64Gi".into()),
+            ..Requirements::default()
+        };
+        assert!(floor.check(&caps()).is_ok());
+        assert!(floor.check(&digitalocean()).is_ok());
+        assert!(!floor.constrains_capabilities());
+        assert!(Requirements::client_work().constrains_capabilities());
+    }
+
+    #[test]
+    fn validation_refuses_a_memory_floor_that_is_not_a_size() {
+        validate(&parse("[channel.x.require]\nmemory = \"4Gi\"")).unwrap();
+        validate(&parse(
+            "[[repo]]\npath = \"a/b\"\n[repo.require]\nmemory = \"512Mi\"",
+        ))
+        .unwrap();
+        for bad in ["0", "4GiB", "lots"] {
+            let why = validate(&parse(&format!(
+                "[[repo]]\npath = \"a/b\"\n[repo.require]\nmemory = \"{bad}\""
+            )))
+            .unwrap_err();
+            assert!(why.contains("require.memory"), "{bad}: {why}");
+            assert!(why.contains("repo a/b"), "{bad}: {why}");
+        }
     }
 }

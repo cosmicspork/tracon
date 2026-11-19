@@ -57,10 +57,10 @@ describe('a provider elsewhere', () => {
   })
 
   test('prices its size and holds today’s spend to the limit', () => {
-    expect(elsewhereLines(there()).some((l) => l.label === 'size' || l.label === 'spend')).toBe(false)
+    expect(elsewhereLines(there()).some((l) => l.label === 'default size' || l.label === 'spend')).toBe(false)
     const spend = { today_usd: 4.5, limit_usd: 5, state: 'near' as const, running: 2, unpriced: 0 }
     const lines = elsewhereLines(there({ size: 'small', price_per_hour_usd: 0.12, spend }))
-    expect(lines.find((l) => l.label === 'size')?.text).toBe('small · $0.120/h')
+    expect(lines.find((l) => l.label === 'default size')?.text).toBe('small · $0.120/h')
     const near = lines.find((l) => l.label === 'spend')
     expect(near?.text).toBe('$4.50 of $5.00 today')
     expect(near?.tone).toBe('warn')
@@ -69,6 +69,71 @@ describe('a provider elsewhere', () => {
     expect(at?.detail).toContain('limit reached')
     const none = elsewhereLines(there({ spend: { ...spend, limit_usd: null, state: 'none' } })).find((l) => l.label === 'spend')
     expect(none?.text).toBe('$4.50 today · no limit')
+  })
+
+  test('shows the default size with its memory and price', () => {
+    const size = elsewhereLines(there({ size: 'mars-2vcpu-2gb', memory_mb: 2048, price_per_hour_usd: 0.107 })).find(
+      (l) => l.label === 'default size',
+    )
+    expect(size).toMatchObject({ tone: '', text: 'mars-2vcpu-2gb · 2048 MB · $0.107/h' })
+    expect(size?.detail).toContain('the cheapest with at least 2 GiB')
+    const set = elsewhereLines(
+      there({ size: 'mars-1vcpu-1gb', memory_mb: 1024, price_per_hour_usd: 0.0535, configured_size: 'mars-1vcpu-1gb' }),
+    ).find((l) => l.label === 'default size')
+    expect(set?.detail).toContain('set by [digitalocean] size')
+  })
+
+  test('shows each memory floor with the size it resolves to', () => {
+    const lines = elsewhereLines(
+      there({
+        size: 'mars-2vcpu-2gb',
+        memory_mb: 2048,
+        price_per_hour_usd: 0.107,
+        floors: [
+          { scope: 'github.com/cosmicspork/tracon', memory: '4Gi', size: 'mars-2vcpu-4gb', memory_mb: 4096, price_per_hour_usd: 0.126 },
+          {
+            scope: 'channel big',
+            memory: '64Gi',
+            error: 'no DigitalOcean size has 64Gi; the largest is mars-16vcpu-32gb (32768 MB)',
+          },
+        ],
+      }),
+    )
+    expect(lines.find((l) => l.label === 'floor github.com/cosmicspork/tracon')).toEqual({
+      label: 'floor github.com/cosmicspork/tracon',
+      tone: '',
+      text: '4Gi → mars-2vcpu-4gb · 4096 MB · $0.126/h',
+    })
+    const none = lines.find((l) => l.label === 'floor channel big')
+    expect(none).toMatchObject({ tone: 'bad', text: '64Gi → none' })
+    expect(none?.detail).toContain('the largest is mars-16vcpu-32gb')
+  })
+
+  test('says why no size can be chosen: an unknown slug, or a catalog not read', () => {
+    const unknown = elsewhereLines(
+      there({
+        configured_size: 'mars-1vcpu-512mb',
+        size_error: "`[digitalocean] size` `mars-1vcpu-512mb` is not in DigitalOcean's catalog (mars-1vcpu-1gb)",
+      }),
+    ).find((l) => l.label === 'default size')
+    expect(unknown).toMatchObject({ tone: 'bad', text: "mars-1vcpu-512mb · not in DigitalOcean's catalog" })
+    expect(unknown?.detail).toContain('is not in')
+
+    const unread = elsewhereLines(
+      there({
+        catalog_error: "could not read DigitalOcean's sandbox sizes: 503",
+        size_error: "DigitalOcean's size catalog could not be read, so no size could be chosen for this sandbox",
+      }),
+    ).find((l) => l.label === 'default size')
+    expect(unread).toMatchObject({ tone: 'bad', text: 'catalog not read' })
+    expect(unread?.detail).toContain('503')
+
+    // A configured size still starts sandboxes without the catalog, unpriced.
+    const trusted = elsewhereLines(
+      there({ size: 'mars-2vcpu-4gb', configured_size: 'mars-2vcpu-4gb', catalog_error: 'could not read: 503' }),
+    ).find((l) => l.label === 'default size')
+    expect(trusted).toMatchObject({ tone: 'warn', text: 'mars-2vcpu-4gb · unpriced' })
+    expect(trusted?.detail).toContain('catalog not read')
   })
 
   test('lists each service and why one is refused', () => {

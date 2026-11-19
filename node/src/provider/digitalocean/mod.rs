@@ -103,7 +103,9 @@ pub struct Settings {
     pub registry: String,
     /// The runtime's base template the image is rebased onto.
     pub base_template: String,
-    /// The sandbox size slug; empty for the runtime's default.
+    /// The sandbox size slug; empty for the cheapest in the runtime's
+    /// catalog with at least 2 GiB (`meter::DEFAULT_MIN_MB`). A
+    /// `[placement]` `require.memory` floor raises either.
     pub size: String,
     /// The most sandboxes this node runs there at once.
     pub limit: u32,
@@ -480,6 +482,9 @@ struct Made {
     /// that builds the image's previous one.
     template: String,
     config_id: Option<String>,
+    /// The size it was made at, which a fork of it is too; `None` for a
+    /// fork of a sandbox this process did not make.
+    size: Option<meter::Chosen>,
     /// Taken by the first `connect`.
     arrival: Option<oneshot::Receiver<SandboxConn>>,
 }
@@ -651,17 +656,20 @@ impl DoProvider {
         &self.meter
     }
 
-    /// Note a sandbox just made, then start its run; a run that fails to
-    /// start removes it, and so ends it.
+    /// Note a sandbox just made at `size`, then start its run; a run that
+    /// fails to start removes it, and so ends it.
     async fn metered_run(
         &self,
         client: &Client,
         session: Session,
-        (image, template): (&str, &str),
+        (image, template, size): (&str, &str, Option<meter::Chosen>),
         bootstrap: &Bootstrap,
         (name, kind, channel, started_ms): (Option<&str>, &str, Option<&str>, i64),
     ) -> Result<Handle, ProviderError> {
-        let (size, price) = self.meter.price(client, &self.options.settings.size).await;
+        let (slug, price) = match &size {
+            Some(size) => (Some(size.slug.clone()), size.price_per_hour_usd),
+            None => (None, None),
+        };
         let id = session.session_id.clone();
         self.meter.started(crate::store::SandboxUsage {
             sandbox_id: id.clone(),
@@ -670,14 +678,14 @@ impl DoProvider {
             kind: kind.into(),
             session_id: None,
             channel: channel.map(str::to_string),
-            size,
+            size: slug,
             price_per_hour_usd: price,
             started_ms,
             ended_ms: None,
             end_reason: None,
         });
         let run = self
-            .start_run(client, session, (image, template), bootstrap)
+            .start_run(client, session, (image, template, size), bootstrap)
             .await;
         if run.is_err() {
             self.meter.ended(&id, "failed");
@@ -743,12 +751,17 @@ impl DoProvider {
         }
     }
 
-    /// The manifest of every sandbox: nothing of the run in it.
-    pub fn manifest(&self, name: &str, template: &str) -> Result<Manifest, ProviderError> {
-        let settings = &self.options.settings;
+    /// The manifest of every sandbox: nothing of the run in it. `size` is
+    /// the slug `meter::choose` chose: never left to the runtime.
+    pub fn manifest(
+        &self,
+        name: &str,
+        template: &str,
+        size: &str,
+    ) -> Result<Manifest, ProviderError> {
         Ok(Manifest {
             template: Some(template.to_string()),
-            size: (!settings.size.is_empty()).then(|| settings.size.clone()),
+            size: Some(size.to_string()),
             keep_warm: true,
             egress: Some({
                 let (allow_ips, allow_hosts) = self.options.reach.egress();
@@ -838,7 +851,7 @@ impl DoProvider {
         &self,
         client: &Client,
         session: Session,
-        (image, template): (&str, &str),
+        (image, template, size): (&str, &str, Option<meter::Chosen>),
         bootstrap: &Bootstrap,
     ) -> Result<Handle, ProviderError> {
         let id = session.session_id.clone();
@@ -858,6 +871,7 @@ impl DoProvider {
                         image: image.to_string(),
                         template: template.to_string(),
                         config_id: ready.config_id.or(session.config_id),
+                        size,
                         arrival: Some(arrival),
                     },
                 );
@@ -938,11 +952,20 @@ impl SandboxProvider for DoProvider {
         let name = spec
             .name
             .ok_or_else(|| failed("a DigitalOcean sandbox needs a name"))?;
-        let manifest = self.manifest(name, &template)?;
         // Said before anything is made: a relay not held now would leave a
         // session nobody can reach.
         self.server_name()?;
         let client = self.client()?;
+        // Decided once, before anything is made: the manifest, the usage
+        // row and any fork of it carry this size. One that cannot be
+        // chosen refuses the create rather than leave it to the runtime.
+        let floor = spec.resources.memory_bytes.map(meter::floor_mb);
+        let size = self
+            .meter
+            .choose(&client, &self.options.settings.size, floor)
+            .await
+            .map_err(|why| failed(format!("no DigitalOcean sandbox was made: {why}")))?;
+        let manifest = self.manifest(name, &template, &size.slug)?;
         let started_ms = crate::store::now_ms();
         let session = client.create_session(&manifest).await.map_err(failed)?;
         let kind = spec
@@ -952,7 +975,7 @@ impl SandboxProvider for DoProvider {
         self.metered_run(
             &client,
             session,
-            (spec.image, &template),
+            (spec.image, &template, Some(size)),
             spec.bootstrap,
             (Some(name), kind, spec.labels.channel.as_deref(), started_ms),
         )
@@ -1101,6 +1124,7 @@ impl SandboxProvider for DoProvider {
     /// A child forked from a checkpoint, told its own bootstrap: it starts
     /// with its parent's memory, and so with a supervisor whose connection
     /// is gone, which ends; the template's service then waits for this one.
+    /// It is its parent's size, and priced as it.
     async fn fork(
         &self,
         snapshot: &SnapshotId,
@@ -1111,12 +1135,12 @@ impl SandboxProvider for DoProvider {
             .0
             .split_once('/')
             .ok_or_else(|| failed(format!("{} is not a DigitalOcean checkpoint", snapshot.0)))?;
-        let (image, template) = self
+        let (image, template, size) = self
             .made
             .lock()
             .unwrap()
             .get(session)
-            .map(|m| (m.image.clone(), m.template.clone()))
+            .map(|m| (m.image.clone(), m.template.clone(), m.size.clone()))
             .unwrap_or_default();
         let client = self.client()?;
         let started_ms = crate::store::now_ms();
@@ -1130,7 +1154,7 @@ impl SandboxProvider for DoProvider {
         self.metered_run(
             &client,
             child,
-            (&image, &template),
+            (&image, &template, size),
             bootstrap,
             (None, meter::FORK, None, started_ms),
         )

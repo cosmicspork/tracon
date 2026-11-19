@@ -36,6 +36,8 @@ pub struct Api {
     pub deleted_templates: Vec<String>,
     /// Gets a template answers BUILDING before it is READY.
     pub template_builds: u32,
+    /// The size catalog answers 503, as an API that cannot be read.
+    pub sizes_fail: bool,
     next: u64,
 }
 
@@ -139,6 +141,7 @@ impl FakeDo {
                 delete(checkpoint_delete),
             )
             .route(&format!("{P}/sessions/{{id}}/fork"), post(fork))
+            .route(&format!("{P}/sessions/sandbox/sizes"), get(sizes))
             .route(&format!("{P}/configs"), get(configs))
             .route(
                 &format!("{P}/configs/{{id}}"),
@@ -227,6 +230,27 @@ async fn session_create(State(s): State<S>, body: String) -> Response {
     });
     api.sessions.insert(id, session.clone());
     (StatusCode::CREATED, Json(json!({"session": session}))).into_response()
+}
+
+/// The catalog `doctl` listed on 2026-11-19 (the fixture `do_harness`
+/// reads), not smallest first, as nothing promises it is.
+async fn sizes(State(s): State<S>) -> Response {
+    if s.api.lock().unwrap().sizes_fail {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"id": "service_unavailable", "message": "try again later"})),
+        )
+            .into_response();
+    }
+    let size = |slug: &str, vcpus: u32, mb: u64, hourly: f64| json!({"slug": slug, "vcpus": vcpus, "memory_mb": mb, "price_per_hour_usd": hourly});
+    Json(json!({"sizes": [
+        size("mars-4vcpu-8gb", 4, 8192, 0.252),
+        size("mars-16vcpu-32gb", 16, 32768, 1.008),
+        size("mars-2vcpu-4gb", 2, 4096, 0.126),
+        size("mars-1vcpu-1gb", 1, 1024, 0.0535),
+        size("mars-2vcpu-2gb", 2, 2048, 0.107),
+    ]}))
+    .into_response()
 }
 
 async fn session_get(State(s): State<S>, Path(id): Path<String>) -> Response {

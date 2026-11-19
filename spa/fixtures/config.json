@@ -3771,6 +3771,22 @@
     {
       "admin": true,
       "apply": "live",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "placement.channel.*.require.memory",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
       "array": "placement.repo",
       "editable": true,
       "editable_at_node": true,
@@ -3924,6 +3940,23 @@
       "shape": {
         "item": "enum",
         "kind": "list",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "placement.repo",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "placement.repo.require.memory",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
         "optional": true
       }
     },
