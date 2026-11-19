@@ -1470,7 +1470,10 @@ pub(crate) async fn verify_node(
             .or_else(|| previous.as_ref().and_then(|n| n.x25519_pub.clone())),
         last_seen_ms: Some(now_ms()),
         reachable: 1,
-        providers_json: None,
+        // Only the providers' own publish writes this, and a re-check is not
+        // one. The hello carries this row, so a summary dropped here would
+        // show this node to every peer as offering no model.
+        providers_json: previous.as_ref().and_then(|n| n.providers_json.clone()),
         app_version: Some(env!("CARGO_PKG_VERSION").into()),
         wire_contract: Some(proto::CONTRACT_VERSION),
         policy_identity: policy.as_ref().map(|bundle| bundle.pubkey_hex.clone()),
