@@ -1690,6 +1690,14 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
                                     # Each pod is labelled tracon.dev/kind (session, check, prepare,
                                     # probe) and tracon.dev/sizing (the table that sized it), plus
                                     # repo, channel, harness and phase where they apply
+# [runtime.kubernetes.pool]         # the nodes sandbox pods run on, in place of the node pod's own
+                                    # machine ("Sandbox pool"); left out, they stay beside it
+# node_selector = { workload = "tracon-sandbox" } # labels a node must carry; the node adds
+                                    # kubernetes.io/arch for its base's architecture
+# tolerations = [{ key = "workload", value = "tracon-sandbox", effect = "NoSchedule" }]
+                                    # the pool's taints; operator "Equal" (default) or "Exists"
+# scale_up_grace_secs = 600         # how long a pod the cluster autoscaler is adding a node for
+                                    # may wait for it, in place of unschedulable_grace_secs
 # internal_cidrs = []               # (under [runtime.kubernetes]) address blocks the per-client
                                     # egress proxy refuses besides the private ones (RFC 1918,
                                     # 100.64.0.0/10, fc00::/7), which it always refuses in a
@@ -2410,12 +2418,35 @@ and an emptyDir at `/tmp` that `TMPDIR` names.
   diff or a publication, and can be hours old.
 - **Placement.** Pods sit beside this node's own pod (`tracon.dev/role=node` and
   `tracon.dev/node=<prefix>`, its `[boundary] resource_prefix`) by pod affinity on
-  `kubernetes.io/hostname`, through the scheduler. The node's pod must carry both labels
+  `kubernetes.io/hostname`, through the scheduler, unless a sandbox pool is set (below).
+  The node's pod must carry both labels
   (the base Deployment sets `tracon.dev/node: tracon`), which the `runtime` check reads
   back from its own pod (`TRACON_POD_NAME`).
+- **Sandbox pool.** `[runtime.kubernetes.pool]` puts every sandbox pod (a session's, a
+  check's, a preparation's, the boundary's probe) on a pool of nodes instead: its
+  `node_selector` labels, plus `kubernetes.io/arch` for the architecture the node
+  pinned the base for, with its `tolerations`, and no affinity to the node pod. One
+  pool takes sessions and checks alike. Everything a sandbox reaches crosses nodes by
+  pod address and label selector: the init containers fetch the bundle over HTTP from
+  the node pod's address, the supervisor dials the same address, the node takes a
+  connection only from the address of the pod its token was issued to, and both
+  NetworkPolicies select pods by label, not by machine. A pool the cluster's autoscaler
+  grows from zero is waited for: while the pool has no node, it has room
+  (`capacity.awaits_node` in the placement event); a pod the scheduler has no place for
+  whose events say the autoscaler is adding a node (`TriggeredScaleUp`) waits up to
+  `scale_up_grace_secs` (600) for it, and a session's start waits that much longer than
+  its usual 90 seconds; one the autoscaler will not place (`NotTriggerScaleUp`: the
+  pool is at its largest) is given up after `unschedulable_grace_secs` as before, the
+  scheduler's and the autoscaler's words in its refusal, so a check stops short of room
+  and joins the line of checks waiting for it. `start_timeout_secs` still bounds every
+  start, and a check's own timeout counts the wait. The `runtime` check refuses a pool
+  whose selector or nodes name another architecture than the base's, and needs `list`
+  on `events` (in the base's `role.yaml`) and the cluster-wide read below.
 - **Room and overflow.** With `[placement] digitalocean` on (or a requirement set), each
   starting session asks the API how much room the node pod's machine has
-  (`TRACON_NODE_NAME`; affinity keeps every sandbox there): its allocatable CPU and
+  (`TRACON_NODE_NAME`; affinity keeps every sandbox there), or the roomiest node of the
+  sandbox pool where one is set (a node still joining counted for what it will have):
+  its allocatable CPU and
   memory, less the requests of every pod bound to it that has not ended, in any
   namespace. A cordoned machine, or one with a `NoSchedule` or `NoExecute` taint, has
   none. The runtime is **full** when a session's pod and one check's pod

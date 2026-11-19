@@ -149,8 +149,9 @@ impl KubeBackend {
     }
 
     /// The bundle fetched or checked, and the stock base pinned by the manifest its registry holds for this
-    /// machine's architecture, which is every sandbox's, since affinity keeps
-    /// them on the node pod's machine. Nothing is pulled here; a pod's
+    /// machine's architecture, which is every sandbox's: affinity keeps them
+    /// on the node pod's machine, and a pool's pods select that
+    /// architecture (a pool of another is refused by the `runtime` check). Nothing is pulled here; a pod's
     /// kubelet pulls the pinned digest. The release's browser bundle too,
     /// where a `[[service]]` names it: a session's pod copies it in from the
     /// node, and the DigitalOcean templates the node builds hold it.
@@ -431,7 +432,8 @@ impl Backend for KubeBackend {
         report
     }
 
-    /// The node pod's machine's room, read at most every `ROOM_FRESH`.
+    /// The room on the node pod's machine, or in `[runtime.kubernetes.pool]`
+    /// where one is set, read at most every `ROOM_FRESH`.
     async fn room(&self) -> Option<Result<Fit, String>> {
         let mut last = self.room.lock().await;
         if let Some((at, read)) = last.as_ref() {
@@ -444,8 +446,15 @@ impl Backend for KubeBackend {
             Ok(env) => match self.client().await {
                 Err(why) => Err(why),
                 Ok(client) => {
-                    let needs = room::needs(&self.cfg.runtime.kubernetes.resources);
-                    room::read(&client, &env.node_name, needs).await
+                    let k = &self.cfg.runtime.kubernetes;
+                    let needs = room::needs(&k.resources);
+                    match k.pool.is_set() {
+                        true => {
+                            let arch = crate::boundary::registry::host_architecture();
+                            room::read_pool(&client, &k.pool, arch, needs).await
+                        }
+                        false => room::read(&client, &env.node_name, needs).await,
+                    }
                 }
             },
         };
@@ -455,6 +464,15 @@ impl Backend for KubeBackend {
 
     async fn converge(&self, _cfg: &Config) -> Result<bool, BoundaryError> {
         self.converge_images().await.map_err(BoundaryError::Other)
+    }
+
+    /// A pool may have to grow a node for a session's pod first.
+    fn start_allowance(&self) -> std::time::Duration {
+        let pool = &self.cfg.runtime.kubernetes.pool;
+        match pool.is_set() {
+            true => std::time::Duration::from_secs(pool.scale_up_grace_secs),
+            false => std::time::Duration::ZERO,
+        }
     }
 
     /// A bundle to fetch and a base to pin; the cluster's manifests stay the

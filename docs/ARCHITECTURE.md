@@ -791,9 +791,25 @@ start places the session again with the runtime counted full
 (`placement::Room::Unschedulable`), and a check reports "could not be scheduled: ..."
 as its result rather than waiting out its timeout.
 
+**A sandbox pool can grow from zero.** With `[runtime.kubernetes.pool]`, sandbox pods
+carry the pool's node selector (and the base's architecture, `kubernetes.io/arch`) and
+tolerations in place of the affinity to the node pod, so sessions and checks run on
+nodes of their own; nothing a sandbox reaches is tied to a machine (the bundle, the
+supervisor's dial and the token are bound to pod addresses, the policies to labels). A
+pool the cluster's autoscaler sizes from zero changes what "no place" means: while the
+pod is `Unschedulable` the provider reads its events every few seconds, and a
+`TriggeredScaleUp` turns the grace into `scale_up_grace_secs` (10 minutes), sticky
+from then on, since a new node takes minutes to boot and join; a `NotTriggerScaleUp`,
+or no word at all, leaves `unschedulable_grace_secs`, and the refusal carries what the
+autoscaler said. Either way the refusal is `unschedulable`, so checks queue on it as
+they do on a full machine. A session's start bound grows by the same allowance
+(`Backend::start_allowance`). The `runtime` check refuses a pool of another
+architecture than the pinned base, by its selector or its nodes' labels.
+
 **Placement counts the cluster's room.** The Kubernetes candidate is full when a
 session's pod and one check's pod (`resources.session` plus `resources.command`) do not
-fit on the node pod's machine: allocatable less the requests of the pods bound there
+fit on the node pod's machine, or on the roomiest node of the pool (a pool with no node
+has room to wait for, `Fit::awaits_node`): allocatable less the requests of the pods bound there
 that have not ended (`provider::kubernetes::room`), read with cluster-wide read-only
 `get`/`list` on `nodes` and `pods` and kept for 3 s. `[placement] local_limit` still
 caps the count. A node that cannot read them places by count and records why

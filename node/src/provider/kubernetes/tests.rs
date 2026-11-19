@@ -98,6 +98,7 @@ async fn a_sandbox_pod_holds_nothing_of_the_claim_and_sits_beside_the_node() {
     let spec = pod.spec.clone().unwrap();
     assert!(spec.node_name.is_none());
     assert!(spec.node_selector.is_none());
+    assert!(spec.tolerations.is_none());
     assert!(spec.scheduling_gates.is_none());
     let term = &spec
         .affinity
@@ -717,6 +718,7 @@ fn a_pod_the_scheduler_has_no_room_for_is_unschedulable() {
         Sizing::Command,
         &k.resources,
         Duration::from_secs(61),
+        &pod::ScaleUp::Unsaid,
     ) else {
         panic!("not a refusal");
     };
@@ -804,6 +806,237 @@ async fn an_unschedulable_pod_is_given_up_after_its_grace() {
             .starts_with("could not be scheduled: 0/1 nodes are available: 1 Insufficient memory."),
         "{message}"
     );
+}
+
+fn pool() -> crate::config::KubePool {
+    crate::config::KubePool {
+        node_selector: BTreeMap::from([("workload".into(), "tracon-sandbox".into())]),
+        tolerations: vec![crate::config::KubeToleration {
+            key: "workload".into(),
+            value: "tracon-sandbox".into(),
+            effect: "NoSchedule".into(),
+            ..Default::default()
+        }],
+        scale_up_grace_secs: 600,
+    }
+}
+
+/// With a pool, a sandbox pod (a probe's too, so admission sees what runs)
+/// goes to the pool's nodes of the base's architecture, tolerating its
+/// taint, and keeps nothing of the affinity to the node pod's machine; its
+/// boundary is otherwise the same.
+#[tokio::test]
+async fn a_pool_places_sandbox_pods_by_its_selector_and_tolerations() {
+    let mut options = options();
+    options.spec.pool = pool();
+    let provider = KubeSandboxProvider::new(
+        kube::Client::new(axum::Router::new(), "tracon-node"),
+        options,
+    );
+    let mounts = session_mounts();
+    for (shape, gated) in [
+        (Shape::Session, false),
+        (Shape::Command, false),
+        (Shape::Probe, true),
+    ] {
+        let pod = provider
+            .render(
+                "tracon-c-1",
+                &CreateSpec {
+                    name: Some("tracon-c-1"),
+                    image: "registry.example/app@sha256:aa",
+                    resources: &Resources::default(),
+                    mounts: &mounts,
+                    bootstrap: &bootstrap(),
+                    labels: &RunLabels::of(RunKind::Check),
+                    shape,
+                },
+                "10.244.0.9:7426",
+                &BundleDigests::harness("cd".repeat(32)),
+                gated,
+            )
+            .unwrap();
+        let spec = pod.spec.clone().unwrap();
+        assert!(spec.affinity.is_none(), "{shape:?}");
+        assert!(spec.node_name.is_none());
+        assert_eq!(
+            spec.node_selector,
+            Some(BTreeMap::from([
+                ("workload".into(), "tracon-sandbox".into()),
+                (
+                    "kubernetes.io/arch".into(),
+                    crate::boundary::registry::host_architecture().into()
+                ),
+            ]))
+        );
+        let tolerations = spec.tolerations.clone().unwrap();
+        assert_eq!(tolerations.len(), 1);
+        assert_eq!(tolerations[0].key.as_deref(), Some("workload"));
+        assert_eq!(tolerations[0].value.as_deref(), Some("tracon-sandbox"));
+        assert_eq!(tolerations[0].effect.as_deref(), Some("NoSchedule"));
+        assert_eq!(tolerations[0].operator, None);
+        assert_eq!(spec.scheduling_gates.is_some(), gated);
+        assert!(breaches(&pod, "tracon-gw").is_empty(), "{shape:?}");
+    }
+    // A selector that names the architecture itself keeps its own.
+    let mut named = pool();
+    named
+        .node_selector
+        .insert("kubernetes.io/arch".into(), "arm64".into());
+    assert_eq!(
+        pod::pool_selector(&named, "amd64")["kubernetes.io/arch"],
+        "arm64"
+    );
+}
+
+/// A pod in a pool the scheduler has no place for, while it does: its
+/// condition, and the pod's events from `events`.
+fn pending_in_pool(events: serde_json::Value) -> axum::Router {
+    axum::Router::new()
+        .route(
+            "/api/v1/namespaces/tracon-node/pods/tracon-c-1",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({
+                    "apiVersion": "v1",
+                    "kind": "Pod",
+                    "metadata": {"name": "tracon-c-1", "namespace": "tracon-node", "uid": "u-1"},
+                    "status": {
+                        "phase": "Pending",
+                        "conditions": [{
+                            "type": "PodScheduled",
+                            "status": "False",
+                            "reason": "Unschedulable",
+                            "message": "0/1 nodes are available: 1 node(s) didn't match Pod's node affinity/selector.",
+                        }],
+                    },
+                }))
+            }),
+        )
+        .route(
+            "/api/v1/namespaces/tracon-node/events",
+            axum::routing::get(
+                move |query: axum::extract::Query<BTreeMap<String, String>>| {
+                    let fields = query.get("fieldSelector").cloned().unwrap_or_default();
+                    let events = events.clone();
+                    async move {
+                        // Only this pod's, by its uid.
+                        assert_eq!(
+                            fields,
+                            "involvedObject.kind=Pod,involvedObject.name=tracon-c-1,involvedObject.uid=u-1"
+                        );
+                        axum::Json(serde_json::json!({
+                            "apiVersion": "v1",
+                            "kind": "EventList",
+                            "metadata": {},
+                            "items": events,
+                        }))
+                    }
+                },
+            ),
+        )
+}
+
+fn event(reason: &str, message: &str, at: &str) -> serde_json::Value {
+    serde_json::json!({
+        "metadata": {"name": format!("tracon-c-1.{reason}"), "namespace": "tracon-node"},
+        "involvedObject": {"kind": "Pod", "name": "tracon-c-1", "uid": "u-1"},
+        "reason": reason,
+        "message": message,
+        "lastTimestamp": at,
+        "source": {"component": "cluster-autoscaler"},
+    })
+}
+
+/// How long `connect` waits on a pod in a pool that the scheduler has no
+/// place for, and what it says when it gives the pod up.
+async fn given_up(events: serde_json::Value) -> (Duration, String) {
+    let mut options = options();
+    options.listen = "127.0.0.1:0".parse().unwrap();
+    options.spec.unschedulable_grace = Duration::from_secs(60);
+    options.spec.pool = pool();
+    let provider = KubeSandboxProvider::new(
+        kube::Client::new(pending_in_pool(events), "tracon-node"),
+        options,
+    );
+    let identity = tracon_sandbox::tls::NodeIdentity::generate().unwrap();
+    let server =
+        SandboxServer::new(&identity, tracon_sandbox::node::ServerOptions::default()).unwrap();
+    let begun = tokio::time::Instant::now();
+    let error = provider
+        .connect(
+            &Handle("tracon-c-1".into()),
+            &server,
+            Duration::from_secs(30),
+        )
+        .await
+        .err()
+        .expect("refused");
+    let waited = begun.elapsed();
+    let ProviderError::Refused { reason, message } = error else {
+        panic!("{error}");
+    };
+    assert_eq!(reason, pod::UNSCHEDULABLE);
+    (waited, message)
+}
+
+/// A pod the cluster autoscaler is adding a node for waits for it, up to
+/// `scale_up_grace_secs`, and is then given up as unschedulable, as a full
+/// cluster's would be: no room, never the run's own failing.
+#[tokio::test(start_paused = true)]
+async fn a_pod_waits_for_the_node_the_autoscaler_adds_up_to_its_grace() {
+    let (waited, message) = given_up(serde_json::json!([
+        event(
+            "NotTriggerScaleUp",
+            "pod didn't trigger scale-up: 1 node(s) had untolerated taint(s)",
+            "2026-11-20T10:00:00Z",
+        ),
+        event(
+            "TriggeredScaleUp",
+            "pod triggered scale-up: [{tracon-sandbox 0->1 (max: 1)}]",
+            "2026-11-20T10:00:05Z",
+        ),
+    ]))
+    .await;
+    assert!(waited >= Duration::from_secs(600), "{waited:?}");
+    assert!(waited < Duration::from_secs(606), "{waited:?}");
+    assert!(
+        message.contains("the cluster autoscaler was adding a node for it (pod triggered scale-up: [{tracon-sandbox 0->1 (max: 1)}])"),
+        "{message}"
+    );
+    assert!(
+        message.contains("[runtime.kubernetes.pool] scale_up_grace_secs"),
+        "{message}"
+    );
+}
+
+/// One the autoscaler will not add a node for (the pool is at its largest)
+/// is full, after the usual grace, and says why; so is one in a pool with no
+/// autoscaler at all.
+#[tokio::test(start_paused = true)]
+async fn a_pod_the_autoscaler_will_not_place_is_given_up_after_the_usual_grace() {
+    let (waited, message) = given_up(serde_json::json!([event(
+        "NotTriggerScaleUp",
+        "pod didn't trigger scale-up: 1 max node group size reached",
+        "2026-11-20T10:00:00Z",
+    )]))
+    .await;
+    assert!(waited >= Duration::from_secs(60), "{waited:?}");
+    assert!(waited < Duration::from_secs(66), "{waited:?}");
+    assert!(
+        message.contains(
+            "the cluster autoscaler added no node for it: pod didn't trigger scale-up: 1 max node group size reached"
+        ),
+        "{message}"
+    );
+    assert!(
+        message.contains("[runtime.kubernetes] unschedulable_grace_secs"),
+        "{message}"
+    );
+
+    let (waited, message) = given_up(serde_json::json!([])).await;
+    assert!(waited >= Duration::from_secs(60), "{waited:?}");
+    assert!(waited < Duration::from_secs(66), "{waited:?}");
+    assert!(!message.contains("autoscaler"), "{message}");
 }
 
 /// A connection is handed only to the run expected at its address, whether

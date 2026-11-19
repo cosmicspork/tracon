@@ -20,3 +20,10 @@ data:
 
     [session]
     worktree_root = "/state/work"
+
+    # Sandbox pods run beside the node's own pod unless a pool of nodes is
+    # named for them, say one the cluster autoscaler sizes from zero (README,
+    # "Sandbox pool"):
+    # [runtime.kubernetes.pool]
+    # node_selector = { workload = "tracon-sandbox" }
+    # tolerations = [{ key = "workload", value = "tracon-sandbox", effect = "NoSchedule" }]

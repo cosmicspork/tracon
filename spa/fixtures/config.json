@@ -1674,6 +1674,106 @@
     },
     {
       "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.pool.node_selector.*",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "array": "runtime.kubernetes.pool.tolerations",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.pool.tolerations.key",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "array": "runtime.kubernetes.pool.tolerations",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.pool.tolerations.operator",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "array": "runtime.kubernetes.pool.tolerations",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.pool.tolerations.value",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "array": "runtime.kubernetes.pool.tolerations",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.pool.tolerations.effect",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "string",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "runtime.kubernetes.pool.scale_up_grace_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
       "apply": "live",
       "array": "repo",
       "editable": true,

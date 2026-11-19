@@ -10,7 +10,7 @@ use k8s_openapi::api::core::v1::{
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 
-use crate::config::{Config, KubeResources, PodSizing};
+use crate::config::{Config, KubePool, KubeResources, PodSizing};
 use crate::runner::{Mount, RunLabels, RunnerError};
 
 pub const ROLE_LABEL: &str = "tracon.dev/role";
@@ -322,6 +322,7 @@ pub(crate) fn unschedulable_error(
     sizing: Sizing,
     resources: &KubeResources,
     waited: Duration,
+    scale_up: &ScaleUp,
 ) -> RunnerError {
     let sized = sizing.sized(resources);
     let table = format!("[runtime.kubernetes.resources.{}]", sizing.as_str());
@@ -341,8 +342,26 @@ pub(crate) fn unschedulable_error(
             sized.cpu_request
         ));
     }
+    let grace = match scale_up {
+        ScaleUp::Triggered(added) => {
+            message.push_str(&format!(
+                "; the cluster autoscaler was adding a node for it ({}), which did not take it in \
+                 time",
+                added.trim()
+            ));
+            "[runtime.kubernetes.pool] scale_up_grace_secs"
+        }
+        ScaleUp::NotTriggered(why) => {
+            message.push_str(&format!(
+                "; the cluster autoscaler added no node for it: {}",
+                why.trim()
+            ));
+            "[runtime.kubernetes] unschedulable_grace_secs"
+        }
+        ScaleUp::Unsaid => "[runtime.kubernetes] unschedulable_grace_secs",
+    };
     message.push_str(&format!(
-        " (pod {name}, unschedulable for {}s; [runtime.kubernetes] unschedulable_grace_secs)",
+        " (pod {name}, unschedulable for {}s; {grace})",
         waited.as_secs()
     ));
     RunnerError::Refused {
@@ -457,6 +476,9 @@ pub struct KubeSpec {
     pub image_pull_secrets: Vec<String>,
     /// `[runtime.kubernetes] shm_size`.
     pub shm_size: String,
+    /// `[runtime.kubernetes.pool]`: the nodes sandbox pods run on, when
+    /// set, in place of the node pod's own machine.
+    pub pool: KubePool,
 }
 
 impl KubeSpec {
@@ -486,6 +508,7 @@ impl KubeSpec {
             resources: k.resources.clone(),
             image_pull_secrets: k.image_pull_secrets.clone(),
             shm_size: k.shm_size.clone(),
+            pool: k.pool.clone(),
         }
     }
 
@@ -511,6 +534,11 @@ impl KubeSpec {
         }
     }
 
+    /// `[runtime.kubernetes.pool] scale_up_grace_secs`.
+    pub fn scale_up_grace(&self) -> Duration {
+        Duration::from_secs(self.pool.scale_up_grace_secs)
+    }
+
     pub(crate) fn pull_secrets(&self) -> Option<Vec<LocalObjectReference>> {
         (!self.image_pull_secrets.is_empty()).then(|| {
             self.image_pull_secrets
@@ -522,6 +550,112 @@ impl KubeSpec {
 }
 
 pub(crate) const HARNESS_CONTAINER: &str = "harness";
+
+/// The label every node carries naming its architecture.
+pub const ARCH_LABEL: &str = "kubernetes.io/arch";
+/// The label older nodes carry beside it, which a selector may still name.
+const BETA_ARCH_LABEL: &str = "beta.kubernetes.io/arch";
+
+/// The node selector a sandbox pod in `pool` carries: the pool's labels,
+/// and the architecture its sandbox base is pinned for (`arch`), so a pod
+/// never lands on a node that could not run it.
+pub fn pool_selector(pool: &KubePool, arch: &str) -> std::collections::BTreeMap<String, String> {
+    let mut selector = pool.node_selector.clone();
+    selector
+        .entry(ARCH_LABEL.to_string())
+        .or_insert_with(|| arch.to_string());
+    selector
+}
+
+/// Why sandbox pods cannot run in `pool` when its nodes, as `nodes` lists
+/// them by its own labels, or its selector, name another architecture than
+/// `arch`, the one the node pinned its sandbox base for: every pod there
+/// would pull an image it cannot run. `None` when nothing says so; a pool
+/// with no node yet is told by its selector alone, and its pods by their
+/// own selector (`pool_selector`).
+pub fn arch_refusal(
+    pool: &KubePool,
+    nodes: &[k8s_openapi::api::core::v1::Node],
+    arch: &str,
+) -> Option<String> {
+    let advice = format!(
+        "the sandbox base is pinned for {arch}, the node pod's own machine's architecture, so \
+         every sandbox pod must run on {arch}: select a pool of {arch} nodes in \
+         [runtime.kubernetes.pool] node_selector, or run the node itself on that architecture"
+    );
+    for label in [ARCH_LABEL, BETA_ARCH_LABEL] {
+        if let Some(named) = pool.node_selector.get(label).filter(|named| *named != arch) {
+            return Some(format!(
+                "[runtime.kubernetes.pool] node_selector names {label}={named}; {advice}"
+            ));
+        }
+    }
+    let other: Vec<String> = nodes
+        .iter()
+        .filter_map(|node| {
+            let labels = node.metadata.labels.as_ref()?;
+            let theirs = labels
+                .get(ARCH_LABEL)
+                .or_else(|| labels.get(BETA_ARCH_LABEL))?;
+            (theirs != arch).then(|| {
+                format!(
+                    "{} ({theirs})",
+                    node.metadata.name.as_deref().unwrap_or("a node")
+                )
+            })
+        })
+        .collect();
+    (!other.is_empty()).then(|| {
+        format!(
+            "the sandbox pool's nodes include {}; {advice}",
+            other.join(", ")
+        )
+    })
+}
+
+/// What the cluster's autoscaler last said of a pod the scheduler had no
+/// place for, read from the pod's events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScaleUp {
+    /// Nothing yet: it has not looked, or there is no autoscaler.
+    Unsaid,
+    /// It is adding a node the pod fits on (`TriggeredScaleUp`), in its
+    /// words. Taken over anything it said before or after: once a node is
+    /// on its way, the pod waits for it.
+    Triggered(String),
+    /// No node it could add would take the pod (`NotTriggerScaleUp`): the
+    /// pool is at its largest, or the pod fits none of its nodes. Its
+    /// latest words.
+    NotTriggered(String),
+}
+
+/// What `events` (a pod's) say of its scale-up.
+pub fn scale_up(events: &[k8s_openapi::api::core::v1::Event]) -> ScaleUp {
+    let said =
+        |event: &k8s_openapi::api::core::v1::Event| event.message.clone().unwrap_or_default();
+    if let Some(event) = events
+        .iter()
+        .find(|e| e.reason.as_deref() == Some("TriggeredScaleUp"))
+    {
+        return ScaleUp::Triggered(said(event));
+    }
+    let when = |event: &k8s_openapi::api::core::v1::Event| {
+        event
+            .last_timestamp
+            .as_ref()
+            .map(|t| t.0)
+            .or(event.event_time.as_ref().map(|t| t.0))
+            .or(event.first_timestamp.as_ref().map(|t| t.0))
+    };
+    match events
+        .iter()
+        .filter(|e| e.reason.as_deref() == Some("NotTriggerScaleUp"))
+        .max_by_key(|e| when(e))
+    {
+        Some(event) => ScaleUp::NotTriggered(said(event)),
+        None => ScaleUp::Unsaid,
+    }
+}
 
 /// The status of the one container a sandbox pod runs, by name.
 pub(crate) fn harness_status(status: &PodStatus) -> Option<&ContainerStatus> {
@@ -937,6 +1071,107 @@ mod tests {
         };
         assert_eq!(evicted(&failed, None), None);
         assert_eq!(evicted(&PodStatus::default(), None), None);
+    }
+
+    /// A node the autoscaler is adding is waited for whatever it said
+    /// besides; otherwise its latest refusal stands; with neither, nothing
+    /// was said.
+    #[test]
+    fn what_the_autoscaler_said_is_read_from_the_pods_events() {
+        use k8s_openapi::api::core::v1::Event;
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
+        let event = |reason: &str, message: &str, at: &str| Event {
+            reason: Some(reason.into()),
+            message: Some(message.into()),
+            last_timestamp: Some(Time(at.parse().unwrap())),
+            ..Default::default()
+        };
+        let earlier = event(
+            "NotTriggerScaleUp",
+            "pod didn't trigger scale-up: 1 node(s) had untolerated taint(s)",
+            "2026-11-20T10:00:00Z",
+        );
+        let later = event(
+            "NotTriggerScaleUp",
+            "pod didn't trigger scale-up: 1 max node group size reached",
+            "2026-11-20T10:01:00Z",
+        );
+        let triggered = event(
+            "TriggeredScaleUp",
+            "pod triggered scale-up: [{pool 0->1 (max: 1)}]",
+            "2026-11-20T10:00:30Z",
+        );
+        assert_eq!(scale_up(&[]), ScaleUp::Unsaid);
+        assert_eq!(
+            scale_up(&[event("Scheduled", "", "2026-11-20T10:00:00Z")]),
+            ScaleUp::Unsaid
+        );
+        assert_eq!(
+            scale_up(&[later.clone(), earlier.clone()]),
+            ScaleUp::NotTriggered(
+                "pod didn't trigger scale-up: 1 max node group size reached".into()
+            )
+        );
+        assert_eq!(
+            scale_up(&[earlier, triggered, later]),
+            ScaleUp::Triggered("pod triggered scale-up: [{pool 0->1 (max: 1)}]".into())
+        );
+    }
+
+    /// A pool of another architecture than the base is pinned for is
+    /// refused, whether its selector or one of its nodes says so; one with
+    /// no node yet, or of the same architecture, is not.
+    #[test]
+    fn a_pool_of_another_architecture_is_refused() {
+        use k8s_openapi::api::core::v1::Node;
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+        let node = |name: &str, arch: &str| Node {
+            metadata: ObjectMeta {
+                name: Some(name.into()),
+                labels: Some(std::collections::BTreeMap::from([(
+                    ARCH_LABEL.to_string(),
+                    arch.to_string(),
+                )])),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut pool = KubePool {
+            node_selector: [("workload".to_string(), "tracon-sandbox".to_string())].into(),
+            ..Default::default()
+        };
+        assert_eq!(arch_refusal(&pool, &[], "amd64"), None);
+        assert_eq!(
+            arch_refusal(&pool, &[node("pool-a", "amd64")], "amd64"),
+            None
+        );
+        let why = arch_refusal(
+            &pool,
+            &[node("pool-a", "amd64"), node("pool-b", "arm64")],
+            "amd64",
+        )
+        .unwrap();
+        assert!(
+            why.starts_with(
+                "the sandbox pool's nodes include pool-b (arm64); the sandbox base \
+                             is pinned for amd64"
+            ),
+            "{why}"
+        );
+        assert!(
+            why.contains("[runtime.kubernetes.pool] node_selector"),
+            "{why}"
+        );
+        pool.node_selector
+            .insert(BETA_ARCH_LABEL.into(), "arm64".into());
+        let why = arch_refusal(&pool, &[], "amd64").unwrap();
+        assert!(
+            why.starts_with(
+                "[runtime.kubernetes.pool] node_selector names beta.kubernetes.io/arch=arm64"
+            ),
+            "{why}"
+        );
+        assert_eq!(arch_refusal(&pool, &[], "arm64"), None);
     }
 
     #[test]

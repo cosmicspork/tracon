@@ -2094,6 +2094,10 @@ pub struct Kubernetes {
     pub unschedulable_grace_secs: u64,
     /// Requests and limits for sandbox pods, `[runtime.kubernetes.resources]`.
     pub resources: KubeResources,
+    /// Which of the cluster's nodes sandbox pods run on,
+    /// `[runtime.kubernetes.pool]`. Left out, every sandbox pod sits on the
+    /// node pod's own machine.
+    pub pool: KubePool,
     /// Secrets a sandbox pod pulls its image with. Empty leaves the pod
     /// without any, so the namespace's `default` service account supplies
     /// its own (a registry integration that patches that account works
@@ -2124,6 +2128,153 @@ pub struct Kubernetes {
 /// The port a pod-hosted node takes its sandboxes' connections on by
 /// default.
 pub const KUBE_SANDBOX_PORT: u16 = 7426;
+
+/// The nodes every sandbox pod (a session's, a check's, a preparation's) is
+/// placed on, in place of the node pod's own machine: those carrying every
+/// `node_selector` label, whose taints `tolerations` let them onto. A pool
+/// the cluster's autoscaler grows from zero is waited for, not taken as full
+/// (`scale_up_grace_secs`). Left out (no `node_selector`), sandboxes keep
+/// to the node pod's machine by pod affinity, as before.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct KubePool {
+    /// Labels a node must carry for a sandbox pod to run there (the pod's
+    /// `nodeSelector`): a node pool's own label, say `workload =
+    /// "tracon-sandbox"`. The node adds `kubernetes.io/arch` for the
+    /// architecture its sandbox base is pinned for.
+    pub node_selector: std::collections::BTreeMap<String, String>,
+    /// Taints a sandbox pod tolerates, as Kubernetes spells a toleration:
+    /// the pool's own `NoSchedule` taint, which keeps everything else off it.
+    pub tolerations: Vec<KubeToleration>,
+    /// How long a sandbox pod the cluster autoscaler is adding a node for
+    /// (its `TriggeredScaleUp` event) may stay unschedulable before the
+    /// node gives it up, in place of `unschedulable_grace_secs`: a new node
+    /// takes minutes to boot and join. Bounded by `start_timeout_secs`, which
+    /// still applies.
+    pub scale_up_grace_secs: u64,
+}
+
+impl Default for KubePool {
+    fn default() -> Self {
+        Self {
+            node_selector: Default::default(),
+            tolerations: Vec::new(),
+            scale_up_grace_secs: 10 * 60,
+        }
+    }
+}
+
+/// One taint a sandbox pod tolerates: `key`, `operator` (`Equal`, the
+/// default, or `Exists`), `value` and `effect` (`NoSchedule`,
+/// `PreferNoSchedule`, `NoExecute`; empty for any).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct KubeToleration {
+    pub key: String,
+    pub operator: String,
+    pub value: String,
+    pub effect: String,
+}
+
+impl KubeToleration {
+    /// Whether it tolerates the taint `key=value:effect`, as the scheduler
+    /// reads a toleration.
+    pub fn tolerates(&self, key: &str, value: &str, effect: &str) -> bool {
+        let effect_matches = self.effect.is_empty() || self.effect == effect;
+        let key_matches = match self.operator.as_str() {
+            "Exists" => self.key.is_empty() || self.key == key,
+            _ => self.key == key && self.value == value,
+        };
+        effect_matches && key_matches
+    }
+}
+
+/// A label's key as the API server checks it: an optional DNS-subdomain
+/// prefix and `/`, then a name.
+fn label_key(key: &str) -> bool {
+    let (prefix, name) = match key.rsplit_once('/') {
+        Some((prefix, name)) => (Some(prefix), name),
+        None => (None, key),
+    };
+    prefix.is_none_or(dns_subdomain) && label_name(name)
+}
+
+/// A label's name, or a non-empty value: at most 63 characters,
+/// alphanumeric at both ends, `-`, `_` and `.` between.
+fn label_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 63
+        && name.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && name.ends_with(|c: char| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+impl KubePool {
+    /// Whether sandbox pods go to a pool rather than the node pod's machine.
+    pub fn is_set(&self) -> bool {
+        !self.node_selector.is_empty()
+    }
+
+    /// Refuse what the API server would reject at every pod create, and
+    /// tolerations with no pool to keep them to, which would let sandboxes
+    /// onto any node.
+    fn validate(&self) -> Result<(), String> {
+        const KEY: &str = "runtime.kubernetes.pool";
+        if !self.tolerations.is_empty() && self.node_selector.is_empty() {
+            return Err(format!(
+                "{KEY}.tolerations without a node_selector would let sandbox pods onto any \
+                 node; name the pool's label in {KEY}.node_selector"
+            ));
+        }
+        for (key, value) in &self.node_selector {
+            if !label_key(key) {
+                return Err(format!("{KEY}.node_selector: {key:?} is not a label key"));
+            }
+            if !value.is_empty() && !label_name(value) {
+                return Err(format!(
+                    "{KEY}.node_selector: {value:?} ({key}) is not a label value"
+                ));
+            }
+        }
+        for toleration in &self.tolerations {
+            let operator = toleration.operator.as_str();
+            if !matches!(operator, "" | "Equal" | "Exists") {
+                return Err(format!(
+                    "{KEY}.tolerations: operator {operator:?} is neither Equal nor Exists"
+                ));
+            }
+            if !matches!(
+                toleration.effect.as_str(),
+                "" | "NoSchedule" | "PreferNoSchedule" | "NoExecute"
+            ) {
+                return Err(format!(
+                    "{KEY}.tolerations: effect {:?} is not NoSchedule, PreferNoSchedule or \
+                     NoExecute",
+                    toleration.effect
+                ));
+            }
+            if operator == "Exists" && !toleration.value.is_empty() {
+                return Err(format!(
+                    "{KEY}.tolerations: {:?} names a value with operator Exists",
+                    toleration.key
+                ));
+            }
+            if operator != "Exists" && !label_key(&toleration.key) {
+                return Err(format!(
+                    "{KEY}.tolerations: {:?} is not a taint key (only Exists may leave it \
+                     empty)",
+                    toleration.key
+                ));
+            }
+        }
+        if self.scale_up_grace_secs == 0 {
+            return Err(format!("{KEY}.scale_up_grace_secs must be at least 1"));
+        }
+        Ok(())
+    }
+}
 
 /// What a sandbox pod asks the scheduler for. Three kinds: a session (the
 /// harness and whatever it runs while the operator works), a command run to
@@ -2348,7 +2499,7 @@ impl Kubernetes {
                 .parse::<crate::gateway::proxy::Cidr>()
                 .map_err(|error| format!("runtime.kubernetes.internal_cidrs: {error}"))?;
         }
-        Ok(())
+        self.pool.validate()
     }
 }
 
@@ -2363,6 +2514,7 @@ impl Default for Kubernetes {
             start_timeout_secs: 15 * 60,
             unschedulable_grace_secs: 60,
             resources: KubeResources::default(),
+            pool: KubePool::default(),
             image_pull_secrets: Vec::new(),
             shm_size: "1Gi".into(),
             internal_cidrs: Vec::new(),
@@ -5230,6 +5382,82 @@ models = [{ id = "gpt-6" }]
         k.resources.command.memory_limit = Some("2048Mi".into());
         k.resources.command.cpu_limit = Some("0.5".into());
         k.validate().unwrap();
+    }
+
+    /// A pool is read as Kubernetes spells a node selector and its
+    /// tolerations, and what the API server would refuse at every pod
+    /// create is refused at load; left out, there is none.
+    #[test]
+    fn a_sandbox_pool_is_read_and_checked_at_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.toml");
+        std::fs::write(
+            &path,
+            "[runtime.kubernetes.pool]\n\
+             node_selector = { workload = \"tracon-sandbox\" }\n\
+             tolerations = [{ key = \"workload\", value = \"tracon-sandbox\", effect = \"NoSchedule\" }]\n",
+        )
+        .unwrap();
+        let pool = Config::try_load_from(&path)
+            .unwrap()
+            .runtime
+            .kubernetes
+            .pool;
+        assert!(pool.is_set());
+        assert_eq!(pool.node_selector["workload"], "tracon-sandbox");
+        assert_eq!(pool.scale_up_grace_secs, 600);
+        let toleration = &pool.tolerations[0];
+        assert!(toleration.tolerates("workload", "tracon-sandbox", "NoSchedule"));
+        assert!(!toleration.tolerates("workload", "minecraft", "NoSchedule"));
+        assert!(!toleration.tolerates("workload", "tracon-sandbox", "NoExecute"));
+        let any = KubeToleration {
+            operator: "Exists".into(),
+            ..Default::default()
+        };
+        assert!(any.tolerates("anything", "at-all", "NoExecute"));
+        assert!(!Config::default().runtime.kubernetes.pool.is_set());
+
+        let refused = |toml_text: &str, needle: &str| {
+            std::fs::write(&path, toml_text).unwrap();
+            let error = Config::try_load_from(&path).unwrap_err();
+            assert!(error.contains(needle), "{needle}: {error}");
+        };
+        refused(
+            "[runtime.kubernetes.pool]\ntolerations = [{ key = \"workload\", operator = \"Exists\" }]\n",
+            "tolerations without a node_selector",
+        );
+        refused(
+            "[runtime.kubernetes.pool]\nnode_selector = { \"a b\" = \"x\" }\n",
+            "\"a b\" is not a label key",
+        );
+        refused(
+            "[runtime.kubernetes.pool]\nnode_selector = { workload = \"-x\" }\n",
+            "\"-x\" (workload) is not a label value",
+        );
+        refused(
+            "[runtime.kubernetes.pool]\nnode_selector = { workload = \"x\" }\n\
+             tolerations = [{ key = \"workload\", operator = \"Is\" }]\n",
+            "operator \"Is\" is neither Equal nor Exists",
+        );
+        refused(
+            "[runtime.kubernetes.pool]\nnode_selector = { workload = \"x\" }\n\
+             tolerations = [{ key = \"workload\", effect = \"NoRun\" }]\n",
+            "effect \"NoRun\"",
+        );
+        refused(
+            "[runtime.kubernetes.pool]\nnode_selector = { workload = \"x\" }\n\
+             tolerations = [{ key = \"workload\", operator = \"Exists\", value = \"x\" }]\n",
+            "names a value with operator Exists",
+        );
+        refused(
+            "[runtime.kubernetes.pool]\nnode_selector = { workload = \"x\" }\n\
+             tolerations = [{ value = \"x\" }]\n",
+            "is not a taint key",
+        );
+        refused(
+            "[runtime.kubernetes.pool]\nnode_selector = { workload = \"x\" }\nscale_up_grace_secs = 0\n",
+            "scale_up_grace_secs must be at least 1",
+        );
     }
 
     #[test]

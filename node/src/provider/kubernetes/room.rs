@@ -1,14 +1,19 @@
 //! How much room the cluster has for one more session, for placement.
 //!
-//! Every sandbox pod is kept beside the node's own pod by required pod
-//! affinity on `kubernetes.io/hostname`, so the room that counts is the node
-//! pod's machine's: its allocatable CPU and memory, less the requests of
-//! every pod bound to it that has not ended, in any namespace. A session
-//! fits when its pod and one check's pod (`[runtime.kubernetes.resources]`
-//! `session` and `command`) fit together on a schedulable node, so a session
-//! placed here can still run its checks. A node that is cordoned or carries a
-//! `NoSchedule` or `NoExecute` taint (sandbox pods tolerate none) takes
-//! nothing.
+//! Without a pool, every sandbox pod is kept beside the node's own pod by
+//! required pod affinity on `kubernetes.io/hostname`, so the room that counts
+//! is the node pod's machine's: its allocatable CPU and memory, less the
+//! requests of every pod bound to it that has not ended, in any namespace.
+//! With `[runtime.kubernetes.pool]`, it is the roomiest of the pool's nodes
+//! (those its node selector, with the base's architecture, selects), and a
+//! pool with no node at all has room to wait for: the cluster's autoscaler
+//! adds one when a pod asks (`Fit::awaits_node`). A session fits when its pod
+//! and one check's pod (`[runtime.kubernetes.resources]` `session` and
+//! `command`) fit together on a schedulable node, so a session placed here
+//! can still run its checks. A node that is cordoned or carries a
+//! `NoSchedule` or `NoExecute` taint the pods do not tolerate takes nothing,
+//! except that a pool's node still starting up counts for the room it will
+//! have (`STARTING`).
 //!
 //! Read with cluster-wide `get` and `list` on `nodes` and `pods`
 //! (`deploy/kubernetes/base/clusterrole.yaml`). Without them it is not read,
@@ -22,18 +27,31 @@ use kube::api::ListParams;
 use kube::Api;
 use serde::Serialize;
 
-use crate::config::{kube_quantity, KubeResources};
+use crate::config::{kube_quantity, KubePool, KubeResources, KubeToleration};
 
 /// What a session and its checks need, against what the roomiest
 /// schedulable node has free. CPU in millicores, memory in bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct Fit {
     pub free_cpu: u64,
     pub free_memory: u64,
     pub needs_cpu: u64,
     pub needs_memory: u64,
     pub fits: bool,
+    /// The pool has no node now: one is added when a pod asks, so it fits
+    /// without anything free yet.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub awaits_node: bool,
 }
+
+/// The taints a node carries while it is still joining the cluster, which
+/// lift once it is ready: a pool's new node counts for the room it will
+/// have, so a second start during a scale-up is not taken as full.
+pub const STARTING: [&str; 3] = [
+    "node.kubernetes.io/not-ready",
+    "node.cloudprovider.kubernetes.io/uninitialized",
+    "node.cilium.io/agent-not-ready",
+];
 
 /// What one more session asks of a node, as (millicores, bytes): its own
 /// pod's requests and one check's.
@@ -82,18 +100,19 @@ pub fn pod_requests(pod: &Pod) -> (u64, u64) {
     (cpu + overhead_cpu, memory + overhead_memory)
 }
 
-/// Whether the scheduler would put a sandbox pod on `node`: not cordoned,
-/// and no taint a pod without tolerations is kept off by.
-pub fn schedulable(node: &Node) -> bool {
+/// Whether the scheduler would put a sandbox pod tolerating `tolerations`
+/// on `node`: not cordoned, and no taint it is kept off by.
+pub fn schedulable(node: &Node, tolerations: &[KubeToleration]) -> bool {
     let Some(spec) = &node.spec else {
         return true;
     };
     !spec.unschedulable.unwrap_or(false)
-        && !spec
-            .taints
-            .iter()
-            .flatten()
-            .any(|t| t.effect == "NoSchedule" || t.effect == "NoExecute")
+        && !spec.taints.iter().flatten().any(|t| {
+            (t.effect == "NoSchedule" || t.effect == "NoExecute")
+                && !tolerations.iter().any(|tolerated| {
+                    tolerated.tolerates(&t.key, t.value.as_deref().unwrap_or_default(), &t.effect)
+                })
+        })
 }
 
 /// Whether a pod still holds its requests on its node: one that ended
@@ -110,10 +129,20 @@ fn holds(pod: &Pod) -> bool {
 /// A node where it fits is preferred; among the rest, the one with the most
 /// memory free. No schedulable node at all has nothing free.
 pub fn fit(nodes: &[Node], pods: &[Pod], needs: (u64, u64)) -> Fit {
+    fit_tolerating(nodes, pods, needs, &[])
+}
+
+/// [`fit`], for pods that tolerate `tolerations`.
+pub fn fit_tolerating(
+    nodes: &[Node],
+    pods: &[Pod],
+    needs: (u64, u64),
+    tolerations: &[KubeToleration],
+) -> Fit {
     let (needs_cpu, needs_memory) = needs;
     let best = nodes
         .iter()
-        .filter(|node| schedulable(node))
+        .filter(|node| schedulable(node, tolerations))
         .map(|node| {
             let name = node.metadata.name.as_deref().unwrap_or_default();
             let (cpu, memory) = amounts(node.status.as_ref().and_then(|s| s.allocatable.as_ref()));
@@ -141,7 +170,30 @@ pub fn fit(nodes: &[Node], pods: &[Pod], needs: (u64, u64)) -> Fit {
         needs_cpu,
         needs_memory,
         fits,
+        awaits_node: false,
     }
+}
+
+/// The room in a pool whose nodes, as its selector lists them, are `nodes`:
+/// the roomiest that the pool's pods tolerate (and one still starting, for
+/// the room it will have), or, with no node at all, room to wait for.
+pub fn pool_fit(nodes: &[Node], pods: &[Pod], needs: (u64, u64), pool: &KubePool) -> Fit {
+    if nodes.is_empty() {
+        return Fit {
+            needs_cpu: needs.0,
+            needs_memory: needs.1,
+            fits: true,
+            awaits_node: true,
+            ..Fit::default()
+        };
+    }
+    let mut tolerations = pool.tolerations.clone();
+    tolerations.extend(STARTING.iter().map(|key| KubeToleration {
+        key: key.to_string(),
+        operator: "Exists".into(),
+        ..Default::default()
+    }));
+    fit_tolerating(nodes, pods, needs, &tolerations)
 }
 
 /// Read the room on `node` (the node pod's own machine, `TRACON_NODE_NAME`)
@@ -169,6 +221,61 @@ pub async fn read(client: &kube::Client, node: &str, needs: (u64, u64)) -> Resul
     Ok(fit(&[found], &bound.items, needs))
 }
 
+/// A node selector as a label selector query: `key=value,...`.
+pub fn selector_query(selector: &BTreeMap<String, String>) -> String {
+    selector
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The nodes a pool's own labels select, whatever their architecture.
+pub async fn pool_nodes(client: &kube::Client, pool: &KubePool) -> Result<Vec<Node>, String> {
+    let nodes: Api<Node> = Api::all(client.clone());
+    nodes
+        .list(&ListParams::default().labels(&selector_query(&pool.node_selector)))
+        .await
+        .map(|listed| listed.items)
+        .map_err(|e| denied("list the sandbox pool's nodes", e))
+}
+
+fn denied(what: &str, error: kube::Error) -> String {
+    match &error {
+        kube::Error::Api(status) if status.code == 403 => format!(
+            "the node may not {what} (deploy/kubernetes/base/clusterrole.yaml grants it): {}",
+            status.message
+        ),
+        _ => format!("{what}: {error}"),
+    }
+}
+
+/// Read the room in `pool` from the API: its nodes of `arch` (the pods'
+/// own selector, `pod::pool_selector`), and the pods bound anywhere that
+/// have not ended. `Err` says why it could not be.
+pub async fn read_pool(
+    client: &kube::Client,
+    pool: &KubePool,
+    arch: &str,
+    needs: (u64, u64),
+) -> Result<Fit, String> {
+    let nodes: Api<Node> = Api::all(client.clone());
+    let selector = super::pod::pool_selector(pool, arch);
+    let found = nodes
+        .list(&ListParams::default().labels(&selector_query(&selector)))
+        .await
+        .map_err(|e| denied("list the sandbox pool's nodes", e))?;
+    if found.items.is_empty() {
+        return Ok(pool_fit(&[], &[], needs, pool));
+    }
+    let pods: Api<Pod> = Api::all(client.clone());
+    let bound = pods
+        .list(&ListParams::default().fields("status.phase!=Succeeded,status.phase!=Failed"))
+        .await
+        .map_err(|e| denied("list the pods on the sandbox pool's nodes", e))?;
+    Ok(pool_fit(&found.items, &bound.items, needs, pool))
+}
+
 /// Memory as an operator reads it: `630 Mi`, `1.5 Gi`.
 pub fn memory_words(bytes: u64) -> String {
     const MI: f64 = 1024.0 * 1024.0;
@@ -193,7 +300,15 @@ pub fn cpu_words(millis: u64) -> String {
 
 impl std::fmt::Display for Fit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.fits {
+        if self.awaits_node {
+            write!(
+                f,
+                "the sandbox pool has no node now, and the cluster's autoscaler adds one when a \
+                 pod asks; a session and its checks need {} and {} CPU",
+                memory_words(self.needs_memory),
+                cpu_words(self.needs_cpu)
+            )
+        } else if self.fits {
             write!(
                 f,
                 "the cluster has {} and {} CPU free; a session and its checks need {} and {} CPU",
@@ -391,9 +506,147 @@ mod tests {
                 free_memory: 0,
                 needs_cpu: 750,
                 needs_memory: 3 * GI,
-                fits: false
+                fits: false,
+                awaits_node: false,
             }
         );
+    }
+
+    fn pool() -> KubePool {
+        KubePool {
+            node_selector: BTreeMap::from([("workload".into(), "tracon-sandbox".into())]),
+            tolerations: vec![KubeToleration {
+                key: "workload".into(),
+                value: "tracon-sandbox".into(),
+                effect: "NoSchedule".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn tainted(mut node: Node, key: &str, value: &str) -> Node {
+        node.spec.as_mut().unwrap().taints = Some(vec![Taint {
+            key: key.into(),
+            value: Some(value.into()),
+            effect: "NoSchedule".into(),
+            ..Default::default()
+        }]);
+        node
+    }
+
+    /// A pool with no node has room to wait for; one with nodes has the room
+    /// of the roomiest its pods tolerate, a node still joining counted for
+    /// what it will have.
+    #[test]
+    fn a_pool_has_the_room_of_its_nodes_or_waits_for_one() {
+        let pool = pool();
+        let empty = pool_fit(&[], &[], (750, 3 * GI), &pool);
+        assert!(empty.fits && empty.awaits_node, "{empty:?}");
+        assert_eq!((empty.free_cpu, empty.free_memory), (0, 0));
+        assert_eq!(
+            empty.to_string(),
+            "the sandbox pool has no node now, and the cluster's autoscaler adds one when a pod \
+             asks; a session and its checks need 3 Gi and 0.75 CPU"
+        );
+        assert_eq!(
+            serde_json::to_value(empty).unwrap()["awaits_node"],
+            serde_json::json!(true)
+        );
+        // Its own taint is tolerated; another pool's is not.
+        let own = tainted(node("pool-a", "4", "6Gi"), "workload", "tracon-sandbox");
+        let other = tainted(node("pool-b", "16", "64Gi"), "workload", "minecraft");
+        let pods = vec![pod("pool-a", "Running", vec![container("1", "2Gi")])];
+        let fit = pool_fit(&[own.clone(), other], &pods, (750, 3 * GI), &pool);
+        assert!(fit.fits && !fit.awaits_node, "{fit:?}");
+        assert_eq!((fit.free_cpu, fit.free_memory), (3000, 4 * GI));
+        assert!(serde_json::to_value(fit)
+            .unwrap()
+            .get("awaits_node")
+            .is_none());
+        // A full node in a pool that has one is full, not waited for.
+        let busy = vec![pod("pool-a", "Running", vec![container("3", "5Gi")])];
+        let fit = pool_fit(std::slice::from_ref(&own), &busy, (750, 3 * GI), &pool);
+        assert!(!fit.fits && !fit.awaits_node, "{fit:?}");
+        // Without the pool's tolerations, its node would take nothing.
+        assert!(!schedulable(&own, &[]));
+        // A node still joining counts for the room it will have.
+        let joining = tainted(
+            node("pool-c", "4", "6Gi"),
+            "node.kubernetes.io/not-ready",
+            "",
+        );
+        assert!(pool_fit(std::slice::from_ref(&joining), &[], (750, 3 * GI), &pool).fits);
+        assert!(!fit_tolerating(&[joining], &[], (750, 3 * GI), &pool.tolerations).fits);
+    }
+
+    /// Read from the API: the pool's nodes of the base's architecture, then
+    /// every pod that has not ended; with none, nothing more is read.
+    #[tokio::test]
+    async fn a_pools_room_is_read_from_the_api() {
+        let labels = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let seen = labels.clone();
+        let nodes = std::sync::Arc::new(std::sync::Mutex::new(serde_json::json!([])));
+        let listed = nodes.clone();
+        let routes = axum::Router::new()
+            .route(
+                "/api/v1/nodes",
+                axum::routing::get(
+                    move |query: axum::extract::Query<BTreeMap<String, String>>| {
+                        *seen.lock().unwrap() =
+                            query.get("labelSelector").cloned().unwrap_or_default();
+                        let items = listed.lock().unwrap().clone();
+                        async move {
+                            axum::Json(serde_json::json!({
+                                "apiVersion": "v1",
+                                "kind": "NodeList",
+                                "metadata": {},
+                                "items": items,
+                            }))
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/api/v1/pods",
+                axum::routing::get(|| async {
+                    axum::Json(serde_json::json!({
+                        "apiVersion": "v1",
+                        "kind": "PodList",
+                        "metadata": {},
+                        "items": [{
+                            "metadata": {"name": "tracon-h-1"},
+                            "spec": {
+                                "nodeName": "pool-a",
+                                "containers": [{
+                                    "name": "harness",
+                                    "resources": {"requests": {"cpu": "250m", "memory": "1Gi"}},
+                                }],
+                            },
+                            "status": {"phase": "Running"},
+                        }],
+                    }))
+                }),
+            );
+        let client = api(routes);
+        let fit = read_pool(&client, &pool(), "amd64", (750, 3 * GI))
+            .await
+            .unwrap();
+        assert!(fit.awaits_node, "{fit:?}");
+        assert_eq!(
+            *labels.lock().unwrap(),
+            "kubernetes.io/arch=amd64,workload=tracon-sandbox"
+        );
+        *nodes.lock().unwrap() = serde_json::json!([{
+            "metadata": {"name": "pool-a"},
+            "spec": {"taints": [{"key": "workload", "value": "tracon-sandbox", "effect": "NoSchedule"}]},
+            "status": {"allocatable": {"cpu": "3920m", "memory": "6Gi"}},
+        }]);
+        let fit = read_pool(&client, &pool(), "amd64", (750, 3 * GI))
+            .await
+            .unwrap();
+        assert!(fit.fits && !fit.awaits_node, "{fit:?}");
+        assert_eq!((fit.free_cpu, fit.free_memory), (3670, 5 * GI));
     }
 
     #[test]

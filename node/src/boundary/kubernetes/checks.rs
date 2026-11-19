@@ -47,6 +47,11 @@ pub const PROTOCOL_RIGHTS: &[(&str, &str, &str, &str)] = &[
     ("networking.k8s.io", "networkpolicies", "", "list"),
 ];
 
+/// What a node with `[runtime.kubernetes.pool]` needs besides: the events
+/// of its sandbox pods, where the cluster's autoscaler says whether it is
+/// adding a node for one the scheduler has no place for.
+pub const POOL_RIGHTS: &[(&str, &str, &str, &str)] = &[("", "events", "", "list")];
+
 /// Whether this service account may do each of `rights` in `namespace`:
 /// the first right it may not, or an error asking.
 async fn first_refused(
@@ -461,9 +466,13 @@ async fn sandbox_runtime(
         }
         Err(e) => return CheckResult::fail(CheckId::Runtime, format!("access review: {e}")),
     }
-    if let Err(why) = own_pod_labelled(client, &provider.options().node_namespace).await {
+    if let Err(why) = own_pod_labelled(client.clone(), &provider.options().node_namespace).await {
         return CheckResult::fail(CheckId::Runtime, why);
     }
+    let placed = match sandbox_pool(&client, &reviews, spec).await {
+        Ok(placed) => placed,
+        Err(why) => return CheckResult::fail(CheckId::Runtime, why),
+    };
     let dispatcher = match provider.dispatcher().await {
         Ok(d) => d,
         Err(e) => return CheckResult::fail(CheckId::Runtime, e.to_string()),
@@ -517,7 +526,7 @@ async fn sandbox_runtime(
         format!(
             "api reachable; pods, pods/log and networkpolicies granted in {}; sandboxes over \
              the protocol dial {} and fetch the bundle {} (sha256 {}) there{services}, and no \
-             run keeps anything in a Secret; node {}; the node's pod is labelled {}",
+             run keeps anything in a Secret; node {}; the node's pod is labelled {}; {placed}",
             spec.env.namespace,
             provider.advertise(&dispatcher),
             provider.options().bundle.display(),
@@ -526,6 +535,50 @@ async fn sandbox_runtime(
             selector_words(&crate::provider::kubernetes::node_pod_labels()),
         ),
     )
+}
+
+/// Where sandbox pods run, in the words the `runtime` check carries; `Err`
+/// for a pool they cannot run in: one whose nodes are of another
+/// architecture than the base is pinned for, or one the node cannot watch
+/// grow (no `list` on events, or on nodes).
+async fn sandbox_pool(
+    client: &kube::Client,
+    reviews: &Api<SelfSubjectAccessReview>,
+    spec: &crate::provider::kubernetes::pod::KubeSpec,
+) -> Result<String, String> {
+    let pool = &spec.pool;
+    if !pool.is_set() {
+        return Ok("sandboxes run on the node pod's own machine".into());
+    }
+    match first_refused(reviews, &spec.env.namespace, POOL_RIGHTS).await {
+        Ok(None) => {}
+        Ok(Some(refused)) => {
+            return Err(format!(
+                "service account may not {refused} in {}, which [runtime.kubernetes.pool] needs \
+                 to tell a pod the cluster autoscaler is adding a node for from one with no room \
+                 (role.yaml grants it)",
+                spec.env.namespace
+            ))
+        }
+        Err(e) => return Err(format!("access review: {e}")),
+    }
+    let nodes = crate::provider::kubernetes::room::pool_nodes(client, pool).await?;
+    let arch = crate::boundary::registry::host_architecture();
+    if let Some(why) = crate::provider::kubernetes::pod::arch_refusal(pool, &nodes, arch) {
+        return Err(why);
+    }
+    let selector = crate::provider::kubernetes::pod::pool_selector(pool, arch);
+    Ok(format!(
+        "sandboxes run on the pool {} ({}), waiting up to {} s for the cluster autoscaler to add \
+         a node",
+        selector_words(&selector),
+        match nodes.len() {
+            0 => "no node now".to_string(),
+            1 => "1 node now".to_string(),
+            n => format!("{n} nodes now"),
+        },
+        pool.scale_up_grace_secs
+    ))
 }
 
 /// Whether the node's own pod carries the labels its sandboxes' affinity
@@ -1171,8 +1224,10 @@ mod tests {
             }
         }
         granted.sort();
+        // A pool's too: the base grants what any configuration may assert.
         let mut asserted: Vec<(String, String)> = PROTOCOL_RIGHTS
             .iter()
+            .chain(POOL_RIGHTS)
             .map(|(_, resource, sub, verb)| {
                 let resource = match sub.is_empty() {
                     true => resource.to_string(),

@@ -1876,8 +1876,9 @@ export interface ProviderCapabilities {
   /**
    * A Kubernetes runtime's room for one more session and its checks
    * (`free_cpu`, `free_memory`, `needs_cpu`, `needs_memory` in millicores
-   * and bytes, `fits`), or `unread` with why it was not read. Absent
-   * elsewhere, and from an older node.
+   * and bytes, `fits`, and `awaits_node` when a sandbox pool has no node
+   * yet and the autoscaler adds one), or `unread` with why it was not read.
+   * Absent elsewhere, and from an older node.
    */
   room?: Record<string, unknown>
 }
