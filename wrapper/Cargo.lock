@@ -4384,7 +4384,7 @@ dependencies = [
 
 [[package]]
 name = "tracon-attest"
-version = "0.54.0"
+version = "0.55.0"
 dependencies = [
  "futures-util",
  "hex",
@@ -4397,7 +4397,7 @@ dependencies = [
 
 [[package]]
 name = "tracon-wrapper"
-version = "0.54.0"
+version = "0.55.0"
 dependencies = [
  "dirs",
  "futures-util",
