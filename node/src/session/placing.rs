@@ -46,9 +46,11 @@ impl Placed {
 /// How often a session waiting on its placement card looks at it.
 pub const ASK_POLL: Duration = Duration::from_secs(1);
 
-/// Whether placement decides anything for this session.
+/// Whether placement decides anything for this session. A memory floor
+/// alone does not: it never refuses a provider, and only DigitalOcean reads
+/// it.
 pub fn in_play(digitalocean: bool, resolved: &Resolved) -> bool {
-    digitalocean || resolved.requirements != Requirements::any()
+    digitalocean || resolved.requirements.constrains_capabilities()
 }
 
 /// The node's own runtime as placement sees it: what its verified boundary
@@ -346,6 +348,12 @@ mod tests {
         let client = placement("[[repo]]\npath = \"/src/hounddogreading\"\nclient = true\n")
             .resolve("personal", Some(Path::new("/src/hounddogreading")));
         assert!(in_play(false, &client));
+        // A memory floor alone, with DigitalOcean off, changes nothing here.
+        let floor = placement("[[repo]]\npath = \"/src/big\"\n[repo.require]\nmemory = \"4Gi\"\n")
+            .resolve("personal", Some(Path::new("/src/big")));
+        assert_eq!(floor.requirements.memory.as_deref(), Some("4Gi"));
+        assert!(!in_play(false, &floor));
+        assert!(in_play(true, &floor));
     }
 
     #[test]

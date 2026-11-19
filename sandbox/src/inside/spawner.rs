@@ -29,9 +29,13 @@ use crate::protocol::{ExitStatus, SpawnSpec, WinSize};
 /// Environment variables the sandbox reads at start and children never see.
 pub const BOOTSTRAP_PREFIX: &str = "TRACON_SANDBOX_";
 
+/// A child's exit channel, and the sandbox's out-of-memory kill count when
+/// it started (`None` where the cgroup could not be read).
+type Registered = (watch::Sender<Option<ExitStatus>>, Option<u64>);
+
 #[derive(Clone, Default)]
 pub struct Spawner {
-    children: Arc<Mutex<HashMap<i32, watch::Sender<Option<ExitStatus>>>>>,
+    children: Arc<Mutex<HashMap<i32, Registered>>>,
 }
 
 pub struct Child {
@@ -115,7 +119,7 @@ impl Spawner {
         let mut child = command.spawn()?;
         let pid = child.id() as i32;
         let (sender, exit) = watch::channel(None);
-        children.insert(pid, sender);
+        children.insert(pid, (sender, oom_kills()));
         drop(children);
 
         let (stdin, stdout, stderr) = match tty {
@@ -161,8 +165,13 @@ impl Spawner {
             if pid <= 0 {
                 break;
             }
-            if let Some(sender) = children.remove(&pid) {
-                let _ = sender.send(Some(ExitStatus::from_raw(status)));
+            if let Some((sender, oom_before)) = children.remove(&pid) {
+                let mut exit = ExitStatus::from_raw(status);
+                // The OOM killer's signal is SIGKILL; one counted since this
+                // child started, by the time it is reaped, is taken as its.
+                exit.oom_killed = exit.signal == Some(libc::SIGKILL)
+                    && oom_before.zip(oom_kills()).is_some_and(|(b, a)| a > b);
+                let _ = sender.send(Some(exit));
             } else {
                 tracing::debug!(pid, "reaped an adopted process");
             }
@@ -267,5 +276,51 @@ pub fn scrub_environment() {
         .collect();
     for name in names {
         std::env::remove_var(name);
+    }
+}
+
+/// How many times the kernel's out-of-memory killer has killed a process in
+/// this sandbox's cgroup: `oom_kill` in cgroup v2's `memory.events` (its own
+/// cgroup's, then the namespace root's), else in v1's `memory.oom_control`.
+/// `None` where neither can be read.
+fn oom_kills() -> Option<u64> {
+    let own = std::fs::read_to_string("/proc/self/cgroup")
+        .ok()
+        .and_then(|text| {
+            text.lines()
+                .find_map(|line| line.strip_prefix("0::").map(str::to_string))
+        })
+        .map(|path| format!("/sys/fs/cgroup{}/memory.events", path.trim_end_matches('/')));
+    own.into_iter()
+        .chain([
+            "/sys/fs/cgroup/memory.events".to_string(),
+            "/sys/fs/cgroup/memory/memory.oom_control".to_string(),
+        ])
+        .find_map(|path| {
+            std::fs::read_to_string(path)
+                .ok()
+                .and_then(|t| oom_kill_count(&t))
+        })
+}
+
+/// The `oom_kill` line of a cgroup's `memory.events` or `memory.oom_control`.
+fn oom_kill_count(text: &str) -> Option<u64> {
+    text.lines().find_map(|line| {
+        let (key, value) = line.split_once(' ')?;
+        (key == "oom_kill")
+            .then(|| value.trim().parse().ok())
+            .flatten()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_oom_kill_count_is_read_from_either_cgroup_version() {
+        let v2 = "low 0\nhigh 0\nmax 12\noom 3\noom_kill 2\noom_group_kill 0\n";
+        assert_eq!(super::oom_kill_count(v2), Some(2));
+        let v1 = "oom_kill_disable 0\nunder_oom 0\noom_kill 5\n";
+        assert_eq!(super::oom_kill_count(v1), Some(5));
+        assert_eq!(super::oom_kill_count("low 0\n"), None);
     }
 }

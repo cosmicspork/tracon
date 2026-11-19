@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import { shortHash } from '../lib/names'
+  import Name from '../components/Name.svelte'
   // What the operator opens onto: a place to start work, then what is waiting
   // on them, then what is running, then what landed. The queue that used to be
   // here showed two empty boxes above a wall of ended sessions — true, and no
@@ -236,7 +238,7 @@
     <summary>Notification delivery attempts</summary>
     <p>Delivery attempts only.</p>
     {#each notifications as notification (notification.notification_id)}
-      <div class="mono">{notification.notification_id.slice(0, 8)} · {notification.attempts.length ? notification.attempts.map((attempt) => `${attempt.device_id.slice(0, 8)}: ${attempt.outcome}`).join(', ') : 'no matching live device'}</div>
+      <div class="mono"><Name id={notification.notification_id} label={shortHash(notification.notification_id)} /> · {#each notification.attempts as attempt, i (i)}{i ? ', ' : ''}<Name id={attempt.device_id} label={shortHash(attempt.device_id)} />: {attempt.outcome}{:else}no matching live device{/each}</div>
     {/each}
   </details>
 {/if}

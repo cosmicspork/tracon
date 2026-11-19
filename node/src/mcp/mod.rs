@@ -2956,10 +2956,8 @@ fn prose_title(name: &str, args: &Value) -> Option<String> {
         ),
         docs::DOC_WRITE | docs::DOC_EDIT | docs::DOC_DELETE => format!("{name} {}", id("slug")),
         memory::RETAIN => with(format!("{name} {}", id("kind")), first_line("body")),
-        memory::AMEND => with(
-            format!("{name} {}", id("id").chars().take(8).collect::<String>()),
-            first_line("reason"),
-        ),
+        // A memory has no name; the page shows which one beside the change.
+        memory::AMEND => with(name.to_string(), first_line("reason")),
         work::WORK_UPDATE => {
             let fields: Vec<String> = [
                 "title", "body", "priority", "deps", "project", "worktree", "state",
@@ -2973,13 +2971,16 @@ fn prose_title(name: &str, args: &Value) -> Option<String> {
             .collect();
             let head = format!(
                 "{name} {} ({})",
-                id("id").chars().take(8).collect::<String>(),
+                crate::names::handle(crate::names::kind::TASK, &id("id")),
                 fields.join(", ")
             );
             with(head, first_line("title"))
         }
         work::WORK_DELETE | work::WORK_SHOW => match text("id") {
-            Some(item) => format!("{name} {}", item.chars().take(8).collect::<String>()),
+            Some(item) => format!(
+                "{name} {}",
+                crate::names::handle(crate::names::kind::TASK, item)
+            ),
             None => name.to_string(),
         },
         work::WORK_LIST => {
@@ -3206,17 +3207,27 @@ mod tests {
         );
         let doc = json!({ "slug": "plan-foo", "body": "# Plan" });
         assert_eq!(summarize(docs::DOC_WRITE, &doc), "doc_write plan-foo");
-        let id = "0b0e29c44da42ee5fef94df7b1b9eff7";
+        let id = "0b0e29c44da42ee5fef94df7b1b9eff70b0e29c44da42ee5fef94df7b1b9eff7";
+        let task = crate::names::task(id);
         assert_eq!(
             summarize(
                 work::WORK_UPDATE,
                 &json!({ "id": id, "priority": "Urgent", "body": "x", "title": "Lists past 100" })
             ),
-            "work_update 0b0e29c4 (title, body, priority Urgent): Lists past 100"
+            format!("work_update {task} (title, body, priority Urgent): Lists past 100")
         );
         assert_eq!(
             summarize(work::WORK_DELETE, &json!({ "id": id })),
-            "work_delete 0b0e29c4"
+            format!("work_delete {task}")
+        );
+        // A prefix the agent shortened an id to names nothing: it reads as given.
+        assert_eq!(
+            summarize(work::WORK_SHOW, &json!({ "id": "0b0e29c4" })),
+            "work_show 0b0e29c4"
+        );
+        assert_eq!(
+            summarize(memory::AMEND, &json!({ "id": id, "reason": "Out of date" })),
+            "memory_amend: Out of date"
         );
         assert_eq!(
             summarize(

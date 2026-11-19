@@ -235,7 +235,7 @@
           {#each infraRows as t, i (i)}
             <tr>
               <td>{t.provider}</td>
-              <td data-label={infraLabel}>{#if infraGroup === 'session' && t.session_id}<a class="lnk" href={`/sessions/${t.session_id}`}>{infraKey(t, infraGroup)}</a>{:else}{infraKey(t, infraGroup)}{/if}</td>
+              <td data-label={infraLabel} title={t.session_id ?? undefined}>{#if infraGroup === 'session' && t.session_id}<a class="lnk" href={`/sessions/${t.session_id}`}>{infraKey(t, infraGroup)}</a>{:else}{infraKey(t, infraGroup)}{/if}</td>
               {#if infraGroup === 'day' || infraGroup === 'session'}<td data-label="Channel">{t.channel ?? '—'}</td>{/if}
               {#if infraGroup === 'session'}<td data-label="Size">{t.size ?? 'default'}</td>{/if}
               <td data-label="Sandboxes">{t.sandboxes}</td>

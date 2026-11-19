@@ -4,6 +4,8 @@
   // verdict lines above are the node's own, so a confident summary cannot
   // read as a verified one.
   import { api } from '../lib/api'
+  import PlanLink from './PlanLink.svelte'
+  import Name from './Name.svelte'
   import { formatTokens } from '../lib/format'
   import { checkLabel, claimStanding, headline, noChecks, verdictLine } from '../lib/outcome'
   import type { SessionOutcome } from '../lib/types'
@@ -50,7 +52,7 @@
       <h4>Plan</h4>
       {#if view.plan}
         <p class="dim">
-          Written as <a href="/docs/{view.channel}/{view.plan.slug}">{view.plan.slug}</a>; an execute session follows
+          Written as <PlanLink channel={view.channel} slug={view.plan.slug} />; an execute session follows
           from it.
         </p>
       {:else}
@@ -60,8 +62,7 @@
       <h4>Verdict</h4>
       {#if view.verdict}
         <p class="dim">
-          {verdictLine(view)} on <a href="/reviews/{view.verdict.review_id}">review {view.verdict.review_id.slice(0, 8)}</a
-          >{view.verdict.superseded ? '; a later revision’s reviewer had already given its own' : ''}.
+          {verdictLine(view)} on <Name kind="review" id={view.verdict.review_id} href="/reviews/{view.verdict.review_id}" />{view.verdict.superseded ? '; a later revision’s reviewer had already given its own' : ''}.
         </p>
         {#if view.verdict.summary}<p class="summary">{view.verdict.summary}</p>{/if}
       {:else}

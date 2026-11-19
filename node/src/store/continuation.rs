@@ -6,7 +6,7 @@
 use rusqlite::params_from_iter;
 use serde::Serialize;
 
-use super::{Result, ReviewRow, SessionRow, Store};
+use super::{Result, ReviewRow, SessionRow, Store, SESSION_SELECT};
 
 /// One thing the operator decided for an attempt: a permission they answered
 /// or a question they replied to.
@@ -36,7 +36,7 @@ impl Store {
     /// oldest first. A session with no lineage is a lineage of one.
     pub fn session_lineage(&self, id: &str) -> Result<Vec<SessionRow>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "WITH RECURSIVE linked(id) AS (
                  SELECT ?1
                  UNION
@@ -46,8 +46,8 @@ impl Store {
                  SELECT p.id FROM session s JOIN linked l ON s.id = l.id
                    JOIN session p ON p.id = s.continued_from OR p.id = s.parent_session
              )
-             SELECT * FROM session WHERE id IN (SELECT id FROM linked) ORDER BY created_ms, id",
-        )?;
+             {SESSION_SELECT} WHERE id IN (SELECT id FROM linked) ORDER BY created_ms, id"
+        ))?;
         let rows = stmt
             .query_map([id], SessionRow::from_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;

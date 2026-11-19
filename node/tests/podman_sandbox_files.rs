@@ -282,7 +282,8 @@ async fn a_workspace_lives_on_the_sandboxs_own_disk() {
         tokio::io::AsyncWriteExt::write_all(&mut stdin, b"go\n")
             .await
             .unwrap();
-        assert_eq!(spawned.done.await.unwrap(), 0);
+        assert_eq!(spawned.done.await.unwrap().code, 0);
+        tracon::runner::protocol::settled(&name).await;
         assert!(podman(&["container", "exists", &name]).is_none());
         assert!(!sandbox_files::is_live(&kept));
         let at = Instant::now();
@@ -419,7 +420,8 @@ async fn what_a_session_changed_is_there_for_the_next_sandbox() {
         ))
         .await
         .unwrap();
-    assert_eq!(out.done.await.unwrap(), 0);
+    assert_eq!(out.done.await.unwrap().code, 0);
+    tracon::runner::protocol::settled(&rig.name("first")).await;
     let out = runner
         .run_capture(sh(
             &rig.name("second"),

@@ -4,6 +4,7 @@
   // where). The node records each decision as it makes it; this panel reads
   // that record back and words it, so it can only say what the gate did.
   import { api } from '../lib/api'
+  import Name from './Name.svelte'
   import { auditSummary, decidedBy, decisionLabel, outcomeNote } from '../lib/audit'
   import type { AuditCall } from '../lib/types'
 
@@ -68,7 +69,7 @@
             {/if}
             {#if call.approval_id}
               <p class="dim">
-                approval <a href="/approvals/{call.approval_id}">{call.approval_id.slice(0, 8)}</a>{call.approval_state
+                <Name kind="approval" id={call.approval_id} href="/approvals/{call.approval_id}" />{call.approval_state
                   ? ` · ${call.approval_state}`
                   : ''}
               </p>

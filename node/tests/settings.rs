@@ -416,7 +416,10 @@ async fn a_cli_rm_reaches_the_running_node() {
     let out = here(&["credential", "revokes"]).output().await.unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success() && stdout.contains("vega"), "{stdout}");
-    assert!(stdout.contains("peer-b           pending"), "{stdout}");
+    assert!(
+        stdout.contains(&format!("{:<24} pending", "peer-b")),
+        "{stdout}"
+    );
     // A revoke for a peer that has left the mesh can be cancelled by the id
     // the listing shows, and is gone from it.
     let short = stdout
@@ -1423,6 +1426,7 @@ fn session_on(id: &str, channel: &str, state: &str) -> tracon::store::SessionRow
         parent_session: None,
         continued_from: None,
         manifest_digest: None,
+        open_turn_tokens: 0,
     }
 }
 

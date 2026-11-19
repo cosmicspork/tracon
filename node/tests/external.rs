@@ -1507,11 +1507,7 @@ async fn a_memory_amendment_is_always_asked_and_allowing_it_rewrites_only_the_bo
     )
     .await;
     assert_eq!(
-        v["approval"]["title"],
-        format!(
-            "memory_amend {}: The retry count changed in 0.38.",
-            &id[..8]
-        ),
+        v["approval"]["title"], "memory_amend: The retry count changed in 0.38.",
         "{v}"
     );
     assert_eq!(v["prose_fields"], json!(["body"]), "{v}");

@@ -112,13 +112,14 @@ export function elsewhereLines(e: Elsewhere): ElsewhereLine[] {
     },
     userLine(e),
   ]
-  if (e.size) {
-    lines.push({
-      label: 'size',
-      tone: '',
-      text: e.price_per_hour_usd === undefined ? `${e.size} · unpriced` : `${e.size} · $${e.price_per_hour_usd.toFixed(3)}/h`,
-      detail: 'Billed from create to destroy: sandboxes are kept warm, so idle time counts',
-    })
+  const size = defaultSizeLine(e)
+  if (size) lines.push(size)
+  for (const f of e.floors ?? []) {
+    lines.push(
+      f.size
+        ? { label: `floor ${f.scope}`, tone: '', text: `${f.memory} → ${sized(f.size, f.memory_mb, f.price_per_hour_usd)}` }
+        : { label: `floor ${f.scope}`, tone: 'bad', text: `${f.memory} → none`, detail: f.error },
+    )
   }
   if (e.spend) {
     const s = e.spend
@@ -143,6 +144,42 @@ export function elsewhereLines(e: Elsewhere): ElsewhereLine[] {
     )
   }
   return lines
+}
+
+/** A size as `slug · 2048 MB · $0.107/h`, or unpriced when the catalog was not read. */
+function sized(slug: string, memoryMb?: number, price?: number): string {
+  if (price === undefined) return `${slug} · unpriced`
+  const memory = memoryMb === undefined ? '' : ` · ${memoryMb} MB`
+  return `${slug}${memory} · $${price.toFixed(3)}/h`
+}
+
+const BILLED = 'billed from create to destroy: sandboxes are kept warm, so idle time counts'
+
+/**
+ * The size a sandbox with no memory floor is made at, and why none can be:
+ * a configured size the catalog does not list, or a catalog not read with
+ * no size configured. Nothing from an older node that sent neither.
+ */
+function defaultSizeLine(e: Elsewhere): ElsewhereLine | null {
+  const label = 'default size'
+  if (e.size_error !== undefined) {
+    if (e.catalog_error !== undefined) {
+      return { label, tone: 'bad', text: 'catalog not read', detail: `${e.catalog_error}. ${e.size_error}` }
+    }
+    if (e.configured_size !== undefined) {
+      return { label, tone: 'bad', text: `${e.configured_size} · not in DigitalOcean's catalog`, detail: e.size_error }
+    }
+    return { label, tone: 'bad', text: 'none', detail: e.size_error }
+  }
+  if (!e.size) return null
+  const why = e.configured_size !== undefined ? 'set by [digitalocean] size' : 'the cheapest with at least 2 GiB'
+  return {
+    label,
+    tone: e.catalog_error !== undefined ? 'warn' : '',
+    text: sized(e.size, e.memory_mb, e.price_per_hour_usd),
+    detail:
+      e.catalog_error !== undefined ? `${why}, unpriced: catalog not read: ${e.catalog_error}` : `${why}; ${BILLED}`,
+  }
 }
 
 /**

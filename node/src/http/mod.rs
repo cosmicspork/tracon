@@ -18,6 +18,7 @@ pub mod recipes;
 pub mod settings;
 mod spa;
 mod stream;
+pub mod strict;
 
 use std::{net::SocketAddr, sync::Arc};
 
@@ -702,6 +703,24 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
 
     let backend = boundary::backend_for(&cfg).await;
     tracing::info!(runtime = backend.kind(), "boundary backend");
+    // Before anything syncs: no import, clone or sync outlives the process
+    // that began it, so every staging copy beside the volumes kept for
+    // sandboxes is left over, and a volume a swap was cut short in is put back.
+    if let Some(files) = backend.sandbox_files_store() {
+        let root = files.root().to_path_buf();
+        match tokio::task::spawn_blocking(move || boundary::sweep_staging(&root)).await {
+            Ok(Ok(swept)) => {
+                if !swept.removed.is_empty() {
+                    tracing::info!(removed = ?swept.removed, "removed staging copies left by work a restart ended");
+                }
+                if !swept.restored.is_empty() {
+                    tracing::warn!(restored = ?swept.restored, "put back volumes a swap was cut short in");
+                }
+            }
+            Ok(Err(error)) => tracing::warn!(%error, "could not sweep leftover staging copies"),
+            Err(error) => tracing::warn!(%error, "could not sweep leftover staging copies"),
+        }
+    }
     let self_reconciles = cfg.boundary.auto_reconcile && backend.converges();
     // The node serves first and converges after (`boundary_upkeep`, once the
     // listeners are bound): marked pending, the startup check below waits on

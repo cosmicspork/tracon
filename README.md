@@ -309,11 +309,34 @@ phase bindings are presets, not requirements, supplying a model and budget only 
 the session does not name its own; if neither does, the node falls back to a model
 already in its catalogue and records which source actually won as the session's
 `model_source`. **Adjust** opens repository, phase, model, and node as fields when a
-session needs something other than the usual. A session that spends its budget is
+session needs something other than the usual. `POST /api/sessions` and `/api/compose`
+refuse a key they do not know with a 422 that names it (`error.kind` is
+`unknown_field`), and suggest the field it was probably meant for: a plan session's
+task goes in `work_item_id`, not `work_item`. A session that spends its budget is
 held, not ended: it is paused at the end of the turn that spent it, with its harness and
 context kept, until the operator raises the budget (on its page, or
 `POST /api/sessions/{id}/budget`) and it carries on. A channel at its daily ceiling
 starts no session at all.
+
+From a terminal, `tracon work start <id>` starts a session on a work item the way
+the Composer does, with no request body to write:
+
+```sh
+tracon work start 71e64e12                  # plan if the item has no plan yet, else execute
+tracon work start 71e64e12 --node homelab   # on a peer: its name, a unique id prefix, or `self`
+tracon work start 71e64e12 --phase execute --branch feat/plugin-supervisor
+```
+
+The session starts in the item's project repository (its forge remote); an item with
+no project, or a project with no remote, needs `--repo <forge url>`. The phase is
+`plan` until the item's plan document exists, then `execute`. The branch is the one
+the item's latest session ran on, so execute carries on from the plan's branch; with
+no earlier session the node names a new `feat/tracon-<id>` branch. The model and
+harness are left to the channel's phase binding and the node's `[harness] id` unless
+`--model` or `--harness` names them. It prints the session id, node, phase, branch,
+model and its link; `--json` prints the row. A refusal from the node (the item is
+blocked or held by another session, execute without a plan, the channel at its
+ceiling) is printed as the node gave it, and the command fails.
 
 **Usage** shows what the node's model gateway counted, per channel, as seen from this
 node. A ChatGPT/Codex subscription is metered in usage windows and credits rather than
@@ -1110,7 +1133,10 @@ deduplicated, and reports only what the push service said, never that you saw
 it. `report_issue` drafts a bug report against tracon itself, with expected and
 actual behaviour, reproduction, versions, and attachments, secrets scrubbed; the
 draft sits in the queue for you to read before you authorize opening it on
-GitHub through the broker, or discard it with an optional reason. The agent
+GitHub through the broker, or discard it with an optional reason. Its limits are
+counted in characters and stated in the tool's schema: a title of at most 256,
+and a published body (every field, its headings and the attachments) of at
+most 60,000, which any one field may use, under GitHub's 65,536. The agent
 follows its draft with `issue_report_status`, which waits up to 45 seconds and
 returns the published issue's number, URL and title, or that you discarded it
 and why. None of the three pauses the session.
@@ -1354,10 +1380,11 @@ and revoked the moment the hub loses that key.
 | `tracon doc import\|ls\|get\|put [--format html]\|rm\|export\|reindex` | documents (import and export are Markdown; `put` writes either format, converting a document in place), and rebuilding the vector index from them; import, preview, replace, download, archive, and delete HTML bundles in Documents |
 | `tracon session show <package> [--jsonl]` | read a session package offline, with no node running |
 | `tracon session archive-legacy\|reopen --harness [--model]` | put sessions from a retired harness away read-only, and carry one forward onto a supported one, on its own model unless `--model` names another |
-| `tracon session continue <id>` | carry on a session a node restart cut off, on its workspace and harness (also the session's **Continue** button) |
+| `tracon session continue <id>` | carry on a session a node restart cut off, or whose harness died and was not started again, on its workspace and harness (also the session's **Continue** button) |
 | `tracon skill import <dir[#git-rev]>\|ls\|rm` | skill packages in a channel's launch manifest |
 | `tracon memory ls\|add\|rm\|recall\|batch` | memories, and the promotion batch on demand |
 | `tracon work add\|ls\|ready\|show\|edit\|close\|dep\|rm` | the ledger; `--project` and `--priority` take names (`[work]` names the priorities) |
+| `tracon work start <id> [--phase] [--node] [--branch] [--base] [--model] [--harness] [--budget] [--repo] [--json]` | start a plan or execute session on an item, here or on a peer, as the Composer does (see [Starting work](#starting-work)) |
 | `tracon plugin add <owner/repo\|archive> [--channel]\|ls\|update [name]\|rollback <name>\|rm <name> [--purge]` | plugins: fetched and staged, then installed once you allow the install card |
 | `tracon repo ls\|show\|set\|rm\|build [repo]` | the `[[repo]]` entries (also **Settings → Repositories**), and building a repository's image from its default-branch Dockerfile |
 | `tracon policy keygen\|init\|sign\|push\|show` | the policy bundle |
@@ -1678,6 +1705,13 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
 # privilege = ["unprivileged"]      # unprivileged | root-in-vm (asked only of a container)
 # runtime_socket = ["absent"]       # absent | present
 # image_identity = ["exact"]        # exact | derived
+# memory = "4Gi"                    # not a capability but a floor: the least memory each sandbox
+                                    # is made with, as a Kubernetes quantity ("4Gi", not "4GiB").
+                                    # The larger of channel's and repository's wins. Read by
+                                    # DigitalOcean alone (the cheapest size in its catalog with at
+                                    # least this much, raising [digitalocean] size or its default);
+                                    # it never refuses a provider, and local runtimes ignore it.
+                                    # Settings shows the size each floor resolves to
 
 # [digitalocean]                    # DigitalOcean's Harness Runtime, for sessions [placement] sends
                                     # there. Off without a credential. Each sandbox is a microVM whose
@@ -1735,7 +1769,15 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
 # base_template = "coding-base"     # the runtime's base the image is rebased onto (DigitalOcean
                                     # no longer accepts the old name "sandbox")
 # region = ""                       # the API host's region; empty for the default
-# size = ""                         # a sandbox size slug; empty for the runtime's default
+# size = ""                         # a sandbox size slug; empty for the cheapest size in the
+                                    # runtime's catalog with at least 2 GiB (mars-2vcpu-2gb today),
+                                    # never the runtime's own 1 GB default. A smaller slug set here
+                                    # is kept; a [placement] memory floor raises either. A slug the
+                                    # catalog does not list, a floor no size meets, or (with no slug
+                                    # set, or a floor) a catalog the node has never read refuses the
+                                    # sandbox with why; a slug set here lets sandboxes start without
+                                    # the catalog, unpriced. Settings shows the size, its memory and
+                                    # price
 # limit = 4                         # sandboxes there at once
 # listen = "0.0.0.0:8443"           # where the node takes its sandboxes' TLS connections
 # node_addr = "203.0.113.7:443"     # what they dial as raw TLS: an address, not a name. A load

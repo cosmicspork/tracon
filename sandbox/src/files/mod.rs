@@ -17,6 +17,7 @@
 //! here, by the node, or by any copy the node makes of the tree.
 
 mod checkout;
+mod staging;
 
 use std::collections::HashSet;
 use std::fs::File;
@@ -29,6 +30,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::io::SyncIoBridge;
 
 pub use checkout::{ignore_rules_inside, kept_paths};
+pub use staging::{in_flight, Staging, Stoppable};
 
 use crate::protocol::{Exclusions, TreeSummary};
 
@@ -512,6 +514,26 @@ where
     tokio::task::spawn_blocking(move || unpack(bridge, &dest, mount.as_deref(), &limits))
         .await
         .map_err(|e| FilesError::Io(io::Error::other(e)))?
+}
+
+/// [`unpack_async`] into `staging`, which it stops when its owner gives up:
+/// dropping the future (a timeout, a caller that went away) stops reading
+/// at once, drops `reader`, which ends the transfer, and leaves `staging`
+/// to be removed once the unpack has stopped writing it.
+pub async fn unpack_staged<R>(
+    reader: R,
+    staging: &Staging,
+    mount: Option<PathBuf>,
+    limits: Limits,
+) -> Result<TreeSummary, FilesError>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    let bridge = SyncIoBridge::new(staging.reader(reader));
+    let dest = staging.path().to_path_buf();
+    staging
+        .blocking(move || unpack(bridge, &dest, mount.as_deref(), &limits))
+        .await
 }
 
 #[cfg(test)]

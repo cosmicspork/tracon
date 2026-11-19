@@ -70,6 +70,7 @@ fn session(id: &str, channel: &str, phase: &str, item: Option<&str>) -> SessionR
         parent_session: None,
         continued_from: None,
         manifest_digest: None,
+        open_turn_tokens: 0,
     }
 }
 

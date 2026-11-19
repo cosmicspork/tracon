@@ -13,7 +13,8 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::{
     adapter::{
-        HarnessAdapter, HarnessEvent, HarnessHandle, LaunchSpec, PermissionReply, PermissionRequest,
+        AdapterError, ExitCause, HarnessAdapter, HarnessEvent, HarnessHandle, LaunchSpec,
+        PermissionReply, PermissionRequest,
     },
     runner::Runner,
     session::{
@@ -49,11 +50,10 @@ const RELAUNCHES_PER_TURN: u32 = 2;
 const RELAUNCHES_PER_SESSION: u32 = 3;
 /// How long a relaunched harness has to answer its handshake.
 const RELAUNCH_TIMEOUT: Duration = Duration::from_secs(90);
-/// What the session is told when its harness was relaunched mid-turn.
-const CONTINUE_AFTER_RELAUNCH: &str = "The harness process stopped during the last turn and was \
-     restarted; the conversation was restored from its journal. Tool calls that were running or \
-     waiting when it stopped are marked failed, as 'outcome unknown' or 'not run'. Check what \
-     those calls may have changed before repeating them, then carry on with the task.";
+/// How long a turn that failed because its harness died waits for the
+/// process's exit, which says how it died, before the session is relaunched
+/// or ended without it. Nothing is dispatched meanwhile.
+const EXIT_WAIT: Duration = Duration::from_secs(10);
 
 /// How many times the same tool call has to arrive back to back before the
 /// run is worth saying out loud. Only an unchanged call repeated with nothing
@@ -240,6 +240,14 @@ pub struct Supervisor {
     /// A turn whose harness died under it, settled already, waiting for the
     /// relaunch that carries its work on.
     died_in_turn: bool,
+    /// The harness is known to be dead (a turn failed with
+    /// `AdapterError::HarnessDied`) and its exit has not arrived: nothing is
+    /// dispatched on its handle, and at this instant the session goes on as
+    /// if it had exited with no status.
+    exit_due: Option<tokio::time::Instant>,
+    /// The last tool call this turn started, and what became of it: what a
+    /// harness that died mid-turn was doing.
+    last_call: Option<LastCall>,
     /// Said of the next prompt dispatched: who it is from, when not the operator.
     next_prompt_origin: Option<&'static str>,
     /// A `context_compacting` is recorded and its compaction has not ended,
@@ -248,6 +256,49 @@ pub struct Supervisor {
     compacting: bool,
     /// What this session's metric series are labelled with; see `with_series`.
     series: crate::telemetry::SessionSeries,
+}
+
+/// A tool call as a harness that died mid-turn left it.
+#[derive(Debug, Clone)]
+struct LastCall {
+    id: String,
+    title: String,
+    status: Option<String>,
+}
+
+impl LastCall {
+    /// How it stood, in a word or two.
+    fn standing(&self) -> &str {
+        match self.status.as_deref() {
+            Some("completed") => "completed",
+            Some("failed") => "failed",
+            _ => "unfinished",
+        }
+    }
+}
+
+/// What a session is told when its harness died mid-turn and was started
+/// again: that it died and how, the call it was in, and what went with it.
+fn continue_after_death(how: &str, last: Option<&LastCall>) -> String {
+    let mut text = format!(
+        "The harness process died during the last turn ({how}) and was restarted; the \
+         conversation was restored from its record. "
+    );
+    match last {
+        Some(call) => text.push_str(&format!(
+            "The last tool call was `{}` ({}). ",
+            call.title,
+            call.standing()
+        )),
+        None => text.push_str("No tool call had started in that turn. "),
+    }
+    text.push_str(
+        "A call that was running or waiting when it died has no result you can rely on: its \
+         outcome is unknown, and it may show as failed or not run. Commands it ran in the \
+         background, and their output, are gone. Check what that call changed and rerun what \
+         you need, then carry on with the task.",
+    );
+    text
 }
 
 /// What a turn does: answer a prompt, or compact the conversation.
@@ -305,6 +356,8 @@ impl Supervisor {
             relaunches: 0,
             turn_relaunches: 0,
             died_in_turn: false,
+            exit_due: None,
+            last_call: None,
             next_prompt_origin: None,
             series: Default::default(),
             self_tx,
@@ -486,7 +539,7 @@ impl Supervisor {
         let mut killed_by_us = false;
         // An exit found among the events a finished turn drained, handled
         // once that turn is settled.
-        let mut exit_behind_turn: Option<Option<i32>> = None;
+        let mut exit_behind_turn: Option<(Option<i32>, ExitCause)> = None;
         // Stop can land between the startup handoff's last check and this
         // task's registration in `live`; only a row still `starting` may
         // become the one this task drives, so that race cannot resurrect a
@@ -496,26 +549,31 @@ impl Supervisor {
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
-                if let Some(code) = exit_behind_turn.take() {
-                    if self.relaunchable() {
-                        if let Some(next) = self.relaunch(code).await {
+                if let Some((code, cause)) = exit_behind_turn.take() {
+                    match self.on_exit(code, cause).await {
+                        Some(next) => {
                             events = next;
                             continue;
                         }
-                    }
-                    if self.on_harness_event(HarnessEvent::Exited { code }).await {
-                        break;
+                        None => {
+                            killed_by_us = true;
+                            break;
+                        }
                     }
                 }
+                let exit_due = self.exit_due;
                 tokio::select! {
                     ev = events.recv() => match ev {
-                        Some(HarnessEvent::Exited { code }) if self.relaunchable() => {
-                            if let Some(next) = self.relaunch(code).await {
-                                events = next;
-                                continue;
-                            }
-                            if self.on_harness_event(HarnessEvent::Exited { code }).await {
-                                break;
+                        Some(HarnessEvent::Exited { code, cause }) => {
+                            match self.on_exit(code, cause).await {
+                                Some(next) => {
+                                    events = next;
+                                    continue;
+                                }
+                                None => {
+                                    killed_by_us = true;
+                                    break;
+                                }
                             }
                         }
                         Some(ev) => {
@@ -525,6 +583,18 @@ impl Supervisor {
                         }
                         None => break,
                     },
+                    // The harness died under a turn and its exit has not come:
+                    // the sandbox stopped answering with it, or the runtime
+                    // is slow to say. The session does not wait on it longer.
+                    _ = tokio::time::sleep_until(exit_due.unwrap_or_else(tokio::time::Instant::now)), if exit_due.is_some() => {
+                        exit_behind_turn = Some((
+                            None,
+                            ExitCause::unknown(format!(
+                                "its turn failed as it died, and no exit was reported within {} s",
+                                EXIT_WAIT.as_secs()
+                            )),
+                        ));
+                    }
                     cmd = commands.recv() => match cmd {
                         Some(Command::Prompt { text, ack }) => {
                             let _ = ack.send(self.on_operator_prompt(text).await);
@@ -563,17 +633,29 @@ impl Supervisor {
                                 );
                                 continue;
                             }
-                            // The harness died under this turn: its pump stopped
-                            // with the process. Settled as interrupted, and the
-                            // relaunch the exit brings carries the work on.
-                            if kind == ek::ERROR
-                                && self.relaunchable()
-                                && payload["event_barrier_error"]
-                                    .as_str()
-                                    .is_some_and(|e| e.contains("stopped"))
-                            {
+                            // The harness is dead: its handle takes no other
+                            // turn, and nothing is dispatched until its exit is
+                            // in, which relaunches it or ends the session.
+                            let died = payload["harness_died"] == true;
+                            if died {
+                                self.exit_due = Some(tokio::time::Instant::now() + EXIT_WAIT);
+                            }
+                            // It died under this turn. Settled as interrupted;
+                            // the exit says what happens to its work.
+                            if died && kind == ek::ERROR {
                                 self.active_turn = None;
                                 self.died_in_turn = true;
+                                if self.paused_turn == Some(turn_id) {
+                                    self.paused_turn = None;
+                                }
+                                while let Ok(ev) = events.try_recv() {
+                                    if let HarnessEvent::Exited { code, cause } = ev {
+                                        exit_behind_turn = Some((code, cause));
+                                        break;
+                                    }
+                                    let _ = self.on_harness_event(ev).await;
+                                }
+                                self.flush_chunks();
                                 self.settle_interrupted_turn(true);
                                 continue;
                             }
@@ -585,8 +667,8 @@ impl Supervisor {
                             // it before settling, or a request's own usage
                             // arrives after the turn it belongs to is closed.
                             while let Ok(ev) = events.try_recv() {
-                                if let HarnessEvent::Exited { code } = ev {
-                                    exit_behind_turn = Some(code);
+                                if let HarnessEvent::Exited { code, cause } = ev {
+                                    exit_behind_turn = Some((code, cause));
                                     break;
                                 }
                                 let _ = self.on_harness_event(ev).await;
@@ -700,6 +782,7 @@ impl Supervisor {
                             // Only an idle session is put away: a turn that
                             // started since the manager looked keeps it.
                             let idle = self.active_turn.is_none()
+                                && self.exit_due.is_none()
                                 && self.open.lock().await.is_empty()
                                 && self.store.get_session(&self.session_id).ok().flatten()
                                     .is_some_and(|s| s.state == SessionState::Running.as_str() && s.turn_active == 0);
@@ -980,7 +1063,8 @@ impl Supervisor {
     /// wait from there. With neither, a finished phase ends the session.
     /// `true` when the session ended here.
     async fn settle_waits(&mut self) -> bool {
-        if self.active_turn.is_some() || self.paused_turn.is_some() {
+        // A dead harness's exit is handled first: it may end the session.
+        if self.active_turn.is_some() || self.paused_turn.is_some() || self.exit_due.is_some() {
             return false;
         }
         let Ok(Some(row)) = self.store.get_session(&self.session_id) else {
@@ -1156,7 +1240,7 @@ impl Supervisor {
                     }
                     let _ = reply.send(PermissionReply::Cancelled);
                 }
-                HarnessEvent::Exited { code } => {
+                HarnessEvent::Exited { code, .. } => {
                     self.record(ek::ERROR, None, json!({ "harness_exit_code": code }));
                     return true;
                 }
@@ -1193,6 +1277,11 @@ impl Supervisor {
             }
             HarnessEvent::ToolCall(t) => {
                 self.flush_chunks();
+                self.last_call = Some(LastCall {
+                    id: t.tool_call_id.clone(),
+                    title: t.title.clone(),
+                    status: t.status.clone(),
+                });
                 self.record(
                     ek::TOOL_CALL,
                     Some(t.tool_call_id.clone()),
@@ -1205,6 +1294,15 @@ impl Supervisor {
                 self.note_repetition(&t);
             }
             HarnessEvent::ToolCallUpdate(t) => {
+                if let Some(call) = self
+                    .last_call
+                    .as_mut()
+                    .filter(|call| call.id == t.tool_call_id)
+                {
+                    if t.status.is_some() {
+                        call.status = t.status.clone();
+                    }
+                }
                 // Updates are cumulative; only the terminal one is worth keeping.
                 self.bus.publish(Frame::ToolUpdate {
                     session_id: self.session_id.clone(),
@@ -1320,7 +1418,7 @@ impl Supervisor {
                 self.on_decided(request);
             }
             HarnessEvent::Models(_) => {}
-            HarnessEvent::Exited { code } => {
+            HarnessEvent::Exited { code, .. } => {
                 self.record(ek::ERROR, None, json!({ "harness_exit_code": code }));
                 return true;
             }
@@ -1694,7 +1792,10 @@ impl Supervisor {
             state,
             SessionState::Running | SessionState::WaitingOnYou | SessionState::WaitingOnCheck
         );
-        let busy = s.turn_active != 0 || state == SessionState::WaitingOnCheck;
+        // A harness that died is relaunched or the session ended first; what
+        // the operator said waits for the relaunched one.
+        let busy =
+            s.turn_active != 0 || state == SessionState::WaitingOnCheck || self.exit_due.is_some();
         let behind = self
             .store
             .queued_prompt_count(&self.session_id)
@@ -1794,6 +1895,13 @@ impl Supervisor {
             Work::Prompt(_) => self.next_prompt_origin.take(),
             Work::Compact => None,
         };
+        if self.exit_due.is_some() {
+            return Err(
+                "its harness process died; it is being started again or the session \
+                        ended"
+                    .into(),
+            );
+        }
         let s = self
             .store
             .get_session(&self.session_id)
@@ -1820,6 +1928,7 @@ impl Supervisor {
         self.next_turn = self.next_turn.wrapping_add(1);
         let turn_id = self.next_turn;
         self.active_turn = Some(turn_id);
+        self.last_call = None;
         let _ = self.store.update_session(
             &self.session_id,
             SessionPatch {
@@ -1881,6 +1990,9 @@ impl Supervisor {
                     Work::Compact => handle.compact().await,
                 }
             };
+            // The harness died under the turn, as the turn itself or the
+            // event barrier after it said.
+            let mut died = false;
             let (kind, mut payload, tokens) =
                 match until_silent(turn, &activity, TURN_IDLE, TURN_MAX).await {
                     // A harness that counted nothing is not said to have
@@ -1904,7 +2016,10 @@ impl Supervisor {
                         }),
                         turn.usage.charged() as i64,
                     ),
-                    Ok(Err(e)) => (ek::ERROR, json!({ "error": e.to_string() }), 0),
+                    Ok(Err(e)) => {
+                        died = matches!(e, AdapterError::HarnessDied(_));
+                        (ek::ERROR, json!({ "error": e.to_string() }), 0)
+                    }
                     Err(_) => {
                         let cancel_confirmed = matches!(
                             tokio::time::timeout(CANCEL_TIMEOUT, handle.cancel()).await,
@@ -1926,8 +2041,14 @@ impl Supervisor {
             }
             match tokio::time::timeout(CANCEL_TIMEOUT, handle.quiesce_events()).await {
                 Ok(Ok(())) => {}
-                Ok(Err(error)) => payload["event_barrier_error"] = json!(error.to_string()),
+                Ok(Err(error)) => {
+                    died |= matches!(error, AdapterError::HarnessDied(_));
+                    payload["event_barrier_error"] = json!(error.to_string());
+                }
                 Err(_) => payload["event_barrier_error"] = json!("event barrier timed out"),
+            }
+            if died {
+                payload["harness_died"] = json!(true);
             }
             crate::runner::sandbox_files::turn_ended(&container).await;
             let _ = done
@@ -2144,7 +2265,12 @@ impl Supervisor {
     /// process died. The turn it died in is settled as interrupted and carried
     /// on with one prompt from the node. `None` when it may not or could not
     /// be started, and the exit ends the session as before.
-    async fn relaunch(&mut self, code: Option<i32>) -> Option<mpsc::Receiver<HarnessEvent>> {
+    async fn relaunch(
+        &mut self,
+        code: Option<i32>,
+        cause: &ExitCause,
+    ) -> Option<mpsc::Receiver<HarnessEvent>> {
+        let how = cause.describe(code);
         let in_flight = self.active_turn.take().is_some();
         let interrupted = in_flight || std::mem::take(&mut self.died_in_turn);
         // Settled before anything else, so its spend is charged whatever the
@@ -2158,6 +2284,7 @@ impl Supervisor {
                 json!({
                     "outcome": "refused",
                     "exit_code": code,
+                    "cause": how,
                     "reason": format!(
                         "the harness died again after {} restarts; the session ends",
                         self.relaunches
@@ -2175,6 +2302,23 @@ impl Supervisor {
         let relaunch = self.relaunch.as_ref()?;
         let mut spec = relaunch.spec.clone();
         spec.resume = Some(resume.clone());
+        // A harness that died before it recorded anything has nothing to
+        // carry on; a launch would fail its first turn saying so.
+        let kept = tokio::time::timeout(
+            RELAUNCH_TIMEOUT,
+            relaunch.adapter.has_conversation(
+                self.runner.as_ref(),
+                &spec,
+                &resume.harness_session_id,
+            ),
+        )
+        .await;
+        if let Ok(Ok(false)) = kept {
+            return self.relaunch_failed(
+                code,
+                "the harness has no record of the conversation to carry on".into(),
+            );
+        }
         let launched = tokio::time::timeout(
             RELAUNCH_TIMEOUT,
             relaunch.adapter.launch(self.runner.as_ref(), spec),
@@ -2194,6 +2338,7 @@ impl Supervisor {
             json!({
                 "outcome": "restored",
                 "exit_code": code,
+                "cause": how,
                 "attempt": self.relaunches,
                 "harness_session_id": resume.harness_session_id,
                 "resumed_after_seq": resume.last_seq,
@@ -2202,10 +2347,8 @@ impl Supervisor {
         );
         if interrupted {
             self.next_prompt_origin = Some("node");
-            if let Err(e) = self
-                .dispatch_prompt(CONTINUE_AFTER_RELAUNCH.into(), Vec::new())
-                .await
-            {
+            let text = continue_after_death(&how, self.last_call.as_ref());
+            if let Err(e) = self.dispatch_prompt(text, Vec::new()).await {
                 self.next_prompt_origin = None;
                 self.record(
                     ek::ERROR,
@@ -2215,6 +2358,103 @@ impl Supervisor {
             }
         }
         Some(events)
+    }
+
+    /// The harness process is gone. A restorable harness on a live session
+    /// is started again, unless the out-of-memory killer ended it (it would
+    /// die the same way); otherwise the session ends saying how it died.
+    /// `Some` with the new process's events when it was started again.
+    async fn on_exit(
+        &mut self,
+        code: Option<i32>,
+        cause: ExitCause,
+    ) -> Option<mpsc::Receiver<HarnessEvent>> {
+        self.exit_due = None;
+        if self.is_terminal() {
+            // Ended from outside; its harness went with it.
+            self.record(ek::ERROR, None, json!({ "harness_exit_code": code }));
+            return None;
+        }
+        // Ended by the node over a refused handshake, which the turn that
+        // elicited it already said: nothing died, and it is not started again.
+        if cause.refused {
+            self.record(ek::ERROR, None, json!({ "harness_exit_code": code }));
+            self.finish_unexpected().await;
+            return None;
+        }
+        let mid_turn = self.died_in_turn || self.active_turn.is_some();
+        if self.relaunchable() {
+            if cause.oom_killed {
+                self.record(
+                    ek::HARNESS_RESTARTED,
+                    None,
+                    json!({
+                        "outcome": "refused",
+                        "exit_code": code,
+                        "cause": cause.describe(code),
+                        "reason": "it ran out of memory and would die the same way again; \
+                                   the session ends",
+                    }),
+                );
+            } else if let Some(next) = self.relaunch(code, &cause).await {
+                return Some(next);
+            }
+        }
+        self.end_died(code, &cause, mid_turn).await;
+        None
+    }
+
+    /// End the session on its harness's death: the error says how it died
+    /// and, mid-turn, what it was doing; a turn still open is settled as
+    /// interrupted. It can be carried on with `tracon session continue`.
+    async fn end_died(&mut self, code: Option<i32>, cause: &ExitCause, mid_turn: bool) {
+        self.flush_chunks();
+        let mut error = format!(
+            "the harness process died {}: {}",
+            if mid_turn {
+                "mid-turn"
+            } else {
+                "between turns"
+            },
+            cause.describe(code)
+        );
+        let mut detail = cause.detail(code);
+        if mid_turn {
+            if let Some(call) = &self.last_call {
+                error.push_str(&format!(
+                    "; its last tool call was `{}` ({})",
+                    call.title,
+                    call.standing()
+                ));
+                detail["last_tool_call"] = json!({ "title": call.title, "status": call.status });
+            }
+            error.push_str("; whatever it ran in the background is gone with it");
+        }
+        detail["error"] = json!(error);
+        detail["source"] = json!("harness");
+        self.record(ek::ERROR, None, detail);
+        self.reject_open_permissions().await;
+        let Ok(Some(s)) = self.store.get_session(&self.session_id) else {
+            return;
+        };
+        self.died_in_turn = false;
+        let in_flight = self.active_turn.take().is_some() || s.turn_active != 0;
+        self.settle_interrupted_turn(in_flight);
+        let Ok(Some(s)) = self.store.get_session(&self.session_id) else {
+            return;
+        };
+        if s.budget_tokens > 0 && s.tokens_used >= s.budget_tokens {
+            self.set_state(SessionState::KilledBudget, Some(EndReason::Budget));
+            return;
+        }
+        let _ = self.store.update_session(
+            &self.session_id,
+            SessionPatch {
+                last_error: Some(error),
+                ..Default::default()
+            },
+        );
+        self.set_state(SessionState::Closed, Some(EndReason::HarnessDied));
     }
 
     fn relaunch_failed(

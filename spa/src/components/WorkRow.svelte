@@ -4,7 +4,8 @@
   import { nodeLabel } from '../lib/nodes'
   import { store } from '../lib/store.svelte'
   import type { PriorityLevel, WorkView } from '../lib/types'
-  import { blockersLine, isTopPriority, priorityLabel, short, workLabel, workState } from '../lib/work'
+  import { generatedName } from '../lib/names'
+  import { blockersLine, isTopPriority, priorityLabel, taskName, workLabel, workState } from '../lib/work'
 
   let {
     item,
@@ -23,12 +24,12 @@
   const state = $derived(workState(item))
   const holder = $derived(item.session_id ? store.sessions.get(item.session_id) : undefined)
   const detail = $derived.by(() => {
-    const bits = [short(item.id)]
+    const bits = [taskName(item.id)]
     if (state === 'blocked' && item.readiness.state === 'blocked') bits.push(blockersLine(item.readiness.by, titles))
     if (state === 'ready') bits.push(item.phase_plan_slug ? 'plan written' : 'no plan yet')
     if (state === 'insession' && holder) bits.push(`${holder.phase} on ${nodeLabel(store.nodes, holder.node_id)}`)
-    if (state === 'closed' && item.closed_by_session) bits.push(`closed by session ${item.closed_by_session.slice(0, 8)}`)
-    if (item.discovered_from) bits.push(`discovered from ${short(item.discovered_from)}`)
+    if (state === 'closed' && item.closed_by_session) bits.push(`closed by ${generatedName('session', item.closed_by_session)}`)
+    if (item.discovered_from) bits.push(`discovered from ${taskName(item.discovered_from)}`)
     return bits.join(' · ')
   })
   const act = $derived(
@@ -45,7 +46,7 @@
     <em>{workLabel(item)}</em>
     {item.title}
     {#if project}<span class="proj">{project}</span>{/if}
-    <small>{detail}</small>
+    <small title={item.id}>{detail}</small>
   </span>
   <span class="act">{act}</span>
 </a>

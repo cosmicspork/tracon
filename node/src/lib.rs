@@ -31,6 +31,7 @@ pub mod manifest;
 pub mod mcp;
 pub mod mesh;
 pub mod metrics;
+pub mod names;
 pub mod node_target;
 pub mod notify;
 pub mod oauth;

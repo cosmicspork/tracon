@@ -228,7 +228,7 @@ async fn a_harness_streams_stdio_with_backpressure_and_ends_when_killed() {
     writer.await.unwrap();
     assert_eq!(got.len(), expected.len());
     assert!(got == expected, "the bytes came back changed");
-    assert_eq!(spawned.done.await.unwrap(), 0);
+    assert_eq!(spawned.done.await.unwrap().code, 0);
 
     let long = runner
         .spawn(rig.command("sleeper", "exec sleep 600"))
@@ -241,6 +241,6 @@ async fn a_harness_streams_stdio_with_backpressure_and_ends_when_killed() {
     let ended = tokio::time::timeout(Duration::from_secs(30), long.done)
         .await
         .expect("the harness outlived its sandbox");
-    assert!(ended.is_err() || ended.unwrap() != 0);
+    assert!(ended.is_err() || ended.unwrap().code != 0);
     assert!(podman(&["container", "exists", &name]).is_none());
 }

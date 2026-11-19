@@ -594,6 +594,108 @@ pub fn directory_volumes(root: &std::path::Path) -> Result<Vec<VolumeInfo>, Boun
     Ok(volumes)
 }
 
+/// Put the tree at `staged` in place of the volume at `dest`. A volume
+/// already there is moved aside first, as `<volume>.staging-<id>-old`, and
+/// removed only once the new tree is in place: a swap cut short leaves a
+/// copy [`sweep_staging`] puts back, never no volume and nothing to restore.
+pub fn swap_staged(staged: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
+    if std::fs::symlink_metadata(dest).is_err() {
+        return std::fs::rename(staged, dest);
+    }
+    let name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let old = dest.with_file_name(format!(
+        "{name}.staging-{}-old",
+        uuid::Uuid::now_v7().simple()
+    ));
+    std::fs::rename(dest, &old)?;
+    if let Err(error) = std::fs::rename(staged, dest) {
+        let _ = std::fs::rename(&old, dest);
+        return Err(error);
+    }
+    let _ = std::fs::remove_dir_all(&old);
+    Ok(())
+}
+
+/// For a staging copy beside the volumes under a directory-backed root
+/// (`<volume>.staging-<id>`, made by an import, a clone or a sync), the
+/// volume it is for, and whether it is that volume's own copy moved aside to
+/// be replaced (`<volume>.staging-<id>-old`). `None` for any other name.
+pub fn staging_of(name: &str) -> Option<(&str, bool)> {
+    let (volume, rest) = name.split_once(".staging-")?;
+    if volume.is_empty() || rest.is_empty() || !crate::gc::is_own(volume) {
+        return None;
+    }
+    Some((volume, rest.ends_with("-old")))
+}
+
+/// What [`sweep_staging`] did, by entry name.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct StagingSwept {
+    pub removed: Vec<String>,
+    /// Copies moved aside by a swap that never finished, put back as their
+    /// volume.
+    pub restored: Vec<String>,
+}
+
+/// At node start, before anything syncs: every staging copy under `root` is
+/// left by work a restart ended, since none outlives the process that made
+/// it, and goes. One a swap moved aside (`-old`) whose volume is missing is
+/// the volume's only copy, and is put back instead.
+pub fn sweep_staging(root: &std::path::Path) -> std::io::Result<StagingSwept> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(StagingSwept::default())
+        }
+        Err(error) => return Err(error),
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| staging_of(name).is_some())
+        .collect();
+    // Newest first (the ids are UUIDv7): of two copies of a missing volume,
+    // the later one is put back.
+    names.sort_unstable_by(|a, b| b.cmp(a));
+    let mut swept = StagingSwept::default();
+    for name in names {
+        let Some((volume, old)) = staging_of(&name) else {
+            continue;
+        };
+        let path = root.join(&name);
+        if tracon_sandbox::files::in_flight(&path) {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let volume_path = root.join(volume);
+        if old && meta.is_dir() && std::fs::symlink_metadata(&volume_path).is_err() {
+            match std::fs::rename(&path, &volume_path) {
+                Ok(()) => swept.restored.push(name),
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), %error, "could not put a volume's copy back")
+                }
+            }
+            continue;
+        }
+        let removed = match meta.is_dir() {
+            true => std::fs::remove_dir_all(&path),
+            false => std::fs::remove_file(&path),
+        };
+        match removed {
+            Ok(()) => swept.removed.push(name),
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "could not remove a staging copy")
+            }
+        }
+    }
+    Ok(swept)
+}
+
 /// Remove a directory-backed volume; a missing one is already gone.
 pub fn remove_directory_volume(root: &std::path::Path, volume: &str) -> Result<(), BoundaryError> {
     if volume.is_empty() || volume.contains('/') || volume.contains("..") {
@@ -775,6 +877,63 @@ pub fn sandboxes_over_protocol(cfg: &Config) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// At start every staging copy left beside the volumes goes, but a
+    /// volume's own copy that a swap cut short moved aside is put back when
+    /// the volume is missing; another node's names are left alone.
+    #[test]
+    fn a_start_sweeps_staging_and_puts_back_a_volume_cut_short() {
+        let root = tempfile::tempdir().unwrap();
+        let a = crate::config::resource_name("workspace-a");
+        let b = crate::config::resource_name("workspace-b");
+        let make = |name: &str, file: &str| {
+            std::fs::create_dir_all(root.path().join(name)).unwrap();
+            std::fs::write(root.path().join(name).join(file), name).unwrap();
+        };
+        make(&a, "live");
+        make(&format!("{a}.staging-x"), "partial");
+        make(&format!("{a}.staging-y-old"), "replaced");
+        make(&format!("{b}.staging-x-old"), "only");
+        make("another-volume.staging-x", "theirs");
+
+        let swept = sweep_staging(root.path()).unwrap();
+        assert_eq!(swept.restored, vec![format!("{b}.staging-x-old")]);
+        let mut removed = swept.removed.clone();
+        removed.sort();
+        assert_eq!(
+            removed,
+            vec![format!("{a}.staging-x"), format!("{a}.staging-y-old")]
+        );
+        let mut left: Vec<String> = std::fs::read_dir(root.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        let mut want = vec![a.clone(), b.clone(), "another-volume.staging-x".to_string()];
+        want.sort();
+        assert_eq!(left, want);
+        assert!(root.path().join(&a).join("live").exists());
+        assert!(root.path().join(&b).join("only").exists());
+        assert_eq!(sweep_staging(root.path()).unwrap(), StagingSwept::default());
+    }
+
+    /// A swap moves the old volume aside and puts the staged tree in its
+    /// place, leaving neither copy behind.
+    #[test]
+    fn a_staged_tree_replaces_its_volume() {
+        let root = tempfile::tempdir().unwrap();
+        let volume = root
+            .path()
+            .join(crate::config::resource_name("workspace-a"));
+        let staged = root.path().join("staged");
+        std::fs::create_dir_all(&volume).unwrap();
+        std::fs::write(volume.join("old"), "").unwrap();
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::write(staged.join("new"), "").unwrap();
+        swap_staged(&staged, &volume).unwrap();
+        assert!(volume.join("new").exists() && !volume.join("old").exists());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
 
     /// A prepared tree is copied as the runtime would copy it: what an install
     /// left behind — a `.bin` of symlinks — arrives as it was, where the

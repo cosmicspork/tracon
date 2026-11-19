@@ -216,6 +216,33 @@ async fn composing_straight_to_execute_is_refused_before_anything_is_written() {
 }
 
 #[tokio::test]
+async fn an_unknown_field_is_refused_before_anything_is_written() {
+    state::isolate();
+    let h = Harness::new(Some(r#"[{"value":"m/a","name":"A"}]"#)).await;
+    let (st, body) = h
+        .call(
+            "POST",
+            "/api/compose",
+            Some(json!({
+                "channel": "personal",
+                "title": "Misspelt",
+                "repo_path": "forge.invalid/o/r",
+                "priorty": 1,
+            })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["error"]["kind"], "unknown_field", "{body}");
+    assert_eq!(
+        body["error"]["message"],
+        "unknown field \"priorty\"; did you mean \"priority\"?"
+    );
+    let (st, items) = h.call("GET", "/api/work?channel=personal", None).await;
+    assert_eq!(st, StatusCode::OK, "{items}");
+    assert!(!items.to_string().contains("Misspelt"), "{items}");
+}
+
+#[tokio::test]
 async fn a_prompt_takes_the_channel_s_bound_model() {
     state::isolate();
     let h = Harness::new(Some(r#"[{"value":"m/a","name":"A"}]"#)).await;
@@ -285,6 +312,9 @@ async fn peer_compose_applies_its_scoped_work_before_the_mesh_tap_arrives() {
         "spec": {
             "channel": "personal", "phase": "plan", "repo_path": repo,
             "work_item_id": item.id, "model": "m/a",
+            // A newer sender's field this node does not have: ignored, not
+            // refused, so mesh version skew keeps working.
+            "a_field_from_a_newer_node": true,
         },
         "work_item": change,
     });

@@ -83,6 +83,12 @@ pub enum EndReason {
     /// on to a fallback model: a continuation picks it up from the safe
     /// boundary this session reached.
     ProviderExhausted,
+    /// The harness process died, mid-turn or between turns, and was not
+    /// started again: its runtime gives no relaunch (a sandbox on another
+    /// provider), it was killed for running out of memory, or it kept dying.
+    /// The session's error says how it ended. Its work can be carried on
+    /// from its workspace in a new session, as a node restart's can.
+    HarnessDied,
     Error,
 }
 
@@ -99,6 +105,7 @@ impl EndReason {
             Self::Continued => "continued",
             Self::NodeRestart => "node_restart",
             Self::ProviderExhausted => "provider_exhausted",
+            Self::HarnessDied => "harness_died",
             Self::Error => "error",
         }
     }

@@ -1,5 +1,7 @@
 <script lang="ts">
   import HtmlImport from '../components/HtmlImport.svelte'
+  import { shortHash } from '../lib/names'
+  import Name from '../components/Name.svelte'
   import { api, ApiError, DocConflict } from '../lib/api'
   import { autogrow } from '../lib/autogrow'
   import { clock } from '../lib/clock.svelte'
@@ -214,8 +216,8 @@
   <div class="h4">
     <a class="lnk" href="/docs">Documents</a>
     <span class="sep">/</span>
-    {slug}
-    <b>{channel}{doc ? ` · ${formatAge(doc.updated_ms, clock.now)}` : missing ? ' · new' : ''}{doc ? ` · ${doc.hash.slice(0, 8)}` : ''}{doc?.archived ? ' · archived' : ''}{doc?.pinned ? ' · pinned' : ''}</b>
+    <span title={slug}>{doc?.title || slug}</span>
+    <b>{channel}{doc ? ` · ${formatAge(doc.updated_ms, clock.now)}` : missing ? ' · new' : ''}{#if doc}{' · '}<Name id={doc.hash} label={shortHash(doc.hash)} />{/if}{doc?.archived ? ' · archived' : ''}{doc?.pinned ? ' · pinned' : ''}</b>
     {#if error && !editing}<span class="err" role="alert">{error}</span>{/if}
     {#if doc?.format === 'html' && !loadError}
       <span class="r">
@@ -276,7 +278,7 @@
       <div class="html-meta">
         <span><b>Source</b> {doc.source_name}</span>
         <span><b>Entry</b> <code>{doc.entry_path}</code></span>
-        <span><b>Generation</b> <code>{doc.hash}</code></span>
+        <span><b>Generation</b> <code><Name id={doc.hash} label={shortHash(doc.hash)} /></code></span>
         <span><b>Files</b> {doc.bundle_files?.length ?? 0}</span>
       </div>
       <div class="html-actions">

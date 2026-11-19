@@ -7,6 +7,7 @@
 // break a run: every Claude Code call now carries a policy record, and letting
 // those through left no two calls side by side.
 
+import { generatedName } from './names'
 import { roomWords } from './capabilities'
 import { exhaustionNote } from './exhaustion'
 import { formatBytes } from './data'
@@ -414,6 +415,8 @@ export interface EventLine {
   /** A link after the text: a forge URL, or a route in this app. */
   href?: string
   link?: string
+  /** The raw id of the record `link` names: on hover and to copy. */
+  id?: string
 }
 
 function str(v: unknown): string {
@@ -424,9 +427,9 @@ function num(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null
 }
 
-function line(tone: EventLine['tone'], parts: unknown[], href?: string, link?: string): EventLine {
+function line(tone: EventLine['tone'], parts: unknown[], href?: string, link?: string, id?: string): EventLine {
   const text = parts.filter((p) => typeof p === 'string' && p).join(' · ')
-  return href ? { text, tone, href, link } : { text, tone }
+  return href ? { text, tone, href, link, ...(id ? { id } : {}) } : { text, tone }
 }
 
 /// A pause or resume reason, unless it is the node's stand-in for none.
@@ -684,7 +687,8 @@ export function eventLine(e: Event): EventLine | null {
       // or sent back for changes; the link is that attempt.
       const from = str(p.from_session)
       const what = str(p.state) === 'revising' ? 'review sent back for changes taken over' : 'open review taken over'
-      return line('mark', [what, from ? `from ${from.slice(0, 8)}` : ''], from ? `/sessions/${from}` : undefined, from ? from.slice(0, 8) : undefined)
+      const name = from ? generatedName('session', from) : ''
+      return line('mark', [what, from ? `from ${name}` : ''], from ? `/sessions/${from}` : undefined, name || undefined, from || undefined)
     }
     case 'provider_exhausted': {
       const note = exhaustionNote(p as unknown as SessionExhaustion)
@@ -703,7 +707,7 @@ export function eventLine(e: Event): EventLine | null {
           return line('mark', ["the provider's limit reset", 'resumed', note])
         case 'continued': {
           const next = str(p.continued_by)
-          return line('mark', ['continued in a new session', str(p.model) ? `on ${str(p.model)}` : '', note], next ? `/sessions/${next}` : undefined, next ? next.slice(0, 8) : undefined)
+          return line('mark', ['continued in a new session', str(p.model) ? `on ${str(p.model)}` : '', note], next ? `/sessions/${next}` : undefined, next ? generatedName('session', next) : undefined, next || undefined)
         }
         case 'held':
           return line('wait', ['held for you', note])

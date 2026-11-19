@@ -1469,6 +1469,7 @@ mod tests {
             phase: "execute".into(),
             policy_version: None,
             manifest_digest: None,
+            open_turn_tokens: 0,
             review_id: None,
             budget_tokens: 0,
             tokens_used: 0,

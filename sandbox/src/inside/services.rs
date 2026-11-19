@@ -435,6 +435,7 @@ async fn exited(exit: &mut watch::Receiver<Option<ExitStatus>>) -> ExitStatus {
             return ExitStatus {
                 code: None,
                 signal: None,
+                oom_killed: false,
             };
         }
     }

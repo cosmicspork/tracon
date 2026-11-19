@@ -172,10 +172,13 @@ fn reopen_phase(stored: &str) -> Phase {
 /// re-derives it, badly, and calls the result progress.
 fn handoff_note(old: &SessionRow, harness: &str, carried: &[ReviewRow]) -> String {
     let why = format!(
-        "This session continues session {} (`{}` {}), which ran a harness this node no \
+        "This session continues {} (id {}, `{}` {}), which ran a harness this node no \
          longer has and which is now archived read-only. You are {harness}, and you \
          inherit none of its context",
-        old.id, old.harness_id, old.harness_version,
+        crate::names::session(&old.id),
+        old.id,
+        old.harness_id,
+        old.harness_version,
     );
     handoff(old, &why, carried)
 }
@@ -282,6 +285,24 @@ pub(crate) fn workspace_of(row: &SessionRow) -> String {
         .strip_prefix("workspace://")
         .unwrap_or(&row.id)
         .to_string()
+}
+
+/// What a session carrying on one whose harness died is told: that it died,
+/// how, and that whatever it was running in the background went with it.
+fn died_note(old: &SessionRow, carried: &[ReviewRow]) -> String {
+    let how = old
+        .last_error
+        .as_deref()
+        .filter(|e| !e.is_empty())
+        .map(|e| format!(" ({e})"))
+        .unwrap_or_default();
+    let why = format!(
+        "This session continues session {}, whose harness process died in the middle of its \
+         work{how} and was not started again. Commands it ran in the background, and their \
+         output, are gone. You inherit none of its context",
+        old.id,
+    );
+    handoff(old, &why, carried)
 }
 
 /// What a session carrying on a suspended, published one is told: where its
@@ -472,11 +493,7 @@ fn kickoff(
     review_id: Option<&str>,
 ) -> Option<String> {
     let named = |item: &tracon_sync::work::WorkItem| {
-        format!(
-            "**{}** (`{}…`)",
-            item.title,
-            &item.id[..8.min(item.id.len())]
-        )
+        format!("**{}** (`{}`)", item.title, crate::names::task(&item.id))
     };
     match phase {
         Phase::Plan => {
@@ -536,7 +553,7 @@ pub enum SessionError {
     UnknownChannel(String),
     #[error("channel {0} is archived: bring it back to start work on it again")]
     ChannelArchived(String),
-    #[error("a task is required: pick one from the ready list")]
+    #[error("a plan session needs a task: pass work_item_id (ready ids: tracon work ready)")]
     WorkItemRequired,
     #[error("task is not ready: {0}")]
     NotReady(String),
@@ -957,10 +974,11 @@ impl Manager {
                 Some(r) if r == state::EndReason::ProviderExhausted.as_str() => {
                     exhausted_note(&old, None, &carried)
                 }
+                Some(r) if r == state::EndReason::HarnessDied.as_str() => died_note(&old, &carried),
                 _ => {
                     return Err(SessionError::Rejected(
-                        "only a session a node restart or an exhausted provider ended, or a \
-                         suspended one, can be continued this way"
+                        "only a session a node restart, an exhausted provider or its harness's \
+                         death ended, or a suspended one, can be continued this way"
                             .into(),
                     ))
                 }
@@ -1003,8 +1021,8 @@ impl Manager {
             .find(|s| s.continued_from.as_deref() == Some(id))
         {
             return Err(SessionError::Rejected(format!(
-                "session {} already continues this one",
-                next.id
+                "{} already continues this one",
+                crate::names::session(&next.id)
             )));
         }
         // A session on a checkout keeps its workspace under its own id; one
@@ -1056,8 +1074,8 @@ impl Manager {
     async fn reopenable(&self, row: &SessionRow) -> Result<Arc<dyn HarnessAdapter>, String> {
         if row.node_id != self.node_id {
             return Err(format!(
-                "it ran on node {}; ask it there",
-                &row.node_id[..8.min(row.node_id.len())]
+                "it ran on {}; ask it there",
+                self.store.node_display_name(&row.node_id)
             ));
         }
         if row.legacy_ms.is_some() {
@@ -1144,8 +1162,8 @@ impl Manager {
                         && other.work_item_id == row.work_item_id))
         }) {
             return Err(format!(
-                "session {} is {} on its workspace or its task now",
-                &other.id[..8.min(other.id.len())],
+                "{} is {} on its workspace or its task now",
+                crate::names::session(&other.id),
                 other.state.replace('_', " ")
             ));
         }
@@ -1327,8 +1345,8 @@ impl Manager {
         self.refuse_turn_while_restarting(id)?;
         if row.node_id != self.node_id {
             return Err(SessionError::Rejected(format!(
-                "it runs on node {}; compact it there",
-                &row.node_id[..8.min(row.node_id.len())]
+                "it runs on {}; compact it there",
+                self.store.node_display_name(&row.node_id)
             )));
         }
         if !self
@@ -1859,6 +1877,7 @@ impl Manager {
                     parent_session: None,
                     continued_from: None,
                     manifest_digest: None,
+                    open_turn_tokens: 0,
                 })
                 .expect("test session row");
         }
@@ -2266,10 +2285,10 @@ impl Manager {
                         .iter()
                         .map(|b| match b {
                             tracon_sync::work::Blocker::Open { id } => {
-                                format!("open task {}", &id[..8.min(id.len())])
+                                format!("open {}", crate::names::task(id))
                             }
                             tracon_sync::work::Blocker::Unknown { id } => {
-                                format!("task {} not seen here", &id[..8.min(id.len())])
+                                format!("{} not seen here", crate::names::task(id))
                             }
                             tracon_sync::work::Blocker::Cycle => "a dependency cycle".into(),
                         })
@@ -2443,6 +2462,7 @@ impl Manager {
             parent_session: spec.parent_session.clone(),
             continued_from: spec.continued_from.clone(),
             manifest_digest: None,
+            open_turn_tokens: 0,
         };
         self.store.insert_session(&row)?;
         self.store.exhaustion_choose(&id, &on_exhaustion)?;
@@ -3536,11 +3556,16 @@ impl Manager {
                 }
             }
             // Kept for a harness that can be started again on this session when
-            // its process dies.
-            let relaunch = adapter.restorable().then(|| supervisor::Relaunch {
-                adapter: adapter.clone(),
-                spec: launch_spec.clone(),
-            });
+            // its process dies, in a sandbox on this node's own runtime. One
+            // placed elsewhere is gone by the time its exit is known, and a
+            // relaunch would be a new paid sandbox of the same size that
+            // would likely die the same way: the session ends instead, to be
+            // carried on (`continue_interrupted`).
+            let relaunch =
+                (adapter.restorable() && !placed.is_elsewhere()).then(|| supervisor::Relaunch {
+                    adapter: adapter.clone(),
+                    spec: launch_spec.clone(),
+                });
             let launched = tokio::time::timeout(
                 STARTUP_TIMEOUT,
                 adapter.launch(runner.as_ref(), launch_spec),
@@ -4548,16 +4573,20 @@ impl Manager {
         Self::refuse_legacy(&row)?;
         if row.node_id != self.node_id {
             return Err(SessionError::Rejected(format!(
-                "session runs on node {}; raise its budget on the node that runs it",
-                row.node_id
+                "session runs on {}; raise its budget on the node that runs it",
+                self.store.node_display_name(&row.node_id)
             )));
         }
         let ended = || SessionError::Rejected(format!("session is {}", row.state));
         if SessionState::from_stored(&row.state).is_terminal() {
             return Err(ended());
         }
-        if budget_tokens > 0 && budget_tokens <= row.tokens_used {
-            return Err(SessionError::BudgetSpent(row.tokens_used));
+        // What the gateway's budget check counts: the settled turns plus
+        // what the open one has spent so far. A budget at or under that is
+        // refused on the next call, so it is refused here instead.
+        let spent = row.tokens_used + row.open_turn_tokens;
+        if budget_tokens > 0 && budget_tokens <= spent {
+            return Err(SessionError::BudgetSpent(spent));
         }
         let changed = self.store.update_session_unless(
             id,
@@ -5488,7 +5517,11 @@ mod tests {
     #[test]
     fn an_execute_session_without_a_plan_starts_on_the_item_alone() {
         let text = kickoff(Phase::Execute, Some(&item(None)), None).unwrap();
-        assert!(text.contains("**Add the ledger** (`01234567…`)"), "{text}");
+        let name = crate::names::task("0123456789abcdef");
+        assert!(
+            text.contains(&format!("**Add the ledger** (`{name}`)")),
+            "{text}"
+        );
         assert!(!text.contains("plan"), "{text}");
     }
 

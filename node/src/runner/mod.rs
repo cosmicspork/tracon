@@ -296,15 +296,58 @@ pub enum RunnerError {
     ServiceFailed(String),
 }
 
+/// How a process ended, as far as its runtime could tell.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Exit {
+    /// Its exit code as a container's would read: 128 and the signal when a
+    /// signal killed it, -1 when the runtime kept none.
+    pub code: i32,
+    /// The signal that killed it, when one did and the runtime said so.
+    pub signal: Option<i32>,
+    /// The runtime saw the kernel's out-of-memory killer end it (a cgroup's
+    /// `oom_kill` count rising as it was killed, a pod's `OOMKilled`).
+    pub oom_killed: bool,
+}
+
+impl Exit {
+    pub fn code(code: i32) -> Self {
+        Self {
+            code,
+            ..Default::default()
+        }
+    }
+
+    #[cfg(unix)]
+    pub fn of(status: std::process::ExitStatus) -> Self {
+        use std::os::unix::process::ExitStatusExt as _;
+        match (status.code(), status.signal()) {
+            (Some(code), _) => Self::code(code),
+            (None, Some(signal)) => Self {
+                code: 128 + signal,
+                signal: Some(signal),
+                oom_killed: false,
+            },
+            (None, None) => Self::code(-1),
+        }
+    }
+
+    #[cfg(not(unix))]
+    pub fn of(status: std::process::ExitStatus) -> Self {
+        Self::code(status.code().unwrap_or(-1))
+    }
+}
+
 /// A running harness, reduced to what a stdio transport needs: its pipes and
 /// a future that resolves when it is gone. A process and a pod attach look
 /// the same from here.
 pub struct Spawned {
     pub stdin: Box<dyn AsyncWrite + Send + Unpin>,
     pub stdout: Box<dyn AsyncRead + Send + Unpin>,
-    /// Resolves with the exit status once the harness has ended. Awaiting it
-    /// is also what reaps a child process.
-    pub done: BoxFuture<'static, Result<i32, RunnerError>>,
+    /// Resolves with the exit status once the harness has ended: as soon as
+    /// the process is gone, not once whatever held it has been taken down.
+    /// Awaiting it is also what reaps a child process. An error is a status
+    /// nobody could report, and says why.
+    pub done: BoxFuture<'static, Result<Exit, RunnerError>>,
 }
 
 impl Spawned {
@@ -323,7 +366,7 @@ impl Spawned {
             stdout: Box::new(stdout),
             done: Box::pin(async move {
                 let status = child.wait().await?;
-                Ok(status.code().unwrap_or(-1))
+                Ok(Exit::of(status))
             }),
         })
     }

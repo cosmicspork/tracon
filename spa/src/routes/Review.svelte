@@ -1,5 +1,6 @@
 <script lang="ts">
   import ReportReview from '../components/ReportReview.svelte'
+  import Name from '../components/Name.svelte'
   import Diff from '../components/Diff.svelte'
   import { splitDiff } from '../lib/diff'
   import CommitMessage from '../components/CommitMessage.svelte'
@@ -899,7 +900,7 @@
       <em>{closed ? CLOSED_LABEL[review.state] : stale.length > 0 ? 'Changed since submit' : 'Review'}</em>
       {title || review.title}
       <small
-        >{files.length} files · +{review.added} −{review.removed} · {review.channel}{!closed && review.claimed_ms
+        ><Name kind="review" id={review.id} /> · {files.length} files · +{review.added} −{review.removed} · {review.channel}{!closed && review.claimed_ms
           ? ' · claimed'
           : ''}</small
       >
@@ -955,7 +956,7 @@
 
     {#if review.session_id}
       <dt>Session</dt>
-      <dd class="m"><a href="/sessions/{review.session_id}">{review.session_id.slice(0, 8)}</a></dd>
+      <dd class="m"><Name kind="session" id={review.session_id} href="/sessions/{review.session_id}" /></dd>
     {:else}
       <dt>Submitted by</dt>
       <dd class="m">{review.lane ?? 'an external agent'}</dd>
@@ -1159,7 +1160,7 @@
 
   <dl class="prov">
     <div><dt>Model</dt><dd>{session ? `${session.model} · ${session.phase}` : '—'}</dd></div>
-    <div><dt>Task</dt><dd>{#if session?.work_item_id}<a href="/tasks/{session.work_item_id}">{session.work_item_id.slice(0, 8)}</a>{:else}none{/if}</dd></div>
+    <div><dt>Task</dt><dd>{#if session?.work_item_id}<Name kind="task" id={session.work_item_id} href="/tasks/{session.work_item_id}" />{:else}none{/if}</dd></div>
     <div><dt>Reviewed by</dt><dd>{reviewer ? `${reviewer.model} · fresh session` : review.review_session_id ? 'fresh session' : (reviewerReason ?? 'no review session')}{reviewer && startedHow(reviewerView?.started_by) ? ` · ${startedHow(reviewerView?.started_by)}` : ''}</dd></div>
   </dl>
 

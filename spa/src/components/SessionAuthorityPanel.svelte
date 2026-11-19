@@ -6,6 +6,8 @@
   // computed its own verdicts would eventually disagree with the gate, and the
   // operator would have no way to tell which of the two was lying.
   import { api } from '../lib/api'
+  import { generatedName } from '../lib/names'
+  import Name from './Name.svelte'
   import { formatDuration, formatTokens } from '../lib/format'
   import type { FilesSyncNote } from '../lib/filesSync'
   import type { ActionStanding, SessionAuthority } from '../lib/types'
@@ -68,7 +70,7 @@
     <dl>
       <dt>Runs on</dt>
       <dd>
-        {view.node.name ?? view.node.id.slice(0, 8)}{view.node.is_self ? ' (this node)' : ''} ·
+        <Name id={view.node.id} label={view.node.name || generatedName('node', view.node.id)} />{view.node.is_self ? ' (this node)' : ''} ·
         isolation {view.node.isolation ?? 'unknown'}{view.node.failed_check
           ? ` · ${view.node.failed_check}${view.node.failed_detail ? `: ${view.node.failed_detail}` : ''}`
           : ''}

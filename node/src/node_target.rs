@@ -236,11 +236,6 @@ pub fn is_loopback(url: &str) -> bool {
     }
 }
 
-/// The first eight characters of a node id, as messages show it.
-pub fn short_id(id: &str) -> &str {
-    &id[..8.min(id.len())]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

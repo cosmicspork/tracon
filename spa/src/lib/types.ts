@@ -387,6 +387,11 @@ export interface Session {
   review_id: string | null
   budget_tokens: number
   tokens_used: number
+  /** What the open turn has spent so far through the gateway, cache reads
+   * left out; 0 between turns. Not in `tokens_used` until the turn settles,
+   * so what was spent is the sum: `spent()` in `budget.ts`. Absent from an
+   * older node. */
+  open_turn_tokens?: number
   cost_usd: number | null
   context_used: number | null
   context_size: number | null
@@ -1756,11 +1761,37 @@ export interface Elsewhere {
   expected_uid: number | null
   /** What the last sandbox to connect said of itself; absent until one has. */
   reported: { version: string; uid: number | null } | null
-  /** The size a new sandbox is made at, and its hourly price; absent until the catalog is read. */
+  /**
+   * The size a new sandbox with no memory floor is made at (`[digitalocean] size`, or the
+   * cheapest with at least 2 GiB), its memory and hourly price. Absent when none can be chosen;
+   * a configured size with the catalog not read has no memory or price.
+   */
   size?: string
+  memory_mb?: number
   price_per_hour_usd?: number
+  /** Why no size can be chosen, so a sandbox there would be refused. */
+  size_error?: string
+  /** `[digitalocean] size`, when set. */
+  configured_size?: string
+  /** Why the runtime's size catalog could not be read. */
+  catalog_error?: string
+  /** Each `[placement]` `require.memory` floor and the size it resolves to. Absent from an older node. */
+  floors?: SizeFloor[]
   /** Today's sandbox spend against the limit. Absent from an older node. */
   spend?: InfraSpend
+}
+
+/** One `[placement]` entry's memory floor and the size a sandbox under it is made at. */
+export interface SizeFloor {
+  /** `channel <name>`, or a repository's path. */
+  scope: string
+  /** As written: `4Gi`. */
+  memory: string
+  size?: string
+  memory_mb?: number
+  price_per_hour_usd?: number
+  /** Why no size meets it. */
+  error?: string
 }
 
 /** Today's sandbox spend against `[spend] infra_usd_per_day`. */

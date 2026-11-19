@@ -1,9 +1,11 @@
 // A call to one of the node's own MCP tools, read as what it does: "Wait for
-// review 01a128ee", "Ask the operator · Which staging database…", "Pull
+// review-quiet-otter-07", "Ask the operator · Which staging database…", "Pull
 // request #439". The harnesses name these tools by their protocol, not for
 // people: `mcp__tracon__review_status`, or `tracon_review_status` in a session
 // the retired OpenCode harness ran. Another MCP server's tools keep their server's name
 // in view, since that is what the operator needs to know about them.
+
+import { generatedName, type NameKind } from './names'
 
 /// Every tool the node offers a session, by the name it is offered under.
 /// An archived OpenCode session's `tracon_<tool>` is read as the node's only
@@ -120,9 +122,12 @@ function clip(text: string, max = 72): string {
   return line.length > max ? `${line.slice(0, max - 1).trimEnd()}…` : line
 }
 
-/// The start of an id the node minted: enough to tell two apart on one screen.
-function short(id: string): string {
-  return id.length > 12 ? id.slice(0, 8) : id
+/// A record an agent named by id, by its generated name. An agent may pass a
+/// prefix or another handle, which names nothing: that reads as the agent
+/// wrote it, after the kind.
+function named(kind: NameKind, id: string): string {
+  const full = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$|^[0-9a-f]{64}$/.test(id)
+  return full ? generatedName(kind, id) : `${kind} ${id}`
 }
 
 /// "review status" for `review_status`: what an unmapped tool reads as.
@@ -143,7 +148,7 @@ function sp(...parts: string[]): string {
   return parts.filter(Boolean).join(' ')
 }
 
-/// "Ask the operator", "Wait for review 01a128ee": the tool and what it was
+/// "Ask the operator", "Wait for review-quiet-otter-07": the tool and what it was
 /// called with, as a line to scan.
 export function nodeCallText(tool: string, rawInput: unknown): string {
   // A number the schema requires but the call left out leaves "Comment on #";
@@ -165,13 +170,13 @@ function callLine(tool: string, rawInput: unknown): string {
     case 'submit_review':
       return line(str(a.review_id) ? 'Resubmit for review' : 'Submit for review', clip(str(a.title)))
     case 'review_status':
-      return sp('Wait for review', short(str(a.review_id)))
+      return str(a.review_id) ? sp('Wait for', named('review', str(a.review_id))) : 'Wait for review'
     case 'review_verdict':
       return line('Give a verdict', str(a.verdict))
     case 'submit_report':
       return line(str(a.report_id) ? 'Revise the report' : 'Submit a report', clip(str(a.title)))
     case 'report_status':
-      return sp('Wait for the report', short(str(a.report_id)))
+      return str(a.report_id) ? sp('Wait for', named('report', str(a.report_id))) : 'Wait for the report'
     case 'ask_operator':
       return line('Ask the operator', clip(str(a.question)))
     case 'question_status':
@@ -304,11 +309,11 @@ function callLine(tool: string, rawInput: unknown): string {
     case 'work_list':
       return line('Tasks', [str(a.project), str(a.state), str(a.query) && `“${clip(str(a.query), 40)}”`].filter(Boolean).join(' · '))
     case 'work_show':
-      return str(a.id) ? sp('Task', str(a.id).slice(0, 8)) : 'This task'
+      return str(a.id) ? sp('Show', named('task', str(a.id))) : 'This task'
     case 'work_update':
-      return line(sp('Update task', str(a.id).slice(0, 8)), clip(str(a.title)))
+      return line(str(a.id) ? sp('Update', named('task', str(a.id))) : 'Update task', clip(str(a.title)))
     case 'work_delete':
-      return sp('Delete task', str(a.id).slice(0, 8))
+      return str(a.id) ? sp('Delete', named('task', str(a.id))) : 'Delete task'
     default:
       return spaced(tool)
   }

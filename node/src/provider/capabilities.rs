@@ -151,15 +151,50 @@ pub struct Elsewhere {
     /// What the last sandbox to connect said of itself; `None` until one
     /// has, so who the harness runs as is not established.
     pub reported: Option<Reported>,
-    /// The size a new sandbox is made at, and its hourly price in the
-    /// runtime's catalog; `None` until the catalog has been read.
+    /// The size a new sandbox with no memory floor is made at, its memory
+    /// and its hourly price in the runtime's catalog: `[digitalocean] size`,
+    /// or the cheapest with at least 2 GiB. With the catalog not read, a
+    /// configured size alone, unpriced; `None` when none can be chosen.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub price_per_hour_usd: Option<f64>,
+    /// Why no size can be chosen, so a sandbox would be refused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_error: Option<String>,
+    /// `[digitalocean] size`, when set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub configured_size: Option<String>,
+    /// Why the runtime's size catalog could not be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog_error: Option<String>,
+    /// Each `[placement]` `require.memory` floor and the size it resolves
+    /// to.
+    pub floors: Vec<SizeFloor>,
     /// Today's sandbox spend against `[spend] infra_usd_per_day`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spend: Option<crate::metrics::InfraSpend>,
+}
+
+/// One `[placement]` entry's memory floor and the size a sandbox under it
+/// alone is made at.
+#[derive(Debug, Clone, Serialize)]
+pub struct SizeFloor {
+    /// `channel <name>`, or a repository's path.
+    pub scope: String,
+    /// As written: `4Gi`.
+    pub memory: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price_per_hour_usd: Option<f64>,
+    /// Why no size meets it, so its sessions there would be refused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// What a sandbox's supervisor said of itself in its hello.

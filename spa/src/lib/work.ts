@@ -1,3 +1,4 @@
+import { generatedName } from './names'
 import type { Blocker, PriorityLevel, Project, WorkItem, WorkView } from './types'
 
 /** The row's state word, as the ledger shows it. */
@@ -11,21 +12,30 @@ export function workLabel(v: WorkView): string {
   return { ready: 'Ready', blocked: 'Blocked', insession: 'In session', closed: 'Closed' }[workState(v)]
 }
 
-/** "waits on b07d13e8 Metrics rollups" — blockers by id and, when known, title. */
+/** "waits on task-quiet-otter-07 Metrics rollups" — blockers by name and, when known, title. */
 export function blockersLine(by: Blocker[], titles: Map<string, string>): string {
   return by
     .map((b) =>
       b.kind === 'cycle'
         ? 'part of a dependency cycle'
         : b.kind === 'unknown'
-          ? `waits on ${b.id.slice(0, 8)} (not seen on this node)`
-          : `waits on ${b.id.slice(0, 8)}${titles.has(b.id) ? ` ${titles.get(b.id)}` : ''}`,
+          ? `waits on ${generatedName('task', b.id)} (not seen on this node)`
+          : `waits on ${generatedName('task', b.id)}${titles.has(b.id) ? ` ${titles.get(b.id)}` : ''}`,
     )
     .join(' · ')
 }
 
-export function short(id: string | null | undefined, n = 8): string {
-  return id ? id.slice(0, n) : ''
+/** A task's short handle: its generated name. Its title is its name. */
+export function taskName(id: string): string {
+  return generatedName('task', id)
+}
+
+/**
+ * A project this node does not list, by the order it first appears: projects
+ * are not named records, and the id is not something to read.
+ */
+function unlistedLabel(id: string, unlisted: readonly string[]): string {
+  return unlisted.length > 1 ? `unlisted project ${unlisted.indexOf(id) + 1}` : 'unlisted project'
 }
 
 /** A priority as people read it: its level's name, or the number when no level has it. */
@@ -89,16 +99,22 @@ export function projectTabs(
   const unnamed = [...held].filter((id) => !projects.some((p) => p.id === id)).sort()
   const tabs: ProjectTab[] = [{ key: 'all', label: 'All', open: open('all') }]
   for (const p of named) tabs.push({ key: p.id, label: projectLabel(p, projects), open: open(p.id) })
-  for (const id of unnamed) tabs.push({ key: id, label: short(id), open: open(id) })
+  for (const id of unnamed) tabs.push({ key: id, label: unlistedLabel(id, unnamed), open: open(id) })
   if (items.some((i) => !i.project_id && (isOpen(i) || current === 'none'))) {
     tabs.push({ key: 'none', label: 'No project', open: open('none') })
   }
   return tabs
 }
 
-/** A project's name, with its short id beside it when another project shares the name. */
+/**
+ * A project's name, told apart from another project of the same name by its
+ * remote, or else by its place among them.
+ */
 export function projectLabel(p: Project, projects: readonly Project[]): string {
-  return projects.some((o) => o.id !== p.id && o.name === p.name) ? `${p.name} ${short(p.id, 6)}` : p.name
+  const same = projects.filter((o) => o.name === p.name)
+  if (same.length < 2) return p.name
+  if (p.remote_url && same.every((o) => o.id === p.id || o.remote_url !== p.remote_url)) return `${p.name} (${p.remote_url})`
+  return `${p.name} #${[...same].sort((a, b) => a.id.localeCompare(b.id)).indexOf(p) + 1}`
 }
 
 /**
@@ -121,7 +137,7 @@ export function inProject(item: Pick<WorkItem, 'project_id'>, key: ProjectKey): 
 export function projectName(item: Pick<WorkItem, 'project_id'>, projects: readonly Project[]): string | null {
   if (!item.project_id) return null
   const p = projects.find((p) => p.id === item.project_id)
-  return p ? projectLabel(p, projects) : short(item.project_id)
+  return p ? projectLabel(p, projects) : 'unlisted project'
 }
 
 const TAB_KEY = 'tracon.tasks.project.'

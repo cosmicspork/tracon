@@ -1278,20 +1278,50 @@ impl SandboxConn {
             .parent()
             .ok_or_else(|| SandboxError::Protocol("export destination has no parent".into()))?;
         tokio::fs::create_dir_all(parent).await?;
-        let staging = tempfile::Builder::new()
-            .prefix(".sandbox-export-")
-            .tempdir_in(parent)?;
-        let summary =
-            files::unpack_async(reader, staging.path().to_path_buf(), Some(dir), limits).await?;
-        let staged = staging.keep();
-        if tokio::fs::symlink_metadata(dest).await.is_ok() {
-            tokio::fs::remove_dir_all(dest).await?;
+        // Owned by a `Staging` rather than the `TempDir`: a caller that gives
+        // up stops the unpack and its transfer, and the directory goes once
+        // the unpack has stopped writing it.
+        let staging = files::Staging::own(
+            tempfile::Builder::new()
+                .prefix(".sandbox-export-")
+                .tempdir_in(parent)?
+                .keep(),
+        );
+        let summary = match files::unpack_staged(reader, &staging, Some(dir), limits).await {
+            Ok(summary) => summary,
+            Err(error) => {
+                staging.discard().await;
+                return Err(error.into());
+            }
+        };
+        // The swap in one blocking step, so a caller that gives up cannot
+        // leave `dest` removed and the tree that replaces it still staged.
+        let (staged, dest_owned, stopped) = (
+            staging.path().to_path_buf(),
+            dest.to_path_buf(),
+            staging.stopped(),
+        );
+        let swapped = staging
+            .blocking(move || {
+                if stopped.is_cancelled() {
+                    return Err(io::Error::other("the export was abandoned"));
+                }
+                if std::fs::symlink_metadata(&dest_owned).is_ok() {
+                    std::fs::remove_dir_all(&dest_owned)?;
+                }
+                std::fs::rename(&staged, &dest_owned)
+            })
+            .await;
+        match swapped {
+            Ok(()) => {
+                staging.keep();
+                Ok(summary)
+            }
+            Err(error) => {
+                staging.discard().await;
+                Err(error.into())
+            }
         }
-        if let Err(error) = tokio::fs::rename(&staged, dest).await {
-            let _ = tokio::fs::remove_dir_all(&staged).await;
-            return Err(error.into());
-        }
-        Ok(summary)
     }
 
     /// Listen on `listen` inside the sandbox and join each connection to

@@ -384,7 +384,8 @@ async fn kubernetes_sandboxes_over_the_protocol() {
     assert!(ready, "the service never answered");
     runner.kill(&web.name).await.unwrap();
     drop(stdin);
-    assert_eq!(spawned.done.await.unwrap(), 0);
+    assert_eq!(spawned.done.await.unwrap().code, 0);
+    tracon::runner::protocol::settled("tracon-h-1").await;
 
     // The provider reads isolation back from the pod and the policy: with
     // no sandbox policy in place, the route is not claimed.

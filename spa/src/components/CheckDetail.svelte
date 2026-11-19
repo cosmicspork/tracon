@@ -2,6 +2,7 @@
   // One check run, opened from its line on the review: what ran, in which
   // image, with which inputs, and everything it printed.
   import { failuresOf, inputRows, outcomeLabel, runDuration, runTone } from '../lib/checkRuns'
+  import Name from './Name.svelte'
   import type { CandidateCheckRun } from '../lib/types'
 
   let { run, onclose }: { run: CandidateCheckRun | null; onclose: () => void } = $props()
@@ -36,9 +37,7 @@
         <button class="lnk" type="button" onclick={() => dialog?.close()}>Close</button>
       </header>
       <p class="said">
-        {outcomeLabel(run)} · {runDuration(run)}{run.exit_code != null ? ` · exit ${run.exit_code}` : ''}{run.reused_from_id
-          ? ` · reused from ${run.reused_from_id.slice(0, 8)}`
-          : ''}
+        {outcomeLabel(run)} · {runDuration(run)}{run.exit_code != null ? ` · exit ${run.exit_code}` : ''}{#if run.reused_from_id}{' · reused from '}<Name kind="check" id={run.reused_from_id} />{/if}
       </p>
       {#if failures}
         <pre class="failures" aria-label="what failed">{failures}</pre>

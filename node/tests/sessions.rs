@@ -359,6 +359,44 @@ async fn a_session_needs_a_ready_item_and_execute_needs_its_plan() {
         .as_str()
         .unwrap()
         .contains("no task"));
+    // A plan session without a task says which field carries it.
+    let (st, body) = h
+        .call(
+            "POST",
+            "/api/sessions",
+            Some(spec(json!({"phase": "plan"}))),
+        )
+        .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("pass work_item_id"));
+}
+
+#[tokio::test]
+async fn an_unknown_field_is_refused_by_name_rather_than_dropped() {
+    state::isolate();
+    let h = Harness::new(1000).await;
+    // `work_item` is what readiness takes; a session reads `work_item_id`.
+    let (st, body) = h
+        .call(
+            "POST",
+            "/api/sessions",
+            Some(json!({
+                "channel": "personal", "repo_path": "forge.invalid/o/r", "model": "m/a",
+                "phase": "plan", "work_item": "w1",
+            })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["error"]["kind"], "unknown_field", "{body}");
+    assert_eq!(
+        body["error"]["message"],
+        "unknown field \"work_item\"; did you mean \"work_item_id\"?"
+    );
+    assert_eq!(body["error"]["fields"][0]["field"], "work_item");
+    assert!(h.store.list_sessions(None).unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -987,6 +1025,7 @@ fn insert_session_for_item(store: &Arc<Store>, budget: i64, item: Option<&str>) 
             parent_session: None,
             continued_from: None,
             manifest_digest: None,
+            open_turn_tokens: 0,
         })
         .unwrap();
     id
@@ -2012,6 +2051,7 @@ async fn reconcile_after_restart_closes_paused_sessions_and_keeps_an_external_fe
             parent_session: None,
             continued_from: None,
             manifest_digest: None,
+            open_turn_tokens: 0,
         })
         .unwrap();
 
@@ -2767,7 +2807,51 @@ async fn a_session_a_restart_ended_can_be_continued_once() {
         .call("POST", &format!("/api/sessions/{id}/continue"), None)
         .await;
     assert_eq!(status, StatusCode::CONFLICT, "{answer}");
-    assert!(answer.to_string().contains(new_id), "{answer}");
+    assert!(
+        answer.to_string().contains(&tracon::names::session(new_id)),
+        "{answer}"
+    );
+}
+
+/// A session whose harness died and was not started again is carried on
+/// the same way, and its successor is told the harness died, how, and what
+/// went with it.
+#[tokio::test]
+async fn a_session_whose_harness_died_can_be_continued() {
+    state::isolate();
+    let h = Harness::new(10_000).await;
+    let id = insert_running_session(&h.store, 10_000);
+    h.store
+        .update_session(
+            &id,
+            tracon::store::SessionPatch {
+                state: Some("closed".into()),
+                end_reason: Some("harness_died".into()),
+                last_error: Some(
+                    "the harness process died mid-turn: killed by SIGKILL (exit 137)".into(),
+                ),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let (status, row) = h
+        .call("POST", &format!("/api/sessions/{id}/continue"), None)
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{row}");
+    assert_eq!(row["continued_from"], id.as_str());
+    assert_eq!(row["repo_path"], format!("workspace://{id}"));
+    let note = h
+        .store
+        .get_session(row["id"].as_str().unwrap())
+        .unwrap()
+        .unwrap()
+        .draft
+        .unwrap_or_default();
+    assert!(note.contains(&id), "{note}");
+    assert!(note.contains("harness process died"), "{note}");
+    assert!(note.contains("killed by SIGKILL (exit 137)"), "{note}");
+    assert!(note.contains("background"), "{note}");
+    assert!(note.contains("inherit none of its context"), "{note}");
 }
 
 fn published_review(id: &str, session: &str) -> tracon::store::ReviewRow {

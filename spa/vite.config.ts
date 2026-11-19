@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 import { svelte } from '@sveltejs/vite-plugin-svelte'
-import { defineConfig, type Plugin, type PluginOption } from 'vite'
+import { defineConfig, searchForWorkspaceRoot, type Plugin, type PluginOption } from 'vite'
 
 // `TRACON_FIXTURES=1 bun run dev` serves the interface against canned state
 // instead of a node: fixtures/api.json keyed by path, `*` matching one
@@ -112,11 +112,16 @@ export default defineConfig({
       },
     },
   },
-  server: fixtureMode
-    ? {}
-    : {
-        proxy: {
-          '/api': { target: 'http://127.0.0.1:7420', changeOrigin: false },
-        },
-      },
+  server: {
+    // The generated-name word lists live with the node's copy in proto/, which
+    // both sides embed; the dev server may serve that one file from outside.
+    fs: { allow: [searchForWorkspaceRoot(process.cwd()), fileURLToPath(new URL('../proto/src/names-v1.json', import.meta.url))] },
+    ...(fixtureMode
+      ? {}
+      : {
+          proxy: {
+            '/api': { target: 'http://127.0.0.1:7420', changeOrigin: false },
+          },
+        }),
+  },
 })

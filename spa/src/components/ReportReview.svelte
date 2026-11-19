@@ -1,5 +1,6 @@
 <script lang="ts">
   import { decideReport, type NarrativeReport } from '../lib/reports'
+  import Name from './Name.svelte'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
   import { renderMessage } from '../lib/markdown'
@@ -35,7 +36,7 @@
 
 <header class="head">
   <div>
-    <span class="overline">Narrative report</span>
+    <span class="overline">Narrative report · <Name kind="report" id={report.id} /></span>
     <h1>{report.title}</h1>
     <p>Operator feedback, without code changes or publication.</p>
   </div>
@@ -44,7 +45,7 @@
 
 <dl class="meta">
   <div><dt>Channel</dt><dd>{report.channel}</dd></div>
-  <div><dt>Source</dt><dd>{#if report.session_id}<a href="/sessions/{report.session_id}">Session record</a>{:else}{report.lane ?? 'an external agent'}{/if}</dd></div>
+  <div><dt>Source</dt><dd>{#if report.session_id}<Name kind="session" id={report.session_id} href="/sessions/{report.session_id}" />{:else}{report.lane ?? 'an external agent'}{/if}</dd></div>
   <div><dt>Submitted</dt><dd>{formatAge(report.created_ms, clock.now)} ago</dd></div>
   <div><dt>Version</dt><dd>{report.head_sha.slice(0, 12)}</dd></div>
 </dl>

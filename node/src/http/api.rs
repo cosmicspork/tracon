@@ -1444,9 +1444,13 @@ fn zip_workspace(root: &std::path::Path) -> Result<Vec<u8>, String> {
     Ok(cursor.into_inner())
 }
 
+/// The body is read strictly here and only here: a key `NewSession` has no
+/// field for is refused by name, where serde would drop it and the request
+/// fail later for want of what it did send. A peer's forwarded spec is read
+/// leniently, so an older node still takes a newer one's.
 pub async fn create_session(
     State(s): State<AppState>,
-    Json(spec): Json<NewSession>,
+    super::strict::StrictJson(spec): super::strict::StrictJson<NewSession>,
 ) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
     let row = s.manager.create(spec).await?;
     Ok((StatusCode::CREATED, Json(json!(row))))
@@ -1491,7 +1495,12 @@ fn plan_phase() -> Phase {
 /// it. A session refused after the item exists keeps the item — the operator
 /// typed it, and it is the only copy — and the refusal carries the item's id
 /// so the interface can say where the words went.
-pub async fn compose(State(s): State<AppState>, Json(c): Json<ComposeBody>) -> Response {
+///
+/// Read strictly, as `create_session` is: an unknown key is refused by name.
+pub async fn compose(
+    State(s): State<AppState>,
+    super::strict::StrictJson(c): super::strict::StrictJson<ComposeBody>,
+) -> Response {
     match compose_inner(s, c).await {
         Ok(r) => r,
         Err(e) => e.into_response(),
@@ -3268,12 +3277,17 @@ pub async fn start_review_session(
                 .into(),
         )));
     }
-    let short: String = id.chars().take(8).collect();
+    let review_kind = if r.kind == "report" {
+        crate::names::kind::REPORT
+    } else {
+        crate::names::kind::REVIEW
+    };
+    let named = crate::names::generated(review_kind, &id);
     admin_on_peer(
         &s,
         &parts,
         &r.node_id,
-        &format!("Start a reviewer on review {short}"),
+        &format!("Start a reviewer on {named}"),
         |statement| proto::frame::Command::StartReviewer {
             review_id: id.clone(),
             revision_id: body.revision_id.clone(),
@@ -4627,12 +4641,7 @@ pub async fn publish_operator_issue(
                 "stored issue attachments are invalid".into(),
             )
         })?;
-    let body = format!(
-        "{}\n\n## Inspectable attachments\n\n```json\n{}\n```\n\n<!-- tracon-issue-draft:{} -->",
-        issue.body,
-        serde_json::to_string_pretty(&attachments).unwrap_or_else(|_| "[]".into()),
-        issue.id,
-    );
+    let body = crate::mcp::operator::published_issue_body(&issue.body, &attachments, &issue.id);
     // Checked before the draft is marked as publishing, so a refused `gh`
     // leaves it a draft rather than an uncertain publication.
     let gh = crate::config::path_guard::program("publish.gh", &s.cfg.live().publish.gh)
@@ -4643,7 +4652,10 @@ pub async fn publish_operator_issue(
             "this issue was already authorized or is no longer a draft".into(),
         ));
     }
-    let result = tokio::process::Command::new(gh)
+    // The body goes on stdin, not as an argument: a body of 60,000
+    // characters can be 240,000 bytes, past Linux's 128 KiB limit on one
+    // argument, and execve would refuse it.
+    let spawned = tokio::process::Command::new(gh)
         .args([
             "issue",
             "create",
@@ -4651,17 +4663,38 @@ pub async fn publish_operator_issue(
             "cosmicspork/tracon",
             "--title",
             &issue.title,
-            "--body",
-            &body,
+            "--body-file",
+            "-",
         ])
         .current_dir(Config::state_dir())
         .env_clear()
         .env("PATH", crate::config::path_guard::child_path())
         .env("HOME", std::env::var("HOME").unwrap_or_default())
         .envs(env)
-        .output()
-        .await;
-    match result {
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
+        // `gh` never started, so nothing reached GitHub: the draft stays a
+        // draft the operator can publish again, not an uncertain one.
+        Err(e) => {
+            let err = format!("could not start gh: {e}");
+            s.store().fail_issue_publication(&id, &err)?;
+            return Err(ApiError(StatusCode::BAD_GATEWAY, err));
+        }
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        // Written alongside the wait, so a `gh` that writes before it has
+        // read everything cannot stall on a full pipe. A failed write shows
+        // up as `gh`'s own failure.
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let _ = stdin.write_all(body.as_bytes()).await;
+        });
+    }
+    match child.wait_with_output().await {
         Ok(out) if out.status.success() => {
             let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
             s.store().finish_issue_publication(&id, &url)?;

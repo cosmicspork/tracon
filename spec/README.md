@@ -248,6 +248,28 @@ ClientHello's SNI, `<first 32 hex of node id>.<relay domain>`, and forwards the
 connection's bytes unchanged. `/v0/relay/connect` does the same with the bytes of
 a WebSocket's binary messages. `GET /v0/info` reports `sandbox_relay: {domain}`.
 
+## Generated names (`names.rs`)
+
+Not a wire format, but pinned the same way: the node, the CLI and the interface
+(`spa/src/lib/names.ts`) must derive the same display name for a record with
+nothing stored or synced.
+
+```
+h    = splitmix64_finalizer(FNV-1a-64("tracon/name/v1" ‖ 0x1f ‖ kind ‖ 0x1f ‖ id))
+name = kind "-" adjectives[h mod A] "-" nouns[(h / A) mod N] "-" zero_pad2((h / (A·N)) mod 100)
+```
+
+- `id` is the full id as stored (UTF-8), never a prefix: a UUIDv7's first 12 hex
+  characters are its timestamp.
+- The finalizer is splitmix64's mix step without the golden-ratio increment:
+  `z ^= z >> 30; z *= 0xbf58476d1ce4e5b9; z ^= z >> 27; z *= 0x94d049bb133111eb; z ^= z >> 31`.
+- `A` and `N` are the lengths of the lists in `proto/src/names-v1.json`, which both
+  sides embed. The lists are frozen: a changed list is `v2`, with a new domain.
+- Kinds: `session`, `review`, `report`, `approval`, `manifest`, `agent`, `task`,
+  `transfer`, `check`, `node`.
+
+A name is a label, never a key; two records of a kind may share one.
+
 ## Vectors
 
 | File | Pins |
@@ -258,3 +280,4 @@ a WebSocket's binary messages. `GET /v0/info` reports `sandbox_relay: {domain}`.
 | `keyring.json` | container bytes for genesis + one rotation, and a handoff |
 | `frame.json` | canonical bytes and ids for channel and direct headers |
 | `admin-statement.json` | op hash, signed bytes and signature of a fixed statement |
+| `names.json` | list lengths, hashes and generated names for fixed ids, two of them UUIDv7s from one millisecond |

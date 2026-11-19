@@ -14,12 +14,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tracon_sandbox::node::{SandboxConn, SandboxServer, ServerOptions, Tunnel};
+use tracon_sandbox::node::{SandboxConn, SandboxError, SandboxServer, ServerOptions, Tunnel};
 use tracon_sandbox::protocol::{ExitStatus, SpawnSpec};
 use tracon_sandbox::tls::NodeIdentity;
 
 use super::tunnels::TunnelSpec;
-use super::{Mount, Runner, RunnerCommand, RunnerError, Sidecar, Spawned};
+use super::{Exit, Mount, Runner, RunnerCommand, RunnerError, Sidecar, Spawned};
 use crate::provider::{
     Bootstrap, CreateSpec, Handle, ProviderError, Resources, SandboxProvider, Shape, Status,
 };
@@ -133,9 +133,15 @@ fn end_if_gone(
                     Some(conn) if conn.is_connected() => break,
                     Some(_) => {}
                 }
-                match provider.status(&handle).await {
+                let status = provider.status(&handle).await;
+                match status {
                     Ok(Status::Exited { .. } | Status::Lost) | Err(ProviderError::NotFound(_)) => {
                         tracing::warn!(sandbox = %handle.0, %run, "a sandbox stopped while its connection was down; its run is over");
+                        // What the provider saw is all there will be to say
+                        // of how its processes ended.
+                        if let Ok(exited @ Status::Exited { .. }) = status {
+                            gone().lock().unwrap().insert(run.clone(), exited);
+                        }
                         server.end_run(&run);
                         return;
                     }
@@ -148,6 +154,106 @@ fn end_if_gone(
 
 /// How often a sandbox whose connection is down is looked for.
 const AWAY_POLL: Duration = Duration::from_secs(2);
+
+/// How the provider said a run's sandbox ended, when `end_if_gone` ended the
+/// run on it: the harness's own status cannot come back over a connection
+/// that is gone, so this is what its exit says instead. Taken by the run's
+/// `done`, by run id.
+fn gone() -> &'static Mutex<HashMap<String, Status>> {
+    static GONE: OnceLock<Mutex<HashMap<String, Status>>> = OnceLock::new();
+    GONE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Teardowns still running behind a harness whose exit was already said,
+/// by name: `true` once done.
+fn tearing_down() -> &'static Mutex<HashMap<String, tokio::sync::watch::Receiver<bool>>> {
+    static TEARING: OnceLock<Mutex<HashMap<String, tokio::sync::watch::Receiver<bool>>>> =
+        OnceLock::new();
+    TEARING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Take a sandbox down on a task of its own, so whoever waits on its
+/// harness hears of the exit now rather than after its files have come back
+/// and the provider has removed it (minutes, for a slow sync or a remote
+/// provider). `kill` and a new spawn under the same name wait for it.
+fn tear_down_behind(name: &str, teardown: Teardown) {
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    tearing_down()
+        .lock()
+        .unwrap()
+        .insert(name.to_string(), rx.clone());
+    let name = name.to_string();
+    tokio::spawn(async move {
+        teardown.finish().await;
+        let mut map = tearing_down().lock().unwrap();
+        if map.get(&name).is_some_and(|held| held.same_channel(&rx)) {
+            map.remove(&name);
+        }
+        drop(map);
+        let _ = tx.send(true);
+    });
+}
+
+/// Wait for a teardown started behind an exit under `name`, if one is still
+/// running. `true` when there was one.
+async fn torn_down(name: &str) -> bool {
+    let pending = tearing_down().lock().unwrap().get(name).cloned();
+    match pending {
+        Some(mut rx) => {
+            let _ = rx.wait_for(|done| *done).await;
+            true
+        }
+        None => false,
+    }
+}
+
+/// Wait until the sandbox a harness under `name` ran in has been taken down
+/// behind its exit: its files back, the sandbox removed. At once when it has
+/// been, or nothing ran under the name.
+pub async fn settled(name: &str) {
+    torn_down(name).await;
+}
+
+/// A harness's exit as the sandbox reported it, or why it could not.
+fn harness_exit(
+    name: &str,
+    status: Result<ExitStatus, SandboxError>,
+    gone: Option<Status>,
+    resume_within: Duration,
+) -> Result<Exit, RunnerError> {
+    let error = match status {
+        Ok(status) => {
+            return Ok(Exit {
+                code: exit_code(status),
+                signal: status.signal,
+                oom_killed: status.oom_killed,
+            })
+        }
+        Err(error) => error,
+    };
+    match gone {
+        // The whole sandbox went the way the provider says; its harness
+        // with it.
+        Some(Status::Exited {
+            code,
+            oom_killed: true,
+        }) => Ok(Exit {
+            code,
+            signal: None,
+            oom_killed: true,
+        }),
+        Some(Status::Exited { code, .. }) => Err(RunnerError::Other(format!(
+            "{name}: its sandbox ended (exit {code}) while its connection was down, \
+             so the harness's own exit status is unknown"
+        ))),
+        _ if matches!(error, SandboxError::Lost) => Err(RunnerError::Other(format!(
+            "{name}: its sandbox stopped answering for {} s, so the harness's exit status \
+             is unknown",
+            resume_within.as_secs()
+        ))),
+        _ => Err(RunnerError::Other(format!("{name}: {error}"))),
+    }
+}
 
 /// A session's sandbox, as the node would leave it running when it stops.
 struct Kept {
@@ -247,6 +353,9 @@ pub struct ProtocolRunner {
     /// What each sandbox's isolation, read back from the provider once it
     /// has connected, must satisfy before anything is sent into it.
     requirements: Option<crate::provider::Requirements>,
+    /// What each sandbox is made with. Left at the default for a local
+    /// provider, which would turn a memory floor into a limit.
+    resources: Resources,
     /// How long a run's token may wait to be redeemed; `None` for as long
     /// as the run lasts.
     token_window: Option<Duration>,
@@ -274,6 +383,7 @@ impl ProtocolRunner {
             bundled_harness: false,
             sandbox_services: false,
             requirements: None,
+            resources: Resources::default(),
             token_window: None,
             env: Vec::new(),
             service_refusal: None,
@@ -337,6 +447,13 @@ impl ProtocolRunner {
     /// before any file, tunnel or command reaches it.
     pub fn with_requirements(mut self, requirements: crate::provider::Requirements) -> Self {
         self.requirements = Some(requirements);
+        self
+    }
+
+    /// Make every sandbox with `resources`: for a provider elsewhere that
+    /// sizes what it makes by them (DigitalOcean's memory floor).
+    pub fn with_resources(mut self, resources: Resources) -> Self {
+        self.resources = resources;
         self
     }
 
@@ -564,7 +681,7 @@ impl ProtocolRunner {
                 .create(&CreateSpec {
                     name: Some(name),
                     image,
-                    resources: &Resources::default(),
+                    resources: &self.resources,
                     mounts: provided,
                     bootstrap: &bootstrap,
                     labels: &cmd.labels,
@@ -846,6 +963,10 @@ impl Runner for ProtocolRunner {
             true => crate::config::resource_name("h"),
             false => cmd.name.clone(),
         };
+        // A harness that died under this name may still be being taken
+        // down behind its exit; its sandbox goes before another takes the
+        // name.
+        torn_down(&name).await;
         let Started { process, teardown } = self.start(&name, &cmd, Shape::Session).await?;
         let stdio = match process.stdio().await {
             Ok(stdio) => stdio,
@@ -879,10 +1000,10 @@ impl Runner for ProtocolRunner {
             done: Box::pin(async move {
                 let _in_flight = in_flight;
                 let status = process.wait().await;
-                teardown.finish().await;
-                status
-                    .map(exit_code)
-                    .map_err(|e| RunnerError::Other(format!("{name}: {e}")))
+                let gone = gone().lock().unwrap().remove(&teardown.run);
+                let within = teardown.server.options().resume_within;
+                tear_down_behind(&name, teardown);
+                harness_exit(&name, status, gone, within)
             }),
         })
     }
@@ -905,6 +1026,10 @@ impl Runner for ProtocolRunner {
         // A service in a session's sandbox stops there; its sandbox stays.
         if let Some(stopped) = super::services::stop(name).await {
             return stopped;
+        }
+        // Its harness has exited and the sandbox is on its way out already.
+        if torn_down(name).await {
+            return Ok(());
         }
         // What it changed comes back before it goes.
         super::sandbox_files::finish_named(name).await;
@@ -980,18 +1105,59 @@ mod tests {
         assert_eq!(
             exit_code(ExitStatus {
                 code: Some(2),
-                signal: None
+                signal: None,
+                oom_killed: false,
             }),
             2
         );
         assert_eq!(
             exit_code(ExitStatus {
                 code: None,
-                signal: Some(9)
+                signal: Some(9),
+                oom_killed: false,
             }),
             137
         );
         assert_eq!(std_status(137).code(), Some(137));
         assert!(std_status(0).success());
+    }
+
+    #[test]
+    fn a_harness_exit_says_what_ended_it_or_why_nobody_could() {
+        let within = Duration::from_secs(120);
+        let killed = ExitStatus {
+            code: None,
+            signal: Some(9),
+            oom_killed: true,
+        };
+        assert_eq!(
+            harness_exit("h", Ok(killed), None, within).unwrap(),
+            Exit {
+                code: 137,
+                signal: Some(9),
+                oom_killed: true
+            }
+        );
+        let lost = harness_exit("h", Err(SandboxError::Lost), None, within)
+            .unwrap_err()
+            .to_string();
+        assert!(lost.contains("stopped answering for 120 s"), "{lost}");
+        let oom = Status::Exited {
+            code: 137,
+            oom_killed: true,
+        };
+        assert!(
+            harness_exit("h", Err(SandboxError::Lost), Some(oom), within)
+                .unwrap()
+                .oom_killed
+        );
+        let ended = Status::Exited {
+            code: 1,
+            oom_killed: false,
+        };
+        let said = harness_exit("h", Err(SandboxError::Lost), Some(ended), within)
+            .unwrap_err()
+            .to_string();
+        assert!(said.contains("ended (exit 1)"), "{said}");
     }
 }

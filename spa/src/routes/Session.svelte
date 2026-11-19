@@ -8,6 +8,7 @@
   import SessionAuthorityPanel from '../components/SessionAuthorityPanel.svelte'
   import ShownWork from '../components/ShownWork.svelte'
   import ContinuationPanel from '../components/ContinuationPanel.svelte'
+  import Name from '../components/Name.svelte'
   import TransferExport from '../components/TransferExport.svelte'
   import { api } from '../lib/api'
   import { autogrow } from '../lib/autogrow'
@@ -17,7 +18,7 @@
   import { errorText, isNotFound } from '../lib/load'
   import { exhaustionNote } from '../lib/exhaustion'
   import { providerCardHref, providerLabel } from '../lib/providers'
-  import { budgetProblem, heldAtBudget, suggestedBudget } from '../lib/budget'
+  import { budgetProblem, heldAtBudget, spent, suggestedBudget } from '../lib/budget'
   import { externalAgent, formatAge, formatBudget, formatTokens } from '../lib/format'
   import { runtimeNote as runtimeNoteFor, usageNote as usageNoteFor } from '../lib/usage'
   import { filesSyncNote, logRoot } from '../lib/filesSync'
@@ -327,7 +328,7 @@
   async function raiseBudget(e?: SubmitEvent) {
     e?.preventDefault()
     if (!session || raising) return
-    const problem = budgetProblem(budgetValue, session.tokens_used)
+    const problem = budgetProblem(budgetValue, spent(session))
     if (problem) {
       error = `the budget must be ${problem}`
       return
@@ -370,7 +371,7 @@
     if (session.state === 'starting') return 'starting'
     if (session.state === 'waiting_on_check') return `running ${checkCommand ?? 'the checks'}`
     if (busy) return 'a turn is running'
-    if (session.budget_tokens > 0 && session.tokens_used >= session.budget_tokens) return 'over budget'
+    if (session.budget_tokens > 0 && spent(session) >= session.budget_tokens) return 'over budget'
     return null
   })
   // A prompt to an unreachable owner is queued on this node and sent when it
@@ -388,7 +389,7 @@
 </script>
 
 {#if !session && readError?.missing}
-  <div class="banner crit">not found <b>· no session {id.slice(0, 8)}</b> <a class="lnk" href="/sessions">All sessions</a></div>
+  <div class="banner crit">not found <b>· no session <Name kind="session" {id} /></b> <a class="lnk" href="/sessions">All sessions</a></div>
 {:else if !session && readError}
   <div class="banner crit" role="alert">Could not load this session <b>· {readError.text} · trying again</b></div>
 {:else if !session}
@@ -396,6 +397,7 @@
 {:else}
   <header class="sess">
     <a class="lnk" href="/">‹ Queue</a>
+    <Name kind="session" id={session.id} />
     <!-- The harness and its protocol are the node's business: on hover only. -->
     <span
       class="model"
@@ -418,14 +420,14 @@
       <span class="mono" title="External-agent model use happens outside Tracon's metered runtime.">usage outside Tracon · unknown</span>
     {:else}
       {#if isTerminal(session.state) || atBudget}
-        <span class="mono">{formatBudget(session.tokens_used, session.budget_tokens)} tok</span>
+        <span class="mono">{formatBudget(spent(session), session.budget_tokens)} tok</span>
       {:else}
         <button
           class="lnk mono"
           onclick={() => (editingBudget = !editingBudget)}
           disabled={unreachable !== null || remote}
           title={remote ? 'the budget is changed on the node that runs the session' : 'change the token budget'}
-          >{formatBudget(session.tokens_used, session.budget_tokens)} tok</button
+          >{formatBudget(spent(session), session.budget_tokens)} tok</button
         >
       {/if}
       {#if usageNote}
@@ -447,10 +449,8 @@
       <span class="mono files-sync" class:stale={syncNote.warn} title={syncNote.title}>{syncNote.text}</span>
     {/if}
     {#if session.manifest_digest}
-      <span
-        class="mono"
-        title="Launch manifest: skills, instructions and agents"
-        >manifest {session.manifest_digest.slice(0, 8)}</span
+      <span class="mono" title="Launch manifest: skills, instructions and agents"
+        ><Name kind="manifest" id={session.manifest_digest} /></span
       >
     {/if}
     <a class="mono" href="#authority" title="where it runs, what it can reach, what it must ask about and what is refused"
@@ -513,14 +513,12 @@
   {#each publications as p (p.review_id)}
     <div class="banner ok">
       published <a class="lnk" href={p.url} target="_blank" rel="noreferrer">{p.url}</a>
-      <b>· from review <a class="lnk" href="/reviews/{p.review_id}">{p.review_id.slice(0, 8)}</a></b>
+      <b>· from review <Name kind="review" id={p.review_id} href="/reviews/{p.review_id}" class="lnk" /></b>
     </div>
   {/each}
   {#if session.continued_from}
     <div class="banner dim">
-      continues <a class="lnk" href="/sessions/{session.continued_from}"
-        >{session.continued_from.slice(0, 8)}</a
-      >
+      continues <Name kind="session" id={session.continued_from} href="/sessions/{session.continued_from}" class="lnk" />
       <b>· workspace inherited</b>
     </div>
   {/if}
@@ -538,7 +536,7 @@
   {#if session.state === 'killed_budget'}
     <div class="banner crit">
       killed at budget <b
-        >· {formatTokens(session.tokens_used)} of {formatTokens(session.budget_tokens)} tokens ·
+        >· {formatTokens(spent(session))} of {formatTokens(session.budget_tokens)} tokens ·
         resume is a new session</b
       >
     </div>
@@ -549,7 +547,7 @@
   {:else if atBudget}
     <div class="banner">
       held at budget <b
-        >· {formatTokens(session.tokens_used)} of {formatTokens(session.budget_tokens)} tokens · its harness and
+        >· {formatTokens(spent(session))} of {formatTokens(session.budget_tokens)} tokens · its harness and
         context are kept; a higher budget lets it carry on</b
       >
       {@render budgetForm()}
@@ -590,7 +588,7 @@
           : 'its work is published and it went idle; container stopped, egress revoked, workspace kept'}</b
       >
       {#if continuedAs}
-        <a class="lnk" href="/sessions/{continuedAs.id}">continued as {continuedAs.id.slice(0, 8)}</a>
+        <Name kind="session" id={continuedAs.id} href="/sessions/{continuedAs.id}" class="lnk" prefix="continued as " />
       {:else}
         <button class="lnk" onclick={() => void carryOn()} disabled={continuing || unreachable !== null}
           >Continue</button
@@ -600,13 +598,13 @@
   {:else if session.end_reason === 'continued' && continuedAs}
     <div class="banner dim">
       continued <b>· its work carries on in</b>
-      <a class="lnk" href="/sessions/{continuedAs.id}">{continuedAs.id.slice(0, 8)}</a>
+      <Name kind="session" id={continuedAs.id} href="/sessions/{continuedAs.id}" class="lnk" />
     </div>
   {:else if session.end_reason === 'node_restart'}
     <div class="banner dim">
       ended by a node restart <b>· you did not stop it; its workspace is kept</b>
       {#if continuedAs}
-        <a class="lnk" href="/sessions/{continuedAs.id}">continued as {continuedAs.id.slice(0, 8)}</a>
+        <Name kind="session" id={continuedAs.id} href="/sessions/{continuedAs.id}" class="lnk" prefix="continued as " />
       {/if}
     </div>
   {:else if session.end_reason === 'provider_exhausted'}
@@ -615,11 +613,18 @@
         >· {exhaustion?.fallback ? `to carry on with ${exhaustion.fallback}` : 'its workspace is kept'}</b
       >
       {#if continuedAs}
+        <Name kind="session" id={continuedAs.id} href="/sessions/{continuedAs.id}" class="lnk" prefix="continued as " />
+      {/if}
+    </div>
+  {:else if session.end_reason === 'harness_died'}
+    <div class="banner crit">
+      its harness died <b>· {session.last_error ?? 'it was not started again'} · its workspace is kept</b>
+      {#if continuedAs}
         <a class="lnk" href="/sessions/{continuedAs.id}">continued as {continuedAs.id.slice(0, 8)}</a>
       {/if}
     </div>
   {:else if session.end_reason === 'item_close'}
-    <div class="banner ok">ended at task close <b>· the task is closed{session.work_item_id ? ` · ${session.work_item_id.slice(0, 8)}` : ''}</b></div>
+    <div class="banner ok">ended at task close <b>· the task is closed{#if session.work_item_id}{' · '}<Name kind="task" id={session.work_item_id} href="/tasks/{session.work_item_id}" />{/if}</b></div>
   {:else if session.end_reason === 'phase_done'}
     <div class="banner ok">{session.phase === 'plan' ? 'plan written' : 'verdict given'} <b>· this {session.phase} session is done</b></div>
   {/if}
@@ -637,8 +642,8 @@
     <div class="banner dim">
       budget <b
         >· {session.budget_tokens > 0
-          ? `${formatTokens(session.tokens_used)} of ${formatTokens(session.budget_tokens)} tokens spent`
-          : `${formatTokens(session.tokens_used)} tokens spent · no budget`}</b
+          ? `${formatTokens(spent(session))} of ${formatTokens(session.budget_tokens)} tokens spent`
+          : `${formatTokens(spent(session))} tokens spent · no budget`}</b
       >
       {@render budgetForm()}
     </div>

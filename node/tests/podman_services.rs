@@ -355,9 +355,11 @@ async fn the_browser_runs_in_the_session_sandbox_and_show_work_carries_its_scree
         tokio::time::timeout(Duration::from_secs(30), spawned.done)
             .await
             .expect("the session ended")
-            .unwrap(),
+            .unwrap()
+            .code,
         0
     );
+    tracon::runner::protocol::settled(&session_container).await;
     // The session's end took the browser with it.
     rig.assert_gone();
 
@@ -546,9 +548,11 @@ async fn the_release_browser_is_fetched_and_runs_in_the_session_sandbox() {
         tokio::time::timeout(Duration::from_secs(30), spawned.done)
             .await
             .expect("the session ended")
-            .unwrap(),
+            .unwrap()
+            .code,
         0
     );
+    tracon::runner::protocol::settled(&session_container).await;
     rig.assert_gone();
 }
 
@@ -662,8 +666,10 @@ async fn a_crashing_service_restarts_by_its_policy_and_goes_with_its_sandbox() {
         tokio::time::timeout(Duration::from_secs(30), spawned.done)
             .await
             .expect("the session ended")
-            .unwrap(),
+            .unwrap()
+            .code,
         0
     );
+    tracon::runner::protocol::settled(&session_container).await;
     rig.assert_gone();
 }

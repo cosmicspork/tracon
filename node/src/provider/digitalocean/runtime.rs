@@ -964,13 +964,7 @@ impl DoRuntime {
     pub async fn report(&self, cfg: &Config) -> crate::provider::CapabilityReport {
         use crate::provider::capabilities::{CapabilityLine, Elsewhere, Route, ServiceSupport};
         let candidate = self.candidate(cfg).await;
-        let (size, price_per_hour_usd) = match self.provider.client() {
-            Ok(client) => {
-                let sizes = self.provider.meter().sizes(&client).await;
-                super::meter::priced(&sizes, &self.provider.options().settings.size)
-            }
-            Err(_) => (None, None),
-        };
+        let sizing = self.sizing(cfg).await;
         let caps = candidate.capabilities;
         let options = self.provider.options();
         let (allow_ips, allow_hosts) = options.reach.egress();
@@ -1065,10 +1059,67 @@ impl DoRuntime {
                         uid: info.uid,
                     }
                 }),
-                size,
-                price_per_hour_usd,
+                size: sizing.default.as_ref().ok().map(|c| c.slug.clone()),
+                memory_mb: sizing.default.as_ref().ok().and_then(|c| c.memory_mb),
+                price_per_hour_usd: sizing
+                    .default
+                    .as_ref()
+                    .ok()
+                    .and_then(|c| c.price_per_hour_usd),
+                size_error: sizing.default.err(),
+                configured_size: Some(self.provider.options().settings.size.clone())
+                    .filter(|s| !s.is_empty()),
+                catalog_error: sizing.catalog_error,
+                floors: sizing.floors,
                 spend: self.spend(cfg),
             }),
+        }
+    }
+
+    /// The size a new sandbox is made at with no floor, and each live
+    /// `[placement]` `require.memory` floor with the size it resolves to:
+    /// what `create` would choose now (`meter::choose`).
+    async fn sizing(&self, cfg: &Config) -> Sizing {
+        use super::meter::{choose, floor_mb};
+        let configured = &self.provider.options().settings.size;
+        let catalog = match self.provider.client() {
+            Ok(client) => self.provider.meter().catalog(&client).await,
+            Err(error) => Err(error.to_string()),
+        };
+        let (sizes, catalog_error) = match catalog {
+            Ok(sizes) => (sizes, None),
+            Err(error) => (Vec::new(), Some(error)),
+        };
+        let chosen = |floor: Option<u64>| choose(&sizes, configured, floor.map(floor_mb));
+        let placement = &cfg.live().placement;
+        let entries = placement
+            .channel
+            .iter()
+            .map(|(name, c)| (format!("channel {name}"), &c.require))
+            .chain(
+                placement
+                    .repo
+                    .iter()
+                    .map(|r| (r.path.display().to_string(), &r.require)),
+            );
+        let floors = entries
+            .filter_map(|(scope, require)| {
+                let memory = require.memory.clone()?;
+                let size = chosen(require.memory_bytes());
+                Some(crate::provider::capabilities::SizeFloor {
+                    scope,
+                    memory,
+                    size: size.as_ref().ok().map(|c| c.slug.clone()),
+                    memory_mb: size.as_ref().ok().and_then(|c| c.memory_mb),
+                    price_per_hour_usd: size.as_ref().ok().and_then(|c| c.price_per_hour_usd),
+                    error: size.err(),
+                })
+            })
+            .collect();
+        Sizing {
+            default: chosen(None),
+            catalog_error,
+            floors,
         }
     }
 
@@ -1153,10 +1204,22 @@ impl DoRuntime {
                 .with_env(self.sandbox_env(cfg, harness_id))
                 .with_sandbox_services(true)
                 .with_service_refusal(refusal)
+                // The memory floor sizes each sandbox (`meter::choose`).
+                .with_resources(crate::provider::Resources {
+                    memory_bytes: requirements.memory_bytes(),
+                    ..Default::default()
+                })
                 .with_requirements(requirements)
                 .with_token_window(TOKEN_WINDOW),
         )
     }
+}
+
+/// What the Settings view shows of sandbox sizes.
+struct Sizing {
+    default: Result<super::meter::Chosen, String>,
+    catalog_error: Option<String>,
+    floors: Vec<crate::provider::capabilities::SizeFloor>,
 }
 
 /// The tunnels a sandbox there gets to the node's gateways: those this

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api } from '../lib/api'
+  import { generatedName, nodeDisplayName } from '../lib/names'
   import { autogrow } from '../lib/autogrow'
   import { store } from '../lib/store.svelte'
 
@@ -51,10 +52,10 @@
         delivery: destination ? 'mesh' : 'portable',
       })
       if (response.delivery === 'portable') {
-        download(response.transfer, `tracon-transfer-${response.transfer.sha256.slice(0, 12)}.json`)
+        download(response.transfer, `tracon-${generatedName('transfer', response.transfer.payload.candidate_id)}.json`)
         result = 'Signed package downloaded. On the receiving node, choose Import a session and explicitly start the isolated continuation.'
       } else {
-        result = `Sealed package queued for ${destination}. That node must explicitly import it before a new isolated session starts.`
+        result = `Sealed package queued for ${nodeDisplayName(store.nodes, destination)}. That node must explicitly import it before a new isolated session starts.`
       }
     } catch (caught) {
       error = caught instanceof Error ? caught.message : String(caught)
@@ -78,7 +79,7 @@
     <select bind:value={destination}>
       <option value="">Portable download — choose and import on another node</option>
       {#each destinations as node (node.id)}
-        <option value={node.id}>{node.name || node.id.slice(0, 12)}</option>
+        <option value={node.id}>{nodeDisplayName(store.nodes, node.id)}</option>
       {/each}
     </select>
     <small>Reachable nodes in {channel}. Blank downloads a package.</small>
