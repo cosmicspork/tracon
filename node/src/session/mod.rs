@@ -40,6 +40,18 @@ fn unschedulable(error: &crate::adapter::AdapterError) -> Option<String> {
     }
 }
 
+/// Whether its harness did not launch because DigitalOcean no longer has the
+/// template its sandbox was to start from
+/// (`provider::digitalocean::TEMPLATE_GONE`): the node has forgotten it, so
+/// choosing the session's image again starts it elsewhere meanwhile.
+fn template_gone(error: &crate::adapter::AdapterError) -> bool {
+    matches!(
+        error,
+        crate::adapter::AdapterError::Runner(crate::runner::RunnerError::Refused { reason, .. })
+            if *reason == crate::provider::digitalocean::TEMPLATE_GONE
+    )
+}
+
 /// Startup is bounded separately from a turn: no model work has happened yet,
 /// so a stuck container or ACP handshake is a failed start, not a half-live
 /// session.
@@ -3436,6 +3448,7 @@ impl Manager {
         // where it may go (or the operator asked), else ended with the
         // scheduler's words.
         let mut placed = placed;
+        let mut template_retried = false;
         let (runner, started_elsewhere, elsewhere_note, relaunch, handle, events) = loop {
             // The image a session placed elsewhere started from: its
             // template's there, which `image` (this node's runtime's) knows
@@ -3584,6 +3597,11 @@ impl Manager {
                 }
                 Ok(Err(e)) => {
                     let _ = tokio::time::timeout(CLEANUP_TIMEOUT, runner.kill(&container)).await;
+                    if placed.is_elsewhere() && !template_retried && template_gone(&e) {
+                        tracing::warn!(session = %id, error = %e, "the session's DigitalOcean template is gone; choosing its image again");
+                        template_retried = true;
+                        continue;
+                    }
                     let Some(said) = unschedulable(&e).filter(|_| !placed.is_elsewhere()) else {
                         return Err(e.into());
                     };

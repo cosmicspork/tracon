@@ -712,25 +712,33 @@ impl DoRuntime {
     }
 
     /// The templates this node keeps: the default image's, each current
-    /// snapshot's, and each a peer asked for within `shared::PEER_KEEP`.
-    async fn wanted(&self) -> std::collections::HashSet<String> {
+    /// snapshot's, each repository's image's, and each a peer asked for
+    /// within `shared::PEER_KEEP`. `None` while that cannot be known: before
+    /// the default image is (the boundary pins the base moments after the
+    /// provider starts), or before the runtime and store that say which
+    /// snapshots and images are current are set; nothing is swept then.
+    async fn wanted(&self) -> Option<std::collections::HashSet<String>> {
         let templates = self.provider.templates();
-        let mut images: Vec<String> = self.default_image().into_iter().collect();
-        if let (Source::Built { .. }, Some((backend, store))) =
-            (templates.source(), self.node.get())
-        {
+        let mut images: Vec<String> = vec![self.default_image()?];
+        if let Source::Built { .. } = templates.source() {
+            let (backend, store) = self.node.get()?;
             // A runtime that keeps its snapshots in a registry lists none;
             // the store's ready rows are the current ones either way.
             images.extend(backend.prepared_snapshots().await);
             images.extend(crate::sandbox_images::ready_snapshots(store));
-            // An entry that prepares nothing has its image's template.
-            images.extend(crate::sandbox_images::ready_unprepared(store));
+            // Each repository's image, prepared or not: a session there
+            // starts from it whenever its snapshot is not current (a store
+            // row can be ready for a key since moved on) or that snapshot's
+            // template is not ready yet (`choose`).
+            images.extend(crate::sandbox_images::current_repo_images(store));
         }
-        images
-            .iter()
-            .flat_map(|image| templates.kept(image))
-            .chain(templates.shared().wanted(crate::store::now_ms()))
-            .collect()
+        Some(
+            images
+                .iter()
+                .flat_map(|image| templates.kept(image))
+                .chain(templates.shared().wanted(crate::store::now_ms()))
+                .collect(),
+        )
     }
 
     /// Look again at each template a peer still wants: registered again if
@@ -833,15 +841,21 @@ impl DoRuntime {
         let client = self.provider.client().ok()?;
         self.end_gone_sandboxes(&client).await;
         let wanted = self.wanted().await;
+        if wanted.is_none() {
+            tracing::debug!("DigitalOcean templates not swept: the default image is not known yet");
+        }
         let swept = upkeep::sweep(
             &client,
             &self.provider.options().owner,
             self.provider.templates(),
-            &wanted,
+            wanted.as_ref(),
             crate::store::now_ms(),
         )
         .await;
         if let Ok(swept) = &swept {
+            // Gone from DigitalOcean, so gone here too: a start in one of
+            // their images registers it again rather than naming it.
+            self.provider.templates().forget(&swept.templates);
             self.provider.templates().shared().forget(&swept.templates);
         }
         match &swept {
@@ -1488,10 +1502,14 @@ mod tests {
         assert_eq!(prepare, None);
     }
 
-    /// The template of a repository's image is kept from the sweep while
-    /// the repository has no prepared snapshot ready.
+    /// Each repository's current image has its template kept from the
+    /// sweep, whether or not a prepared snapshot is ready: a session there
+    /// starts from the image when that snapshot is not the current one
+    /// (`snapshot_for` holds a ready row to its key) or its template is not
+    /// ready yet. A session carrying on another's workspace chooses the
+    /// same way, from the repository that workspace came from.
     #[test]
-    fn an_unprepared_repositorys_image_is_kept() {
+    fn each_repositorys_image_is_kept_prepared_or_not() {
         let store = Store::open_in_memory().unwrap();
         ready(&store, "/src/sql-review", crate::repo_image::BASE, REPO);
         ready(&store, "/src/app", crate::repo_image::BASE, BASE);
@@ -1502,8 +1520,24 @@ mod tests {
             SNAPSHOT,
         );
         assert_eq!(
-            crate::sandbox_images::ready_unprepared(&store),
-            vec![REPO.to_string()]
+            crate::sandbox_images::current_repo_images(&store),
+            vec![BASE.to_string(), REPO.to_string()]
         );
+        assert_eq!(
+            crate::sandbox_images::ready_snapshots(&store),
+            vec![SNAPSHOT.to_string()]
+        );
+
+        // A snapshot that is not current leaves the repository's sessions on
+        // its image, whose template is chosen and made.
+        let entry = Repo {
+            prepare: vec!["cargo fetch --locked".into()],
+            ..build_only()
+        };
+        let own = Own::of(None, &environment(&entry, true));
+        assert_eq!(own.images, vec![REPO.to_string()]);
+        let templates = built();
+        let (_, prepare) = choose(&templates, &own, Some(BASE.into()));
+        assert_eq!(prepare.as_deref(), Some(REPO));
     }
 }

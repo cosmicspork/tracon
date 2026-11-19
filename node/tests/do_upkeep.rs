@@ -90,7 +90,7 @@ async fn a_sweep_keeps_one_checkpoint_per_environment_and_no_leftovers() {
         &fake.client(),
         &owner,
         &templates,
-        &wanted,
+        Some(&wanted),
         tracon::store::now_ms(),
     )
     .await
@@ -129,7 +129,7 @@ async fn a_sweep_keeps_one_checkpoint_per_environment_and_no_leftovers() {
         &fake.client(),
         &owner,
         &templates,
-        &wanted,
+        Some(&wanted),
         tracon::store::now_ms(),
     )
     .await
@@ -143,4 +143,83 @@ async fn a_sweep_keeps_one_checkpoint_per_environment_and_no_leftovers() {
         .templates
         .values()
         .any(|t| t["name"] == current.as_str()));
+}
+
+/// Right after the provider starts the boundary has not pinned the stock
+/// base yet, so the default image, whose template every session without one
+/// of its own starts from, is not known: no template is swept then (the
+/// first sweep of a restarted node removed the default image's template).
+/// Once the base is pinned its template is kept and only stale ones go.
+/// The only test in this binary that pins the base, which is the process's.
+#[tokio::test]
+async fn no_template_is_swept_before_the_base_is_pinned() {
+    use std::sync::Arc;
+    use tracon::provider::digitalocean::listener::DoListener;
+    use tracon::provider::digitalocean::runtime::DoRuntime;
+    use tracon::provider::digitalocean::{ClientSource, HubRelay, Settings};
+
+    const BASE: &str = "ghcr.io/cosmicspork/tracon-sandbox-base@sha256:014c6d9e014c6d9eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    support::state::isolate();
+    let fake = FakeDo::start().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let bundle = tmp.path().join("bundle");
+    std::fs::create_dir_all(&bundle).unwrap();
+    let listener = DoListener::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        tracon::runner::protocol::node_server().unwrap(),
+    )
+    .await
+    .unwrap();
+    let node = listener.local_addr().to_string();
+    let client: ClientSource = {
+        let fake = fake.clone();
+        Arc::new(move || Ok(fake.client()))
+    };
+    let owner = Owner::new("tracon", "abcd1234");
+    let runtime = DoRuntime::with(
+        client,
+        Settings {
+            credential: "do".into(),
+            api_url: fake.url.clone(),
+            registry: "registry.digitalocean.com/acme".into(),
+            listen: node.clone(),
+            node_addr: node,
+            ..Settings::default()
+        },
+        Source::Built {
+            registry: "registry.digitalocean.com/acme".into(),
+            prefix: "tracon".into(),
+            bundle,
+            services: Vec::new(),
+        },
+        owner.clone(),
+        "tracon-gw".into(),
+        listener,
+        HubRelay::none(),
+    )
+    .unwrap();
+    let backend: Arc<dyn tracon::boundary::Backend> = Arc::new(tracon::runner::local::LocalBackend);
+    runtime.set_node(
+        backend,
+        Arc::new(tracon::store::Store::open_in_memory().unwrap()),
+    );
+    let base = runtime.provider().templates().name_for(BASE).unwrap();
+    let stale = format!("{}-ffffffffffffffff", owner.template_stem());
+    {
+        let mut api = fake.api.lock().unwrap();
+        api.put_template(&base, "TEMPLATE_STATUS_READY");
+        api.put_template(&stale, "TEMPLATE_STATUS_READY");
+    }
+
+    assert_eq!(runtime.default_image(), None, "not pinned yet");
+    let swept = runtime.sweep().await.unwrap();
+    assert!(swept.templates.is_empty(), "{:?}", swept.templates);
+    assert_eq!(fake.api.lock().unwrap().templates.len(), 2);
+
+    tracon::sandbox_images::pin("ghcr.io/cosmicspork/tracon-sandbox-base:latest", BASE);
+    let swept = runtime.sweep().await.unwrap();
+    assert_eq!(swept.templates, vec![stale]);
+    let api = fake.api.lock().unwrap();
+    assert!(api.templates.values().all(|t| t["name"] == base.as_str()));
+    assert_eq!(api.templates.len(), 1);
 }

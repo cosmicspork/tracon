@@ -30,6 +30,19 @@ const IMAGE: &str =
 const SNAPSHOT: &str = "registry.digitalocean.com/acme/tracon-snapshot-app-0123@sha256:3333333333333333444444444444444444444444444444444444444444444444";
 const REGISTRY: &str = "registry.digitalocean.com/acme";
 const PUSHED: &str = "sha256:5555555555555555666666666666666666666666666666666666666666666666";
+/// The stock base as the boundary pins it, which the sweep waits for.
+const BASE: &str = "ghcr.io/cosmicspork/tracon-sandbox-base@sha256:014c6d9e014c6d9eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+
+/// What the boundary's converge does once it has pinned the base: every
+/// test here that pins it pins the same one.
+fn pin_base() {
+    tracon::sandbox_images::pin("ghcr.io/cosmicspork/tracon-sandbox-base:latest", BASE);
+}
+/// A repository's image as a Kubernetes node keeps it, in the registry; one
+/// it has since replaced; and a prepared snapshot whose key has moved on.
+const REPO: &str = "registry.digitalocean.com/acme/tracon-repo-tracon-72b24c1098@sha256:e9a1e9a1e9a1e9a1777777777777777777777777777777777777777777777777";
+const REPO_OLD: &str = "registry.digitalocean.com/acme/tracon-repo-tracon-0000000000@sha256:8888888888888888999999999999999999999999999999999999999999999999";
+const OLD_SNAPSHOT: &str = "registry.digitalocean.com/acme/tracon-snapshot-tracon-0123@sha256:aaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbccccccccccccccccdddddddddddddddd";
 
 /// A BuildKit stand-in: what it was asked to build, and a push under the
 /// tag's name at `PUSHED`.
@@ -234,6 +247,7 @@ async fn a_ready_snapshots_template_is_kept_from_the_sweep() {
         .finish_repo_image(&row, Ok(SNAPSHOT), "", &[])
         .unwrap();
     runtime.set_node(backend, store);
+    pin_base();
 
     let kept = runtime.provider().templates().name_for(SNAPSHOT).unwrap();
     let stale = format!(
@@ -256,4 +270,192 @@ async fn a_ready_snapshots_template_is_kept_from_the_sweep() {
         .map(|t| t["name"].as_str().unwrap().to_string())
         .collect();
     assert_eq!(left, vec![kept]);
+}
+
+fn ready_row(store: &tracon::store::Store, repo: &str, kind: &str, key: &str, image: &str) {
+    let row = store
+        .start_repo_image(&tracon::store::RepoImageStart {
+            repo_path: repo,
+            kind,
+            recipe_hash: key,
+            source_ref: "main",
+            source_commit: "abc",
+            parent_image: IMAGE,
+        })
+        .unwrap();
+    store.finish_repo_image(&row, Ok(image), "", &[]).unwrap();
+}
+
+fn template_names(fake: &FakeDo) -> Vec<String> {
+    let mut names: Vec<String> = fake
+        .api
+        .lock()
+        .unwrap()
+        .templates
+        .values()
+        .map(|t| t["name"].as_str().unwrap().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+/// A repository with prepare steps whose ready snapshot is not the current
+/// one (its key moved with a new repository image) has its sessions start
+/// from its image: that image's template is kept from the sweep, as is the
+/// snapshot's. The template of the image it replaced goes, and the node
+/// forgets it, so its image has no template ready rather than one that
+/// every create would be refused for.
+#[tokio::test]
+async fn a_repositorys_image_keeps_its_template_beside_a_stale_snapshot() {
+    support::state::isolate();
+    let fake = FakeDo::start().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let runtime = runtime(&fake, built(tmp.path())).await;
+    let mut cfg = kubernetes();
+    cfg.runtime.kubernetes.state_mount = tmp.path().join("state");
+    let backend: Arc<dyn tracon::boundary::Backend> =
+        Arc::new(tracon::boundary::kubernetes::KubeBackend::new(&cfg));
+    let store = Arc::new(tracon::store::Store::open_in_memory().unwrap());
+    ready_row(&store, "/src/tracon", tracon::repo_image::BASE, "r1", REPO);
+    ready_row(
+        &store,
+        "/src/tracon",
+        tracon::sandbox_images::SNAPSHOT,
+        "k0",
+        OLD_SNAPSHOT,
+    );
+    runtime.set_node(backend, store);
+    pin_base();
+
+    let templates = runtime.provider().templates();
+    let repo = templates.name_for(REPO).unwrap();
+    let snapshot = templates.name_for(OLD_SNAPSHOT).unwrap();
+    let replaced = templates.name_for(REPO_OLD).unwrap();
+    let base = templates.name_for(BASE).unwrap();
+    {
+        let mut api = fake.api.lock().unwrap();
+        for name in [&repo, &snapshot, &replaced, &base] {
+            api.put_template(name, "TEMPLATE_STATUS_READY");
+        }
+    }
+    for image in [REPO, REPO_OLD] {
+        assert!(matches!(
+            runtime.ensure_template(image).await,
+            TemplateState::Ready { .. }
+        ));
+    }
+    assert_eq!(templates.ready(REPO_OLD).unwrap(), replaced);
+
+    let swept = runtime.sweep().await.unwrap();
+    assert_eq!(swept.templates, vec![replaced.clone()]);
+    let mut kept = vec![repo.clone(), snapshot, base];
+    kept.sort();
+    assert_eq!(template_names(&fake), kept);
+    assert_eq!(templates.ready(REPO).unwrap(), repo);
+    assert_eq!(
+        templates.ready(REPO_OLD).unwrap_err(),
+        TemplateState::Unknown.describe(),
+        "a swept template is not ready"
+    );
+}
+
+/// A template the sweep removed, once forgotten, is registered again by the
+/// next `ensure`, with the usual build, rather than named as ready.
+#[tokio::test]
+async fn a_swept_template_is_registered_again() {
+    support::state::isolate();
+    let fake = FakeDo::start().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let builder = Arc::new(FakeBuildKit {
+        scratch: tmp.path().join("state/tmp"),
+        ..Default::default()
+    });
+    let owner = Owner::new("tracon", "abcd1234");
+    let templates = Templates::new(built(tmp.path()), "coding-base", &owner.template_stem())
+        .unwrap()
+        .with_builder(builder.clone());
+    let client = fake.client();
+    let name = templates.name_for(SNAPSHOT).unwrap();
+    templates.ensure(&client, "unused", SNAPSHOT).await.unwrap();
+    let state = templates.ensure(&client, "unused", SNAPSHOT).await.unwrap();
+    assert!(matches!(state, TemplateState::Ready { .. }), "{state:?}");
+
+    let swept = tracon::provider::digitalocean::upkeep::sweep(
+        &client,
+        &owner,
+        &templates,
+        Some(&Default::default()),
+        tracon::store::now_ms(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(swept.templates, vec![name.clone()]);
+    templates.forget(&swept.templates);
+    assert!(templates.ready(SNAPSHOT).is_err());
+
+    let state = templates.ensure(&client, "unused", SNAPSHOT).await.unwrap();
+    assert!(matches!(state, TemplateState::Building { .. }), "{state:?}");
+    assert_eq!(builder.built.lock().unwrap().len(), 2, "built again");
+    assert_eq!(template_names(&fake), vec![name.clone()]);
+    let state = templates.ensure(&client, "unused", SNAPSHOT).await.unwrap();
+    assert!(matches!(state, TemplateState::Ready { .. }), "{state:?}");
+    assert_eq!(templates.ready(SNAPSHOT).unwrap(), name);
+}
+
+/// A create DigitalOcean refuses because the template is gone (409, "not
+/// provisioned") is classified as such, and the template forgotten: the
+/// image has none ready, and the next `ensure` registers it again.
+#[tokio::test]
+async fn a_create_refused_for_a_gone_template_forgets_it() {
+    support::state::isolate();
+    let fake = FakeDo::start().await;
+    let runtime = runtime(&fake, Source::Given(IMAGE.into())).await;
+    let templates = runtime.provider().templates();
+    let name = templates.name_for(IMAGE).unwrap();
+    fake.api
+        .lock()
+        .unwrap()
+        .put_template(&name, "TEMPLATE_STATUS_READY");
+    assert!(matches!(
+        runtime.ensure_template(IMAGE).await,
+        TemplateState::Ready { .. }
+    ));
+    // Removed behind the node's back.
+    fake.api.lock().unwrap().templates.clear();
+
+    let bootstrap = tracon::provider::Bootstrap {
+        run: "run-gone".into(),
+        cert_pin: "sha256:00".into(),
+        token: "t".into(),
+    };
+    let error = tracon::provider::SandboxProvider::create(
+        runtime.provider().as_ref(),
+        &tracon::provider::CreateSpec {
+            name: Some("tracon-h-gone"),
+            image: IMAGE,
+            resources: &tracon::provider::Resources::default(),
+            mounts: &[],
+            bootstrap: &bootstrap,
+            labels: &tracon::runner::RunLabels::default(),
+            shape: tracon::provider::Shape::Probe,
+        },
+    )
+    .await
+    .unwrap_err();
+    let tracon::provider::ProviderError::Refused { reason, message } = error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(reason, tracon::provider::digitalocean::TEMPLATE_GONE);
+    assert!(message.contains("not provisioned"), "{message}");
+    assert!(fake.api.lock().unwrap().sessions.is_empty());
+    assert_eq!(
+        templates.ready(IMAGE).unwrap_err(),
+        TemplateState::Unknown.describe()
+    );
+
+    assert!(matches!(
+        runtime.ensure_template(IMAGE).await,
+        TemplateState::Building { .. }
+    ));
+    assert_eq!(template_names(&fake), vec![name]);
 }
