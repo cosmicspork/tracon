@@ -2685,7 +2685,10 @@ async fn a_session_a_restart_ended_can_be_continued_once() {
         .call("POST", &format!("/api/sessions/{id}/continue"), None)
         .await;
     assert_eq!(status, StatusCode::CONFLICT, "{answer}");
-    assert!(answer.to_string().contains(new_id), "{answer}");
+    assert!(
+        answer.to_string().contains(&tracon::names::session(new_id)),
+        "{answer}"
+    );
 }
 
 fn published_review(id: &str, session: &str) -> tracon::store::ReviewRow {

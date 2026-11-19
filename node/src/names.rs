@@ -44,10 +44,13 @@ pub fn manifest(digest: &str) -> String {
 }
 
 /// A node by its own name when there is one, else its generated `node-…` name.
+/// An id that is not a node id (64 hex characters) is already something to
+/// read, and reads as given.
 pub fn node(id: &str, name: Option<&str>) -> String {
     match name.map(str::trim).filter(|n| !n.is_empty()) {
         Some(name) => name.to_string(),
-        None => generated(kind::NODE, id),
+        None if id.len() == 64 && is_full_id(id) => generated(kind::NODE, id),
+        None => id.to_string(),
     }
 }
 
@@ -66,5 +69,6 @@ mod tests {
         assert!(!is_full_id(&"zz".repeat(32)));
         assert_eq!(node("x", Some("bazzite")), "bazzite");
         assert!(node(&"ab".repeat(32), Some(" ")).starts_with("node-"));
+        assert_eq!(node("peer-b", None), "peer-b");
     }
 }

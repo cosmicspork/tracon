@@ -176,8 +176,8 @@ async fn with_tracon_listen_auth_issue_changes_the_scratch_node() {
     assert!(stdout.starts_with("trc1."), "{stdout}");
     assert!(
         stderr.contains(&format!(
-            "Rotating the operator token of node {} at {}",
-            &id[..8],
+            "Rotating the operator token of {} at {}",
+            tracon::names::node(&id, None),
             scratch.url
         )),
         "{stderr}"
@@ -222,8 +222,10 @@ async fn a_tracon_url_naming_another_node_is_refused_and_changes_nothing() {
     assert!(!out.status.success());
     assert!(!stdout.contains("trc1."), "no token was printed: {stdout}");
     assert!(
-        stderr.contains("TRACON_URL points at node ffffffff")
-            && stderr.contains(&format!("is node {}", &id[..8]))
+        stderr.contains(&format!(
+            "TRACON_URL points at {}",
+            tracon::names::node(&"f".repeat(64), None)
+        )) && stderr.contains(&format!("is {}", tracon::names::node(&id, None)))
             && stderr.contains("set TRACON_URL to the node you mean"),
         "{stderr}"
     );
