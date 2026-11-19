@@ -172,10 +172,13 @@ fn reopen_phase(stored: &str) -> Phase {
 /// re-derives it, badly, and calls the result progress.
 fn handoff_note(old: &SessionRow, harness: &str, carried: &[ReviewRow]) -> String {
     let why = format!(
-        "This session continues session {} (`{}` {}), which ran a harness this node no \
+        "This session continues {} (id {}, `{}` {}), which ran a harness this node no \
          longer has and which is now archived read-only. You are {harness}, and you \
          inherit none of its context",
-        old.id, old.harness_id, old.harness_version,
+        crate::names::session(&old.id),
+        old.id,
+        old.harness_id,
+        old.harness_version,
     );
     handoff(old, &why, carried)
 }
@@ -412,11 +415,7 @@ fn kickoff(
     review_id: Option<&str>,
 ) -> Option<String> {
     let named = |item: &tracon_sync::work::WorkItem| {
-        format!(
-            "**{}** (`{}…`)",
-            item.title,
-            &item.id[..8.min(item.id.len())]
-        )
+        format!("**{}** (`{}`)", item.title, crate::names::task(&item.id))
     };
     match phase {
         Phase::Plan => {
@@ -943,8 +942,8 @@ impl Manager {
             .find(|s| s.continued_from.as_deref() == Some(id))
         {
             return Err(SessionError::Rejected(format!(
-                "session {} already continues this one",
-                next.id
+                "{} already continues this one",
+                crate::names::session(&next.id)
             )));
         }
         // A session on a checkout keeps its workspace under its own id; one
@@ -996,8 +995,8 @@ impl Manager {
     async fn reopenable(&self, row: &SessionRow) -> Result<Arc<dyn HarnessAdapter>, String> {
         if row.node_id != self.node_id {
             return Err(format!(
-                "it ran on node {}; ask it there",
-                &row.node_id[..8.min(row.node_id.len())]
+                "it ran on {}; ask it there",
+                self.store.node_display_name(&row.node_id)
             ));
         }
         if row.legacy_ms.is_some() {
@@ -1084,8 +1083,8 @@ impl Manager {
                         && other.work_item_id == row.work_item_id))
         }) {
             return Err(format!(
-                "session {} is {} on its workspace or its task now",
-                &other.id[..8.min(other.id.len())],
+                "{} is {} on its workspace or its task now",
+                crate::names::session(&other.id),
                 other.state.replace('_', " ")
             ));
         }
@@ -1267,8 +1266,8 @@ impl Manager {
         self.refuse_turn_while_restarting(id)?;
         if row.node_id != self.node_id {
             return Err(SessionError::Rejected(format!(
-                "it runs on node {}; compact it there",
-                &row.node_id[..8.min(row.node_id.len())]
+                "it runs on {}; compact it there",
+                self.store.node_display_name(&row.node_id)
             )));
         }
         if !self
@@ -2206,10 +2205,10 @@ impl Manager {
                         .iter()
                         .map(|b| match b {
                             tracon_sync::work::Blocker::Open { id } => {
-                                format!("open task {}", &id[..8.min(id.len())])
+                                format!("open {}", crate::names::task(id))
                             }
                             tracon_sync::work::Blocker::Unknown { id } => {
-                                format!("task {} not seen here", &id[..8.min(id.len())])
+                                format!("{} not seen here", crate::names::task(id))
                             }
                             tracon_sync::work::Blocker::Cycle => "a dependency cycle".into(),
                         })
@@ -4434,8 +4433,8 @@ impl Manager {
         Self::refuse_legacy(&row)?;
         if row.node_id != self.node_id {
             return Err(SessionError::Rejected(format!(
-                "session runs on node {}; raise its budget on the node that runs it",
-                row.node_id
+                "session runs on {}; raise its budget on the node that runs it",
+                self.store.node_display_name(&row.node_id)
             )));
         }
         let ended = || SessionError::Rejected(format!("session is {}", row.state));
@@ -5374,7 +5373,11 @@ mod tests {
     #[test]
     fn an_execute_session_without_a_plan_starts_on_the_item_alone() {
         let text = kickoff(Phase::Execute, Some(&item(None)), None).unwrap();
-        assert!(text.contains("**Add the ledger** (`01234567…`)"), "{text}");
+        let name = crate::names::task("0123456789abcdef");
+        assert!(
+            text.contains(&format!("**Add the ledger** (`{name}`)")),
+            "{text}"
+        );
         assert!(!text.contains("plan"), "{text}");
     }
 

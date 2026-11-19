@@ -1,5 +1,7 @@
 <script lang="ts">
   import Help from '../Help.svelte'
+  import Name from '../Name.svelte'
+  import { shortHash } from '../../lib/names'
   // Every node.toml table the bespoke screens do not edit, as a form built
   // from the node's description of each key. A table saves on its own: its
   // changed keys go as one request of per-key operations, decided against
@@ -513,8 +515,8 @@
         Read-only. Secrets and unread keys show as <code>{cfg.redacted}</code>; comments are left out.
       </p>
       <dl class="facts">
-        <div><dt>Version</dt><dd><code data-testid="config-hash">{cfg.hash}</code></dd></div>
-        {#if cfg.running_hash}<div><dt>Running</dt><dd><code>{cfg.running_hash}</code>{cfg.running_hash === cfg.hash ? ' · the same' : ''}</dd></div>{/if}
+        <div><dt>Version</dt><dd><code data-testid="config-hash" data-hash={cfg.hash}><Name id={cfg.hash} label={shortHash(cfg.hash)} /></code></dd></div>
+        {#if cfg.running_hash}<div><dt>Running</dt><dd><code><Name id={cfg.running_hash} label={shortHash(cfg.running_hash)} /></code>{cfg.running_hash === cfg.hash ? ' · the same' : ''}</dd></div>{/if}
         <div><dt>File</dt><dd><code>{cfg.readonly.config_path}</code></dd></div>
       </dl>
       <pre class="toml" aria-label="node.toml, redacted">{cfg.toml}</pre>

@@ -14,6 +14,8 @@
   // standing note is the operator's own. Something that reaches every session
   // on a channel needs a place the operator can find it and read it back.
   import { api } from '../lib/api'
+  import { shortHash } from '../lib/names'
+  import Name from './Name.svelte'
   import { autogrow } from '../lib/autogrow'
   import { store } from '../lib/store.svelte'
   import type { ManifestView } from '../lib/types'
@@ -112,7 +114,7 @@
     <div class="rev">
       {#if view.next}
         <span class="chip">next launch r{view.next.revision}</span>
-        <span class="mono">{view.next.digest.slice(0, 12)}</span>
+        <span class="mono"><Name kind="manifest" id={view.next.digest} /></span>
       {:else}
         <span class="chip bad">will not build</span>
       {/if}
@@ -132,7 +134,7 @@
             <span class="chip">{item.kind}</span>
             <span class="name">{item.name}</span>
             <span class="mono dim">{item.source}</span>
-            {#if item.digest}<span class="mono dim">{item.digest.slice(0, 8)}</span>{/if}
+            {#if item.digest}<span class="mono dim"><Name id={item.digest} label={shortHash(item.digest)} /></span>{/if}
             <button
               class="btn"
               disabled={busy !== ''}

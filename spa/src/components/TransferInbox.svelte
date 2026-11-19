@@ -1,5 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import { store } from '../lib/store.svelte'
+  import { generatedName, nodeDisplayName } from '../lib/names'
+  import Name from './Name.svelte'
   import { api } from '../lib/api'
   import type { CandidateTransfer, TransferInboxItem } from '../lib/types'
 
@@ -38,7 +41,7 @@
     try {
       const transfer = JSON.parse(await file.text()) as CandidateTransfer
       const staged = await api.stageTransfer(transfer)
-      notice = `Staged ${staged.candidate_id}. Review it below, then explicitly start an isolated continuation session.`
+      notice = `Staged ${generatedName('transfer', staged.candidate_id)}. Review it below, then explicitly start an isolated continuation session.`
       await refresh()
     } catch (caught) {
       error = caught instanceof Error ? caught.message : String(caught)
@@ -55,7 +58,7 @@
     try {
       const body = model ? { confirm: true as const, model } : { confirm: true as const }
       const imported = await api.importTransfer(transfer.id, body)
-      notice = `Started isolated continuation session ${imported.session.id.slice(0, 12)} from immutable candidate ${transfer.candidate_id}.`
+      notice = `Started isolated continuation ${generatedName('session', imported.session.id)} from immutable candidate ${generatedName('transfer', transfer.candidate_id)}.`
       await refresh()
     } catch (caught) {
       error = caught instanceof Error ? caught.message : String(caught)
@@ -93,13 +96,13 @@
       {#each transfers as transfer (transfer.id)}
         <li>
           <div class="transfer-meta">
-            <strong>{transfer.candidate_id}</strong>
+            <strong><Name kind="transfer" id={transfer.candidate_id} /></strong>
             <span>
-              {transfer.channel} · source node {transfer.origin_node.slice(0, 12)} ·
+              {transfer.channel} · source node <Name id={transfer.origin_node} label={nodeDisplayName(store.nodes, transfer.origin_node)} /> ·
               {new Date(transfer.created_ms).toLocaleString()} · {transfer.files} file{transfer.files === 1 ? '' : 's'} ·
               {transfer.documents} doc{transfer.documents === 1 ? '' : 's'} · {transfer.memories} memor{transfer.memories === 1 ? 'y' : 'ies'}
               {#if transfer.note}{' · '}note: {transfer.note}{/if}
-              {#if transfer.import_state === 'imported'}{' · '}continuation {transfer.session_id?.slice(0, 12)} started{/if}
+              {#if transfer.import_state === 'imported'}{' · '}continuation {#if transfer.session_id}<Name kind="session" id={transfer.session_id} href="/sessions/{transfer.session_id}" />{' '}{/if}started{/if}
               {#if transfer.import_state === 'preparing'}{' · '}import outcome unknown{/if}
               {#if transfer.import_state === 'failed'}{' · '}previous import failed; retry is explicit{/if}
             </span>

@@ -1,3 +1,4 @@
+import { generatedName } from './names'
 import { expect, test } from 'bun:test'
 import { usageView } from './routes'
 import type { InfraTotal, UsageTotal } from './types'
@@ -46,7 +47,7 @@ test('an infrastructure row is keyed by its day, channel, size or session', () =
   expect(infraKey(infra({ channel: 'work' }), 'channel')).toBe('work')
   expect(infraKey(infra({}), 'channel')).toBe('no channel')
   expect(infraKey(infra({ size: 'small' }), 'size')).toBe('small')
-  expect(infraKey(infra({ session_id: 's1' }), 'session')).toBe('s1')
+  expect(infraKey(infra({ session_id: 's1' }), 'session')).toBe(generatedName('session', 's1'))
   expect(infraKey(infra({ kind: 'check' }), 'session')).toBe('check run')
   expect(formatHours(0.75)).toBe('45m')
   expect(formatHours(3.21)).toBe('3.2h')
@@ -104,7 +105,7 @@ test('a breakdown row is keyed by its model, its day or its session', () => {
   expect(usageKey(row({ day: '2026-10-02' }), usageView('?group=day'))).toBe('2026-10-02')
   const bySession = usageView('?group=session')
   expect(usageKey(row({ session_id: 's1', title: 'Ship it', review: 'accepted' }), bySession)).toBe('Ship it · accepted')
-  expect(usageKey(row({ session_id: 's1' }), bySession)).toBe('s1')
+  expect(usageKey(row({ session_id: 's1' }), bySession)).toBe(generatedName('session', 's1'))
   expect(usageKey(row({}), bySession)).toBe('outside a session')
   expect(usageHeading(bySession)).toBe('By provider and session')
 })

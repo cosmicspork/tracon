@@ -1,3 +1,4 @@
+import { generatedName, nodeDisplayName } from './names'
 import type { ChannelInfo, NodeInfo, RecipeOffer, RecipeOfferView } from './types'
 
 /**
@@ -19,7 +20,7 @@ export interface OfferTarget {
  * to channel co-members.
  */
 export function offerTargets(channels: ChannelInfo[], nodes: NodeInfo[], self: string): OfferTarget[] {
-  const name = (id: string) => nodes.find((node) => node.id === id)?.name || id.slice(0, 12)
+  const name = (id: string) => nodeDisplayName(nodes, id)
   return channels
     .filter((channel) => !channel.name.startsWith('@') && !channel.archived && channel.nodes.includes(self))
     .map((channel) => ({
@@ -56,7 +57,7 @@ export function inboxOrder(offers: RecipeOffer[]): RecipeOffer[] {
 
 /** A result line for one node an offer went to. */
 export function offerResultLine(result: { name: string; node: string; state: string; detail?: string }): string {
-  const who = result.name || result.node.slice(0, 12)
+  const who = result.name || generatedName('node', result.node)
   switch (result.state) {
     case 'offered':
       return `${who}: offered; its operator decides`

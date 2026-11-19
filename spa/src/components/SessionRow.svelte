@@ -2,6 +2,7 @@
   import { clock } from '../lib/clock.svelte'
   import { humanizeError } from '../lib/errors'
   import { externalAgent, formatAge, formatBudget, formatDuration } from '../lib/format'
+  import { generatedName } from '../lib/names'
   import { chipLabel, nodeById } from '../lib/nodes'
   import { store } from '../lib/store.svelte'
   import { sessionTone } from '../lib/tone'
@@ -84,6 +85,7 @@
   <span class="t">
     <em>{kind}</em>
     {session.branch}
+    <span class="nm" title={session.id}>{generatedName('session', session.id)}</span>
     <small
       >{stale && owner?.last_seen_ms ? `last seen ${formatAge(owner.last_seen_ms, clock.now)} · ` : ''}{external
         ? ['your own harness', externalAgent(session.harness_session_id, session.harness_agent), session.channel].filter(Boolean).join(' · ')
@@ -253,5 +255,10 @@
       width: 64px;
       padding: 0;
     }
+  }
+  .nm {
+    font: 11.5px var(--mono);
+    color: var(--dim);
+    margin-left: 6px;
   }
 </style>

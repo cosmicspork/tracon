@@ -817,7 +817,7 @@ fn node_name(s: &AppState, node: &str) -> String {
         .flatten()
         .map(|row| recipe::display_name(&row.name))
         .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| node.chars().take(12).collect())
+        .unwrap_or_else(|| crate::names::node(node, None))
 }
 
 /// Where an offer lands: the entry at `path`, or a new one there.

@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test'
+import { generatedName } from './names'
 
 import { groupLog, groupSummary, type ToolEntry } from './log'
 import {
@@ -234,7 +235,7 @@ test("a call to the node's own tools reads as what it does, with its answer's st
   // A document read stays its own line: it is not one of the files a run read.
   expect(rows.map((r) => r.kind)).toEqual(['call', 'call', 'call', 'call'])
   const calls = rows.map((r) => (r.kind === 'call' ? r.call : null))
-  expect(calls[0]?.text).toBe('Wait for review 01a128ee')
+  expect(calls[0]?.text).toBe(`Wait for ${generatedName('review', '01a128ee-0940-7cf0-85e7-a5f3aa718404')}`)
   expect(calls[0]?.note).toBe('checking')
   expect(calls[0]?.kind).toBe('node')
   expect(calls[1]?.text).toBe('Read document note-tracon-dogfood')

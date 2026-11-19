@@ -173,10 +173,10 @@ pub fn ask(
         .map(str::trim)
         .filter(|why| !why.is_empty())
         .map(|why| why.chars().take(MAX_WHY_CHARS).collect::<String>());
-    let short = session_id.get(..8).unwrap_or(session_id);
+    let named = crate::names::session(session_id);
     let title = match &why {
-        Some(why) => format!("reach {host} from session {short} · {why}"),
-        None => format!("reach {host} from session {short}"),
+        Some(why) => format!("reach {host} from {named} · {why}"),
+        None => format!("reach {host} from {named}"),
     };
     let mut arguments = json!({ "host": host });
     if let Some(why) = &why {

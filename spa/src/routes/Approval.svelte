@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api, ApiError } from '../lib/api'
+  import Name from '../components/Name.svelte'
   import {
     approvalArguments,
     approvalFields,
@@ -214,7 +215,7 @@
       <em>Approval</em>
       {a.title}
       <small
-        >{a.tool} · {a.channel} · {pending
+        ><Name kind="approval" id={a.id} /> · {a.tool} · {a.channel} · {pending
           ? lapsed
             ? 'expired · nothing ran'
             : `${formatExpiry(a.expires_ms, clock.now)} · ${grant ? 'allowing grants it' : 'allowing runs it'}`
@@ -226,7 +227,7 @@
   <dl class="kv">
     {#if a.session_id}
       <dt>Session</dt>
-      <dd class="m"><a href="/sessions/{a.session_id}">{a.session_id.slice(0, 8)}</a></dd>
+      <dd class="m"><Name kind="session" id={a.session_id} href="/sessions/{a.session_id}" /></dd>
     {:else}
       <dt>Asked by</dt>
       <dd class="m">{details.lane ?? 'an external agent'}</dd>

@@ -3,6 +3,8 @@
   // shared channels, devices, mesh, policy, and maintenance retain distinct
   // scopes so a local host change is never mistaken for a peer or device change.
   import { onMount, tick } from 'svelte'
+  import Name from '../components/Name.svelte'
+  import { generatedName } from '../lib/names'
   import { isTauri } from '@tauri-apps/api/core'
   import LaunchManifest from '../components/LaunchManifest.svelte'
   import QrScanner from '../components/QrScanner.svelte'
@@ -776,7 +778,7 @@
           <span>Node</span>
           <select value={selectedNodeId} onchange={(event) => selectNode(event.currentTarget.value)}>
             {#each store.nodes as node (node.id)}
-              <option value={node.id}>{node.name || node.id.slice(0, 8)}{node.is_self ? ' · serving node' : node.reachable ? ' · peer' : ' · peer unavailable'}</option>
+              <option value={node.id}>{node.name || generatedName('node', node.id)}{node.is_self ? ' · serving node' : node.reachable ? ' · peer' : ' · peer unavailable'}</option>
             {/each}
           </select>
         </label>
@@ -1137,7 +1139,7 @@
           {#each authority.grants as item (item.id)}
             <div class:dim={item.revoked_ms !== null} class="grant">
               <b>{item.verdict} {item.action}</b>
-              <span>{item.target} · {item.channel}{item.session_id ? ` · session ${item.session_id}` : ''}{item.revision ? ` · revision ${item.revision}` : ''}{item.expires_ms ? ` · expires ${new Date(item.expires_ms).toLocaleString()}` : ''}</span>
+              <span>{item.target} · {item.channel}{#if item.session_id}{' · '}<Name kind="session" id={item.session_id} href="/sessions/{item.session_id}" />{/if}{item.revision ? ` · revision ${item.revision}` : ''}{item.expires_ms ? ` · expires ${new Date(item.expires_ms).toLocaleString()}` : ''}</span>
               <small>{item.reason}</small>
               {#if item.revoked_ms !== null}
                 <small>revoked</small>
@@ -1160,7 +1162,7 @@
       {#if grantConfirmation}
         <div class="grant-confirmation">
           <b>Confirm this exact local grant</b>
-          <span>{grantConfirmation.verdict} {grantConfirmation.action} · {grantConfirmation.target} · channel {grantConfirmation.channel}{grantConfirmation.session_id ? ` · session ${grantConfirmation.session_id}` : ''}{grantConfirmation.revision ? ` · immutable revision ${grantConfirmation.revision}` : ''}{grantConfirmation.expires_ms ? ` · expires ${new Date(grantConfirmation.expires_ms).toLocaleString()}` : ''}</span>
+          <span>{grantConfirmation.verdict} {grantConfirmation.action} · {grantConfirmation.target} · channel {grantConfirmation.channel}{#if grantConfirmation.session_id}{' · '}<Name kind="session" id={grantConfirmation.session_id} />{/if}{grantConfirmation.revision ? ` · immutable revision ${grantConfirmation.revision}` : ''}{grantConfirmation.expires_ms ? ` · expires ${new Date(grantConfirmation.expires_ms).toLocaleString()}` : ''}</span>
           <small>{grantConfirmation.reason}</small>
           <div class="acts">
             <button class="btn p" onclick={saveGrant} disabled={busy !== ''}>{busy === 'authority' ? 'Saving…' : 'Confirm local grant'}</button>

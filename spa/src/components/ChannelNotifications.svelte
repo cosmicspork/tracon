@@ -1,6 +1,7 @@
 <script lang="ts">
   // A channel binding is shared with its members; it is never a per-device filter.
   import { api } from '../lib/api'
+  import { nodeDisplayName } from '../lib/names'
   import { store } from '../lib/store.svelte'
   import Card from './settings/Card.svelte'
 
@@ -22,7 +23,7 @@
 
   function nodeNames(ids: string[]): string {
     return ids
-      .map((id) => store.nodes.find((node) => node.id === id)?.name ?? id.slice(0, 8))
+      .map((id) => nodeDisplayName(store.nodes, id))
       .join(', ')
   }
 

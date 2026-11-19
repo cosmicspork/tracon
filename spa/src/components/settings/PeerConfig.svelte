@@ -8,6 +8,7 @@
   // changes. `only` shows one table read-only, as Repositories shows
   // `[[repo]]`.
   import Card from './Card.svelte'
+  import { generatedName } from '../../lib/names'
   import ConfigForm from './ConfigForm.svelte'
   import { api, ApiError } from '../../lib/api'
   import { store } from '../../lib/store.svelte'
@@ -56,7 +57,7 @@
       <select value={selected} onchange={(event) => void load(event.currentTarget.value)}>
         <option value="">Choose a peer</option>
         {#each peers as peer (peer.id)}
-          <option value={peer.id}>{peer.name || peer.id.slice(0, 8)}{peer.reachable ? '' : ' (unreachable)'}</option>
+          <option value={peer.id}>{peer.name || generatedName('node', peer.id)}{peer.reachable ? '' : ' (unreachable)'}</option>
         {/each}
       </select>
     </label>

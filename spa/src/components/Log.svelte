@@ -1,4 +1,6 @@
 <script lang="ts">
+  import Name from './Name.svelte'
+  import PlanLink from './PlanLink.svelte'
   import {
     eventLine,
     turnEndLine,
@@ -263,7 +265,7 @@
       {:else if e.kind === 'review_rejected'}
         <div class="mark crit">submission refused · {e.payload.reason}</div>
       {:else if e.kind === 'plan_artifact'}
-        <div class="mark ok">plan written · <a href="/docs/{e.payload.channel ?? ''}/{e.payload.slug}">{e.payload.slug}</a> · ends the phase</div>
+        <div class="mark ok">plan written · <PlanLink channel={String(e.payload.channel ?? '')} slug={String(e.payload.slug)} /> · ends the phase</div>
       {:else if e.kind === 'work_shown'}
         <div class="mark ok">work shown · {e.payload.title} · at {String(e.payload.head_sha ?? '').slice(0, 12)}{e.payload.files ? ` · ${e.payload.files} ${e.payload.files === 1 ? 'file' : 'files'}` : ''} · in tracon only</div>
       {:else if e.kind === 'forge_follow'}
@@ -341,7 +343,7 @@
         {@const line = eventLine(e) ?? fallbackLine(e)}
         {@const external = line.href?.startsWith('http') ?? false}
         <div class={line.tone === 'sys' || line.tone === 'mark' ? line.tone : `mark ${line.tone}`}>
-          {line.text}{#if line.href}{' · '}<a href={line.href} target={external ? '_blank' : undefined} rel={external ? 'noopener' : undefined}>{line.link ?? 'open'}</a>{/if}
+          {line.text}{#if line.href && line.id}{' · '}<Name id={line.id} label={line.link} href={line.href} />{:else if line.href}{' · '}<a href={line.href} target={external ? '_blank' : undefined} rel={external ? 'noopener' : undefined}>{line.link ?? 'open'}</a>{/if}
         </div>
       {/if}
     {:else}

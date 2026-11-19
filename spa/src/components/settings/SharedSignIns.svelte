@@ -7,6 +7,7 @@
   // edit Configuration makes, here or on the peer (which must name this
   // node in `[mesh] admin_peers`).
   import Card from './Card.svelte'
+  import { nodeDisplayName } from '../../lib/names'
   import { api, ApiError } from '../../lib/api'
   import { providerLabel, sharedSignIns } from '../../lib/providers'
   import { store } from '../../lib/store.svelte'
@@ -17,7 +18,7 @@
   let done = $state<Record<string, string>>({})
   let failed = $state<Record<string, string>>({})
 
-  const nodeName = (id: string) => store.nodes.find((node) => node.id === id)?.name || id.slice(0, 8)
+  const nodeName = (id: string) => nodeDisplayName(store.nodes, id)
   const isSelf = (id: string) => store.nodes.some((node) => node.id === id && node.is_self)
 
   async function renewFrom(key: string, nodeId: string) {

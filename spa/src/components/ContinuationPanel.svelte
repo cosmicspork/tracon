@@ -12,6 +12,7 @@
   // the followed request is merged, closing the task is the next action, and
   // it is offered here first.
   import { api } from '../lib/api'
+  import Name from './Name.svelte'
   import { autogrow } from '../lib/autogrow'
   import { closeOffer, verbs, workLinks } from '../lib/continuation'
   import { router } from '../lib/router.svelte'
@@ -115,7 +116,8 @@
             {#each g.links as l, j (j)}
               <span class="ln">
                 {#if !l.href}<span class="m" title={l.title}>{l.text}</span>
-                {:else if l.here}<b title={l.title}>{l.text}</b>
+                {:else if l.here}<b title={l.id ? `${l.title ?? ''} · ${l.id}` : l.title}>{l.text}</b>
+                {:else if l.id}<Name id={l.id} label={l.text} href={l.href} hint={l.title} />
                 {:else if l.external}<a href={l.href} title={l.title} target="_blank" rel="noopener">{l.text}</a>
                 {:else}<a href={l.href} title={l.title}>{l.text}</a>{/if}
                 {#if l.note}<span class="st">{l.note}</span>{/if}

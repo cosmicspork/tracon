@@ -1,3 +1,4 @@
+import { generatedName } from './names'
 import type { LoginCompletion, NodeInfo, ProviderInfo, ProviderSignIn } from './types'
 
 export function providerLabel(name: string): string {
@@ -203,7 +204,7 @@ export function signInsNeeded(nodes: NodeInfo[], own: ProviderInfo[]): SignInNee
         entry = { provider: p.name, nodes: [] }
         out.push(entry)
       }
-      if (!entry.nodes.some((n) => n.id === node.id)) entry.nodes.push({ id: node.id, name: node.name || node.id.slice(0, 8) })
+      if (!entry.nodes.some((n) => n.id === node.id)) entry.nodes.push({ id: node.id, name: node.name || generatedName('node', node.id) })
     }
   }
   return out

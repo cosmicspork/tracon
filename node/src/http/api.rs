@@ -3265,12 +3265,17 @@ pub async fn start_review_session(
                 .into(),
         )));
     }
-    let short: String = id.chars().take(8).collect();
+    let review_kind = if r.kind == "report" {
+        crate::names::kind::REPORT
+    } else {
+        crate::names::kind::REVIEW
+    };
+    let named = crate::names::generated(review_kind, &id);
     admin_on_peer(
         &s,
         &parts,
         &r.node_id,
-        &format!("Start a reviewer on review {short}"),
+        &format!("Start a reviewer on {named}"),
         |statement| proto::frame::Command::StartReviewer {
             review_id: id.clone(),
             revision_id: body.revision_id.clone(),

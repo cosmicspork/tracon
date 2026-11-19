@@ -1,3 +1,4 @@
+import { generatedName } from './names'
 import { expect, test } from 'bun:test'
 import {
   eligibleNodes,
@@ -65,7 +66,7 @@ test('reasons follow hub and peer state', () => {
   expect(unreachableReason(nodes, { ...connected, hub: { state: 'unreachable', since_ms: 1 } }, 'me')).toBeNull()
   expect(unreachableReason(nodes, connected, 'nope')).toBe('node unknown')
   expect(nodeLabel(nodes, 'p')).toBe('peer')
-  expect(nodeLabel(nodes, 'abcdefghij')).toBe('abcdefgh')
+  expect(nodeLabel(nodes, 'abcdefghij')).toBe(generatedName('node', 'abcdefghij'))
 })
 
 

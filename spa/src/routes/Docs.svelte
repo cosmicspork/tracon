@@ -196,7 +196,7 @@
               <span class="t">
                 {#if d.format === 'html'}<em>HTML</em>{/if}
                 {d.title}
-                <small>{d.slug} · {formatAge(d.updated_ms, clock.now)}</small>
+                <small>{d.slug.startsWith('plan-') ? 'plan' : d.slug} · {formatAge(d.updated_ms, clock.now)}</small>
               </span>
               <span class="act">Open</span>
             </a>

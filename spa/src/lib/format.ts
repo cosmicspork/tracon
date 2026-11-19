@@ -1,3 +1,4 @@
+import { generatedName } from './names'
 import type { CodexLimits, LimitWindow } from './types'
 
 /** Token counts as the interface shows them: 15024 → "15k", 1_240_000 → "1.24M". */
@@ -60,13 +61,12 @@ export function digits(s: string): number {
 
 /**
  * Which of a channel's external agents a session is: the lane the harness
- * labels itself with, else the tail of the id the node handed it at
- * `initialize`, since a v7 id's head is a timestamp two agents started
- * together share. Empty for a client that sends neither.
+ * labels itself with, else the generated name of the id the node handed it at
+ * `initialize`. Empty for a client that sends neither.
  */
 export function externalAgent(clientId: string | null | undefined, lane?: string | null): string {
   if (lane) return lane
-  return clientId ? `agent ${clientId.slice(-8)}` : ''
+  return clientId ? generatedName('agent', clientId) : ''
 }
 
 /** A usage window's length: "5h", "7d", "90m". */

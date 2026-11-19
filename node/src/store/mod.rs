@@ -302,6 +302,13 @@ impl Store {
             .map_err(Into::into)
     }
 
+    /// A node as text the node writes names it: its own name when this node
+    /// knows it, else its generated `node-…` name.
+    pub fn node_display_name(&self, id: &str) -> String {
+        let name = self.get_node(id).ok().flatten().map(|n| n.name);
+        crate::names::node(id, name.as_deref())
+    }
+
     // ---- session ----
 
     pub fn insert_session(&self, s: &SessionRow) -> Result<()> {

@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test'
+import { generatedName } from './names'
 import { attemptState, carries, closeOffer, verbs, workLinks } from './continuation'
 import type { Continuation, ContinuationAttempt } from './types'
 
@@ -30,7 +31,7 @@ test('lineage points only at attempts in the same work', () => {
   const b = attempt({ id: 'bbbbbbbb-2', continued_from: 'aaaaaaaa-1' })
   const stray = attempt({ id: 'cccccccc-3', parent_session: 'elsewhere' })
   expect(carries(a, [a, b])).toBe(null)
-  expect(carries(b, [a, b])).toBe('aaaaaaaa')
+  expect(carries(b, [a, b])).toBe(generatedName('session', 'aaaaaaaa-1'))
   expect(carries(stray, [a, stray])).toBe(null)
 })
 
@@ -90,7 +91,7 @@ test('the links bar names everything linked to the work, in order', () => {
   expect(read(workLinks(item(), { sessionId: 'bbbbbbbb-2' }))).toEqual([
     'Task /tasks/wi-2',
     'Plan doc /docs/personal/plan-wi-2',
-    'Sessions: plan aaaaaaaa /sessions/aaaaaaaa-1: execute bbbbbbbb /sessions/bbbbbbbb-2',
+    `Sessions: plan ${generatedName('session', 'aaaaaaaa-1')} /sessions/aaaaaaaa-1: execute ${generatedName('session', 'bbbbbbbb-2')} /sessions/bbbbbbbb-2`,
     'Review published /reviews/rev-7',
     'PR #149 merged https://github.com/o/r/pull/149',
     'Branch: feat/rate-limits',
@@ -111,7 +112,7 @@ test('the links bar leaves out what the work does not have, and the task on its 
   const pushed = item({ evidence: { reviews: [{ ...item().evidence.reviews[0], state: 'approved', publish_result: 'pushed abc' }], shown: [] } })
   expect(read(workLinks(pushed, { itemId: 'wi-2' }))).toEqual([
     'Plan doc /docs/personal/plan-wi-2',
-    'Sessions: plan aaaaaaaa /sessions/aaaaaaaa-1: execute bbbbbbbb /sessions/bbbbbbbb-2',
+    `Sessions: plan ${generatedName('session', 'aaaaaaaa-1')} /sessions/aaaaaaaa-1: execute ${generatedName('session', 'bbbbbbbb-2')} /sessions/bbbbbbbb-2`,
     'Review approved /reviews/rev-7',
     'Branch: feat/rate-limits',
   ])

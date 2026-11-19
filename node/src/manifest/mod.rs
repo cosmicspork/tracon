@@ -287,10 +287,10 @@ impl LaunchManifest {
         let mut out = String::from("## Operator notes\n\n");
         out.push_str(&format!(
             "Standing notes from the operator of this node, read by every session on this \
-             channel (launch manifest revision {}, `{}`). They are the operator's words, not \
+             channel (launch manifest revision {}, {}). They are the operator's words, not \
              tracon's, and nothing here can be changed from inside the session.\n\n",
             self.revision,
-            &self.digest[..8.min(self.digest.len())]
+            crate::names::manifest(&self.digest)
         ));
         for entry in &self.instructions {
             out.push_str(&format!("### {}\n\n{}\n\n", entry.name, entry.body.trim()));
@@ -307,10 +307,10 @@ impl LaunchManifest {
         }
         let mut out = String::from("## Customization\n\n");
         out.push_str(&format!(
-            "What this channel's launch manifest installed (revision {}, `{}`). It is the \
+            "What this channel's launch manifest installed (revision {}, {}). It is the \
              operator's, not yours: nothing here can be changed from inside the session.\n\n",
             self.revision,
-            &self.digest[..8.min(self.digest.len())]
+            crate::names::manifest(&self.digest)
         ));
         if !self.skills.is_empty() {
             out.push_str("Skills available through the `skill` tool:\n\n");

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte'
+  import { nodeDisplayName } from '../lib/names'
   import ChannelChoice from './ChannelChoice.svelte'
   import { api } from '../lib/api'
   import { providerChannelSeed } from '../lib/channel'
@@ -197,7 +198,7 @@
   }
 
   const isSelf = $derived(nodeId === store.node?.id)
-  const nodeName = $derived(store.nodes.find((node) => node.id === nodeId)?.name ?? nodeId.slice(0, 8))
+  const nodeName = $derived(nodeDisplayName(store.nodes, nodeId))
   const mayClaimBrowser = $derived(isSelf && !managedLocal && browserCanClaimNode())
   const meshed = $derived(store.nodes.length > 1)
   const shownState = $derived(justResult && (p.state === 'disconnected' || again !== null) ? 'pending' : p.state)
@@ -251,7 +252,7 @@
     }
   }
 
-  const peerName = (id: string) => store.nodes.find((node) => node.id === id)?.name ?? id.slice(0, 8)
+  const peerName = (id: string) => nodeDisplayName(store.nodes, id)
 
   const held = $derived(signIns(p))
   const takeover = $derived(isSelf && held.length ? takesOver(p, picked) : null)

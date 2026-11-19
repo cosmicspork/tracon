@@ -66,14 +66,14 @@ test('tabs are All, each project that holds an item, an unnamed one by id, then 
     ['All', 4],
     ['hounddogreading', 1],
     ['tracon', 1],
-    ['feedc0ff', 1],
+    ['unlisted project', 1],
     ['No project', 1],
   ])
   expect(projectTabs(items.slice(0, 1), projects).map((t) => t.key)).toEqual(['all', 'p-hdr'])
   expect(inProject(items[4], 'none')).toBe(true)
   expect(inProject(items[0], 'none')).toBe(false)
   expect(inProject(items[0], 'all')).toBe(true)
-  expect(projectName(items[3], projects)).toBe('feedc0ff')
+  expect(projectName(items[3], projects)).toBe('unlisted project')
   expect(projectName(items[4], projects)).toBeNull()
 })
 
@@ -99,5 +99,6 @@ test('pickers offer repositories and projects with work, and tell same-named one
   expect(pickableProjects(projects).map((p) => p.id)).toEqual(['p-hdr', 'ws-aaaaaa1'])
   expect(pickableProjects(projects, 'ws-cccccc3').map((p) => p.id)).toEqual(['p-hdr', 'ws-aaaaaa1', 'ws-cccccc3'])
   expect(projectLabel(projects[0], projects)).toBe('hounddogreading')
-  expect(projectLabel(projects[1], projects)).toBe('imported workspace ws-aaa')
+  expect(projectLabel(projects[1], projects)).toBe('imported workspace #1')
+  expect(projectLabel(projects[3], projects)).toBe('imported workspace #3')
 })

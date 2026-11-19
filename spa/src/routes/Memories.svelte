@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api } from '../lib/api'
+  import ScopeRef from '../components/ScopeRef.svelte'
   import { autogrow } from '../lib/autogrow'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
@@ -143,7 +144,7 @@
             <em>{m.kind}</em>
             {m.body}
             <small
-              >{m.scope}{m.scope_ref ? ` · ${m.scope_ref.slice(0, 8)}` : ''} · {Math.round(m.confidence * 100)}% ·
+              >{m.scope}{#if m.scope_ref}{' · '}<ScopeRef channel={m.channel} scope={m.scope} ref={m.scope_ref} />{/if} · {Math.round(m.confidence * 100)}% ·
               {formatAge(m.updated_ms, clock.now)}</small
             >
           </span>

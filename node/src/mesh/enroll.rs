@@ -622,7 +622,7 @@ pub fn policy_push_targets(
                 .and_then(|m| m["name"].as_str())
                 .filter(|n| !n.trim().is_empty())
                 .map(String::from)
-                .unwrap_or_else(|| short_id(&node.id)),
+                .unwrap_or_else(|| crate::names::node(&node.id, None)),
             name => name.to_string(),
         };
         targets.push(PolicyPushTarget {
@@ -649,7 +649,7 @@ pub fn policy_push_targets(
                 .as_str()
                 .filter(|n| !n.trim().is_empty())
                 .map(String::from)
-                .unwrap_or_else(|| short_id(id)),
+                .unwrap_or_else(|| crate::names::node(id, None)),
             key: Ok(key),
         });
     }

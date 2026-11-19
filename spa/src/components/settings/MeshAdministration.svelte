@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import { generatedName } from '../../lib/names'
+  import Name from '../Name.svelte'
   import Card from './Card.svelte'
   import {
     admin,
@@ -169,10 +171,10 @@
         {#each data.members as member (member.id)}
           <article>
             <div class="member-title">
-              <strong>{member.self ? `${member.name} · this node` : member.name || 'unnamed node'}</strong>
+              <strong>{member.self ? `${member.name} · this node` : member.name || generatedName('node', member.id)}</strong>
               <span class:offline={!member.reachable}>{member.reachable ? 'reachable' : 'not currently reachable'}</span>
             </div>
-            <p><code>{member.id}</code></p>
+            <p class="id"><Name kind="node" id={member.id} /></p>
             <dl>
               <div><dt>Channels</dt><dd>{member.channels.filter((channel) => channel !== '@mesh').join(', ') || 'none reported'}</dd></div>
               {#if member.compatibility.harnesses?.length}
@@ -286,7 +288,7 @@
   dl { margin: 0; display: grid; gap: 3px; }
   dl div { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 8px; align-items: baseline; }
   article > .lnk { justify-self: start; }
-  article p code { font-size: 11.5px; color: var(--dim); }
+  article p.id { font-size: 11.5px; color: var(--dim); }
   dd { overflow-wrap: anywhere; }
   dd.mismatch { color: var(--wait); }
   dd.unknown { color: var(--dim); }
