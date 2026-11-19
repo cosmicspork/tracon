@@ -476,7 +476,7 @@ pub enum SessionError {
     UnknownChannel(String),
     #[error("channel {0} is archived: bring it back to start work on it again")]
     ChannelArchived(String),
-    #[error("a task is required: pick one from the ready list")]
+    #[error("a plan session needs a task: pass work_item_id (ready ids: tracon work ready)")]
     WorkItemRequired,
     #[error("task is not ready: {0}")]
     NotReady(String),

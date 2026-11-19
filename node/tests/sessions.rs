@@ -359,6 +359,44 @@ async fn a_session_needs_a_ready_item_and_execute_needs_its_plan() {
         .as_str()
         .unwrap()
         .contains("no task"));
+    // A plan session without a task says which field carries it.
+    let (st, body) = h
+        .call(
+            "POST",
+            "/api/sessions",
+            Some(spec(json!({"phase": "plan"}))),
+        )
+        .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("pass work_item_id"));
+}
+
+#[tokio::test]
+async fn an_unknown_field_is_refused_by_name_rather_than_dropped() {
+    state::isolate();
+    let h = Harness::new(1000).await;
+    // `work_item` is what readiness takes; a session reads `work_item_id`.
+    let (st, body) = h
+        .call(
+            "POST",
+            "/api/sessions",
+            Some(json!({
+                "channel": "personal", "repo_path": "forge.invalid/o/r", "model": "m/a",
+                "phase": "plan", "work_item": "w1",
+            })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["error"]["kind"], "unknown_field", "{body}");
+    assert_eq!(
+        body["error"]["message"],
+        "unknown field \"work_item\"; did you mean \"work_item_id\"?"
+    );
+    assert_eq!(body["error"]["fields"][0]["field"], "work_item");
+    assert!(h.store.list_sessions(None).unwrap().is_empty());
 }
 
 #[tokio::test]

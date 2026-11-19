@@ -1444,9 +1444,13 @@ fn zip_workspace(root: &std::path::Path) -> Result<Vec<u8>, String> {
     Ok(cursor.into_inner())
 }
 
+/// The body is read strictly here and only here: a key `NewSession` has no
+/// field for is refused by name, where serde would drop it and the request
+/// fail later for want of what it did send. A peer's forwarded spec is read
+/// leniently, so an older node still takes a newer one's.
 pub async fn create_session(
     State(s): State<AppState>,
-    Json(spec): Json<NewSession>,
+    super::strict::StrictJson(spec): super::strict::StrictJson<NewSession>,
 ) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
     let row = s.manager.create(spec).await?;
     Ok((StatusCode::CREATED, Json(json!(row))))
@@ -1491,7 +1495,12 @@ fn plan_phase() -> Phase {
 /// it. A session refused after the item exists keeps the item — the operator
 /// typed it, and it is the only copy — and the refusal carries the item's id
 /// so the interface can say where the words went.
-pub async fn compose(State(s): State<AppState>, Json(c): Json<ComposeBody>) -> Response {
+///
+/// Read strictly, as `create_session` is: an unknown key is refused by name.
+pub async fn compose(
+    State(s): State<AppState>,
+    super::strict::StrictJson(c): super::strict::StrictJson<ComposeBody>,
+) -> Response {
     match compose_inner(s, c).await {
         Ok(r) => r,
         Err(e) => e.into_response(),

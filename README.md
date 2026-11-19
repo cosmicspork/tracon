@@ -309,7 +309,10 @@ phase bindings are presets, not requirements, supplying a model and budget only 
 the session does not name its own; if neither does, the node falls back to a model
 already in its catalogue and records which source actually won as the session's
 `model_source`. **Adjust** opens repository, phase, model, and node as fields when a
-session needs something other than the usual. A session that spends its budget is
+session needs something other than the usual. `POST /api/sessions` and `/api/compose`
+refuse a key they do not know with a 422 that names it (`error.kind` is
+`unknown_field`), and suggest the field it was probably meant for: a plan session's
+task goes in `work_item_id`, not `work_item`. A session that spends its budget is
 held, not ended: it is paused at the end of the turn that spent it, with its harness and
 context kept, until the operator raises the budget (on its page, or
 `POST /api/sessions/{id}/budget`) and it carries on. A channel at its daily ceiling
