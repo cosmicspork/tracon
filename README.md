@@ -1152,6 +1152,27 @@ is ever in the plugin's environment. The card for a plugin's tool shows its vers
 hint, the hosts it says it reaches, and what an approved run is lent. A call holds its
 process for as long as it runs, so the idle stop counts from the end of the last call.
 
+#### SQL
+
+The node runs no SQL of its own: the database tools are the
+[`sql-review`](https://github.com/cosmicspork/sql-review) plugin's. Install it with
+`tracon plugin add cosmicspork/sql-review`, and bind each database's **read-only**
+account to the channels that may query it as a credential: `sql-read` is the default
+profile and `sql-read-<profile>` any other, with the same `DB_*` fields `sql-review`
+reads standalone (`DB_BACKEND`, `DB_HOST`, `DB_PORT`, `DB_SERVICE`, `DB_USER`,
+`DB_PASSWORD`, or `DATABASE_URL`). The shipped working agreements (from bundle v25)
+allow `sql-review__query` and `sql-review__describe` unattended (a node still on an
+older bundle asks for them until you sign the new one); anything else the plugin offers
+is asked. The read-only account is the boundary: `sql-review` classifies a
+statement as a read or a write, but that is not a security control, so an account that
+can write is never bound as `sql-read`.
+
+This replaces the `consulta` sidecar. A `[consulta]` table left in `node.toml` still
+loads and is ignored, with a warning naming the plugin. On its first start the node
+renames credentials `consulta` and `consulta-<profile>` to `sql-read` and
+`sql-read-<profile>`, bindings and all, and logs each one; one whose new name is already
+taken is left as it is, with a warning, so you can remove whichever is stale.
+
 ### Asking, pinging, and complaining
 
 Three tools let an agent reach you without pretending a question is a permission.
@@ -1456,7 +1477,7 @@ result that would not load is refused before anything is written. Each write is 
 with who made it and which keys it changed, and pushed to your subscribed devices
 ("node.toml changed: ... by ...").
 
-Keys that name a program the node runs (`podman`, `gh`, `glab`, `git`, `[consulta]`, the
+Keys that name a program the node runs (`podman`, `gh`, `glab`, `git`, the
 builder's `buildctl`) or a file or directory it reads, sends on or writes
 (`embed.api_key_file`, the builder's certificate, registry and token paths,
 `docs.export_dir`, `worktree_root`, `repo_roots`,
@@ -1467,12 +1488,6 @@ point one at something an agent wrote or at a secret. In short:
   what its key runs, and lives where no agent can write and only root can, or under a
   package manager's prefix (Homebrew, `~/.local/bin`, `~/.cargo/bin`), where your own
   user may;
-- `[consulta] args` reads `run --project <consulta's checkout> consulta` (a few plain
-  `uv` flags allowed), with nothing after `consulta`. The node runs consulta from its
-  own state directory, so a stray `.env` wherever you started the node is never read.
-  If your `args` still end in `--env-file <empty file>` from an older setup, please drop
-  it: the node refuses any argument after `consulta`, and the query tools fail until
-  it is gone;
 - a secret file lives in `~/.config/tracon/secrets/` (on macOS, `secrets/` beside
   `node.toml`) or `/etc/tracon/`;
 - documents export into the node's own export area (`~/.local/share/tracon/exports` on
@@ -1916,13 +1931,6 @@ shape = "anthropic"                 # or "openai", "openai-codex"; the shape als
 # [providers.anthropic.price]
 # input_per_mtok = 3.0
 # output_per_mtok = 15.0
-
-[consulta]                          # the database MCP tools, run as a sidecar
-# one credential per database: `consulta` is the default, `consulta-<profile>` any other;
-# a channel holding more than the default offers the tools a `profile` argument
-command = "uv"
-args = ["run", "--project", "<home>/src/consulta", "consulta"]   # paths here are literal: only repo_roots and export_dir expand ~
-timeout_secs = 60
 
 [publish]                           # the binaries the node runs to publish an approved review
 gh = "gh"

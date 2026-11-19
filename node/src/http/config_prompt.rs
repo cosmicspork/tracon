@@ -64,7 +64,6 @@ const SENSITIVE: &[&str] = &[
     "auth",
     "mesh",
     "runtime",
-    "consulta",
     "boundary",
     "gateway.allow_hosts",
     "gateway.harness_listen",

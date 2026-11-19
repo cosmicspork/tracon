@@ -55,7 +55,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 
-use super::{Config, Consulta};
+use super::Config;
 use crate::config_schema::PathKind;
 
 /// Every key the guard checks, with the rules that hold it. A test holds
@@ -65,8 +65,6 @@ pub const GUARDED: &[(&str, PathKind)] = &[
     ("publish.gh", PathKind::Executable),
     ("publish.glab", PathKind::Executable),
     ("publish.git", PathKind::Executable),
-    ("consulta.command", PathKind::Executable),
-    ("consulta.args", PathKind::ExecArgs),
     ("runtime.kubernetes.builder.buildctl", PathKind::Executable),
     ("runtime.apple.container", PathKind::Executable),
     ("runtime.kubernetes.builder.tls_dir", PathKind::SecretDir),
@@ -98,7 +96,6 @@ fn program_names(key: &str) -> &'static [&'static str] {
         "publish.gh" => &["gh"],
         "publish.glab" => &["glab"],
         "publish.git" => &["git"],
-        "consulta.command" => &["uv", "consulta"],
         "runtime.kubernetes.builder.buildctl" => &["buildctl"],
         "runtime.apple.container" => &["container"],
         _ => &[],
@@ -193,22 +190,6 @@ const SYSTEM_DIRS: &[&str] = &[
     "/private/etc",
     "/private/var/db",
     "/private/var/run",
-];
-
-/// The options `uv run` may take in `consulta.args`. Anything else is
-/// refused, because most of what `uv run` accepts chooses what it runs:
-/// `--with` a package, `--python` an interpreter, `--index-url` where
-/// packages come from, `--directory` where a project is discovered, a
-/// script instead of a command.
-const UV_RUN_FLAGS: &[&str] = &[
-    "--frozen",
-    "--locked",
-    "--no-sync",
-    "--offline",
-    "--no-dev",
-    "--quiet",
-    "-q",
-    "--no-progress",
 ];
 
 /// One key the guard refuses, and why.
@@ -730,11 +711,11 @@ impl Guard {
     pub fn check(&self, cfg: &Config) -> Vec<Refusal> {
         values(cfg)
             .into_iter()
-            .filter_map(|(key, value)| self.check_entry(cfg, key, &value).err())
+            .filter_map(|(key, value)| self.check_entry(key, &value).err())
             .collect()
     }
 
-    fn check_entry(&self, cfg: &Config, key: &'static str, value: &str) -> Result<(), Refusal> {
+    fn check_entry(&self, key: &'static str, value: &str) -> Result<(), Refusal> {
         match kind_of(key) {
             Some(PathKind::Executable) if key == "boundary.podman" => {
                 let candidates = crate::boundary::podman::podman_candidates();
@@ -742,7 +723,6 @@ impl Guard {
                 self.program_with(key, value, &refs).map(drop)
             }
             Some(PathKind::Executable) => self.program(key, value).map(drop),
-            Some(PathKind::ExecArgs) => self.consulta_args(&cfg.consulta),
             Some(_) => self.path(key, value, Stage::Edit),
             None => Ok(()),
         }
@@ -914,136 +894,6 @@ impl Guard {
         Ok(path.to_path_buf())
     }
 
-    /// The `consulta` program, with its arguments held to the shape the
-    /// node runs it in.
-    pub fn consulta(&self, consulta: &Consulta) -> Result<PathBuf, Refusal> {
-        let program = self.program("consulta.command", &consulta.command);
-        // A refused command is the reason; one not installed yet still has
-        // its arguments checked.
-        if self.off || program.as_ref().is_err_and(|refusal| !refusal.missing) {
-            return program;
-        }
-        self.consulta_args(consulta)?;
-        program
-    }
-
-    /// The arguments alone, by the program the command names, whether or
-    /// not that program is installed yet. The node appends the query's own
-    /// arguments after these; nothing here may add more, since consulta's
-    /// own options include where it writes its output.
-    fn consulta_args(&self, consulta: &Consulta) -> Result<(), Refusal> {
-        let refused = |problem: Problem| Refusal {
-            key: "consulta.args".into(),
-            value: consulta.args.join(" "),
-            reason: problem.reason,
-            missing: problem.missing,
-        };
-        let name = Path::new(&consulta.command)
-            .file_name()
-            .unwrap_or_else(|| OsStr::new(""));
-        if name == "uv" {
-            return self.uv_run(&consulta.args).map_err(refused);
-        }
-        match consulta.args.first() {
-            None => Ok(()),
-            Some(arg) => Err(refused(refuse(format!(
-                "passes {arg:?} to consulta; when the command is consulta itself it takes no arguments here"
-            )))),
-        }
-    }
-
-    /// `uv run [options] [--project <consulta>] consulta`, and nothing else
-    /// uv can be asked to run or consulta asked to do.
-    fn uv_run(&self, args: &[String]) -> Result<(), Problem> {
-        let mut args = args.iter();
-        if args.next().map(String::as_str) != Some("run") {
-            return Err(refuse(
-                "must start with `run`: the node runs consulta through `uv run`",
-            ));
-        }
-        let mut program = false;
-        while let Some(arg) = args.next() {
-            if program {
-                return Err(refuse(format!(
-                    "passes {arg:?} to consulta after it; nothing may follow `consulta` here, since the node supplies consulta's arguments itself"
-                )));
-            }
-            if let Some(project) = arg.strip_prefix("--project=") {
-                self.consulta_project(project)?;
-                continue;
-            }
-            if arg == "--project" {
-                let project = args
-                    .next()
-                    .ok_or_else(|| refuse("`--project` needs a directory after it"))?;
-                self.consulta_project(project)?;
-                continue;
-            }
-            if UV_RUN_FLAGS.contains(&arg.as_str()) {
-                continue;
-            }
-            if arg.starts_with('-') {
-                return Err(refuse(format!(
-                    "`uv run {arg}` could choose what runs; the options allowed here are --project and {}",
-                    UV_RUN_FLAGS.join(", ")
-                )));
-            }
-            if arg != "consulta" {
-                return Err(refuse(format!(
-                    "runs {arg:?} through uv; only consulta runs here"
-                )));
-            }
-            program = true;
-        }
-        if !program {
-            return Err(refuse(
-                "names no program for `uv run`; it should end in consulta",
-            ));
-        }
-        Ok(())
-    }
-
-    /// The project `uv run` runs consulta from: what it holds decides what
-    /// runs, so it must be consulta's own, kept out of an agent's reach and
-    /// owned as a secret is (the node's own user may write it: the image's
-    /// `/opt/consulta` is the node's, for uv's own bookkeeping).
-    fn consulta_project(&self, value: &str) -> Result<(), Problem> {
-        let path = Path::new(value);
-        plain_absolute(path)?;
-        let walked = walk(path)?;
-        if [path, walked.resolved.as_path()]
-            .iter()
-            .any(|p| p.parent().is_none())
-        {
-            return Err(refuse("is the root directory"));
-        }
-        self.outside_agent_roots(path, &walked)?;
-        self.not_a_node_secret(path, &walked)?;
-        outside(KERNEL, path, &walked, "a kernel interface")?;
-        outside(SYSTEM_DIRS, path, &walked, "a system directory")?;
-        self.chains(&walked, Writers::Foreign)?;
-        if !walked.exists {
-            return Err(missing(format!("{} does not exist", path.display())));
-        }
-        let manifest = walked.resolved.join("pyproject.toml");
-        let meta = std::fs::symlink_metadata(&manifest)
-            .map_err(|_| refuse("holds no pyproject.toml, so it is not consulta's project"))?;
-        if !meta.file_type().is_file() {
-            return Err(refuse("its pyproject.toml is not a regular file"));
-        }
-        self.component(&manifest, &meta, Writers::Foreign)?;
-        let text = std::fs::read_to_string(&manifest)
-            .map_err(|e| refuse(format!("{}: {e}", manifest.display())))?;
-        let name = text
-            .parse::<toml::Table>()
-            .ok()
-            .and_then(|t| t.get("project")?.get("name")?.as_str().map(String::from));
-        match name.as_deref() {
-            Some("consulta") => Ok(()),
-            other => Err(refuse(format!("is the project {other:?}, not consulta's"))),
-        }
-    }
-
     /// A non-program key's value, by its kind.
     pub fn path(&self, key: &str, value: &str, stage: Stage) -> Result<(), Refusal> {
         self.checked(key, value, stage).map(drop)
@@ -1078,7 +928,7 @@ impl Guard {
             PathKind::SecretFile | PathKind::SecretDir => self.secret(&path, kind, stage),
             PathKind::WriteDir | PathKind::Root => self.directory(&path, kind),
             PathKind::Mount => self.mount(&path),
-            PathKind::Executable | PathKind::ExecArgs => return Ok((path, None)),
+            PathKind::Executable => return Ok((path, None)),
         }
         .map_err(refused)?;
         Ok((path, walked.id))
@@ -1608,8 +1458,6 @@ fn values(cfg: &Config) -> Vec<(&'static str, String)> {
         ("publish.gh", cfg.publish.gh.clone()),
         ("publish.glab", cfg.publish.glab.clone()),
         ("publish.git", cfg.publish.git.clone()),
-        ("consulta.command", cfg.consulta.command.clone()),
-        ("consulta.args", cfg.consulta.args.join(" ")),
         (
             "runtime.apple.container",
             cfg.runtime.apple.container.clone(),
@@ -1798,14 +1646,6 @@ pub fn plugin_program(path: &Path) -> std::io::Result<PathBuf> {
     match current() {
         Some(guard) => Ok(guard.plugin_program(path)?),
         None => Ok(path.to_path_buf()),
-    }
-}
-
-/// The consulta program to spawn, with its arguments checked now.
-pub fn consulta(consulta: &Consulta) -> std::io::Result<PathBuf> {
-    match current() {
-        Some(guard) => Ok(guard.consulta(consulta)?),
-        None => Ok(PathBuf::from(&consulta.command)),
     }
 }
 
@@ -2752,105 +2592,6 @@ mod tests {
         refuse_new_in(node.layout(), Some(&broken), &after).unwrap();
     }
 
-    fn consulta(command: &Path, args: &[&str]) -> Consulta {
-        Consulta {
-            command: shown(command),
-            args: args.iter().map(|s| s.to_string()).collect(),
-            timeout_secs: 60,
-        }
-    }
-
-    #[test]
-    fn consulta_runs_only_consulta_through_uv() {
-        let node = Node::new();
-        let uv = node.program("brew/bin/uv");
-        node.file(
-            "home/src/consulta/pyproject.toml",
-            "[project]\nname = \"consulta\"\n",
-        );
-        let guard = node.guard();
-        let project = shown(&node.at("home/src/consulta"));
-        guard
-            .consulta(&consulta(&uv, &["run", "--project", &project, "consulta"]))
-            .unwrap();
-        guard
-            .consulta(&consulta(
-                &uv,
-                &[
-                    "run",
-                    "--frozen",
-                    &format!("--project={project}"),
-                    "consulta",
-                ],
-            ))
-            .unwrap();
-        node.file(
-            "home/src/other/pyproject.toml",
-            "[project]\nname = \"other\"\n",
-        );
-        node.dir("home/src/empty");
-        for (args, words) in [
-            (vec!["run", "python", "-c", "x"], "only consulta"),
-            (
-                vec!["run", "--with", "evil", "consulta"],
-                "could choose what runs",
-            ),
-            (
-                vec!["run", "--directory", "/tmp", "consulta"],
-                "could choose what runs",
-            ),
-            (vec!["tool", "run", "consulta"], "must start with `run`"),
-            (vec!["run", "--project"], "needs a directory"),
-            (vec!["run"], "names no program"),
-            (
-                vec!["run", "--project", &project, "consulta", "--output", "/x"],
-                "nothing may follow",
-            ),
-            (
-                vec!["run", "consulta", "--profile", "x"],
-                "nothing may follow",
-            ),
-            (vec!["run", "--project", "/", "consulta"], "root directory"),
-            (
-                vec![
-                    "run",
-                    "--project",
-                    &shown(&node.at("home/src/other")),
-                    "consulta",
-                ],
-                "not consulta's",
-            ),
-            (
-                vec![
-                    "run",
-                    "--project",
-                    &shown(&node.at("home/src/empty")),
-                    "consulta",
-                ],
-                "no pyproject",
-            ),
-        ] {
-            let refusal = guard.consulta(&consulta(&uv, &args)).unwrap_err();
-            assert_eq!(refusal.key, "consulta.args");
-            assert!(refusal.reason.contains(words), "{args:?}: {refusal}");
-        }
-        let planted = shown(&node.dir("state/sessions/x"));
-        let refusal = guard
-            .consulta(&consulta(&uv, &["run", "--project", &planted, "consulta"]))
-            .unwrap_err();
-        assert!(refusal.reason.contains("agent"), "{refusal}");
-        // consulta itself takes nothing from here.
-        let direct = node.program("brew/bin/consulta");
-        guard.consulta(&consulta(&direct, &[])).unwrap();
-        let refusal = guard
-            .consulta(&consulta(&direct, &["--output", "/home/x/.bashrc"]))
-            .unwrap_err();
-        assert!(refusal.reason.contains("takes no arguments"), "{refusal}");
-        // A shell is not consulta's command at all.
-        let refusal = guard.consulta(&consulta(&sh(), &["-c", "id"])).unwrap_err();
-        assert_eq!(refusal.key, "consulta.command");
-    }
-
     /// A file written before the guard existed still loads, and `serve`
     /// reports it; what it names is refused when the node goes to run it.
     #[test]
@@ -3014,11 +2755,7 @@ mod tests {
         let mut running_cfg = node.config();
         running_cfg.runtime.kind = super::super::RuntimeKind::Kubernetes;
         running_cfg.runtime.kubernetes.state_mount = node.at("pvc");
-        node.file(
-            "pvc/tracon-workspace-x/pyproject.toml",
-            "[project]\nname = \"consulta\"\n",
-        );
-        let workspace = shown(&node.at("pvc/tracon-workspace-x"));
+        let planted = shown(&node.program("pvc/tracon-workspace-x/gh"));
 
         // Edit 1: the mount moves.
         let mut moved = running_cfg.clone();
@@ -3026,22 +2763,19 @@ mod tests {
         let error = refuse_new_with(pod(&node), None, Some(&running_cfg), &moved).unwrap_err();
         assert!(error.contains("state_mount"), "{error}");
 
-        // Edit 2, as if the first had been written by hand: consulta's
-        // project in a workspace on the claim.
+        // Edit 2, as if the first had been written by hand: a program in a
+        // workspace on the claim.
         let mut after = moved.clone();
-        after.consulta.command = "uv".into();
-        after.consulta.args = ["run", "--project", &workspace, "consulta"]
-            .map(String::from)
-            .to_vec();
+        after.publish.gh = planted;
         // Refused by the claim the process found...
         let error = refuse_new_with(pod(&node), None, Some(&moved), &after).unwrap_err();
-        assert!(error.contains("consulta.args"), "{error}");
+        assert!(error.contains("publish.gh"), "{error}");
         // ...and by the running node's places without it.
         let mut bare = pod(&node);
         bare.state_volume = None;
         let running = Guard::new(bare.clone(), &[&running_cfg]);
         let error = refuse_new_with(bare, Some(&running), Some(&moved), &after).unwrap_err();
-        assert!(error.contains("consulta.args"), "{error}");
+        assert!(error.contains("publish.gh"), "{error}");
     }
 
     /// The configuration's secrets directory is the node's own on the claim

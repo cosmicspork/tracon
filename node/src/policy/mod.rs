@@ -874,8 +874,8 @@ mod tests {
         assert_eq!(
             (policy().version, sha.as_str()),
             (
-                24,
-                "dc5e5ba52e6323aa028839ad53966b3fd6ca4ff8bfe52b2293781b7cdaedc875"
+                25,
+                "5d02b69966a8c2db107eddb47f36a8636fd66ddf433a5ff5874a84e34eb0b908"
             ),
             "working-agreements.toml changed: raise its version and pin the new hash"
         );

@@ -3137,10 +3137,10 @@ async fn mcp_harness(store_toml: &str) -> (axum::Router, Arc<Store>, Manager) {
 }
 
 const BROKER_STORE: &str = r#"
-    [credentials.consulta]
+    [credentials.gh]
     channels = ["work"]
-    [credentials.consulta.env]
-    DB_BACKEND = "sqlite"
+    [credentials.gh.env]
+    GH_TOKEN = "brokered"
 "#;
 
 async fn mcp_call(app: &axum::Router, sid: &str, token: &str, body: Value) -> (StatusCode, Value) {
@@ -3197,7 +3197,7 @@ async fn a_registered_session_can_list_tools_and_a_wrong_token_cannot() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert!(names.contains(&"query"));
+    assert!(names.contains(&"pr_status"));
 
     // The same session, one character off: refused.
     let mut wrong = token.clone();
@@ -3211,26 +3211,6 @@ async fn a_registered_session_can_list_tools_and_a_wrong_token_cannot() {
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn a_write_is_refused_before_the_credential_is_touched() {
-    state::isolate();
-    let (app, store, manager) = mcp_harness(BROKER_STORE).await;
-    let sid = insert_running_session(&store, 0);
-    let token = manager.register_tool_token_for_test(&sid, "work").await;
-    let (status, body) = mcp_call(
-        &app,
-        &sid,
-        &token,
-        json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
-               "params":{"name":"query","arguments":{"sql":"DELETE FROM people"}}}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["result"]["isError"], true);
-    let text = body["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("DELETE"), "{text}");
 }
 
 #[tokio::test]

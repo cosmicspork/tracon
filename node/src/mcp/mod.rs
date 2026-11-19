@@ -12,7 +12,6 @@ pub mod aside;
 pub mod audit;
 pub mod branch;
 pub mod checking;
-pub mod consulta;
 pub mod docs;
 pub mod egress;
 pub mod github;
@@ -411,10 +410,6 @@ impl Tools {
         let mut out = Vec::new();
         let broker = self.broker.read().unwrap();
         let available = broker.available_to(channel, node_id);
-        let profiles = consulta::profiles(&available);
-        if !profiles.is_empty() {
-            out.extend(consulta::definitions(&profiles));
-        }
         if available.contains(&gitlab::CREDENTIAL) {
             out.extend(gitlab::definitions());
         }
@@ -1296,9 +1291,6 @@ impl Tools {
                 .map_err(|e| e.to_string())
         };
         let result = match name {
-            consulta::QUERY | consulta::DESCRIBE => {
-                consulta::call(&self.broker, &self.cfg, ctx, name, args).await
-            }
             gitlab::MR_STATUS
             | gitlab::MR_COMMENT
             | gitlab::MR_MERGE
@@ -3609,7 +3601,9 @@ mod tests {
         );
         assert_eq!(summarize(work::WORK_SHOW, &json!({})), "work_show");
         let query = json!({ "profile": "qa", "sql": "select 1" });
-        assert!(summarize("query", &query).starts_with("query profile=qa {"));
+        assert!(
+            summarize("sql-review__query", &query).starts_with("sql-review__query profile=qa {")
+        );
     }
 
     /// A gated call with no prose is titled in words too, on the card and in
@@ -3914,74 +3908,24 @@ mod tests {
     }
 
     const STORE: &str = r#"
-        [credentials.consulta]
+        [credentials.gh]
         channels = ["work"]
-        [credentials.consulta.env]
-        DB_BACKEND = "sqlite"
+        [credentials.gh.env]
+        GH_TOKEN = "t"
     "#;
 
     #[tokio::test]
     async fn tools_are_offered_only_to_a_bound_channel() {
         let t = tools(STORE);
-        assert_eq!(t.list("work", "n1").len(), 2);
+        assert_eq!(t.list("work", "n1").len(), github::definitions().len());
         assert!(t.list("personal", "n1").is_empty());
     }
 
-    const PROFILES: &str = r#"
-        [credentials.consulta-qa]
-        channels = ["work"]
-        [credentials.consulta-qa.env]
-        DB_BACKEND = "sqlite"
-        [credentials.consulta-prd]
-        channels = ["work"]
-        [credentials.consulta-prd.env]
-        DB_BACKEND = "sqlite"
-    "#;
-
-    #[tokio::test]
-    async fn a_channels_profiles_are_offered_from_the_credentials_it_holds() {
-        let t = tools(PROFILES);
-        let list = t.list("work", "n1");
-        assert_eq!(list.len(), 2);
-        let schema = &list[0]["inputSchema"];
-        assert_eq!(
-            schema["properties"]["profile"]["enum"],
-            json!(["prd", "qa"])
-        );
-        // Two and no default: the call has to say which.
-        assert!(schema["required"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("profile")));
-        assert!(t.list("personal", "n1").is_empty());
-        // Only the default: nothing to choose, so nothing is asked.
-        let plain = tools(STORE).list("work", "n1");
-        assert!(plain[0]["inputSchema"]["properties"]["profile"].is_null());
-    }
-
-    #[test]
-    fn a_profile_resolves_to_its_credential() {
-        let both = vec!["default".to_string(), "qa".into()];
-        assert_eq!(consulta::credential_for(None, &both).unwrap(), "consulta");
-        assert_eq!(
-            consulta::credential_for(Some("qa"), &both).unwrap(),
-            "consulta-qa"
-        );
-        let err = consulta::credential_for(Some("prd"), &both).unwrap_err();
-        assert!(err.contains("qa"), "{err}");
-        let two = vec!["prd".to_string(), "qa".into()];
-        assert!(consulta::credential_for(None, &two).is_err());
-        let one = vec!["qa".to_string()];
-        assert_eq!(consulta::credential_for(None, &one).unwrap(), "consulta-qa");
-        assert_eq!(
-            consulta::profiles(&["consulta", "consulta-tst", "gh", "consulta-"]),
-            vec!["default".to_string(), "tst".into()]
-        );
-    }
-
+    /// A profile is spelled out in the policy haystack, so a deny rule can
+    /// name one: `sql-review`'s tools take one per database account.
     #[tokio::test]
     async fn a_deny_rule_can_name_a_profile() {
-        let mut t = tools(PROFILES);
+        let mut t = tools(STORE);
         t.policy = Arc::new(parking_lot::RwLock::new(
             toml::from_str(
                 r#"
@@ -4000,7 +3944,7 @@ mod tests {
             .handle(
                 &ctx("work"),
                 &json!({"jsonrpc":"2.0","id":7,"method":"tools/call",
-                        "params":{"name":"query","arguments":{"sql":"SELECT 1","profile":"prd"}}}),
+                        "params":{"name":"sql-review__query","arguments":{"sql":"SELECT 1","profile":"prd"}}}),
             )
             .await
             .unwrap();
@@ -4033,7 +3977,7 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert!(names.contains(&"query") && names.contains(&"describe"));
+        assert!(names.contains(&github::PR_STATUS) && names.contains(&github::PR_THREADS));
     }
 
     /// The only client here is a harness this node launched. One announcing
@@ -4096,7 +4040,7 @@ mod tests {
             .handle(
                 &ctx("personal"),
                 &json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
-                        "params":{"name":"query","arguments":{"sql":"SELECT 1"}}}),
+                        "params":{"name":"pr_status","arguments":{"repo":"o/n","number":1}}}),
             )
             .await
             .unwrap();
@@ -4117,7 +4061,7 @@ mod tests {
             verdict = "deny"
             reason = "The warehouse is closed today."
             kinds = ["tool"]
-            matches = ["query"]
+            matches = ["pr_status"]
             "#,
             )
             .unwrap(),
@@ -4126,7 +4070,7 @@ mod tests {
             .handle(
                 &ctx("work"),
                 &json!({"jsonrpc":"2.0","id":5,"method":"tools/call",
-                        "params":{"name":"query","arguments":{"sql":"SELECT 1"}}}),
+                        "params":{"name":"pr_status","arguments":{"repo":"o/n","number":1}}}),
             )
             .await
             .unwrap();
@@ -4148,28 +4092,12 @@ mod tests {
             .handle(
                 &ctx("work"),
                 &json!({"jsonrpc":"2.0","id":6,"method":"tools/call",
-                        "params":{"name":"query","arguments":{"sql":"SELECT 1"}}}),
+                        "params":{"name":"pr_status","arguments":{"repo":"o/n","number":1}}}),
             )
             .await
             .unwrap();
         assert_eq!(res["result"]["isError"], true);
         let text = res["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("approval"), "{text}");
-    }
-
-    #[tokio::test]
-    async fn the_guard_refuses_before_anything_is_spawned() {
-        let t = tools(STORE);
-        let res = t
-            .handle(
-                &ctx("work"),
-                &json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
-                        "params":{"name":"query","arguments":{"sql":"DELETE FROM people"}}}),
-            )
-            .await
-            .unwrap();
-        assert_eq!(res["result"]["isError"], true);
-        let text = res["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.to_lowercase().contains("delete"), "{text}");
     }
 }

@@ -1,9 +1,7 @@
 # The node image, for a node that runs as a pod (the Kubernetes runtime). It
-# carries the node binary with the SPA embedded, git for worktrees, and the
-# consulta sidecar's interpreter (uv, so the Phase 0 "Python 3.9, no uv"
-# finding about the work environment no longer applies: the runner topology
-# provisions the sidecar's dependencies itself). Laptops do not use this
-# image; they fetch the static binary.
+# carries the node binary with the SPA embedded and git for worktrees. SQL is
+# the sql-review plugin's, installed with `tracon plugin add`, not part of
+# this image. Laptops do not use this image; they fetch the static binary.
 
 FROM docker.io/oven/bun@sha256:9114c058aeae42162ee16dd5084b95fe9473970bb6bcb5b232ab1630f0546895 AS spa
 WORKDIR /build/spa
@@ -70,30 +68,11 @@ RUN set -eu; \
     install -m 0755 /tmp/bin/buildctl /usr/local/bin/buildctl; \
     /usr/local/bin/buildctl --version
 
-# consulta, at a pinned commit, with its environment resolved at build time so
-# the first query does not wait on a download inside the boundary.
-FROM ghcr.io/astral-sh/uv:0.9.16-python3.13-bookworm-slim@sha256:ceb1b62148bad35cf9cb899a5da44aa15774a5a74860716f0f14d451122e2051 AS consulta
-ARG CONSULTA_REV=5932f23a7bc33462bae3f1911bd807d0ac1ba28c
-RUN rm -f /etc/apt/sources.list.d/debian.sources \
-    && printf '%s\n' \
-      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20260901T000000Z bookworm main' \
-      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20260901T000000Z bookworm-security main' \
-      > /etc/apt/sources.list \
-    && apt-get -o Acquire::Check-Valid-Until=false update \
-    && apt-get install -y --no-install-recommends git ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-RUN git init /opt/consulta \
-    && git -C /opt/consulta remote add origin https://github.com/cosmicspork/consulta.git \
-    && git -C /opt/consulta fetch --depth 1 origin "$CONSULTA_REV" \
-    && git -C /opt/consulta checkout --detach FETCH_HEAD
-WORKDIR /opt/consulta
-ENV UV_LINK_MODE=copy
-RUN uv sync --frozen --no-dev
-
-# The runtime is the same image consulta's environment was resolved on, so
-# its venv's interpreter link holds; uv runs it offline from here. gh is what
-# an approved GitHub review opens its pull request with (`publish.gh`); without
-# it the branch is pushed and the request never opened. It comes from the same
+# The runtime is a pinned Debian bookworm: the uv image consulta's sidecar
+# needed, kept as it was when SQL moved to the sql-review plugin, though
+# nothing here runs uv any more. gh is what an approved GitHub review opens
+# its pull request with (`publish.gh`); without it the branch is pushed and
+# the request never opened. It comes from the same
 # pinned snapshot as everything else here. Bookworm has no glab, so a GitLab
 # publication still needs `publish.glab` pointed at one the deployment mounts.
 FROM ghcr.io/astral-sh/uv:0.9.16-python3.13-bookworm-slim@sha256:ceb1b62148bad35cf9cb899a5da44aa15774a5a74860716f0f14d451122e2051
@@ -106,14 +85,12 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
     && apt-get install -y --no-install-recommends ca-certificates git curl gh \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/target/release/tracon /usr/local/bin/tracon
-COPY --from=consulta /opt/consulta /opt/consulta
 COPY --from=buildctl /usr/local/bin/buildctl /usr/local/bin/buildctl
-ENV UV_NO_SYNC=1 UV_OFFLINE=1 UV_CACHE_DIR=/tmp/uv-cache
 # State and config are volumes; the deployment sets XDG_STATE_HOME=/state and
 # XDG_CONFIG_HOME=/config. Runs as uid 65532, the same uid the harness pods
 # use, so what each writes on the shared claim the other can read.
 RUN mkdir -p /state /config \
-    && chown -R 65532:65532 /state /config /opt/consulta
+    && chown -R 65532:65532 /state /config
 USER 65532:65532
 ENTRYPOINT ["tracon"]
 CMD ["serve"]

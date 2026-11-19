@@ -2193,7 +2193,7 @@ async fn an_unbound_channel_is_offered_no_brokered_tools() {
     state::isolate();
     let h = harness_with(enabled()).await;
     let names = list(&h.operator, "personal").await;
-    for brokered in ["query", "issue", "issue_update", "mr_status"] {
+    for brokered in ["pr_status", "issue", "issue_update", "mr_status"] {
         assert!(
             !names.contains(&brokered.to_string()),
             "{brokered} in {names:?}"
@@ -3063,6 +3063,62 @@ async fn a_held_write_conflicts_when_the_document_changed_while_it_waited() {
         h.store.doc_get("work", "plan-pin").unwrap().unwrap().body,
         "# Three"
     );
+}
+
+/// SQL is the `sql-review` plugin's: the shipped agreements (bundle v25)
+/// name its reads in `brokered-reads`, so they run unattended with no
+/// `[[plugin]]` entry and are lent the channel's `sql-read` account, while
+/// any other tool it offers is asked.
+#[tokio::test]
+async fn the_shipped_agreements_run_sql_reviews_reads_unattended() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    h.manager
+        .plugins()
+        .set_signer(proto::keys::Identity::from_seed(&[4; 32]));
+    support::plugin::install(
+        &h.store,
+        &Config::state_dir(),
+        "name = \"sql-review\"\nversion = \"0.1.0\"\ncontract = 1\nexec = [\"bin/sql-review\", \"serve\"]\n\n\
+         [[credential]]\nname = \"sql-read\"\npattern = \"sql-read-*\"\n\n\
+         [[tool]]\nname = \"query\"\nhint = \"read\"\n\n\
+         [[tool]]\nname = \"describe\"\nhint = \"read\"\n\n\
+         [[tool]]\nname = \"write\"\nhint = \"write\"\n",
+    );
+    // What the fake lists, so it agrees with the manifest.
+    let data = tracon::plugin::install::data_dir(&Config::state_dir(), "sql-review").join("work");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("tools"), "query\ndescribe\nwrite\n").unwrap();
+    let credential: tracon::broker::Credential =
+        toml::from_str("channels = [\"work\"]\n[env]\nDB_USER = \"reader\"\n").unwrap();
+    h.tools.broker.write().unwrap().put("sql-read", credential);
+    let names = list(&h.operator, "work").await;
+    for tool in ["sql-review__query", "sql-review__describe"] {
+        assert!(names.iter().any(|n| n == tool), "{tool} in {names:?}");
+    }
+    assert!(!names.iter().any(|n| n == "query"), "{names:?}");
+
+    for (tool, args) in [
+        ("sql-review__query", json!({ "sql": "SELECT 1" })),
+        ("sql-review__describe", json!({ "table": "people" })),
+    ] {
+        let (_, v) = mcp(&h.operator, "work", tool_call(tool, args)).await;
+        assert_eq!(v["result"]["isError"], json!(false), "{tool}: {v}");
+        let text = v["result"]["content"][0]["text"].as_str().unwrap();
+        let seen: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(
+            seen["meta"]["credentials"]["sql-read"]["DB_USER"], "reader",
+            "{tool}: {seen}"
+        );
+    }
+    // Not a read the bundle names: the operator decides it.
+    ask(
+        &h,
+        "sql-review__write",
+        json!({ "sql": "UPDATE people SET x = 1" }),
+    )
+    .await;
+    h.manager.plugins().shutdown().await;
 }
 
 /// A plugin's tool, through the external door: offered to a channel that

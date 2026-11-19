@@ -80,7 +80,6 @@ sqlite-vec.workspace = true
 rust-embed.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sqlparser = "0.59"
 thiserror.workspace = true
 # `io-std` for the fake native harness, which speaks over its own stdio.
 tokio = { workspace = true, features = ["io-std"] }

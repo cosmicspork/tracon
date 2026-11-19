@@ -55,16 +55,6 @@
       "stop_timeout_secs": 10,
       "subnet": "10.89.0.0/24"
     },
-    "consulta": {
-      "args": [
-        "run",
-        "--project",
-        "/home/op/src/consulta",
-        "consulta"
-      ],
-      "command": "uv",
-      "timeout_secs": 60
-    },
     "docs": {
       "export_channel": "",
       "export_every_secs": 1800,
@@ -626,55 +616,6 @@
       "secret": false,
       "shape": {
         "kind": "string",
-        "optional": false
-      }
-    },
-    {
-      "admin": true,
-      "apply": "restart",
-      "editable": true,
-      "editable_at_node": true,
-      "editable_by_peer": true,
-      "exec_path": true,
-      "fs_path": false,
-      "key": "consulta.command",
-      "path": "executable",
-      "secret": false,
-      "shape": {
-        "kind": "string",
-        "optional": false
-      }
-    },
-    {
-      "admin": true,
-      "apply": "restart",
-      "editable": true,
-      "editable_at_node": true,
-      "editable_by_peer": true,
-      "exec_path": true,
-      "fs_path": false,
-      "key": "consulta.args",
-      "path": "exec_args",
-      "secret": false,
-      "shape": {
-        "item": "string",
-        "kind": "list",
-        "optional": false
-      }
-    },
-    {
-      "admin": true,
-      "apply": "restart",
-      "editable": true,
-      "editable_at_node": true,
-      "editable_by_peer": true,
-      "exec_path": false,
-      "fs_path": false,
-      "key": "consulta.timeout_secs",
-      "path": null,
-      "secret": false,
-      "shape": {
-        "kind": "integer",
         "optional": false
       }
     },

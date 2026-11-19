@@ -190,7 +190,6 @@ const KEY_HELP: Record<string, string> = {
 
 const PATH_HELP: Record<string, string> = {
   executable: 'A program the node runs. It must be out of an agent’s reach; the node checks it again before every run.',
-  exec_args: 'Arguments that decide what that program runs, held to a fixed shape.',
   secret_file: 'A credential file the node reads, only from a directory set aside for its secrets.',
   secret_dir: 'A directory of credential files, only one set aside for the node’s secrets.',
   write_dir: 'A directory the node writes into: its own export area, or one marked for it on the host.',

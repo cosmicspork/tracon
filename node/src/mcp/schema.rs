@@ -191,7 +191,6 @@ fn registry() -> &'static HashMap<String, Value> {
             jira::definitions(),
             github::definitions(),
             gitlab::definitions(),
-            super::consulta::definitions(&[]),
             // Edits are checked against the default kinds: no asked
             // document call takes a kind.
             docs::definitions(&crate::config::default_doc_kinds()),
@@ -442,7 +441,7 @@ mod tests {
         ] {
             assert!(input_schema(tool).is_some(), "{tool}");
         }
-        for tool in ["retain", "submit_report", "query"] {
+        for tool in ["retain", "submit_report"] {
             assert!(input_schema(tool).is_some(), "{tool}");
         }
         assert_eq!(presentation("issue_create").format, "jira_wiki");

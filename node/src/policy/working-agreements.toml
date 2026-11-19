@@ -22,7 +22,7 @@
 # refuses a different bundle under the version it already runs, and offers
 # the shipped one only when its version is higher.
 
-version = 24
+version = 25
 
 # --- 1. The harness and Git's internals stay the node's ---------------------
 # The harness's own configuration is the node's to write, not the session's.
@@ -103,7 +103,9 @@ kinds = ["write"]
 # What the node does on the agent's behalf is decided here too, before the
 # broker is touched. A tool is allowed by name; one not named is asked. The
 # merge, transition, and deploy tools also require narrow authority grants.
-# A grant never overrides a signed policy denial.
+# A grant never overrides a signed policy denial. A plugin's tool is named
+# `<plugin>__<tool>`: SQL is the `sql-review` plugin's, and its reads run on
+# the database's read-only account, which is the boundary.
 
 [[rule]]
 id = "brokered-reads"
@@ -111,8 +113,8 @@ verdict = "allow"
 reason = "A read-only query or lookup, a search, a pipeline or check read, or a report/review submission or verdict that only enters the operator queue changes nothing the operator has not agreed to."
 kinds = ["tool"]
 matches = [
-    "query",
-    "describe",
+    "sql-review__query",
+    "sql-review__describe",
     "submit_review",
     "review_status",
     "submit_report",

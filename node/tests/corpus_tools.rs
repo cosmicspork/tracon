@@ -62,7 +62,10 @@ async fn every_session_is_offered_memory_and_document_tools() {
     for n in ["recall", "retain", "doc_read", "doc_search", "doc_write"] {
         assert!(names.contains(&n), "{n} missing from {names:?}");
     }
-    assert!(!names.contains(&"query"), "no credential, no consulta");
+    assert!(
+        !names.contains(&"pr_status"),
+        "no credential, no forge tools"
+    );
 
     // What the phase cannot work without stays loaded where a harness defers
     // MCP tools; the rest is loaded when the model asks for it.

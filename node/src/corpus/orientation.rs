@@ -313,8 +313,7 @@ fn push_working_with(out: &mut String, policy: &Policy, facts: &Facts) {
 /// exactly one group, and a test keeps new tools from going unlisted.
 const TOOL_GROUPS: &[(&str, &[&str])] = {
     use crate::mcp::{
-        approvals, consulta, docs, egress, jira, memory, operator, review, services, setup, show,
-        work,
+        approvals, docs, egress, jira, memory, operator, review, services, setup, show, work,
     };
     &[
         (
@@ -383,7 +382,9 @@ const TOOL_GROUPS: &[(&str, &[&str])] = {
                 jira::ISSUE_TRANSITION,
             ],
         ),
-        ("Database", &[consulta::QUERY, consulta::DESCRIBE]),
+        // The `sql-review` plugin's reads, as the shipped policy bundle names
+        // them; the node itself runs no SQL.
+        ("Database", &["sql-review__query", "sql-review__describe"]),
         (
             "Reporting a fault in tracon",
             &[operator::REPORT, operator::REPORT_STATUS],
@@ -1824,7 +1825,6 @@ mod tests {
     fn every_tool_is_in_exactly_one_group_of_the_index() {
         use crate::mcp::*;
         let mut all = Vec::new();
-        all.extend(consulta::definitions(&["default".to_string()]));
         all.extend(github::definitions());
         all.extend(gitlab::definitions());
         all.extend(jira::definitions());
