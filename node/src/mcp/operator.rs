@@ -20,9 +20,53 @@ pub const NOTIFY: &str = "notify_operator";
 pub const REPORT: &str = "report_issue";
 pub const REPORT_STATUS: &str = "issue_report_status";
 pub const QUESTION_STATUS: &str = "question_status";
+/// `ask_operator`'s question and choices.
 const MAX_TEXT: usize = 8 * 1024;
-const MAX_ATTACHMENT_BYTES: usize = 8 * 1024;
-const MAX_ATTACHMENTS: usize = 3;
+
+// `report_issue`'s limits. Every one is counted in characters (Unicode scalar
+// values, `str::chars().count()`), as GitHub counts its limits and as JSON
+// Schema's `maxLength` counts, so the schema the agent reads and the check
+// the node makes agree. The schema and the description are generated from
+// these constants.
+
+/// GitHub refuses an issue title longer than this. Not documented by GitHub:
+/// observed by creating issues (<https://github.com/dead-claudia/github-limits>).
+pub const GITHUB_ISSUE_TITLE_MAX_CHARS: usize = 256;
+/// GitHub refuses an issue body longer than this ("body is too long (maximum
+/// is 65536 characters)"). Not documented by GitHub: observed in 422 errors
+/// (<https://github.com/orgs/community/discussions/27190>) and measured in
+/// code points by <https://github.com/dead-claudia/github-limits>.
+pub const GITHUB_ISSUE_BODY_MAX_CHARS: usize = 65_536;
+/// Room left between our cap and GitHub's, because GitHub's figure is
+/// observed rather than documented and GitHub may count slightly differently
+/// (CRLF normalisation, for one).
+pub const REPORT_BODY_MARGIN_CHARS: usize = 5_536;
+/// The binding limit: the issue body exactly as it is published — every
+/// field, the section headings, the attachments block and the draft marker.
+pub const REPORT_BODY_MAX_CHARS: usize = 60_000;
+/// One text field may use the whole budget, so a lopsided report (a short
+/// `expected`, a long `diagnosis`) fits. It exists so the schema states a
+/// bound and absurd input is refused before it is scrubbed.
+pub const REPORT_FIELD_MAX_CHARS: usize = REPORT_BODY_MAX_CHARS;
+/// One attachment's content.
+pub const REPORT_ATTACHMENT_MAX_CHARS: usize = 8_192;
+/// One attachment's name.
+pub const REPORT_ATTACHMENT_NAME_MAX_CHARS: usize = 256;
+pub const MAX_ATTACHMENTS: usize = 3;
+const _: () =
+    assert!(REPORT_BODY_MAX_CHARS + REPORT_BODY_MARGIN_CHARS <= GITHUB_ISSUE_BODY_MAX_CHARS);
+
+/// `report_issue`'s text fields, in the order they are published, with the
+/// heading each is published under. The first two are required.
+const REPORT_SECTIONS: [(&str, &str); 7] = [
+    ("expected", "Expected behavior"),
+    ("actual", "Actual behavior"),
+    ("reproduction", "Reproduction"),
+    ("versions", "Versions"),
+    ("errors", "Relevant errors"),
+    ("recovery", "Attempted recovery"),
+    ("diagnosis", "Agent diagnosis (not observed evidence)"),
+];
 
 pub fn definitions() -> Vec<Value> {
     vec![
@@ -74,7 +118,7 @@ pub fn definitions() -> Vec<Value> {
             },
         }),
         json!({"name": NOTIFY, "description":"Intentionally send an OS/PWA notification to configured operator devices. Without `node_ids`, every node of this channel delivers it to the devices subscribed there. A push-service attempt is not evidence a human read it.", "inputSchema":{"type":"object","properties":{"title":{"type":"string"},"message":{"type":"string"},"path":{"type":"string"},"device_ids":{"type":"array","items":{"type":"string"}},"node_ids":{"type":"array","items":{"type":"string"}}},"required":["title","message"]}}),
-        json!({"name": REPORT, "description":"Draft a report about tracon, its environments, tools, or harness integration. It never pauses execution or uploads repository files/transcripts. The operator inspects and authorizes publication separately.", "inputSchema":{"type":"object","properties":{"title":{"type":"string"},"expected":{"type":"string"},"actual":{"type":"string"},"reproduction":{"type":"string"},"versions":{"type":"string"},"errors":{"type":"string"},"recovery":{"type":"string"},"diagnosis":{"type":"string"},"attachments":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"content":{"type":"string"}},"required":["name","content"]},"maxItems":3}},"required":["title","expected","actual"]}}),
+        report_definition(),
         json!({
             "name": REPORT_STATUS,
             "description": format!(
@@ -98,6 +142,57 @@ pub fn definitions() -> Vec<Value> {
             },
         }),
     ]
+}
+
+fn report_definition() -> Value {
+    let mut properties = serde_json::Map::new();
+    properties.insert(
+        "title".into(),
+        json!({ "type": "string", "maxLength": GITHUB_ISSUE_TITLE_MAX_CHARS }),
+    );
+    for (key, _) in REPORT_SECTIONS {
+        properties.insert(
+            key.into(),
+            json!({ "type": "string", "maxLength": REPORT_FIELD_MAX_CHARS }),
+        );
+    }
+    properties.insert(
+        "attachments".into(),
+        json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "maxLength": REPORT_ATTACHMENT_NAME_MAX_CHARS },
+                    "content": { "type": "string", "maxLength": REPORT_ATTACHMENT_MAX_CHARS },
+                },
+                "required": ["name", "content"],
+            },
+            "maxItems": MAX_ATTACHMENTS,
+        }),
+    );
+    json!({
+        "name": REPORT,
+        "description": format!(
+            "Draft a report about tracon, its environments, tools, or harness integration. It \
+             never pauses execution or uploads repository files/transcripts. The operator \
+             inspects and authorizes publication separately. Limits, in characters: the title \
+             at most {}; all fields, with their section headings and the attachments \
+             (published as pretty-printed JSON), must fit in {} characters once published, \
+             and any single field may use all of it; at most {MAX_ATTACHMENTS} attachments, \
+             each with a name of at most {} and content of at most {}. Redacting \
+             secret-looking lines can lengthen a field.",
+            thousands(GITHUB_ISSUE_TITLE_MAX_CHARS),
+            thousands(REPORT_BODY_MAX_CHARS),
+            thousands(REPORT_ATTACHMENT_NAME_MAX_CHARS),
+            thousands(REPORT_ATTACHMENT_MAX_CHARS),
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": properties,
+            "required": ["title", "expected", "actual"],
+        },
+    })
 }
 
 fn wait_secs_schema() -> Value {
@@ -492,47 +587,50 @@ async fn notify_operator(
 }
 
 fn report(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<Value, String> {
-    let title = text(args, "title", true)?;
-    if title.len() > 256 {
-        return Err("title exceeds GitHub's 256-byte limit".into());
+    let title =
+        report_text(args, "title", GITHUB_ISSUE_TITLE_MAX_CHARS)?.ok_or("title is required")?;
+    let title_chars = title.text.chars().count();
+    if title_chars > GITHUB_ISSUE_TITLE_MAX_CHARS {
+        return Err(format!(
+            "title is {} characters once secret-looking lines are redacted ({} before); \
+             GitHub allows {}",
+            thousands(title_chars),
+            thousands(title.input_chars),
+            thousands(GITHUB_ISSUE_TITLE_MAX_CHARS),
+        ));
     }
-    let expected = text(args, "expected", true)?;
-    let actual = text(args, "actual", true)?;
-    let sections = [
-        ("Expected behavior", Some(expected)),
-        ("Actual behavior", Some(actual)),
-        ("Reproduction", optional_text(args, "reproduction")?),
-        ("Versions", optional_text(args, "versions")?),
-        ("Relevant errors", optional_text(args, "errors")?),
-        ("Attempted recovery", optional_text(args, "recovery")?),
-        (
-            "Agent diagnosis (not observed evidence)",
-            optional_text(args, "diagnosis")?,
-        ),
-    ];
-    let mut body = String::new();
-    for (heading, value) in sections {
-        if let Some(value) = value {
-            body.push_str("## ");
-
-            body.push_str(heading);
-            body.push_str("\n\n");
-            body.push_str(&value);
-            body.push_str("\n\n");
+    let mut fields = Vec::with_capacity(REPORT_SECTIONS.len());
+    for (index, (key, heading)) in REPORT_SECTIONS.into_iter().enumerate() {
+        match report_text(args, key, REPORT_FIELD_MAX_CHARS)? {
+            Some(field) => fields.push((key, heading, field)),
+            None if index < 2 => return Err(format!("{key} is required")),
+            None => {}
         }
     }
-    let attachments = attachments(args)?;
-    let attachments_json = serde_json::to_string(&attachments).unwrap();
-    if body.len() + attachments_json.len() + 128 > 60_000 {
-        return Err("report exceeds the bounded GitHub issue payload".into());
+    let mut body = String::new();
+    for (_, heading, field) in &fields {
+        body.push_str("## ");
+        body.push_str(heading);
+        body.push_str("\n\n");
+        body.push_str(&field.text);
+        body.push_str("\n\n");
     }
+    let attachments = Value::Array(attachments(args)?);
+    let attachments_json = serde_json::to_string(&attachments).unwrap();
+    // The id is in the published marker, so it is chosen before the body is
+    // measured: the check below measures exactly the string `gh` is given.
     let id = uuid::Uuid::now_v7().to_string();
+    let published = published_issue_body(&body, &attachments, &id);
+    let total = published.chars().count();
+    if total > REPORT_BODY_MAX_CHARS {
+        return Err(over_budget(total, &fields, &attachments));
+    }
     store
         .insert_issue_draft(&IssueDraftRow {
             id: id.clone(),
             session_id: ctx.session_id().map(str::to_string),
             channel: ctx.channel.clone(),
-            title,
+            title: title.text,
             body,
             attachments_json,
             state: "draft".into(),
@@ -555,6 +653,112 @@ fn report(store: &Arc<Store>, ctx: &CallContext, args: &Value) -> Result<Value, 
              published, and as which GitHub issue, or discarded."
         ),
     }))
+}
+
+/// The issue body exactly as `gh issue create` receives it: the drafted
+/// sections, the inspectable attachments as pretty-printed JSON, and the
+/// marker the operator searches for to reconcile an uncertain publication.
+/// Drafting measures this string and publishing sends it, so the two cannot
+/// disagree about its length.
+pub fn published_issue_body(body: &str, attachments: &Value, id: &str) -> String {
+    format!(
+        "{body}\n\n## Inspectable attachments\n\n```json\n{}\n```\n\n<!-- tracon-issue-draft:{id} -->",
+        published_attachments(attachments),
+    )
+}
+
+fn published_attachments(attachments: &Value) -> String {
+    serde_json::to_string_pretty(attachments).unwrap_or_else(|_| "[]".into())
+}
+
+/// Why a report does not fit: the total and the limit, then where the room
+/// went, largest field first, so the agent knows what to shorten.
+fn over_budget(total: usize, fields: &[(&str, &str, ReportText)], attachments: &Value) -> String {
+    let mut sizes: Vec<(&str, usize, usize)> = fields
+        .iter()
+        .map(|(key, _, field)| (*key, field.text.chars().count(), field.input_chars))
+        .collect();
+    sizes.sort_by_key(|a| std::cmp::Reverse(a.1));
+    let largest: Vec<String> = sizes
+        .iter()
+        .take(3)
+        .map(|(key, chars, input)| {
+            if chars > input {
+                format!(
+                    "{key} {} (redaction added {})",
+                    thousands(*chars),
+                    thousands(chars - input)
+                )
+            } else {
+                format!("{key} {}", thousands(*chars))
+            }
+        })
+        .collect();
+    let in_fields: usize = sizes.iter().map(|(_, chars, _)| chars).sum();
+    let in_attachments = published_attachments(attachments).chars().count();
+    format!(
+        "the published issue body would be {} characters; the limit is {}. Largest fields: {}. \
+         Attachments take {} characters once JSON-encoded; headings and the draft marker take {}.",
+        thousands(total),
+        thousands(REPORT_BODY_MAX_CHARS),
+        largest.join(", "),
+        thousands(in_attachments),
+        thousands(total.saturating_sub(in_fields + in_attachments)),
+    )
+}
+
+/// `n` with a comma between each group of three digits, as limits are
+/// written to the agent.
+fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// A `report_issue` text field, trimmed and scrubbed, with the size it was
+/// given at so a refusal can say how much redaction added.
+struct ReportText {
+    text: String,
+    input_chars: usize,
+}
+
+/// A `report_issue` string, refused when its input is longer than `max`
+/// characters (what the schema's `maxLength` says). `None` when absent or
+/// blank.
+fn report_text(args: &Value, key: &str, max: usize) -> Result<Option<ReportText>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => {
+            let chars = s.chars().count();
+            if chars > max {
+                return Err(if key == "title" {
+                    format!(
+                        "title is {} characters; GitHub allows {}",
+                        thousands(chars),
+                        thousands(max)
+                    )
+                } else {
+                    format!(
+                        "{key} is {} characters; a field may be at most {}",
+                        thousands(chars),
+                        thousands(max)
+                    )
+                });
+            }
+            let v = s.trim();
+            Ok((!v.is_empty()).then(|| ReportText {
+                text: scrub(v),
+                input_chars: v.chars().count(),
+            }))
+        }
+        _ => Err(format!("{key} must be a string")),
+    }
 }
 
 async fn report_status(
@@ -687,16 +891,29 @@ fn attachments(args: &Value) -> Result<Vec<Value>, String> {
             let name = attachment
                 .get("name")
                 .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|name| !name.is_empty() && name.len() <= 256)
-                .ok_or("attachment name must be 1–256 bytes")?;
+                .ok_or("attachment name is required")?;
+            let name_chars = name.chars().count();
+            if name_chars > REPORT_ATTACHMENT_NAME_MAX_CHARS {
+                return Err(format!(
+                    "attachment name is {} characters; an attachment name may be at most {}",
+                    thousands(name_chars),
+                    thousands(REPORT_ATTACHMENT_NAME_MAX_CHARS),
+                ));
+            }
+            let name = name.trim();
+            if name.is_empty() {
+                return Err("attachment name is required".into());
+            }
             let content = attachment
                 .get("content")
                 .and_then(Value::as_str)
                 .ok_or("attachment content is required")?;
-            if content.len() > MAX_ATTACHMENT_BYTES {
+            let content_chars = content.chars().count();
+            if content_chars > REPORT_ATTACHMENT_MAX_CHARS {
                 return Err(format!(
-                    "attachment {name} exceeds {MAX_ATTACHMENT_BYTES} bytes"
+                    "attachment {name} is {} characters; an attachment may be at most {}",
+                    thousands(content_chars),
+                    thousands(REPORT_ATTACHMENT_MAX_CHARS),
                 ));
             }
             Ok(json!({"name": scrub(name), "content": scrub(content)}))
@@ -791,6 +1008,29 @@ fn contains_secret_token(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The limits are pinned: the published body keeps its stated margin
+    /// under GitHub's, and the title limit is GitHub's.
+    #[test]
+    fn report_limits_leave_a_margin_under_githubs() {
+        assert_eq!(GITHUB_ISSUE_TITLE_MAX_CHARS, 256);
+        assert_eq!(GITHUB_ISSUE_BODY_MAX_CHARS, 65_536);
+        assert_eq!(REPORT_BODY_MAX_CHARS, 60_000);
+        let with_margin = REPORT_BODY_MAX_CHARS + REPORT_BODY_MARGIN_CHARS;
+        assert!(with_margin <= GITHUB_ISSUE_BODY_MAX_CHARS, "{with_margin}");
+        assert_eq!(REPORT_FIELD_MAX_CHARS, REPORT_BODY_MAX_CHARS);
+        assert_eq!(REPORT_ATTACHMENT_MAX_CHARS, 8_192);
+        assert_eq!(MAX_ATTACHMENTS, 3);
+    }
+
+    #[test]
+    fn limits_are_written_with_thousands_separators() {
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(256), "256");
+        assert_eq!(thousands(8_192), "8,192");
+        assert_eq!(thousands(60_000), "60,000");
+        assert_eq!(thousands(1_234_567), "1,234,567");
+    }
 
     /// A phone subscribes at whichever node it reaches, so a notification
     /// that names no node goes to every node of the channel; with no mesh

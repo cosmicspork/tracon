@@ -93,14 +93,23 @@ fn rig_with(cfg: Config, broker: tracon::broker::SharedBroker) -> Rig {
     }
 }
 
-/// A rig whose node can publish to GitHub through a stub `gh` that prints
-/// the URL of the issue it pretends to open.
+/// A rig whose node can publish to GitHub through a stub `gh` that records
+/// its arguments (one per line, in `gh.args`) and what it read on stdin (in
+/// `gh.stdin`), then prints the URL of the issue it pretends to open.
 fn publishing_rig(name: &str) -> Rig {
     let dir = state::scratch(&format!("operator-{name}"));
     let gh = dir.join("gh");
+    let args = dir.join("gh.args");
+    let stdin = dir.join("gh.stdin");
     std::fs::write(
         &gh,
-        "#!/bin/sh\necho https://github.test/acme/tracon/issues/362\n",
+        format!(
+            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{}'\n\
+             /bin/cat > '{}'\n\
+             echo https://github.test/acme/tracon/issues/362\n",
+            args.display(),
+            stdin.display(),
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -1098,4 +1107,261 @@ async fn a_relayed_answer_to_a_question_mirrored_from_another_node_is_refused() 
     mirrored = h.store.operator_question("theirs").unwrap().unwrap();
     assert_eq!(mirrored.state, "unanswered");
     assert_eq!(mirrored.answer_json, None);
+}
+
+/// What the stub `gh` of [`publishing_rig`] recorded: its arguments and the
+/// body it read on stdin.
+fn gh_received(name: &str) -> (Vec<String>, String) {
+    let dir = std::path::PathBuf::from(std::env::var_os("TRACON_STATE_DIR").unwrap())
+        .join("scratch")
+        .join(format!("operator-{name}"));
+    let args = std::fs::read_to_string(dir.join("gh.args")).unwrap();
+    let stdin = std::fs::read_to_string(dir.join("gh.stdin")).unwrap();
+    (args.lines().map(str::to_string).collect(), stdin)
+}
+
+/// `report_issue` as `tools/list` hands it to the agent.
+async fn report_issue_definition(rig: &Rig) -> Value {
+    let res = rig
+        .tools
+        .handle(
+            &rig.ctx,
+            &json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+        )
+        .await
+        .unwrap();
+    res["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["name"] == "report_issue")
+        .cloned()
+        .expect("report_issue is listed")
+}
+
+/// Three attachments whose JSON-escaping (quotes, newlines, backslashes)
+/// makes their published form longer than their content.
+fn three_attachments() -> Value {
+    let content = "a \"quoted\" line\\with a backslash\n".repeat(40);
+    json!([
+        { "name": "one.log", "content": content },
+        { "name": "two.log", "content": content },
+        { "name": "three.log", "content": content },
+    ])
+}
+
+/// Every limit the node checks is stated where the agent reads the tool: a
+/// `maxLength` on each string, and the total and title limits in the
+/// description, from the same constants.
+#[tokio::test]
+async fn report_issue_states_its_limits_in_its_schema() {
+    use tracon::mcp::operator::*;
+    state::isolate();
+    let rig = rig();
+    let def = report_issue_definition(&rig).await;
+    let props = &def["inputSchema"]["properties"];
+    assert_eq!(props["title"]["maxLength"], GITHUB_ISSUE_TITLE_MAX_CHARS);
+    for key in [
+        "expected",
+        "actual",
+        "reproduction",
+        "versions",
+        "errors",
+        "recovery",
+        "diagnosis",
+    ] {
+        assert_eq!(props[key]["maxLength"], REPORT_FIELD_MAX_CHARS, "{key}");
+    }
+    let item = &props["attachments"]["items"]["properties"];
+    assert_eq!(item["name"]["maxLength"], REPORT_ATTACHMENT_NAME_MAX_CHARS);
+    assert_eq!(item["content"]["maxLength"], REPORT_ATTACHMENT_MAX_CHARS);
+    assert_eq!(props["attachments"]["maxItems"], MAX_ATTACHMENTS);
+    let strings = props
+        .as_object()
+        .unwrap()
+        .values()
+        .chain(item.as_object().unwrap().values())
+        .filter(|p| p["type"] == "string");
+    for p in strings {
+        assert!(p["maxLength"].is_u64(), "every string has a maxLength: {p}");
+    }
+    let description = def["description"].as_str().unwrap();
+    assert!(description.contains("60,000 characters"), "{description}");
+    assert!(description.contains("at most 256"), "{description}");
+}
+
+/// A long diagnosis uses the room the short fields leave: the 9,000-character
+/// diagnosis refused on 2026-11-19 is accepted.
+#[tokio::test]
+async fn a_long_diagnosis_fits_when_the_other_fields_are_short() {
+    state::isolate();
+    let rig = rig();
+    let out = rig
+        .call(
+            "report_issue",
+            json!({
+                "title": "a long diagnosis",
+                "expected": "e",
+                "actual": "a",
+                "diagnosis": "d".repeat(9_000),
+            }),
+        )
+        .await;
+    assert_eq!(out.unwrap()["state"], "draft");
+}
+
+/// Each field is refused one character past its cap, naming the field, its
+/// size and the cap; characters are counted, not bytes.
+#[tokio::test]
+async fn a_field_one_character_over_its_cap_is_refused_by_name() {
+    use tracon::mcp::operator::*;
+    state::isolate();
+    let rig = rig();
+    let report = |extra: Value| {
+        let mut args = json!({ "title": "t", "expected": "e", "actual": "a" });
+        for (k, v) in extra.as_object().unwrap() {
+            args[k] = v.clone();
+        }
+        args
+    };
+
+    let err = rig
+        .call(
+            "report_issue",
+            report(json!({ "diagnosis": "d".repeat(REPORT_FIELD_MAX_CHARS + 1) })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        "diagnosis is 60,001 characters; a field may be at most 60,000"
+    );
+
+    // A non-ASCII title is measured in characters, as GitHub measures it.
+    let title = "é".repeat(GITHUB_ISSUE_TITLE_MAX_CHARS);
+    assert!(rig
+        .call("report_issue", report(json!({ "title": title })))
+        .await
+        .is_ok());
+    let err = rig
+        .call(
+            "report_issue",
+            report(json!({ "title": "é".repeat(GITHUB_ISSUE_TITLE_MAX_CHARS + 1) })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err, "title is 257 characters; GitHub allows 256");
+
+    let at_cap = "é".repeat(REPORT_ATTACHMENT_MAX_CHARS);
+    assert!(rig
+        .call(
+            "report_issue",
+            report(json!({ "attachments": [{ "name": "x", "content": at_cap }] })),
+        )
+        .await
+        .is_ok());
+    let err = rig
+        .call(
+            "report_issue",
+            report(json!({ "attachments": [{
+                "name": "x.log",
+                "content": "é".repeat(REPORT_ATTACHMENT_MAX_CHARS + 1),
+            }] })),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        "attachment x.log is 8,193 characters; an attachment may be at most 8,192"
+    );
+    let err = rig
+        .call(
+            "report_issue",
+            report(json!({ "attachments": [{
+                "name": "n".repeat(REPORT_ATTACHMENT_NAME_MAX_CHARS + 1),
+                "content": "c",
+            }] })),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.starts_with("attachment name is 257 characters"),
+        "{err}"
+    );
+}
+
+/// The binding limit is the body as published, attachments pretty-printed
+/// and JSON-escaped: a draft exactly at it is accepted and one character
+/// more is refused with the total, the limit and the largest fields. The
+/// accepted draft reaches `gh` on stdin, as exactly the body that was
+/// measured.
+#[tokio::test]
+async fn the_published_body_is_held_to_its_limit_and_sent_on_stdin() {
+    use tracon::mcp::operator::*;
+    state::isolate();
+    let rig = publishing_rig("at-the-limit");
+    let args = |diagnosis: String| {
+        json!({
+            "title": "at the limit",
+            "expected": "e",
+            "actual": "a",
+            "reproduction": "r".repeat(10_000),
+            "diagnosis": diagnosis,
+            "attachments": three_attachments(),
+        })
+    };
+    // Measure the published body with a one-character diagnosis, then pad
+    // the diagnosis (with two-byte characters) to land exactly on the limit.
+    let probe = rig.call("report_issue", args("é".into())).await.unwrap();
+    let probe = rig
+        .store
+        .issue_draft(probe["issue_id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    let attachments: Value = serde_json::from_str(&probe.attachments_json).unwrap();
+    let measured = published_issue_body(&probe.body, &attachments, &probe.id)
+        .chars()
+        .count();
+    let fill = 1 + REPORT_BODY_MAX_CHARS - measured;
+
+    let err = rig
+        .call("report_issue", args("é".repeat(fill + 1)))
+        .await
+        .unwrap_err();
+    assert!(
+        err.starts_with(
+            "the published issue body would be 60,001 characters; the limit is 60,000. \
+             Largest fields: diagnosis "
+        ),
+        "{err}"
+    );
+    assert!(err.contains("reproduction 10,000"), "{err}");
+
+    let out = rig
+        .call("report_issue", args("é".repeat(fill)))
+        .await
+        .unwrap();
+    let id = out["issue_id"].as_str().unwrap().to_string();
+    let stored = rig.store.issue_draft(&id).unwrap().unwrap();
+    let attachments: Value = serde_json::from_str(&stored.attachments_json).unwrap();
+    let expected = published_issue_body(&stored.body, &attachments, &stored.id);
+    assert_eq!(expected.chars().count(), REPORT_BODY_MAX_CHARS);
+
+    let (status, published) = support::http::call(
+        &rig.operator,
+        "POST",
+        &format!("/api/operator/issues/{id}/publish"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{published}");
+    let (argv, body) = gh_received("at-the-limit");
+    assert!(
+        argv.windows(2).any(|w| w == ["--body-file", "-"]),
+        "{argv:?}"
+    );
+    assert!(!argv.iter().any(|a| a == "--body"), "{argv:?}");
+    assert_eq!(body, expected, "gh reads the measured body on stdin");
+    assert!(body.chars().count() <= REPORT_BODY_MAX_CHARS);
+    assert!(body.len() > REPORT_BODY_MAX_CHARS, "the body is multibyte");
 }

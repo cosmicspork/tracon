@@ -1265,7 +1265,11 @@ issue number beside its URL, and a discard records the operator's reason.
 `review_status`: the drafting session, or the channel's external callers when
 there was none, on the node that drafted it. Like `approval_status`, it is
 dispatched before the policy is consulted, so a signed bundle that predates it
-cannot turn reading one's own draft into a question for the operator.
+cannot turn reading one's own draft into a question for the operator. The
+draft is measured as the exact body `gh issue create` receives (one builder,
+`published_issue_body`, serves both), in characters, against 60,000, a margin
+under GitHub's observed 65,536; the body reaches `gh` on stdin, since in bytes
+it can pass Linux's limit on one argument.
 
 **Nothing a session calls waits on a person past one status call.** A person
 answers in minutes or hours and an MCP client abandons a call long before that, so

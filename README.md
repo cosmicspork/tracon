@@ -1110,7 +1110,10 @@ deduplicated, and reports only what the push service said, never that you saw
 it. `report_issue` drafts a bug report against tracon itself, with expected and
 actual behaviour, reproduction, versions, and attachments, secrets scrubbed; the
 draft sits in the queue for you to read before you authorize opening it on
-GitHub through the broker, or discard it with an optional reason. The agent
+GitHub through the broker, or discard it with an optional reason. Its limits are
+counted in characters and stated in the tool's schema: a title of at most 256,
+and a published body (every field, its headings and the attachments) of at
+most 60,000, which any one field may use, under GitHub's 65,536. The agent
 follows its draft with `issue_report_status`, which waits up to 45 seconds and
 returns the published issue's number, URL and title, or that you discarded it
 and why. None of the three pauses the session.

@@ -4624,12 +4624,7 @@ pub async fn publish_operator_issue(
                 "stored issue attachments are invalid".into(),
             )
         })?;
-    let body = format!(
-        "{}\n\n## Inspectable attachments\n\n```json\n{}\n```\n\n<!-- tracon-issue-draft:{} -->",
-        issue.body,
-        serde_json::to_string_pretty(&attachments).unwrap_or_else(|_| "[]".into()),
-        issue.id,
-    );
+    let body = crate::mcp::operator::published_issue_body(&issue.body, &attachments, &issue.id);
     // Checked before the draft is marked as publishing, so a refused `gh`
     // leaves it a draft rather than an uncertain publication.
     let gh = crate::config::path_guard::program("publish.gh", &s.cfg.live().publish.gh)
@@ -4640,7 +4635,10 @@ pub async fn publish_operator_issue(
             "this issue was already authorized or is no longer a draft".into(),
         ));
     }
-    let result = tokio::process::Command::new(gh)
+    // The body goes on stdin, not as an argument: a body of 60,000
+    // characters can be 240,000 bytes, past Linux's 128 KiB limit on one
+    // argument, and execve would refuse it.
+    let spawned = tokio::process::Command::new(gh)
         .args([
             "issue",
             "create",
@@ -4648,17 +4646,38 @@ pub async fn publish_operator_issue(
             "cosmicspork/tracon",
             "--title",
             &issue.title,
-            "--body",
-            &body,
+            "--body-file",
+            "-",
         ])
         .current_dir(Config::state_dir())
         .env_clear()
         .env("PATH", crate::config::path_guard::child_path())
         .env("HOME", std::env::var("HOME").unwrap_or_default())
         .envs(env)
-        .output()
-        .await;
-    match result {
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
+        // `gh` never started, so nothing reached GitHub: the draft stays a
+        // draft the operator can publish again, not an uncertain one.
+        Err(e) => {
+            let err = format!("could not start gh: {e}");
+            s.store().fail_issue_publication(&id, &err)?;
+            return Err(ApiError(StatusCode::BAD_GATEWAY, err));
+        }
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        // Written alongside the wait, so a `gh` that writes before it has
+        // read everything cannot stall on a full pipe. A failed write shows
+        // up as `gh`'s own failure.
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let _ = stdin.write_all(body.as_bytes()).await;
+        });
+    }
+    match child.wait_with_output().await {
         Ok(out) if out.status.success() => {
             let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
             s.store().finish_issue_publication(&id, &url)?;
