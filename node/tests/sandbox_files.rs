@@ -378,6 +378,22 @@ async fn a_sessions_trees_go_in_come_back_and_resume() {
     let name = "tracon-h-p3loop";
     let w = l.work.display().to_string();
     let st = l.state.display().to_string();
+    // Every take-back is reported, as the session manager hears them.
+    let reports: Arc<Mutex<Vec<sandbox_files::SyncReport>>> = Arc::default();
+    sandbox_files::set_reporter(Some({
+        let reports = reports.clone();
+        Arc::new(move |report| reports.lock().unwrap().push(report))
+    }));
+    let last = |why: &str| {
+        reports
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|r| r.why == why)
+            .cloned()
+            .unwrap_or_else(|| panic!("no take-back reported for {why}"))
+    };
 
     // In: the provider mounts none of it; two directories of the sandbox's
     // own carry everything (the home, which the gitconfig is sent into,
@@ -460,6 +476,15 @@ async fn a_sessions_trees_go_in_come_back_and_resume() {
     harness.run(&format!("echo four > {w}/a.txt")).await;
     sandbox_files::turn_ended(name).await;
     assert_eq!(read(tree().join("a.txt")), "four\n");
+    // A take-back that worked after others that did is not worth an event.
+    let ended = last("turn end");
+    assert_eq!(ended.outcome, sandbox_files::SyncOutcome::Ok);
+    assert!(!ended.record);
+    assert!(ended.files > 0 && ended.bytes > 0, "{ended:?}");
+    let status = sandbox_files::sync_status(name).expect("a running session's sandbox");
+    assert!(status.live && !status.in_flight);
+    assert_eq!(status.failures, 0);
+    assert_eq!(status.last_ok_ms, ended.last_ok_ms);
     // Between turns nothing is taken.
     harness.run(&format!("echo five > {w}/a.txt")).await;
     tokio::time::sleep(Duration::from_millis(900)).await;
@@ -470,6 +495,12 @@ async fn a_sessions_trees_go_in_come_back_and_resume() {
     harness.exit().await;
     assert_eq!(read(tree().join("a.txt")), "six\n");
     assert!(!sandbox_files::is_live(WORKSPACE));
+    // The last take-back is always reported, and its sandbox's status goes
+    // with it.
+    let exit = last(sandbox_files::WHY_EXIT);
+    assert_eq!(exit.outcome, sandbox_files::SyncOutcome::Ok);
+    assert!(exit.record && exit.sandbox == name);
+    assert!(sandbox_files::sync_status(name).is_none());
     // With the sandbox gone, an export reads the node's copy.
     let snapshot = tracon::workspace::export(&backend, &workspace)
         .await
@@ -518,8 +549,23 @@ async fn a_sessions_trees_go_in_come_back_and_resume() {
             "echo ten > {w}/a.txt; ln -s /etc {w}/escape; ln -s ../../../../etc {st}/up"
         ))
         .await;
+    reports.lock().unwrap().clear();
     sandbox_files::turn_ended(name).await;
     assert_eq!(read(tree().join("a.txt")), "eight\n");
+    // ...and the session hears of it, beyond the node's log.
+    let refused = last("turn end");
+    assert_eq!(refused.sandbox, name);
+    assert_eq!(refused.outcome, sandbox_files::SyncOutcome::Failed);
+    assert!(refused.record);
+    assert_eq!(refused.failures, 1);
+    assert!(
+        refused.error.as_deref().is_some_and(|e| !e.is_empty()),
+        "{refused:?}"
+    );
+    let status = sandbox_files::sync_status(name).unwrap();
+    assert_eq!(status.failures, 1);
+    assert_eq!(status.last_error, refused.error);
+    assert!(status.live);
     assert!(std::fs::symlink_metadata(tree().join("escape")).is_err());
     assert!(std::fs::symlink_metadata(state().join("up")).is_err());
     assert!(tracon::workspace::export(&backend, &workspace)
@@ -527,6 +573,12 @@ async fn a_sessions_trees_go_in_come_back_and_resume() {
         .is_err());
     harness.exit().await;
     assert_eq!(read(tree().join("a.txt")), "eight\n");
+    // Its exit failed too: a second in a row, reported all the same.
+    let exit = last(sandbox_files::WHY_EXIT);
+    assert_eq!(exit.outcome, sandbox_files::SyncOutcome::Failed);
+    assert!(exit.record);
+    assert_eq!(exit.failures, 2);
+    sandbox_files::set_reporter(None);
 
     l.store.remove(WORKSPACE).unwrap();
     l.store.remove(SCRATCH).unwrap();

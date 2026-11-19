@@ -220,7 +220,67 @@ struct Reopened {
 
 /// The workspace a session works on: one it carried on names it in its path;
 /// one seeded for it has its own id.
-fn workspace_of(row: &SessionRow) -> String {
+/// Where a session's harness works in its sandbox: its workspace's mount.
+pub const SANDBOX_WORKDIR: &str = "/work";
+
+/// A `workspace_sync` event's payload.
+fn workspace_sync_payload(report: &crate::runner::sandbox_files::SyncReport) -> serde_json::Value {
+    json!({
+        "outcome": report.outcome.as_str(),
+        "why": report.why,
+        "files": report.files,
+        "bytes": report.bytes,
+        "ms": report.ms,
+        "error": report.error,
+        "failures": report.failures,
+        "recovered": report.recovered,
+        "last_ok_ms": report.last_ok_ms,
+        "sandbox": report.sandbox,
+    })
+}
+
+/// How current the node's copy of a session's sandboxed files is, for the
+/// session API: from its running sandbox while one takes trees back, else
+/// from its last `workspace_sync` event. `None` for an external session and
+/// for one whose files were mounted rather than taken back (nothing syncs
+/// them).
+pub fn files_sync(store: &Store, node_id: &str, row: &SessionRow) -> Option<serde_json::Value> {
+    if row.harness_id == external::HARNESS_ID {
+        return None;
+    }
+    let recorded = store
+        .last_event_payload(&row.id, ek::WORKSPACE_SYNC)
+        .ok()
+        .flatten();
+    let live = (row.node_id == node_id)
+        .then_some(row.container_name.as_deref())
+        .flatten()
+        .and_then(crate::runner::sandbox_files::sync_status);
+    let last_ok = |p: &serde_json::Value| p["last_ok_ms"].as_i64();
+    match (live, recorded) {
+        (Some(status), recorded) => {
+            let mut view = serde_json::to_value(&status).ok()?;
+            // A sandbox taken over from an earlier node process has synced
+            // nothing yet under this one: its last record says when it did.
+            if status.last_ok_ms.is_none() {
+                view["last_ok_ms"] = json!(recorded.as_ref().and_then(last_ok));
+            }
+            Some(view)
+        }
+        (None, Some(p)) => Some(json!({
+            "last_ok_ms": last_ok(&p),
+            "failures": p["failures"].as_u64().unwrap_or(0),
+            "last_error": p["error"],
+            "in_flight": false,
+            "live": false,
+            "outcome": p["outcome"],
+            "why": p["why"],
+        })),
+        (None, None) => None,
+    }
+}
+
+pub(crate) fn workspace_of(row: &SessionRow) -> String {
     row.repo_path
         .strip_prefix("workspace://")
         .unwrap_or(&row.id)
@@ -3370,7 +3430,7 @@ impl Manager {
         let container = crate::config::resource_name(&format!("h-{slug}"));
         let mut mounts = scratch.mounts;
         materialize::own_state(&mut mounts, &scratch.volume);
-        mounts.push(workspace.mount("/work", false));
+        mounts.push(workspace.mount(SANDBOX_WORKDIR, false));
         // A session whose pod this node's runtime cannot schedule is placed
         // again with that runtime counted full, once: on to DigitalOcean
         // where it may go (or the operator asked), else ended with the
@@ -3457,7 +3517,7 @@ impl Manager {
             harness_env.extend(cache_env);
 
             let launch_spec = LaunchSpec {
-                cwd_in_runner: "/work".into(),
+                cwd_in_runner: SANDBOX_WORKDIR.into(),
                 model: spec.model.clone(),
                 container_name: container.clone(),
                 harness_home: harness_home.clone(),
@@ -4094,6 +4154,60 @@ impl Manager {
 
     /// Watch the backend's grants: each host a session's own grant refuses
     /// is put to the operator, and recorded on the session once.
+    /// Hear how every sandbox's take-backs go: what is worth it becomes a
+    /// `workspace_sync` event on the sandbox's session, and a run of
+    /// failures tells the operator. Installed once the node is up; the last
+    /// manager to install it hears them.
+    pub fn report_workspace_syncs(&self) {
+        let manager = self.clone();
+        crate::runner::sandbox_files::set_reporter(Some(Arc::new(move |report| {
+            manager.workspace_synced(&report)
+        })));
+    }
+
+    /// One take-back reported: recorded on its session when worth it, and
+    /// pushed to the operator at the failure that makes a run of them. A
+    /// sandbox that is no session's of this node (a preparation's) is only
+    /// in the log.
+    pub fn workspace_synced(&self, report: &crate::runner::sandbox_files::SyncReport) {
+        let session = match self
+            .store
+            .session_by_container(&self.node_id, &report.sandbox)
+        {
+            Ok(Some(session)) => session,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(sandbox = %report.sandbox, %error, "could not find the session a take-back was for");
+                return;
+            }
+        };
+        if report.record {
+            self.record_event(
+                &session.id,
+                ek::WORKSPACE_SYNC,
+                workspace_sync_payload(report),
+            );
+        }
+        let Some(notification) =
+            crate::notify::Notification::workspace_sync(&session.id, &session.branch, report)
+        else {
+            return;
+        };
+        if !crate::notify::channel_pushes(&self.store, &session.channel) {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let (store, cfg) = (self.store.clone(), self.cfg.clone());
+        runtime.spawn(async move {
+            let now = crate::store::now_ms();
+            for device in store.push_subscriptions_live(now).unwrap_or_default() {
+                crate::notify::deliver(&store, &cfg, &device, &notification, now).await;
+            }
+        });
+    }
+
     pub fn record_egress_refusals(&self) {
         if let Some(grants) = self.backend.egress_grants() {
             self.watch_egress(grants);

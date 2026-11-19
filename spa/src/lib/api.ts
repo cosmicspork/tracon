@@ -77,6 +77,7 @@ import type {
   UsageTotal,
   InfraSpend,
   InfraTotal,
+  FilesSync,
   SessionRuntime,
   ManifestView,
   ReviewerView,
@@ -358,6 +359,9 @@ export const api = {
       usage: SessionUsage
       /** What its sandboxes cost. Absent from an older node. */
       runtime?: SessionRuntime
+      /** How current the node's copy of its work is: null for an external
+          session or mounted files. Absent from an older node. */
+      files_sync?: FilesSync | null
       ceiling: Ceiling
       /** Absent from a node that predates exhaustion policies. */
       exhaustion?: SessionExhaustion | null

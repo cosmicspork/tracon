@@ -2311,6 +2311,15 @@ and an emptyDir at `/tmp` that `TMPDIR` names.
   turn end, every 60 s in a turn and at exit, as on Podman. A
   session's harness state is its own; the state every session once shared is never
   sent. Caches are sent in and come back only from a preparation.
+  How the take-backs go is the session's to see, on every runtime: the first that
+  fails or times out (120 s), the one that ends a run of failures and the last one
+  are `workspace_sync` events in its log; its page says how old the node's copy is
+  (`files_sync` on `GET /api/sessions/:id`) and turns red when syncs fail or a turn
+  has run past about 5 minutes without one; a third failure in a row while the
+  sandbox runs sends one push. The node's copy is the claim's
+  `tracon-workspace-<id>`. The session row's `worktree_path`
+  (`tracon/workspaces/<id>`) is only the node's last export of it, for a review, a
+  diff or a publication, and can be hours old.
 - **Placement.** Pods sit beside this node's own pod (`tracon.dev/role=node` and
   `tracon.dev/node=<prefix>`, its `[boundary] resource_prefix`) by pod affinity on
   `kubernetes.io/hostname`, through the scheduler. The node's pod must carry both labels

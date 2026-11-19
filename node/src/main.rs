@@ -3789,8 +3789,8 @@ fn latest_branch(sessions: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
-/// A node from `GET /api/nodes` by `self`, its name (any case), its full id
-/// or a unique prefix of it.
+/// A node from `GET /api/nodes` by `self`, its name or its generated
+/// `node-…` name (any case), its full id or a unique prefix of it.
 fn resolve_node<'a>(nodes: &'a [serde_json::Value], text: &str) -> Result<&'a serde_json::Value> {
     let text = text.trim();
     let hits: Vec<&serde_json::Value> = if text.eq_ignore_ascii_case("self") {
@@ -3802,6 +3802,9 @@ fn resolve_node<'a>(nodes: &'a [serde_json::Value], text: &str) -> Result<&'a se
                 n["name"]
                     .as_str()
                     .is_some_and(|m| m.eq_ignore_ascii_case(text))
+                    || n["id"]
+                        .as_str()
+                        .is_some_and(|id| tracon::names::node(id, None).eq_ignore_ascii_case(text))
             })
             .collect();
         if by_name.is_empty() && !text.is_empty() {
@@ -3825,19 +3828,16 @@ fn resolve_node<'a>(nodes: &'a [serde_json::Value], text: &str) -> Result<&'a se
         [one] => Ok(one),
         [] => anyhow::bail!("no node {text:?}; known: {}", known()),
         _ => anyhow::bail!(
-            "{text:?} names more than one node; give more of its id. Known: {}",
+            "{text:?} names more than one node; give its name or more of its id. Known: {}",
             known()
         ),
     }
 }
 
-/// A node's name, or its short id when it has none.
+/// A node's name, or its generated one when it has none.
 fn node_label(n: &serde_json::Value) -> String {
     let id = n["id"].as_str().unwrap_or("");
-    match n["name"].as_str().filter(|m| !m.is_empty()) {
-        Some(name) => format!("{name} ({})", tracon::node_target::short_id(id)),
-        None => tracon::node_target::short_id(id).to_string(),
-    }
+    tracon::names::node(id, n["name"].as_str().filter(|m| !m.is_empty()))
 }
 
 /// What `tracon work start` was given.
@@ -3878,7 +3878,7 @@ async fn work_start(a: WorkStart) -> Result<()> {
             match item["project_id"].as_str() {
                 None => anyhow::bail!(
                     "{} has no project, so there is no repository to start in: give --repo <forge url>",
-                    tracon::node_target::short_id(&id)
+                    tracon::names::task(&id)
                 ),
                 Some(p) => names.remote(p).ok_or_else(|| {
                     anyhow::anyhow!(
@@ -3952,11 +3952,11 @@ async fn work_start(a: WorkStart) -> Result<()> {
         .iter()
         .find(|n| n["id"] == on)
         .map(node_label)
-        .unwrap_or_else(|| tracon::node_target::short_id(on).to_string());
+        .unwrap_or_else(|| tracon::names::node(on, None));
     println!("started {sid}");
     println!(
         "  task         {} {}",
-        tracon::node_target::short_id(&id),
+        tracon::names::task(&id),
         item["title"].as_str().unwrap_or("")
     );
     println!("  node         {node_name}");

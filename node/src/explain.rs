@@ -167,12 +167,38 @@ pub fn session_authority(
 
     let broker = tools.broker.read().unwrap();
     let credentials = broker.available_to(&session.channel, &session.node_id);
+    // Where the harness works. An external harness works in its host's own
+    // worktree. Any other works in its sandbox, and the node keeps a copy of
+    // that tree (its workspace volume), which `files_sync` on the session
+    // says how current is. `worktree_path` is not where its work is for
+    // such a session: it is the node's last export of it (for a review, a
+    // diff or a publication), which can be hours old.
+    let external = session.harness_id == crate::session::external::HARNESS_ID;
+    let (workspace, node_copy) = if external {
+        (
+            session
+                .worktree_path
+                .clone()
+                .unwrap_or_else(|| session.repo_path.clone()),
+            None,
+        )
+    } else {
+        (
+            crate::session::SANDBOX_WORKDIR.to_string(),
+            Some(crate::workspace::volume_name(
+                &crate::session::workspace_of(session),
+            )),
+        )
+    };
     let bindings = json!({
         "credentials": credentials,
         // Hosts the gateway will let the harness CONNECT to. Everything else
         // is refused at the boundary, before policy is consulted at all.
         "egress": cfg.gateway.allow_hosts,
-        "workspace": session.worktree_path.clone().unwrap_or_else(|| session.repo_path.clone()),
+        "workspace": workspace,
+        // `sandbox` or `host`: where `workspace` is.
+        "workspace_in": if external { "host" } else { "sandbox" },
+        "node_copy": node_copy,
         "repo": session.repo_path,
         "branch": session.branch,
         "external_broker": cfg.external.enabled,

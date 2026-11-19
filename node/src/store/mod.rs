@@ -385,6 +385,20 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// The newest of this node's sessions whose sandbox (container) is named
+    /// `name`, as the launch records it before the sandbox exists.
+    pub fn session_by_container(&self, node_id: &str, name: &str) -> Result<Option<SessionRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT * FROM session WHERE container_name=?1 AND node_id=?2
+             ORDER BY created_ms DESC LIMIT 1",
+            [name, node_id],
+            SessionRow::from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     /// The channel of the newest session working in `repo_path`, spelled as
     /// sessions record it.
     pub fn newest_session_channel(&self, repo_path: &str) -> Result<Option<String>> {

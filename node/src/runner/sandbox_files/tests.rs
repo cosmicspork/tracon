@@ -831,3 +831,105 @@ async fn a_clone_given_up_leaves_nothing() {
     })
     .await;
 }
+
+fn failed(error: &str) -> Result<TreeSummary, (SyncOutcome, String)> {
+    Err((SyncOutcome::Failed, error.to_string()))
+}
+
+fn taken(files: u64, bytes: u64) -> Result<TreeSummary, (SyncOutcome, String)> {
+    Ok(TreeSummary {
+        files,
+        bytes,
+        ..Default::default()
+    })
+}
+
+#[test]
+fn failures_in_a_row_are_reported_once_and_the_recovery_counts_them() {
+    let mut t = Tracker {
+        last_ok_ms: Some(10),
+        ..Default::default()
+    };
+    let first = t.observe("tracon-h-x", "during a turn", failed("refused"), 5, 100);
+    assert!(first.record);
+    assert_eq!(first.outcome, SyncOutcome::Failed);
+    assert_eq!(first.failures, 1);
+    assert_eq!(first.error.as_deref(), Some("refused"));
+    assert_eq!(first.last_ok_ms, Some(10));
+    assert_eq!(first.sandbox, "tracon-h-x");
+
+    let second = t.observe("tracon-h-x", "turn end", failed("refused again"), 5, 200);
+    assert!(!second.record, "a repeated failure is not recorded again");
+    assert_eq!(second.failures, 2);
+    assert_eq!(
+        t.status(true),
+        SyncStatus {
+            last_ok_ms: Some(10),
+            failures: 2,
+            last_error: Some("refused again".into()),
+            in_flight: false,
+            live: true,
+        }
+    );
+
+    let ok = t.observe("tracon-h-x", "during a turn", taken(3, 40), 7, 300);
+    assert!(ok.record);
+    assert_eq!(ok.outcome, SyncOutcome::Ok);
+    assert_eq!((ok.recovered, ok.failures), (2, 0));
+    assert_eq!((ok.files, ok.bytes, ok.ms), (3, 40, 7));
+    assert_eq!(ok.last_ok_ms, Some(300));
+    assert_eq!(ok.error, None);
+
+    // A success after a success is not worth an event.
+    let again = t.observe("tracon-h-x", "during a turn", taken(3, 40), 7, 400);
+    assert!(!again.record);
+    assert_eq!(t.status(true).last_error, None);
+}
+
+#[tokio::test]
+async fn a_take_back_past_its_bound_is_reported_timed_out() {
+    let late = bounded(
+        Duration::from_millis(20),
+        std::future::pending::<Result<TreeSummary, FilesError>>(),
+    )
+    .await;
+    let Err((outcome, error)) = late else {
+        panic!("a take-back that never ends must time out")
+    };
+    assert_eq!(outcome, SyncOutcome::TimedOut);
+    assert_eq!(
+        error.to_string(),
+        "taking the trees back took longer than 20ms"
+    );
+
+    let mut t = Tracker::default();
+    let report = t.observe(
+        "tracon-h-x",
+        "turn end",
+        Err((outcome, error.to_string())),
+        20,
+        1,
+    );
+    assert_eq!(report.outcome, SyncOutcome::TimedOut);
+    assert_eq!(report.outcome.as_str(), "timed_out");
+    assert!(report.record);
+}
+
+#[test]
+fn the_last_take_back_is_reported_whatever_came_before() {
+    // A failure at a turn's end was reported; the exit's, a second failure
+    // in a row, is reported too.
+    let mut t = Tracker::default();
+    assert!(t.observe("s", "turn end", failed("no"), 1, 1).record);
+    let exit = t.observe("s", WHY_EXIT, failed("no"), 1, 2);
+    assert!(exit.record && exit.is_exit());
+    assert_eq!(exit.failures, 2);
+    assert!(!t.status(true).live, "nothing is taken back after the last");
+
+    // A success at exit after a reported success is reported as well.
+    let mut t = Tracker::default();
+    assert!(!t.observe("s", "turn end", taken(1, 1), 1, 1).record);
+    let exit = t.observe("s", WHY_EXIT, taken(1, 1), 1, 2);
+    assert!(exit.record);
+    assert_eq!(exit.outcome, SyncOutcome::Ok);
+}

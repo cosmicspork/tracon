@@ -543,7 +543,10 @@ async fn work_start_plans_a_task_without_a_plan_in_its_projects_repository() {
         assert!(!spec.contains_key(unset), "{unset} was sent: {spec:?}");
     }
     assert!(stdout.contains("plan (no plan yet)"), "{stdout}");
-    assert!(stdout.contains("scratch ("), "the node by name: {stdout}");
+    assert!(
+        stdout.contains("node         scratch\n"),
+        "the node by name: {stdout}"
+    );
     assert!(stdout.contains("feat/tracon-00000000c0de"), "{stdout}");
     assert!(stdout.contains("m/bound"), "the resolved model: {stdout}");
     assert!(
@@ -644,20 +647,24 @@ async fn work_start_resolves_the_node_by_name_or_prefix_and_refuses_an_ambiguous
     let (ok, stdout, stderr) = work_start(&node, &dir, &[&id[..8], "--node", "BAZZITE"]).await;
     assert!(ok, "{stderr}");
     assert_eq!(posted(&node)[0]["node_id"], PEER_B);
-    assert!(stdout.contains("bazzite (ab12dddd)"), "{stdout}");
+    assert!(stdout.contains("node         bazzite\n"), "{stdout}");
     assert!(!stderr.contains("not reachable"), "{stderr}");
 
     let (ok, _, stderr) = work_start(&node, &dir, &[&id[..8], "--node", "ab12c"]).await;
     assert!(ok, "{stderr}");
     assert_eq!(posted(&node)[1]["node_id"], PEER_A);
-    assert!(
-        stderr.contains("node homelab (ab12cccc) is not reachable"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("node homelab is not reachable"), "{stderr}");
 
     let (ok, _, stderr) = work_start(&node, &dir, &[&id[..8], "--node", "self"]).await;
     assert!(ok, "{stderr}");
     assert_eq!(posted(&node)[2]["node_id"], node.state.node_id.as_str());
+
+    // A node is also found by the generated name the node's own pages and
+    // messages give it.
+    let generated = tracon::names::node(PEER_B, None);
+    let (ok, _, stderr) = work_start(&node, &dir, &[&id[..8], "--node", &generated]).await;
+    assert!(ok, "{stderr}");
+    assert_eq!(posted(&node)[3]["node_id"], PEER_B);
 
     for (text, says) in [
         ("ab12", "names more than one node"),
@@ -667,13 +674,13 @@ async fn work_start_resolves_the_node_by_name_or_prefix_and_refuses_an_ambiguous
         assert!(!ok, "{text}");
         assert!(stderr.contains(says), "{stderr}");
         assert!(
-            stderr.contains("homelab (ab12cccc)") && stderr.contains("bazzite (ab12dddd)"),
+            stderr.contains("homelab") && stderr.contains("bazzite"),
             "the known nodes are listed: {stderr}"
         );
     }
     assert_eq!(
         posted(&node).len(),
-        3,
+        4,
         "nothing was posted for a refused --node"
     );
 }

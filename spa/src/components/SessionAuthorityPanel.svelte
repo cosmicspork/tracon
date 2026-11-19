@@ -9,9 +9,10 @@
   import { generatedName } from '../lib/names'
   import Name from './Name.svelte'
   import { formatDuration, formatTokens } from '../lib/format'
+  import type { FilesSyncNote } from '../lib/filesSync'
   import type { ActionStanding, SessionAuthority } from '../lib/types'
 
-  let { id, open = false }: { id: string; open?: boolean } = $props()
+  let { id, open = false, copy = null }: { id: string; open?: boolean; copy?: FilesSyncNote | null } = $props()
 
   // The prop opens the panel; it does not hold it open. Null means the
   // operator has not touched it, so the anchor decides; once they have, their
@@ -86,7 +87,11 @@
       <dd><code>{view.image.execution}</code> · {view.image.runtime}</dd>
       <dt>Can reach</dt>
       <dd>
-        <code>{view.access.workspace}</code> on <code>{view.access.branch}</code>
+        <code>{view.access.workspace}</code>{view.access.workspace_in === 'sandbox' ? ' in its sandbox' : ''} on
+        <code>{view.access.branch}</code>
+        {#if view.access.workspace_in === 'sandbox' && copy}
+          · <span class:stale={copy.warn} title={copy.title}>{copy.text}</span>
+        {/if}
         {#if view.access.egress.length}
           · egress: {view.access.egress.join(', ')}
         {:else}
@@ -173,6 +178,9 @@
 </details>
 
 <style>
+  .stale {
+    color: var(--crit);
+  }
   .authority {
     background: var(--s1);
     border-radius: 4px;

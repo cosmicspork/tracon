@@ -45,6 +45,20 @@ const MAX_FAILURES: i64 = 20;
 const TTL_ITEM_SECS: u32 = 60 * 60;
 const TTL_REVIEW_SECS: u32 = 24 * 60 * 60;
 
+/// An age in the largest unit that fits: `40 s`, `12 min`, `3 h`.
+fn age(ms: i64) -> String {
+    let secs = ms.max(0) / 1000;
+    match secs {
+        0..60 => format!("{secs} s"),
+        60..3600 => format!("{} min", secs / 60),
+        _ => format!("{} h", secs / 3600),
+    }
+}
+
+/// Failed take-backs in a row of a running sandbox's work that tell the
+/// operator ([`Notification::workspace_sync`]).
+pub const SYNC_ALERT_AFTER: u32 = 3;
+
 /// Knobs a test turns down; production takes the defaults.
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -172,6 +186,36 @@ impl Notification {
                 .map_or_else(|| "/sessions".to_string(), |id| format!("/sessions/{id}")),
             tag: format!("tracon-pipeline-{tag}"),
         }
+    }
+
+    /// A session's sandbox whose work has not come back to the node for
+    /// [`SYNC_ALERT_AFTER`] take-backs in a row, while it still runs: said
+    /// once, at that failure, and not again until a take-back succeeds and a
+    /// new run of failures reaches it. Landing on the session; one per
+    /// session, a later push replacing an earlier banner.
+    pub fn workspace_sync(
+        session_id: &str,
+        branch: &str,
+        report: &crate::runner::sandbox_files::SyncReport,
+    ) -> Option<Self> {
+        if report.failures != SYNC_ALERT_AFTER || report.is_exit() {
+            return None;
+        }
+        let since = match report.last_ok_ms {
+            Some(at) => format!("Its copy is {} old.", age(now_ms().saturating_sub(at))),
+            None => "The node has no copy taken back from it yet.".into(),
+        };
+        let error = report.error.as_deref().unwrap_or("no reason given");
+        Some(Self {
+            kind: Kind::Operator,
+            title: format!("Work not syncing — {branch}"),
+            body: format!(
+                "The node could not take the sandbox's work back {} times in a row ({error}). {since}",
+                report.failures
+            ),
+            path: format!("/sessions/{session_id}"),
+            tag: format!("tracon-sync-{session_id}"),
+        })
     }
 
     /// The push behind "Send a test".
@@ -852,6 +896,52 @@ mod tests {
             path: "/".into(),
             tag: tag.into(),
         }
+    }
+
+    #[test]
+    fn a_run_of_failed_take_backs_is_pushed_once_at_the_third() {
+        use crate::runner::sandbox_files::{SyncOutcome, SyncReport};
+        let report = |failures: u32, why: &str| SyncReport {
+            sandbox: "tracon-h-s1".into(),
+            outcome: if failures == 0 {
+                SyncOutcome::Ok
+            } else {
+                SyncOutcome::TimedOut
+            },
+            why: why.into(),
+            files: 0,
+            bytes: 0,
+            ms: 120_000,
+            error: (failures > 0).then(|| "taking the trees back took longer than 120s".into()),
+            failures,
+            recovered: 0,
+            last_ok_ms: Some(now_ms() - 12 * 60_000),
+            record: failures == 1,
+        };
+        let pushed = |failures: u32, why: &str| {
+            Notification::workspace_sync("s1", "fix/x", &report(failures, why))
+        };
+        assert_eq!(pushed(1, "during a turn"), None);
+        assert_eq!(pushed(2, "during a turn"), None);
+        let third = pushed(3, "during a turn").expect("the third failure in a row is pushed");
+        assert_eq!(third.kind, Kind::Operator);
+        assert_eq!(third.path, "/sessions/s1");
+        assert_eq!(third.tag, "tracon-sync-s1");
+        assert!(third.title.contains("fix/x"), "{}", third.title);
+        assert!(third.body.contains("3 times in a row"), "{}", third.body);
+        assert!(
+            third.body.contains("took longer than 120s"),
+            "{}",
+            third.body
+        );
+        assert!(third.body.contains("12 min old"), "{}", third.body);
+        assert_eq!(pushed(4, "turn end"), None, "not again in the same run");
+        assert_eq!(pushed(5, "during a turn"), None);
+        // A success ends the run; the next one is said again at its third.
+        assert_eq!(pushed(0, "during a turn"), None);
+        assert!(pushed(3, "during a turn").is_some());
+        // The sandbox is going: its exit is in the log, not on the phone.
+        assert_eq!(pushed(3, "exit"), None);
     }
 
     #[test]
