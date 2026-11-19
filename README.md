@@ -1306,8 +1306,20 @@ GitHub issue, or discarded it.
 
 A local app that is not a harness can read the tracker the same way:
 `GET /api/jira/search?channel=work&jql=…&cursor=…` on the loopback operator API
-returns one page of matching issues (100 at a time, with `next_cursor`) using the
-channel's Jira credential, and never the token.
+returns one page of matching issues (with `next_cursor`), and never the token. It
+calls the jira-review plugin's `search` as the operator, which lends it the
+channel's Jira credential: the call is decided by policy and logged to the
+channel's external log under the lane `/api/jira/search`. It answers 503 until
+`tracon plugin add cosmicspork/jira-review` installs the plugin, 422 on a channel
+that binds no `jira` (or `jira-*`) credential, and 403 unless the call is allowed,
+since the operator API never holds a call for approval: until the policy bundle
+allows it (v26), add to `node.toml`:
+
+```toml
+[[plugin]]
+name = "jira-review"
+allow = ["search"]
+```
 
 What it does not get is the boundary. That harness runs as you, on your
 machine: the promise here is that it never needs the credential and that every

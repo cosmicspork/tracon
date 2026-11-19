@@ -1027,6 +1027,13 @@ nonce and a 30-second expiry, so it cannot be replayed or carried to another cal
 same context lends, per call, the credentials the running build declares and the
 channel binds; one marked `lend = "approved"` is withheld unless the call runs from a
 card the operator allowed. A call leases its instance, so the idle stop waits for it.
+The context names its caller: kind `agent` for a session (with its id and harness) or
+an external harness (harness `external`), and kind `operator` for a route of the
+operator API calling on the operator's behalf (`Tools::call_for_operator`, today only
+`GET /api/jira/search`). An operator call is decided the same way but never held: one
+the decision would ask about is refused, naming the `[[plugin]]` allow that would let
+it run. Having no session, its `tool_call` and `tool_decided` rows go to the channel's
+external log under the route's path as the lane.
 
 ### Authority grants
 

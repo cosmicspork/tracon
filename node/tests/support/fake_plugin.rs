@@ -17,6 +17,11 @@
 //! sha256 of its own token. A tool named `fail` answers as an error; `sleep`
 //! answers after `arguments.ms` milliseconds.
 //!
+//! - `search.json`: when it exists, a call to `search` answers as
+//!   jira-review's paged search does: the page `arguments.cursor` names
+//!   (`""` for the first) as JSON text. A page that is a string is answered
+//!   as an error with that text.
+//!
 //! Each start writes `env.json` (its whole environment), `pid`, `cwd`, and a line
 //! to `started` (when, in milliseconds, and the mode it read), and says on
 //! stdout and stderr that it started.
@@ -203,6 +208,24 @@ async fn mcp(
             if tool == "sleep" {
                 let ms = params["arguments"]["ms"].as_u64().unwrap_or(0);
                 tokio::time::sleep(Duration::from_millis(ms)).await;
+            }
+            if tool == "search" {
+                if let Ok(pages) = std::fs::read_to_string(fake.data.join("search.json")) {
+                    let pages: Value = serde_json::from_str(&pages).unwrap();
+                    let cursor = params["arguments"]["cursor"].as_str().unwrap_or("");
+                    let page = &pages[cursor];
+                    let (text, failed) = match page.as_str() {
+                        Some(error) => (error.to_string(), true),
+                        None => (page.to_string(), false),
+                    };
+                    return answer(
+                        &request,
+                        json!({
+                            "content": [{ "type": "text", "text": text }],
+                            "isError": failed,
+                        }),
+                    );
+                }
             }
             answer(
                 &request,

@@ -102,8 +102,8 @@ pub struct CallContext {
     pub node_id: String,
 }
 
-/// Who is calling: a session this node runs, or a harness the operator runs
-/// themselves through the external door.
+/// Who is calling: a session this node runs, a harness the operator runs
+/// themselves through the external door, or the operator's own API.
 #[derive(Debug, Clone)]
 pub enum Caller {
     Session(String),
@@ -114,6 +114,14 @@ pub enum Caller {
         /// a status tool may hold longer than the default (`wait::cap`). A
         /// hint, like the lane.
         wait_budget: Option<u64>,
+    },
+    /// A route of the operator API calling a plugin's tool on the
+    /// operator's behalf ([`Tools::call_for_operator`]). It never raises an
+    /// approval: its calls are allowed by policy or refused.
+    Operator {
+        /// The route, which its calls are logged under in the channel's
+        /// external log.
+        lane: String,
     },
 }
 
@@ -134,7 +142,7 @@ impl CallContext {
     pub fn session_id(&self) -> Option<&str> {
         match &self.caller {
             Caller::Session(id) => Some(id),
-            Caller::External { .. } => None,
+            Caller::External { .. } | Caller::Operator { .. } => None,
         }
     }
 
@@ -145,7 +153,22 @@ impl CallContext {
     pub fn lane(&self) -> Option<&str> {
         match &self.caller {
             Caller::External { lane, .. } => lane.as_deref(),
+            Caller::Operator { lane } => Some(lane),
             Caller::Session(_) => None,
+        }
+    }
+
+    /// The operator API calling on the operator's behalf, from the route
+    /// `lane` names.
+    pub fn operator(
+        lane: impl Into<String>,
+        channel: impl Into<String>,
+        node_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            caller: Caller::Operator { lane: lane.into() },
+            channel: channel.into(),
+            node_id: node_id.into(),
         }
     }
 
@@ -177,7 +200,47 @@ impl CallContext {
     pub fn wait_budget(&self) -> Option<u64> {
         match &self.caller {
             Caller::External { wait_budget, .. } => *wait_budget,
-            Caller::Session(_) => None,
+            Caller::Session(_) | Caller::Operator { .. } => None,
+        }
+    }
+}
+
+/// Why a call through [`Tools::call_for_operator`] did not run.
+#[derive(Debug)]
+pub enum OperatorCallError {
+    /// The node has no sessions, so no plugins.
+    Unavailable,
+    /// The channel is unknown or archived.
+    Request(String),
+    /// No plugin of that name is installed with that tool, or none is
+    /// active.
+    NotInstalled { plugin: String },
+    /// The plugin is installed but not offered on the channel.
+    NotOffered(String),
+    /// The plugin cannot be started, does not list the tool, or the
+    /// arguments cannot be signed.
+    Unreachable(String),
+    /// Refused by a rule or the operator's entry.
+    Denied(String),
+    /// The call would be asked, and an operator API call is never held.
+    Asked(String),
+    /// The plugin answered with an error, or could not be called.
+    Tool(String),
+}
+
+impl std::fmt::Display for OperatorCallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable => f.write_str("plugins are not available on this node"),
+            Self::NotInstalled { plugin } => {
+                write!(f, "plugin {plugin} is not installed on this node")
+            }
+            Self::Request(m)
+            | Self::NotOffered(m)
+            | Self::Unreachable(m)
+            | Self::Denied(m)
+            | Self::Asked(m)
+            | Self::Tool(m) => f.write_str(m),
         }
     }
 }
@@ -601,26 +664,53 @@ impl Tools {
         if !build.manifest.tools.iter().any(|t| t.name == rest) {
             return Err(format!("plugin {prefix} declares no tool {rest}"));
         }
+        self.plugin_offered(ctx, prefix, &build.manifest)?;
+        self.plugin_reachable(ctx, name, args).await
+    }
+
+    /// Whether the plugin `manifest` describes is offered on the caller's
+    /// channel: the channel binds a credential it declares, or it declares
+    /// none.
+    fn plugin_offered(
+        &self,
+        ctx: &CallContext,
+        plugin: &str,
+        manifest: &crate::plugin::manifest::Manifest,
+    ) -> Result<(), String> {
         let offered = {
             let broker = self.broker.read().unwrap();
-            crate::plugin::offered(
-                &build.manifest,
-                &broker.available_to(&ctx.channel, &ctx.node_id),
-            )
+            crate::plugin::offered(manifest, &broker.available_to(&ctx.channel, &ctx.node_id))
         };
-        if !offered {
-            let declared: Vec<&str> = build
-                .manifest
-                .credentials
-                .iter()
-                .map(|c| c.pattern.as_str())
-                .collect();
-            return Err(format!(
-                "plugin {prefix} is not offered on channel {}: it needs a credential matching {} bound to it",
-                ctx.channel,
-                declared.join(" or ")
-            ));
+        if offered {
+            return Ok(());
         }
+        let declared: Vec<&str> = manifest
+            .credentials
+            .iter()
+            .map(|c| c.pattern.as_str())
+            .collect();
+        Err(format!(
+            "plugin {plugin} is not offered on channel {}: it needs a credential matching {} bound to it",
+            ctx.channel,
+            declared.join(" or ")
+        ))
+    }
+
+    /// Whether an offered plugin tool's call can be made: its arguments can
+    /// be signed, and the plugin starts and lists the tool.
+    async fn plugin_reachable(
+        &self,
+        ctx: &CallContext,
+        name: &str,
+        args: &Value,
+    ) -> Result<(), String> {
+        let access = self
+            .session
+            .get()
+            .ok_or("plugins are not available on this node")?;
+        let (prefix, rest) = name
+            .split_once(upstream::SEPARATOR)
+            .ok_or_else(|| format!("{name} names no plugin's tool"))?;
         crate::plugin::context::canonical(args).map_err(|e| e.to_string())?;
         let endpoint = access
             .manager
@@ -697,6 +787,11 @@ impl Tools {
                 session: None,
                 harness: Some(crate::session::external::HARNESS_ID.to_string()),
             },
+            Caller::Operator { .. } => context::CallerId {
+                kind: "operator",
+                session: None,
+                harness: None,
+            },
         };
         let timeout = std::time::Duration::from_secs(
             pt.entry
@@ -725,6 +820,116 @@ impl Tools {
                 timeout,
             )
             .await
+    }
+
+    /// Call a plugin's tool for the operator API ([`Caller::Operator`]):
+    /// decided by the signed policy and the operator's `[[plugin]]` entry as
+    /// an agent's call is, but never held. A call either would ask about is
+    /// refused, naming how to allow it. Every call the channel can take is
+    /// logged to its external log under the route's lane, refusals included.
+    pub async fn call_for_operator(
+        &self,
+        ctx: &CallContext,
+        name: &str,
+        args: &Value,
+    ) -> Result<Value, OperatorCallError> {
+        let access = self.session.get().ok_or(OperatorCallError::Unavailable)?;
+        // The external Stop fences harnesses, not the operator's own API.
+        access
+            .manager
+            .channel_usable(&ctx.channel)
+            .map_err(|e| OperatorCallError::Request(e.to_string()))?;
+        access.manager.record_for(
+            ctx,
+            crate::session::state::event_kind::TOOL_CALL,
+            None,
+            json!({ "title": summarize(name, args), "kind": TOOL_KIND }),
+        );
+        let mut gate = audit::Gate::default();
+        let result = self.operator_gated(ctx, name, args, &mut gate).await;
+        if gate.decision == audit::REFUSED && gate.reason.is_none() {
+            gate.reason = result.as_ref().err().map(ToString::to_string);
+        }
+        let outcome = result
+            .as_ref()
+            .map(|_| Value::Null)
+            .map_err(ToString::to_string);
+        access.manager.record_for(
+            ctx,
+            crate::session::state::event_kind::TOOL_DECIDED,
+            None,
+            audit::record(name, args, &gate, &outcome),
+        );
+        result
+    }
+
+    /// [`Self::call_for_operator`], saying in `gate` how it was decided.
+    async fn operator_gated(
+        &self,
+        ctx: &CallContext,
+        name: &str,
+        args: &Value,
+        gate: &mut audit::Gate,
+    ) -> Result<Value, OperatorCallError> {
+        let Some(pt) = self.plugin_tool(name) else {
+            let plugin = name
+                .split_once(upstream::SEPARATOR)
+                .map_or(name, |(prefix, _)| prefix);
+            return Err(OperatorCallError::NotInstalled {
+                plugin: plugin.to_string(),
+            });
+        };
+        self.plugin_offered(ctx, &pt.plugin, &pt.manifest)
+            .map_err(OperatorCallError::NotOffered)?;
+        self.plugin_reachable(ctx, name, args)
+            .await
+            .map_err(OperatorCallError::Unreachable)?;
+        let decision = self.decide(ctx, name, args);
+        let decided_by = self.decided_by(&decision);
+        match decision.verdict {
+            Verdict::Allow => {
+                *gate = audit::Gate {
+                    decision: audit::POLICY_ALLOWED,
+                    decided_by,
+                    rule: decision.rule_id.clone(),
+                    reason: decision.reason.clone(),
+                    approval_id: None,
+                };
+            }
+            Verdict::Deny => {
+                *gate = audit::Gate {
+                    decision: audit::DENIED,
+                    decided_by,
+                    rule: decision.rule_id.clone(),
+                    reason: decision.reason.clone(),
+                    approval_id: None,
+                };
+                return Err(OperatorCallError::Denied(refusal(decision)));
+            }
+            Verdict::Ask => {
+                let why = decision
+                    .reason
+                    .as_deref()
+                    .map(|r| format!(" ({r})"))
+                    .unwrap_or_default();
+                let refused = format!(
+                    "{name} would be put to the operator{why}, and a call from the operator API \
+                     is never held: allow it with [[plugin]] name = \"{}\" and allow = [\"{}\"] \
+                     in node.toml, or with a policy bundle that allows it",
+                    pt.plugin, pt.tool
+                );
+                *gate = audit::Gate {
+                    decided_by,
+                    rule: decision.rule_id.clone(),
+                    reason: Some(refused.clone()),
+                    ..Default::default()
+                };
+                return Err(OperatorCallError::Asked(refused));
+            }
+        }
+        self.call_plugin(ctx, &pt, args, None)
+            .await
+            .map_err(OperatorCallError::Tool)
     }
 
     /// The input schema a plugin's running build gave one of its tools.
