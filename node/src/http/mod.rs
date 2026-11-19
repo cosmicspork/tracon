@@ -18,6 +18,7 @@ pub mod recipes;
 pub mod settings;
 mod spa;
 mod stream;
+pub mod strict;
 
 use std::{net::SocketAddr, sync::Arc};
 
