@@ -1087,8 +1087,8 @@ Rolling back and removing are admin actions, as is restarting a plugin's process
 `tracon plugin ls` lists what is installed, the version before it, and any build waiting
 on a card.
 
-The node runs a plugin as one process per channel, started when a session on that
-channel first uses its tools. A process stops once it has gone unused for its
+The node runs a plugin as one process per channel, started when a session on a channel
+it is offered to first lists its tools. A process stops once it has gone unused for its
 `[[plugin]]` entry's `idle_timeout_secs` (15 minutes by default). It also stops when the
 plugin is updated, rolled back or removed, and when the node shuts down; the next use
 starts the version active then. The node checks the build's digest again and runs its
@@ -1099,7 +1099,12 @@ they are lent per call. The socket is in a 0700 directory of the node's runtime
 directory (`$XDG_RUNTIME_DIR/tracon/p/`, or `/tmp/tracon-<uid>/tracon/p/` where that is
 unset), and the plugin's data and working directory is
 `<state dir>/plugins/data/<name>/<channel>/`, also 0700. A process is ready once MCP
-`initialize` answers on its socket within 30 seconds. One that exits or is not ready is
+`initialize` answers on its socket within 30 seconds and its `tools/list` names exactly
+the tools its manifest declares. A plugin that lists a tool it does not declare, or
+leaves out one it does, is unhealthy at once with the difference as its last error
+(`its tools disagree with its manifest: lists x not declared; declares y not listed`),
+offers nothing, and is not started again for that build until you restart, update or
+roll it back. One that exits or is not ready is
 started again after a wait that doubles from 1 second to 60; if it fails again after the
 60-second wait it is marked unhealthy and left down until it is next used or restarted.
 Its output is kept in memory and in `<state dir>/plugins/logs/<name>/<channel>.log`,
@@ -1107,9 +1112,45 @@ rotated at 1 MiB with three kept. `tracon plugin ls` shows each process's state,
 uptime, restarts and last error, `tracon plugin logs <name> --channel <c>` its last
 lines, and `tracon plugin restart <name> --channel <c>` starts it afresh, or starts it
 on a channel where it has not run yet. Settings › Plugins shows the same. A `when_idle`
-node restart waits for running plugin processes as it waits for turns. Until brokered
-plugin tools ship, no session uses a plugin, so a plugin runs only once `tracon plugin
-restart` starts it.
+node restart waits for running plugin processes as it waits for turns.
+
+A plugin's tools are offered to execute sessions and external harnesses as
+`<plugin>__<tool>`, beside the node's own, on a channel that binds a credential the
+manifest declares (by its `name`, or a binding its `pattern` matches), or on every
+channel when it declares none. Plan and review sessions are offered none. A call is
+decided as an `[[mcp_server]]` tool's is: the signed policy first, under the `tool` kind
+and the namespaced name, then the lists in the plugin's `[[plugin]]` entry, by the
+plugin's own name for the tool. A signed denial wins, then the entry's `deny`, then its
+`ask`; its `allow` runs a tool without asking only while the signed bundle is trusted. A
+tool that neither names is asked. The manifest's `read`/`write` hint is shown on the card
+and never decides anything:
+
+```toml
+[[plugin]]
+name = "sql-review"
+allow = ["query", "describe"]   # by the plugin's own tool names; `*` globs
+ask = ["explain"]
+deny = ["drop_*"]
+timeout_secs = 120              # one call; 0 or unset is 60
+idle_timeout_secs = 900
+```
+
+Each call carries a caller context in `params._meta.tracon`: the plugin and tool, a hash
+of the arguments, who is calling (an agent, its session and harness, or `external`), the
+channel, the approval it was allowed on if any, a 30-second expiry, a nonce, and the
+sha256 of the instance's `TRACON_PLUGIN_TOKEN`, all signed with the node's identity key
+(the `TRACON_NODE_KEY` it was started with). A plugin refuses a context for another
+process, another call, a stale or replayed one, or one the node did not sign. The wire
+format is in sql-review's README, "Caller context wire format, v1". Arguments must have a
+canonical form, so a float is refused before it is asked: pass decimals as strings.
+
+The same context lends the call, in `credentials`, each credential the channel binds that
+the running build declares, as its environment fields. One the manifest marks
+`lend = "approved"` is lent only to a call run from a card you approved, never to one the
+policy or the entry allowed outright. An undeclared credential is never lent, and none
+is ever in the plugin's environment. The card for a plugin's tool shows its version, its
+hint, the hosts it says it reaches, and what an approved run is lent. A call holds its
+process for as long as it runs, so the idle stop counts from the end of the last call.
 
 ### Asking, pinging, and complaining
 
@@ -1850,9 +1891,10 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
                                     # changed at the node only. A local archive is not held to it
 
 # [[plugin]]                        # your settings for an installed plugin, by name; may come before
-                                    # the install. Read and checked now, used once plugins run
+                                    # the install
 # name = "sql-review"
 # idle_timeout_secs = 900           # how long it may sit idle before it is stopped; 0 is the default
+# timeout_secs = 60                 # how long one call may take; 0 is the default (60)
 # allow = ["query"]                 # by the plugin's own tool names, as [[mcp_server]]'s lists
 # ask = []
 # deny = ["drop_*"]

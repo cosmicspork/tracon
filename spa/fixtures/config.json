@@ -2446,6 +2446,23 @@
       "editable_by_peer": true,
       "exec_path": false,
       "fs_path": false,
+      "key": "plugin.timeout_secs",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "live",
+      "array": "plugin",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
       "key": "plugin.allow",
       "path": null,
       "secret": false,

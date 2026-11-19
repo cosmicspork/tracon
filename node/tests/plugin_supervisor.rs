@@ -19,11 +19,10 @@ use tracon::{
     mcp::upstream,
     plugin::{
         install,
-        manifest::Manifest,
         supervisor::{State, Supervisor, Timings},
     },
     session::Manager,
-    store::{plugins::Pending, Store},
+    store::Store,
     stream::Bus,
 };
 
@@ -32,42 +31,13 @@ const NODE_KEY: &str = "ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34
 
 /// Install the fake plugin into `state` as the operator's allowed card would.
 fn install_fake(store: &Store, state: &Path) {
-    let manifest_text = format!(
-        "name = \"{PLUGIN}\"\nversion = \"1.0.0\"\ncontract = 1\nexec = [\"bin/{PLUGIN}\"]\n\n[[tool]]\nname = \"query\"\nhint = \"read\"\n"
+    support::plugin::install(
+        store,
+        state,
+        &format!(
+            "name = \"{PLUGIN}\"\nversion = \"1.0.0\"\ncontract = 1\nexec = [\"bin/{PLUGIN}\"]\n\n[[tool]]\nname = \"query\"\nhint = \"read\"\n"
+        ),
     );
-    let manifest = Manifest::parse(&manifest_text).unwrap();
-    let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    let dir = install::build_dir(state, PLUGIN, "1.0.0", digest);
-    std::fs::create_dir_all(dir.join("bin")).unwrap();
-    std::fs::write(dir.join("tracon-plugin.toml"), &manifest_text).unwrap();
-    // Linked rather than copied where it can be: a copy just written can be
-    // busy (ETXTBSY) when another thread forks.
-    let exe = dir.join("bin").join(PLUGIN);
-    if std::fs::hard_link(env!("CARGO_BIN_EXE_fake_plugin"), &exe).is_err() {
-        std::fs::copy(env!("CARGO_BIN_EXE_fake_plugin"), &exe).unwrap();
-    }
-    let tree_digest = install::tree_digest(&dir).unwrap();
-    store
-        .plugin_stage_pending(
-            PLUGIN,
-            "local:fake.tar.gz",
-            &Pending {
-                build: tracon::store::plugins::Build {
-                    version: "1.0.0".into(),
-                    digest: digest.into(),
-                    tree_digest,
-                    manifest,
-                },
-                approval_id: "card".into(),
-                tag: None,
-                changelog: None,
-            },
-        )
-        .unwrap();
-    store
-        .plugin_activate_pending(PLUGIN, "card")
-        .unwrap()
-        .unwrap();
 }
 
 struct Rig {

@@ -498,6 +498,9 @@ pub struct PluginEntry {
     /// Zero takes the default.
     #[serde(skip_serializing_if = "is_zero")]
     pub idle_timeout_secs: u64,
+    /// How long one call to the plugin may take. Zero takes the default.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub timeout_secs: u64,
     /// Tools, by the plugin's own names, that run without asking unless a
     /// signed policy rule denies them. `*` matches any run of characters.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -512,10 +515,18 @@ pub struct PluginEntry {
 
 impl PluginEntry {
     pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 900;
+    pub const DEFAULT_TIMEOUT_SECS: u64 = 60;
 
     pub fn idle_timeout_secs(&self) -> u64 {
         match self.idle_timeout_secs {
             0 => Self::DEFAULT_IDLE_TIMEOUT_SECS,
+            n => n,
+        }
+    }
+
+    pub fn timeout_secs(&self) -> u64 {
+        match self.timeout_secs {
+            0 => Self::DEFAULT_TIMEOUT_SECS,
             n => n,
         }
     }
@@ -4381,6 +4392,7 @@ mod tests {
         validate_plugins(&parsed.plugins, &parsed.plugin).unwrap();
         assert_eq!(parsed.plugins.owners, ["cosmicspork", "acme-co"]);
         assert_eq!(parsed.plugin[0].idle_timeout_secs(), 900);
+        assert_eq!(parsed.plugin[0].timeout_secs(), 60);
         assert_eq!(Config::default().plugins.owners, ["cosmicspork"]);
         let ok = parsed.plugin[0].clone();
         for (owners, entries, says) in [

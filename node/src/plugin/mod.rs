@@ -11,6 +11,7 @@
 //! plugin and channel, and stops a plugin's processes when it is updated,
 //! rolled back or removed.
 
+pub mod context;
 pub mod install;
 pub mod manifest;
 pub mod supervisor;
@@ -21,6 +22,16 @@ use crate::store::approvals::{ApprovalRow, PENDING as APPROVAL_PENDING, PLUGIN_I
 use crate::store::plugins::{Build, Pending, PluginRow, REMOVED};
 use crate::store::Store;
 use install::{InstallError, Staged};
+
+/// Whether a channel that may use the credentials `available` is offered
+/// the plugin's tools: it binds one the manifest declares, by name or
+/// pattern, or the plugin declares none.
+pub fn offered(manifest: &manifest::Manifest, available: &[&str]) -> bool {
+    manifest.credentials.is_empty()
+        || available
+            .iter()
+            .any(|binding| manifest.credentials.iter().any(|c| c.matches(binding)))
+}
 
 /// The longest release body an install card carries.
 const CHANGELOG_CHARS: usize = 8_000;
@@ -631,6 +642,18 @@ mod tests {
         )
         .unwrap_err();
         assert!(refused.to_string().contains("[[mcp_server]]"), "{refused}");
+    }
+
+    #[test]
+    fn a_plugin_is_offered_to_a_channel_binding_a_credential_it_declares() {
+        let m = manifest::Manifest::parse(manifest::tests::EXAMPLE).unwrap();
+        assert!(offered(&m, &["github", "sql-read"]));
+        assert!(offered(&m, &["sql-write-prod"]));
+        assert!(!offered(&m, &["github", "sql-readx"]));
+        assert!(!offered(&m, &[]));
+        let mut open = m.clone();
+        open.credentials.clear();
+        assert!(offered(&open, &[]));
     }
 
     #[test]

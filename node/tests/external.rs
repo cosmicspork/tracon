@@ -3064,3 +3064,68 @@ async fn a_held_write_conflicts_when_the_document_changed_while_it_waited() {
         "# Three"
     );
 }
+
+/// A plugin's tool, through the external door: offered to a channel that
+/// binds the credential it declares, run under its `[[plugin]]` entry, and
+/// called with a caller context naming no session and the external harness.
+#[tokio::test]
+async fn an_external_harness_calls_a_plugins_tool_as_itself() {
+    state::isolate();
+    let mut cfg = enabled();
+    cfg.plugin = vec![tracon::config::PluginEntry {
+        name: "fake".into(),
+        allow: vec!["query".into()],
+        ..Default::default()
+    }];
+    let h = harness_with(cfg).await;
+    let identity = proto::keys::Identity::from_seed(&[3; 32]);
+    let node_key = identity.node_id();
+    h.manager.plugins().set_signer(identity);
+    support::plugin::install(
+        &h.store,
+        &Config::state_dir(),
+        "name = \"fake\"\nversion = \"1.0.0\"\ncontract = 1\nexec = [\"bin/fake\"]\n\n\
+         [[credential]]\nname = \"fake-read\"\npattern = \"fake-read-*\"\n\n\
+         [[tool]]\nname = \"query\"\nhint = \"read\"\n",
+    );
+    // Bound to `work` only.
+    let names = list(&h.operator, "work").await;
+    assert!(!names.iter().any(|n| n == "fake__query"), "{names:?}");
+    let credential: tracon::broker::Credential =
+        toml::from_str("channels = [\"work\"]\n[env]\nDB_USER = \"reader\"\n").unwrap();
+    h.tools
+        .broker
+        .write()
+        .unwrap()
+        .put("fake-read-qa", credential);
+    let names = list(&h.operator, "work").await;
+    assert!(names.iter().any(|n| n == "fake__query"), "{names:?}");
+
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call("fake__query", json!({ "sql": "SELECT 1" })),
+    )
+    .await;
+    assert_eq!(v["result"]["isError"], json!(false), "{v}");
+    let text = v["result"]["content"][0]["text"].as_str().unwrap();
+    let seen: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(seen["node_key"], node_key.as_str());
+    let meta = &seen["meta"];
+    assert_eq!(
+        meta["caller"],
+        json!({ "kind": "agent", "session": null, "harness": "external" })
+    );
+    assert_eq!(meta["channel"], "work");
+    assert_eq!(meta["credentials"]["fake-read-qa"]["DB_USER"], "reader");
+    support::plugin::Verifier::new("fake", seen["own_instance"].as_str().unwrap(), &node_key)
+        .verify(
+            meta,
+            "query",
+            &json!({ "sql": "SELECT 1" }),
+            meta["issued_ms"].as_i64().unwrap(),
+        )
+        .unwrap();
+    assert_no_sessions(&h);
+    h.manager.plugins().shutdown().await;
+}

@@ -310,6 +310,7 @@ pub const KEYS: &[KeySpec] = &[
     live("plugins.owners").host_only(),
     live("plugin.name"),
     live("plugin.idle_timeout_secs"),
+    live("plugin.timeout_secs"),
     live("plugin.allow"),
     live("plugin.ask"),
     live("plugin.deny"),

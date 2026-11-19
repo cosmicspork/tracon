@@ -1,0 +1,259 @@
+{
+  "call": {
+    "arguments": {
+      "limit": 10,
+      "params": {
+        "strm": "1261"
+      },
+      "sql": "SELECT app_id FROM apps WHERE strm = :strm"
+    },
+    "tool": "query"
+  },
+  "description": "Tracon plugin caller context, wire format v1. `replay`: verify the context once before the check. `call` overrides the call a context is checked against. `write_tools`: tools the verifier treats as writes.",
+  "instance": "deaf4ff596700875cd63555429dd0a5ecc93f5454547af3ff8b524e5462f1969",
+  "now_ms": 1794900000000,
+  "plugin": "sql-review",
+  "plugin_token": "plugin-token-for-vectors",
+  "public_key": "0d7550754e0800a5d237eef5826035766b9b3e5a15868a940ab289958788e3b0",
+  "seed": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+  "tampered": [
+    {
+      "check": 1,
+      "context": {
+        "approval_id": null,
+        "arguments_sha256": "f962cd5e3c02047202d92b3acd443c1cbd27b1471966b9ab04847eb2e27600b9",
+        "caller": {
+          "harness": "claude",
+          "kind": "agent",
+          "session": "01a1e94d-1013-7fc2-9c04-292e776c2161"
+        },
+        "channel": "personal",
+        "credentials": {
+          "sql-read": {
+            "DB_BACKEND": "sqlite",
+            "DB_SERVICE": "apps.sqlite"
+          }
+        },
+        "expires_ms": 1794900030000,
+        "instance": "deaf4ff596700875cd63555429dd0a5ecc93f5454547af3ff8b524e5462f1969",
+        "issued_ms": 1794900000000,
+        "nonce": "11111111111111111111111111111111",
+        "plugin": "jira-review",
+        "signature": "37046b15cb3fb89fbd0c70995c3975b36a57ab7af92ddc664c5184cf1ef3bd80d065b394a6275f70073808895542580c1ff5636fb4984576cae421004ca72a08",
+        "tool": "query",
+        "v": 1
+      },
+      "name": "another plugin's context"
+    },
+    {
+      "check": 2,
+      "context": {
+        "approval_id": null,
+        "arguments_sha256": "f962cd5e3c02047202d92b3acd443c1cbd27b1471966b9ab04847eb2e27600b9",
+        "caller": {
+          "harness": "claude",
+          "kind": "agent",
+          "session": "01a1e94d-1013-7fc2-9c04-292e776c2161"
+        },
+        "channel": "personal",
+        "credentials": {
+          "sql-read": {
+            "DB_BACKEND": "sqlite",
+            "DB_SERVICE": "apps.sqlite"
+          }
+        },
+        "expires_ms": 1794900030000,
+        "instance": "728a6eebdf2c29c8f6afaad2f06f2e8255aef713e79c0efed09d84ec2fc553f1",
+        "issued_ms": 1794900000000,
+        "nonce": "22222222222222222222222222222222",
+        "plugin": "sql-review",
+        "signature": "1ccd424b4d3f4b7caa31ff01c56c52970cdf82bd0276601bc02c4e1286d37baa5d7e4bdc5aff20f944b1de2c7f4d4cde56697ccd4b0a42c9e0517c5f14208002",
+        "tool": "query",
+        "v": 1
+      },
+      "name": "a previous spawn's instance"
+    },
+    {
+      "call": {
+        "arguments": {
+          "sql": "SELECT * FROM apps"
+        },
+        "tool": "query"
+      },
+      "check": 3,
+      "context": {
+        "approval_id": null,
+        "arguments_sha256": "f962cd5e3c02047202d92b3acd443c1cbd27b1471966b9ab04847eb2e27600b9",
+        "caller": {
+          "harness": "claude",
+          "kind": "agent",
+          "session": "01a1e94d-1013-7fc2-9c04-292e776c2161"
+        },
+        "channel": "personal",
+        "credentials": {
+          "sql-read": {
+            "DB_BACKEND": "sqlite",
+            "DB_SERVICE": "apps.sqlite"
+          }
+        },
+        "expires_ms": 1794900030000,
+        "instance": "deaf4ff596700875cd63555429dd0a5ecc93f5454547af3ff8b524e5462f1969",
+        "issued_ms": 1794900000000,
+        "nonce": "33333333333333333333333333333333",
+        "plugin": "sql-review",
+        "signature": "3cc26d6b2d66b0d066a997e748c9645130f334dd3031337debb902c711199a2a30ac34fdf165101943dacf373a757a898c1e33e66fa4fa87b1bd22571135420c",
+        "tool": "query",
+        "v": 1
+      },
+      "name": "arguments changed after signing"
+    },
+    {
+      "check": 4,
+      "context": {
+        "approval_id": null,
+        "arguments_sha256": "f962cd5e3c02047202d92b3acd443c1cbd27b1471966b9ab04847eb2e27600b9",
+        "caller": {
+          "harness": "claude",
+          "kind": "agent",
+          "session": "01a1e94d-1013-7fc2-9c04-292e776c2161"
+        },
+        "channel": "work",
+        "credentials": {
+          "sql-read": {
+            "DB_BACKEND": "sqlite",
+            "DB_SERVICE": "apps.sqlite"
+          }
+        },
+        "expires_ms": 1794900030000,
+        "instance": "deaf4ff596700875cd63555429dd0a5ecc93f5454547af3ff8b524e5462f1969",
+        "issued_ms": 1794900000000,
+        "nonce": "44444444444444444444444444444444",
+        "plugin": "sql-review",
+        "signature": "cf7b48c27cf47dfe0b98b0e70f73c8839ede8b03216b7a60ae5c1087860c70763dac5afee41ca797efb7e3cc6d1ced96206ce60767c37aa53c48e7bc5edc6f0a",
+        "tool": "query",
+        "v": 1
+      },
+      "name": "a field changed without re-signing"
+    },
+    {
+      "check": 5,
+      "context": {
+        "approval_id": null,
+        "arguments_sha256": "f962cd5e3c02047202d92b3acd443c1cbd27b1471966b9ab04847eb2e27600b9",
+        "caller": {
+          "harness": "claude",
+          "kind": "agent",
+          "session": "01a1e94d-1013-7fc2-9c04-292e776c2161"
+        },
+        "channel": "personal",
+        "credentials": {
+          "sql-read": {
+            "DB_BACKEND": "sqlite",
+            "DB_SERVICE": "apps.sqlite"
+          }
+        },
+        "expires_ms": 1794899910000,
+        "instance": "deaf4ff596700875cd63555429dd0a5ecc93f5454547af3ff8b524e5462f1969",
+        "issued_ms": 1794899880000,
+        "nonce": "55555555555555555555555555555555",
+        "plugin": "sql-review",
+        "signature": "05d346565e816dce86241c71570056d719172ac077c6542121bbaa6d51a2eb625d939f913ae36bd2a26b9ceee54ed1e033c0afd552f1f4386d1683be8b8a570c",
+        "tool": "query",
+        "v": 1
+      },
+      "name": "expired"
+    },
+    {
+      "check": 6,
+      "context": {
+        "approval_id": null,
+        "arguments_sha256": "f962cd5e3c02047202d92b3acd443c1cbd27b1471966b9ab04847eb2e27600b9",
+        "caller": {
+          "harness": "claude",
+          "kind": "agent",
+          "session": "01a1e94d-1013-7fc2-9c04-292e776c2161"
+        },
+        "channel": "personal",
+        "credentials": {
+          "sql-read": {
+            "DB_BACKEND": "sqlite",
+            "DB_SERVICE": "apps.sqlite"
+          }
+        },
+        "expires_ms": 1794900030000,
+        "instance": "deaf4ff596700875cd63555429dd0a5ecc93f5454547af3ff8b524e5462f1969",
+        "issued_ms": 1794900000000,
+        "nonce": "66666666666666666666666666666666",
+        "plugin": "sql-review",
+        "signature": "85fb243eed17eca05192095b98e9402c537962d7000d48cc6693936a5a7ad85e7a16e378f4b93a07b006e5f61ffe607c2f9554b8d946eb58380c0dc99058580d",
+        "tool": "query",
+        "v": 1
+      },
+      "name": "a replayed nonce",
+      "replay": true
+    },
+    {
+      "call": {
+        "arguments": {},
+        "tool": "apply"
+      },
+      "check": 7,
+      "context": {
+        "approval_id": null,
+        "arguments_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "caller": {
+          "harness": "claude",
+          "kind": "agent",
+          "session": "01a1e94d-1013-7fc2-9c04-292e776c2161"
+        },
+        "channel": "personal",
+        "credentials": {
+          "sql-read": {
+            "DB_BACKEND": "sqlite",
+            "DB_SERVICE": "apps.sqlite"
+          }
+        },
+        "expires_ms": 1794900030000,
+        "instance": "deaf4ff596700875cd63555429dd0a5ecc93f5454547af3ff8b524e5462f1969",
+        "issued_ms": 1794900000000,
+        "nonce": "77777777777777777777777777777777",
+        "plugin": "sql-review",
+        "signature": "368c1345d1b2678c6dbf0af0aa9f60d1e2c538ce80cbf44b943f461b7a20e0965c6da30f0d193cf6dfb8c7decf8d46897d9586268c9f7fe5c8058c62a9538e00",
+        "tool": "apply",
+        "v": 1
+      },
+      "name": "a write tool without an approval"
+    }
+  ],
+  "valid": {
+    "context": {
+      "approval_id": null,
+      "arguments_sha256": "f962cd5e3c02047202d92b3acd443c1cbd27b1471966b9ab04847eb2e27600b9",
+      "caller": {
+        "harness": "claude",
+        "kind": "agent",
+        "session": "01a1e94d-1013-7fc2-9c04-292e776c2161"
+      },
+      "channel": "personal",
+      "credentials": {
+        "sql-read": {
+          "DB_BACKEND": "sqlite",
+          "DB_SERVICE": "apps.sqlite"
+        }
+      },
+      "expires_ms": 1794900030000,
+      "instance": "deaf4ff596700875cd63555429dd0a5ecc93f5454547af3ff8b524e5462f1969",
+      "issued_ms": 1794900000000,
+      "nonce": "0123456789abcdef0123456789abcdef",
+      "plugin": "sql-review",
+      "signature": "9d012a4fa6866b5816b773f1537638471a2a2dbd785475bb51c1bb0084b3ff5adb2971fd8bd1c93dbe47271a62b6d93142d1f7dbc298d79897c0a220b7c2ae01",
+      "tool": "query",
+      "v": 1
+    },
+    "signature": "9d012a4fa6866b5816b773f1537638471a2a2dbd785475bb51c1bb0084b3ff5adb2971fd8bd1c93dbe47271a62b6d93142d1f7dbc298d79897c0a220b7c2ae01",
+    "signing_bytes": "747261636f6e2f76312f706c7567696e2d63616c6c000002047b22617070726f76616c5f6964223a6e756c6c2c22617267756d656e74735f736861323536223a2266393632636435653363303230343732303264393262336163643434336331636264323762313437313936366239616230343834376562326532373630306239222c2263616c6c6572223a7b226861726e657373223a22636c61756465222c226b696e64223a226167656e74222c2273657373696f6e223a2230316131653934642d313031332d376663322d396330342d323932653737366332313631227d2c226368616e6e656c223a22706572736f6e616c222c2263726564656e7469616c73223a7b2273716c2d72656164223a7b2244425f4241434b454e44223a2273716c697465222c2244425f53455256494345223a22617070732e73716c697465227d7d2c22657870697265735f6d73223a313739343930303033303030302c22696e7374616e6365223a2264656166346666353936373030383735636436333535353432396464306135656363393366353435343534376166336666386235323465353436326631393639222c226973737565645f6d73223a313739343930303030303030302c226e6f6e6365223a223031323334353637383961626364656630313233343536373839616263646566222c22706c7567696e223a2273716c2d726576696577222c22746f6f6c223a227175657279222c2276223a317d"
+  },
+  "write_tools": [
+    "apply"
+  ]
+}

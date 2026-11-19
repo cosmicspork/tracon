@@ -1014,8 +1014,25 @@ the instance unhealthy rather than retrying forever. The restart loop has the sh
 the sandbox's service supervisor but is not that code: that one spawns as another
 user through the sandbox protocol and never gives up. A running instance holds off a
 `when_idle` node restart, which it releases within its idle timeout once a drain
-refuses the turns that would use it. Brokering plugin tools under policy, with a signed
-caller context and credentials lent per call, comes after.
+refuses the turns that would use it. A start is ready only once the plugin's
+`tools/list` names exactly what its manifest declares: the manifest is what the operator
+approved, so a build that serves more, or less, is refused for that digest rather than
+offered.
+
+**A plugin's tools are brokered as another server's are, with an attested caller.**
+They are listed as `<plugin>__<tool>` to a channel that binds a credential the manifest
+declares, and a call is decided by `upstream::decide` under an `Entry` for the plugin:
+the signed policy by the namespaced name, a signed denial dominating, then the
+`[[plugin]]` entry's deny, ask and allow, whose allow widens nothing without a trusted
+bundle; a tool neither names is asked. The manifest's hint is shown and never read by
+the decision, since it is the plugin's own word. Every call carries `_meta.tracon`, a
+caller context signed with the node's identity key (`plugin::context`): it binds the
+call to its tool and canonical arguments, to the instance by the hash of its start
+token, so a process left from an earlier start cannot answer for the new one, and to a
+nonce and a 30-second expiry, so it cannot be replayed or carried to another call. The
+same context lends, per call, the credentials the running build declares and the
+channel binds; one marked `lend = "approved"` is withheld unless the call runs from a
+card the operator allowed. A call leases its instance, so the idle stop waits for it.
 
 ### Authority grants
 

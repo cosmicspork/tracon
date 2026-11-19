@@ -12,6 +12,10 @@
 //! Streamable HTTP only. The node keeps one MCP session per server and channel
 //! and starts another when the server forgets it, and holds each server's tool
 //! list for a while so a `tools/list` does not wait on every server each time.
+//!
+//! A plugin's tools (`crate::plugin`) are called through the same sessions,
+//! over the plugin's Unix socket, and decided the same way under its
+//! `[[plugin]]` entry (`Entry`).
 
 use std::{
     collections::HashMap,
@@ -22,7 +26,7 @@ use serde_json::{json, Value};
 
 use crate::{
     broker::SharedBroker,
-    config::McpServer,
+    config::{McpServer, PluginEntry},
     policy::{Decision, Policy, Verdict},
 };
 
@@ -94,20 +98,29 @@ enum Failure {
     Expired,
     /// It answered, and not with a result.
     Refused(String),
+    /// The node could not make the request: nothing was sent.
+    NotSent(String),
 }
 
 impl Failure {
+    /// In words, `server` naming what was asked: `MCP server linear`,
+    /// `plugin sql-review`.
     fn describe(&self, server: &str) -> String {
         match self {
-            Failure::Unreachable(e) => format!("MCP server {server} is unreachable: {e}"),
+            Failure::Unreachable(e) => format!("{server} is unreachable: {e}"),
             Failure::Unknown(e) => format!(
-                "mutation-outcome-unknown: MCP server {server} did not answer, and what it \
+                "mutation-outcome-unknown: {server} did not answer, and what it \
                  did is not known: {e}"
             ),
-            Failure::Expired => format!("MCP server {server} forgot the session it was given"),
-            Failure::Refused(e) => format!("MCP server {server}: {e}"),
+            Failure::Expired => format!("{server} forgot the session it was given"),
+            Failure::Refused(e) => format!("{server}: {e}"),
+            Failure::NotSent(e) => format!("{server} was not asked: {e}"),
         }
     }
+}
+
+fn server_label(server: &McpServer) -> String {
+    format!("MCP server {}", server.name)
 }
 
 /// The node's view of every `[[mcp_server]]`: what each one lists, and the
@@ -150,21 +163,60 @@ pub fn server_of<'a, 'n>(
     (!rest.is_empty()).then_some((server, rest))
 }
 
-/// What the operator's entry says about one of its tools, by the server's
-/// own name for it: deny over ask over allow, `None` when no list names it.
-pub fn setting(server: &McpServer, remote: &str) -> Option<Verdict> {
-    let named = |list: &[String]| {
-        list.iter()
-            .any(|pattern| crate::policy::glob(pattern.trim(), remote))
-    };
-    if named(&server.deny) {
-        Some(Verdict::Deny)
-    } else if named(&server.ask) {
-        Some(Verdict::Ask)
-    } else if named(&server.allow) {
-        Some(Verdict::Allow)
-    } else {
-        None
+/// The operator's per-tool lists for one source of tools: an
+/// `[[mcp_server]]`, or a `[[plugin]]` (which may have no entry at all).
+#[derive(Debug, Clone, Copy)]
+pub struct Entry<'a> {
+    /// The table it is written in, as a rule id names it.
+    kind: &'static str,
+    /// What it is called in words.
+    what: &'static str,
+    name: &'a str,
+    allow: &'a [String],
+    ask: &'a [String],
+    deny: &'a [String],
+}
+
+impl<'a> Entry<'a> {
+    pub fn server(server: &'a McpServer) -> Self {
+        Self {
+            kind: "mcp_server",
+            what: "MCP server",
+            name: &server.name,
+            allow: &server.allow,
+            ask: &server.ask,
+            deny: &server.deny,
+        }
+    }
+
+    /// Plugin `name`, under its `[[plugin]]` entry if the operator wrote one.
+    pub fn plugin(name: &'a str, entry: Option<&'a PluginEntry>) -> Self {
+        Self {
+            kind: "plugin",
+            what: "plugin",
+            name,
+            allow: entry.map(|e| e.allow.as_slice()).unwrap_or_default(),
+            ask: entry.map(|e| e.ask.as_slice()).unwrap_or_default(),
+            deny: entry.map(|e| e.deny.as_slice()).unwrap_or_default(),
+        }
+    }
+
+    /// What the entry says about one of its tools, by the tool's own name:
+    /// deny over ask over allow, `None` when no list names it.
+    pub fn setting(&self, remote: &str) -> Option<Verdict> {
+        let named = |list: &[String]| {
+            list.iter()
+                .any(|pattern| crate::policy::glob(pattern.trim(), remote))
+        };
+        if named(self.deny) {
+            Some(Verdict::Deny)
+        } else if named(self.ask) {
+            Some(Verdict::Ask)
+        } else if named(self.allow) {
+            Some(Verdict::Allow)
+        } else {
+            None
+        }
     }
 }
 
@@ -174,7 +226,7 @@ pub fn setting(server: &McpServer, remote: &str) -> Option<Verdict> {
 /// policy allow, and the entry's allow widens nothing while the bundle is
 /// unavailable. A tool neither names is asked.
 pub fn decide(
-    server: &McpServer,
+    on: &Entry<'_>,
     remote: &str,
     policy: &Policy,
     policy_decision: Decision,
@@ -184,24 +236,24 @@ pub fn decide(
     }
     let entry = |verdict: Verdict, list: &str, reason: String| Decision {
         verdict,
-        rule_id: Some(format!("mcp_server.{}.{list}", server.name)),
+        rule_id: Some(format!("{}.{}.{list}", on.kind, on.name)),
         reason: Some(reason),
     };
-    match setting(server, remote) {
+    match on.setting(remote) {
         Some(Verdict::Deny) => entry(
             Verdict::Deny,
             "deny",
             format!(
-                "the operator does not allow {remote} on MCP server {}",
-                server.name
+                "the operator does not allow {remote} on {} {}",
+                on.what, on.name
             ),
         ),
         Some(Verdict::Ask) => entry(
             Verdict::Ask,
             "ask",
             format!(
-                "the operator decides each call to {remote} on MCP server {}",
-                server.name
+                "the operator decides each call to {remote} on {} {}",
+                on.what, on.name
             ),
         ),
         _ if !policy.trusted => Decision {
@@ -214,8 +266,8 @@ pub fn decide(
             Verdict::Allow,
             "allow",
             format!(
-                "the operator allows {remote} on MCP server {} without asking",
-                server.name
+                "the operator allows {remote} on {} {} without asking",
+                on.what, on.name
             ),
         ),
         None => Decision {
@@ -264,7 +316,7 @@ fn credential_headers(
 
 /// `<server>__<tool>`, with any character a function name cannot carry
 /// written as `_`; `None` when that does not fit in one.
-fn namespaced(server: &str, remote: &str) -> Option<String> {
+pub fn namespaced(server: &str, remote: &str) -> Option<String> {
     let tool: String = remote
         .chars()
         .map(|c| {
@@ -278,6 +330,9 @@ fn namespaced(server: &str, remote: &str) -> Option<String> {
     let name = format!("{server}{SEPARATOR}{tool}");
     (!remote.is_empty() && name.len() <= MAX_NAME).then_some(name)
 }
+
+/// The longest name a model API accepts for a tool.
+pub const MAX_TOOL_NAME: usize = MAX_NAME;
 
 /// A server's input schema as a session is offered it: an object schema, and
 /// a `required` that is a list or absent (Claude Code drops every tool of a
@@ -295,7 +350,7 @@ fn input_schema(schema: &Value) -> Value {
     schema
 }
 
-fn bounded(text: &str, max: usize) -> String {
+pub fn bounded(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_string();
     }
@@ -411,9 +466,9 @@ impl Registry {
         self.listings
             .write()
             .retain(|name, _| servers.iter().any(|s| &s.name == name));
-        self.connections
-            .lock()
-            .retain(|(name, _), _| servers.iter().any(|s| &s.name == name));
+        self.connections.lock().retain(|(name, _), _| {
+            name.starts_with(PLUGIN_KEY) || servers.iter().any(|s| &s.name == name)
+        });
         for server in servers {
             if !force && !self.stale(server) {
                 continue;
@@ -491,30 +546,19 @@ impl Registry {
                     LIST_TIMEOUT,
                 )
                 .await
-                .map_err(|f| f.describe(&server.name))?;
-            for tool in page["tools"].as_array().into_iter().flatten() {
-                let Some(remote) = tool["name"].as_str() else {
-                    continue;
-                };
-                let Some(name) = namespaced(&server.name, remote) else {
-                    tracing::warn!(server = %server.name, tool = remote, "an MCP tool's name does not fit; not offered");
+                .map_err(|f| f.describe(&server_label(server)))?;
+            for tool in page_tools(&page) {
+                let Some(name) = namespaced(&server.name, &tool.remote) else {
+                    tracing::warn!(server = %server.name, tool = %tool.remote, "an MCP tool's name does not fit; not offered");
                     continue;
                 };
                 if tools.iter().any(|t| t.name == name) {
-                    tracing::warn!(server = %server.name, tool = remote, "two MCP tools share a name once namespaced; the second is not offered");
+                    tracing::warn!(server = %server.name, tool = %tool.remote, "two MCP tools share a name once namespaced; the second is not offered");
                     continue;
                 }
-                tools.push(RemoteTool {
-                    name,
-                    remote: remote.to_string(),
-                    description: tool["description"].as_str().unwrap_or_default().to_string(),
-                    input_schema: input_schema(&tool["inputSchema"]),
-                });
+                tools.push(RemoteTool { name, ..tool });
             }
-            cursor = page["nextCursor"]
-                .as_str()
-                .filter(|c| !c.is_empty())
-                .map(str::to_string);
+            cursor = next_cursor(&page);
             if cursor.is_none() {
                 break;
             }
@@ -536,6 +580,7 @@ impl Registry {
     ) -> Result<Value, String> {
         let headers = credential_headers(server, broker, channel, node_id)?;
         let timeout = Duration::from_secs(server.timeout_secs());
+        let label = server_label(server);
         let result = self
             .request(
                 server,
@@ -546,34 +591,52 @@ impl Registry {
                 timeout,
             )
             .await
-            .map_err(|f| f.describe(&server.name))?;
-        let content = result
-            .get("content")
-            .filter(|c| c.is_array())
-            .cloned()
-            .unwrap_or_else(|| json!([]));
-        if result["isError"].as_bool() == Some(true) {
-            let text: Vec<&str> = content
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|c| c["text"].as_str())
-                .collect();
-            return Err(format!(
-                "MCP server {} reports an error from {remote}: {}",
-                server.name,
-                if text.is_empty() {
-                    "no detail".to_string()
-                } else {
-                    text.join("\n")
-                }
-            ));
-        }
-        let mut out = json!({ "content": content });
-        if let Some(structured) = result.get("structuredContent").filter(|s| s.is_object()) {
-            out["structuredContent"] = structured.clone();
-        }
-        Ok(out)
+            .map_err(|f| f.describe(&label))?;
+        call_result(result, &label, remote)
+    }
+
+    /// Call `tool` on the plugin instance at `endpoint` for a caller on
+    /// `channel`. `meta` makes the caller context each attempt sends as
+    /// `_meta.tracon`: a fresh one for a retry, since a plugin takes each
+    /// nonce once.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn call_plugin(
+        &self,
+        endpoint: &crate::plugin::supervisor::Endpoint,
+        plugin: &str,
+        channel: &str,
+        tool: &str,
+        args: &Value,
+        mut meta: impl FnMut() -> Result<Value, String>,
+        timeout: Duration,
+    ) -> Result<Value, String> {
+        let http = unix_client(&endpoint.socket);
+        let target = Target {
+            http: &http,
+            url: PLUGIN_URL,
+        };
+        let label = format!("plugin {plugin}");
+        let instance = crate::plugin::context::instance_of(&endpoint.token);
+        let result = self
+            .request_at(
+                target,
+                (format!("{PLUGIN_KEY}{plugin}"), channel.to_string()),
+                &instance,
+                &[],
+                "tools/call",
+                || {
+                    let meta = meta().map_err(Failure::NotSent)?;
+                    Ok(json!({
+                        "name": tool,
+                        "arguments": args,
+                        "_meta": { "tracon": meta },
+                    }))
+                },
+                timeout,
+            )
+            .await
+            .map_err(|f| f.describe(&label))?;
+        call_result(result, &label, tool)
     }
 
     /// One request in the MCP session the node holds with `server` for
@@ -588,8 +651,31 @@ impl Registry {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, Failure> {
-        let key = (server.name.clone(), channel.to_string());
-        let print = fingerprint(server);
+        self.request_at(
+            self.target(server),
+            (server.name.clone(), channel.to_string()),
+            &fingerprint(server),
+            headers,
+            method,
+            || Ok(params.clone()),
+            timeout,
+        )
+        .await
+    }
+
+    /// [`Self::request`] at `target`, in the session held under `key` while
+    /// it was made for `print`. `params` is called once for each attempt.
+    #[allow(clippy::too_many_arguments)]
+    async fn request_at(
+        &self,
+        target: Target<'_>,
+        key: (String, String),
+        print: &str,
+        headers: &[(String, String)],
+        method: &str,
+        mut params: impl FnMut() -> Result<Value, Failure>,
+        timeout: Duration,
+    ) -> Result<Value, Failure> {
         for _ in 0..2 {
             let held = self
                 .connections
@@ -601,12 +687,13 @@ impl Registry {
                 Some(connection) => connection,
                 None => {
                     let id = self.next_id();
-                    let connection = handshake(self.target(server), id, headers, LIST_TIMEOUT)
-                        .await
-                        .map(|c| Connection {
-                            fingerprint: print.clone(),
-                            ..c
-                        })?;
+                    let connection =
+                        handshake(target, id, headers, LIST_TIMEOUT)
+                            .await
+                            .map(|c| Connection {
+                                fingerprint: print.to_string(),
+                                ..c
+                            })?;
                     self.connections
                         .lock()
                         .insert(key.clone(), connection.clone());
@@ -614,12 +701,12 @@ impl Registry {
                 }
             };
             match rpc(
-                self.target(server),
+                target,
                 self.next_id(),
                 headers,
                 Some(&connection),
                 method,
-                params.clone(),
+                params()?,
                 timeout,
             )
             .await
@@ -671,12 +758,13 @@ impl Registry {
                             arguments: None,
                             doc_kinds: None,
                         });
-                        let decision = decide(server, &tool.remote, policy, policy_decision);
+                        let entry = Entry::server(server);
+                        let decision = decide(&entry, &tool.remote, policy, policy_decision);
                         json!({
                             "name": tool.name,
                             "remote": tool.remote,
                             "description": bounded(&tool.description, 300),
-                            "setting": setting(server, &tool.remote).map(verdict_name),
+                            "setting": entry.setting(&tool.remote).map(verdict_name),
                             "decision": verdict_name(decision.verdict),
                             "rule_id": decision.rule_id,
                         })
@@ -710,6 +798,10 @@ pub struct Target<'a> {
 /// connection.
 pub const PLUGIN_URL: &str = "http://plugin/";
 
+/// What a plugin's MCP sessions are held under, before its name: no
+/// `[[mcp_server]]` name can hold a `:`.
+const PLUGIN_KEY: &str = "plugin:";
+
 /// A client for an MCP server on a Unix socket: a plugin
 /// (`crate::plugin::supervisor`). No proxy and no redirects.
 pub fn unix_client(socket: &std::path::Path) -> reqwest::Client {
@@ -732,6 +824,108 @@ pub async fn initialize_unix(http: &reqwest::Client, timeout: Duration) -> Resul
         .await
         .map(|_| ())
         .map_err(|f| f.describe("plugin"))
+}
+
+/// Every tool the plugin `http` reaches lists, in an MCP session of its
+/// own, each named as a session is offered it (`<plugin>__<tool>`, empty
+/// when that does not fit) and by its own name.
+pub async fn list_unix(
+    http: &reqwest::Client,
+    plugin: &str,
+    timeout: Duration,
+) -> Result<Vec<RemoteTool>, String> {
+    let target = Target {
+        http,
+        url: PLUGIN_URL,
+    };
+    let label = format!("plugin {plugin}");
+    let connection = handshake(target, 1, &[], timeout)
+        .await
+        .map_err(|f| f.describe(&label))?;
+    let mut tools: Vec<RemoteTool> = Vec::new();
+    let mut cursor: Option<String> = None;
+    for page_no in 0..MAX_PAGES {
+        let params = match &cursor {
+            Some(cursor) => json!({ "cursor": cursor }),
+            None => json!({}),
+        };
+        let (page, _) = rpc(
+            target,
+            2 + page_no as u64,
+            &[],
+            Some(&connection),
+            "tools/list",
+            params,
+            timeout,
+        )
+        .await
+        .map_err(|f| f.describe(&label))?;
+        tools.extend(page_tools(&page).into_iter().map(|tool| RemoteTool {
+            name: namespaced(plugin, &tool.remote).unwrap_or_default(),
+            ..tool
+        }));
+        cursor = next_cursor(&page);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    Ok(tools)
+}
+
+/// The tools one page of `tools/list` names, by their own names only.
+fn page_tools(page: &Value) -> Vec<RemoteTool> {
+    page["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| {
+            Some(RemoteTool {
+                name: String::new(),
+                remote: tool["name"].as_str()?.to_string(),
+                description: tool["description"].as_str().unwrap_or_default().to_string(),
+                input_schema: input_schema(&tool["inputSchema"]),
+            })
+        })
+        .collect()
+}
+
+fn next_cursor(page: &Value) -> Option<String> {
+    page["nextCursor"]
+        .as_str()
+        .filter(|c| !c.is_empty())
+        .map(str::to_string)
+}
+
+/// A `tools/call` result as a session is given it: the server's own
+/// content, and its structured result; one it marks as an error is
+/// returned as one, `server` naming what answered.
+fn call_result(result: Value, server: &str, remote: &str) -> Result<Value, String> {
+    let content = result
+        .get("content")
+        .filter(|c| c.is_array())
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    if result["isError"].as_bool() == Some(true) {
+        let text: Vec<&str> = content
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|c| c["text"].as_str())
+            .collect();
+        return Err(format!(
+            "{server} reports an error from {remote}: {}",
+            if text.is_empty() {
+                "no detail".to_string()
+            } else {
+                text.join("\n")
+            }
+        ));
+    }
+    let mut out = json!({ "content": content });
+    if let Some(structured) = result.get("structuredContent").filter(|s| s.is_object()) {
+        out["structuredContent"] = structured.clone();
+    }
+    Ok(out)
 }
 
 /// `initialize`, then `notifications/initialized`: the MCP session it
@@ -993,10 +1187,19 @@ mod tests {
     #[test]
     fn deny_wins_over_ask_and_ask_over_allow() {
         let s = server();
-        assert_eq!(setting(&s, "delete_issue"), Some(Verdict::Deny));
-        assert_eq!(setting(&s, "list_secrets"), Some(Verdict::Ask));
-        assert_eq!(setting(&s, "list_issues"), Some(Verdict::Allow));
-        assert_eq!(setting(&s, "create_issue"), None);
+        assert_eq!(
+            Entry::server(&s).setting("delete_issue"),
+            Some(Verdict::Deny)
+        );
+        assert_eq!(
+            Entry::server(&s).setting("list_secrets"),
+            Some(Verdict::Ask)
+        );
+        assert_eq!(
+            Entry::server(&s).setting("list_issues"),
+            Some(Verdict::Allow)
+        );
+        assert_eq!(Entry::server(&s).setting("create_issue"), None);
     }
 
     #[test]
@@ -1009,19 +1212,19 @@ mod tests {
             reason: Some("no".into()),
         };
         assert_eq!(
-            decide(&s, "list_issues", &policy, denied).verdict,
+            decide(&Entry::server(&s), "list_issues", &policy, denied).verdict,
             Verdict::Deny
         );
         assert_eq!(
-            decide(&s, "list_issues", &policy, ask()).verdict,
+            decide(&Entry::server(&s), "list_issues", &policy, ask()).verdict,
             Verdict::Allow
         );
         assert_eq!(
-            decide(&s, "create_issue", &policy, ask()).verdict,
+            decide(&Entry::server(&s), "create_issue", &policy, ask()).verdict,
             Verdict::Ask
         );
         assert_eq!(
-            decide(&s, "delete_issue", &policy, ask()).verdict,
+            decide(&Entry::server(&s), "delete_issue", &policy, ask()).verdict,
             Verdict::Deny
         );
         // The entry's ask holds even where a policy rule would allow.
@@ -1031,17 +1234,93 @@ mod tests {
             reason: None,
         };
         assert_eq!(
-            decide(&s, "list_secrets", &policy, allowed.clone()).verdict,
+            decide(&Entry::server(&s), "list_secrets", &policy, allowed.clone()).verdict,
             Verdict::Ask
         );
         assert_eq!(
-            decide(&s, "create_issue", &policy, allowed).verdict,
+            decide(&Entry::server(&s), "create_issue", &policy, allowed).verdict,
             Verdict::Allow
         );
         // An allow widens nothing without a trusted bundle.
         let untrusted = Policy::default();
         assert_eq!(
-            decide(&s, "list_issues", &untrusted, ask()).verdict,
+            decide(&Entry::server(&s), "list_issues", &untrusted, ask()).verdict,
+            Verdict::Ask
+        );
+    }
+
+    #[test]
+    fn a_plugin_is_decided_as_a_server_is_under_its_own_entry() {
+        let entry = PluginEntry {
+            name: "sql-review".into(),
+            allow: vec!["query".into(), "list_*".into()],
+            ask: vec!["list_secrets".into()],
+            deny: vec!["drop_*".into()],
+            ..Default::default()
+        };
+        let on = Entry::plugin("sql-review", Some(&entry));
+        let policy = Policy::shipped();
+        let allowed = Decision {
+            verdict: Verdict::Allow,
+            rule_id: Some("p".into()),
+            reason: None,
+        };
+        let denied = Decision {
+            verdict: Verdict::Deny,
+            rule_id: Some("r".into()),
+            reason: Some("no".into()),
+        };
+        // (tool, policy's own decision, verdict, rule)
+        let cases = [
+            (
+                "query",
+                ask(),
+                Verdict::Allow,
+                Some("plugin.sql-review.allow"),
+            ),
+            ("query", denied.clone(), Verdict::Deny, Some("r")),
+            (
+                "drop_table",
+                allowed.clone(),
+                Verdict::Deny,
+                Some("plugin.sql-review.deny"),
+            ),
+            (
+                "list_secrets",
+                allowed.clone(),
+                Verdict::Ask,
+                Some("plugin.sql-review.ask"),
+            ),
+            (
+                "list_tables",
+                ask(),
+                Verdict::Allow,
+                Some("plugin.sql-review.allow"),
+            ),
+            ("explain", ask(), Verdict::Ask, None),
+            ("explain", allowed.clone(), Verdict::Allow, Some("p")),
+        ];
+        for (tool, policy_decision, verdict, rule) in cases {
+            let decision = decide(&on, tool, &policy, policy_decision);
+            assert_eq!(decision.verdict, verdict, "{tool}");
+            assert_eq!(decision.rule_id.as_deref(), rule, "{tool}");
+        }
+        let reason = decide(&on, "drop_table", &policy, ask()).reason.unwrap();
+        assert_eq!(
+            reason,
+            "the operator does not allow drop_table on plugin sql-review"
+        );
+        // No entry: only the signed policy allows, and an unnamed tool is
+        // asked.
+        let bare = Entry::plugin("open", None);
+        assert_eq!(
+            decide(&bare, "query", &policy, allowed).verdict,
+            Verdict::Allow
+        );
+        assert_eq!(decide(&bare, "query", &policy, ask()).verdict, Verdict::Ask);
+        // The entry's allow widens nothing without a trusted bundle.
+        assert_eq!(
+            decide(&on, "query", &Policy::default(), ask()).verdict,
             Verdict::Ask
         );
     }

@@ -322,6 +322,20 @@ impl Manifest {
             if !seen.insert(tool.name.as_str()) {
                 return bad(&field, "is declared twice".into());
             }
+            // A session calls it `<plugin>__<tool>`, which a model's tool
+            // name must hold.
+            let offered = self.name.len() + 2 + tool.name.len();
+            if offered > crate::mcp::upstream::MAX_TOOL_NAME {
+                return bad(
+                    &field,
+                    format!(
+                        "{}__{} is {offered} characters; a tool's offered name holds at most {}",
+                        self.name,
+                        tool.name,
+                        crate::mcp::upstream::MAX_TOOL_NAME
+                    ),
+                );
+            }
         }
         if let Some(ui) = &self.ui {
             if !under(&ui.entry, "ui") {
@@ -661,6 +675,11 @@ title = "SQL"
                 "tool \"write\": is declared twice",
             ),
             ("name = \"query\"", "name = \"q__x\"", "tool \"q__x\""),
+            (
+                "name = \"query\"",
+                &format!("name = \"{}\"", "q".repeat(60)),
+                "holds at most 64",
+            ),
             (
                 "name = \"sql-write\"",
                 "name = \"sql-read\"",
