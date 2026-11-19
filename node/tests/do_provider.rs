@@ -31,7 +31,9 @@ use tracon::provider::digitalocean::listener::DoListener;
 use tracon::provider::digitalocean::runtime::DoRuntime;
 use tracon::provider::digitalocean::templates::{Source, TemplateState};
 use tracon::provider::digitalocean::{ClientSource, HubRelay, Owner, Settings};
-use tracon::provider::{Handle, Requirements, SandboxProvider as _, Status};
+use tracon::provider::{
+    Bootstrap, Handle, Requirements, Resources, SandboxProvider as _, SnapshotId, Status,
+};
 use tracon::runner::sandbox_files::FilesStore;
 use tracon::runner::{Mount, RunnerCommand};
 use tracon_sandbox::carrier::Dial;
@@ -218,6 +220,196 @@ async fn services_run_inside_with_the_sandboxs_own_egress(
     assert_eq!(session.done.await.unwrap(), 0);
 }
 
+/// A session in a repository with `require.memory = "4Gi"` is made at the
+/// cheapest size with 4 GiB, its usage row says so at that size's price,
+/// and a fork of it is priced at its parent's size.
+async fn a_memory_floor_sizes_the_sandbox_and_its_fork(
+    runtime: &Arc<DoRuntime>,
+    cfg: &Config,
+    store: &FilesStore,
+    fake: &FakeDo,
+    usage: &tracon::store::Store,
+    fail_exec: &Mutex<bool>,
+) {
+    // As placement resolves it for such a repository.
+    let placement: tracon::provider::requirements::Placement = toml::from_str(
+        r#"
+        [[repo]]
+        path = "github.com/cosmicspork/tracon"
+        [repo.require]
+        memory = "4Gi"
+        "#,
+    )
+    .unwrap();
+    let resolved = placement.resolve(
+        "personal",
+        Some(Path::new("/src/github.com/cosmicspork/tracon")),
+    );
+    let runner = runtime.runner_with(
+        cfg,
+        resolved.requirements,
+        Vec::new(),
+        IMAGE.into(),
+        CLAUDE,
+        store.clone(),
+    );
+    let made_before = fake.api.lock().unwrap().manifests.len();
+    let session = runner
+        .spawn(RunnerCommand {
+            argv: vec!["sh".into(), "-c".into(), "echo up; read done".into()],
+            name: "tracon-h-do5".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let mut lines = BufReader::new(session.stdout).lines();
+    assert_eq!(lines.next_line().await.unwrap().as_deref(), Some("up"));
+    let id = {
+        let api = fake.api.lock().unwrap();
+        assert_eq!(api.manifests.len(), made_before + 1);
+        assert_eq!(api.manifests[made_before]["size"], "mars-2vcpu-4gb");
+        api.sessions
+            .iter()
+            .find(|(_, s)| s["name"] == "tracon-h-do5-nabcd1234")
+            .map(|(id, _)| id.clone())
+            .unwrap()
+    };
+    let rows = || usage.sandboxes_between(0, None, None).unwrap();
+    let parent = rows().into_iter().find(|r| r.sandbox_id == id).unwrap();
+    assert_eq!(parent.size.as_deref(), Some("mars-2vcpu-4gb"));
+    assert_eq!(parent.price_per_hour_usd, Some(0.126));
+
+    // A fork, whose bootstrap this stand-in refuses so nothing dials: its
+    // row is noted as it is made, at its parent's size.
+    let provider = runtime.provider();
+    let snapshot: SnapshotId = provider.snapshot(&Handle(id.clone())).await.unwrap();
+    *fail_exec.lock().unwrap() = true;
+    let forked = provider
+        .fork(
+            &snapshot,
+            &Resources::default(),
+            &Bootstrap {
+                run: "tracon-h-do5-fork:1".into(),
+                cert_pin: "sha256:00".into(),
+                token: "unused".into(),
+            },
+        )
+        .await;
+    *fail_exec.lock().unwrap() = false;
+    assert!(forked.is_err());
+    let fork = rows()
+        .into_iter()
+        .find(|r| r.kind == "fork")
+        .expect("the fork's row");
+    assert_eq!(fork.size.as_deref(), Some("mars-2vcpu-4gb"));
+    assert_eq!(fork.price_per_hour_usd, Some(0.126));
+    assert_eq!(fork.end_reason.as_deref(), Some("failed"));
+
+    // What Settings shows of the floor.
+    let mut cfg = cfg.clone();
+    cfg.placement = placement;
+    let report = serde_json::to_value(runtime.report(&cfg).await).unwrap();
+    assert_eq!(
+        report["elsewhere"]["floors"],
+        serde_json::json!([{
+            "scope": "github.com/cosmicspork/tracon",
+            "memory": "4Gi",
+            "size": "mars-2vcpu-4gb",
+            "memory_mb": 4096,
+            "price_per_hour_usd": 0.126,
+        }])
+    );
+
+    let mut stdin = session.stdin;
+    stdin.write_all(b"\n").await.unwrap();
+    stdin.flush().await.unwrap();
+    drop(stdin);
+    assert_eq!(session.done.await.unwrap(), 0);
+}
+
+/// A node that has never read the catalog, with no `[digitalocean] size`,
+/// refuses the start with why, and asks DigitalOcean to make nothing.
+async fn a_fresh_node_that_cannot_read_the_catalog_makes_nothing(
+    cfg: &Config,
+    server: &Arc<tracon_sandbox::node::SandboxServer>,
+    store: &FilesStore,
+) {
+    let fake = FakeDo::start().await;
+    fake.api.lock().unwrap().sizes_fail = true;
+    let listener = DoListener::bind("127.0.0.1:0".parse().unwrap(), server.clone())
+        .await
+        .unwrap();
+    let node = listener.local_addr();
+    let client: ClientSource = {
+        let fake = fake.clone();
+        Arc::new(move || Ok(fake.client()))
+    };
+    let runtime = DoRuntime::with(
+        client,
+        Settings {
+            credential: "do".into(),
+            api_url: fake.url.clone(),
+            image: IMAGE.into(),
+            listen: node.to_string(),
+            node_addr: node.to_string(),
+            ..Settings::default()
+        },
+        Source::Given(IMAGE.into()),
+        Owner::new("tracon", "abcd1234"),
+        "tracon-gw".into(),
+        listener,
+        HubRelay::none(),
+    )
+    .unwrap();
+    for _ in 0..3 {
+        if matches!(
+            runtime.ensure_template(IMAGE).await,
+            TemplateState::Ready { .. }
+        ) {
+            break;
+        }
+    }
+    let runner = runtime.runner_with(
+        cfg,
+        Requirements::default(),
+        Vec::new(),
+        IMAGE.into(),
+        CLAUDE,
+        store.clone(),
+    );
+    let refused = runner
+        .run_capture(RunnerCommand {
+            argv: vec!["true".into()],
+            name: "tracon-h-do6".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("catalog could not be read"), "{refused}");
+    assert!(
+        refused.contains("setting `[digitalocean] size`"),
+        "{refused}"
+    );
+    {
+        let api = fake.api.lock().unwrap();
+        assert!(api.manifests.is_empty(), "{:?}", api.manifests);
+        assert!(api.sessions.is_empty(), "{:?}", api.sessions);
+    }
+    // Settings says so.
+    let report = serde_json::to_value(runtime.report(cfg).await).unwrap();
+    let elsewhere = &report["elsewhere"];
+    assert!(elsewhere.get("size").is_none(), "{elsewhere}");
+    assert!(
+        elsewhere["catalog_error"]
+            .as_str()
+            .unwrap()
+            .contains("could not read DigitalOcean's sandbox sizes"),
+        "{elsewhere}"
+    );
+    assert!(elsewhere["size_error"].is_string(), "{elsewhere}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_session_runs_on_digitalocean_minus_digitalocean() {
     support::state::isolate();
@@ -260,6 +452,9 @@ async fn a_session_runs_on_digitalocean_minus_digitalocean() {
     )
     .unwrap();
     let provider = runtime.provider().clone();
+    // Each sandbox's lifetime, at the size it was made at.
+    let usage = Arc::new(tracon::store::Store::open_in_memory().unwrap());
+    provider.meter().set_store(usage.clone());
     // The stand-in's supervisor is this test's own loop, as its user.
     let me = tracon_sandbox::inside::user::current().uid;
     provider.expect_uid(Some(me));
@@ -268,11 +463,17 @@ async fn a_session_runs_on_digitalocean_minus_digitalocean() {
     // delivered and dial as a sandbox there would.
     let threads: Arc<Mutex<Vec<Sandbox>>> = Arc::default();
     let widen: Arc<Mutex<bool>> = Arc::default();
+    // The bootstrap fails, so a sandbox is made and at once removed.
+    let fail_exec: Arc<Mutex<bool>> = Arc::default();
     fake.on_exec({
         let threads = threads.clone();
         let widen = widen.clone();
+        let fail_exec = fail_exec.clone();
         let api = fake.api.clone();
         Arc::new(move |session: &str, argv: &[String]| {
+            if *fail_exec.lock().unwrap() {
+                return 1;
+            }
             let Some(d) = Delivery::parse(argv) else {
                 return 2;
             };
@@ -341,6 +542,12 @@ async fn a_session_runs_on_digitalocean_minus_digitalocean() {
     assert_eq!(elsewhere["healthy"], true);
     assert!(elsewhere.get("why").is_none(), "{elsewhere}");
     assert_eq!(elsewhere["capacity"]["limit"], 2);
+    // With no [digitalocean] size, the cheapest with 2 GiB, from the catalog.
+    assert_eq!(elsewhere["size"], "mars-2vcpu-2gb");
+    assert_eq!(elsewhere["memory_mb"], 2048);
+    assert_eq!(elsewhere["price_per_hour_usd"], 0.107);
+    assert!(elsewhere.get("size_error").is_none(), "{elsewhere}");
+    assert!(elsewhere.get("catalog_error").is_none(), "{elsewhere}");
     let template = provider.templates().name_for(IMAGE).unwrap();
     assert_eq!(template, "tracon-tabcd1234-1111111111111111");
 
@@ -418,6 +625,7 @@ async fn a_session_runs_on_digitalocean_minus_digitalocean() {
             "name": "tracon-h-do1-nabcd1234",
             "harness": "none",
             "template": template,
+            "size": "mars-2vcpu-2gb",
             "keep_warm": true,
             "egress": {"allow_ips": ["127.0.0.1"]},
         })
@@ -435,6 +643,23 @@ async fn a_session_runs_on_digitalocean_minus_digitalocean() {
     for thread in ended {
         join(thread).await.unwrap();
     }
+
+    // Its usage row carries the same size, at that size's price.
+    let rows = usage.sandboxes_between(0, None, None).unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].sandbox_id, exec.0);
+    assert_eq!(rows[0].size.as_deref(), Some("mars-2vcpu-2gb"));
+    assert_eq!(rows[0].price_per_hour_usd, Some(0.107));
+
+    a_memory_floor_sizes_the_sandbox_and_its_fork(
+        &runtime, &cfg, &store, &fake, &usage, &fail_exec,
+    )
+    .await;
+    let ended = std::mem::take(&mut *threads.lock().unwrap());
+    for thread in ended {
+        join(thread).await.unwrap();
+    }
+    a_fresh_node_that_cannot_read_the_catalog_makes_nothing(&cfg, &server, &store).await;
 
     services_run_inside_with_the_sandboxs_own_egress(&runtime, &cfg, &store, &tmp).await;
     let ended = std::mem::take(&mut *threads.lock().unwrap());
@@ -529,7 +754,8 @@ async fn a_session_runs_on_digitalocean_minus_digitalocean() {
     {
         let api = fake.api.lock().unwrap();
         assert!(api.sessions.is_empty(), "{:?}", api.sessions);
-        assert_eq!(api.deleted_configs.len(), 4);
+        // The two above, the floor's session and its fork.
+        assert_eq!(api.deleted_configs.len(), 6);
     }
 
     // Read back: paused is not lost, gone is lost, and only this node's

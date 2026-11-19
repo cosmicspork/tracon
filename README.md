@@ -1678,6 +1678,13 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
 # privilege = ["unprivileged"]      # unprivileged | root-in-vm (asked only of a container)
 # runtime_socket = ["absent"]       # absent | present
 # image_identity = ["exact"]        # exact | derived
+# memory = "4Gi"                    # not a capability but a floor: the least memory each sandbox
+                                    # is made with, as a Kubernetes quantity ("4Gi", not "4GiB").
+                                    # The larger of channel's and repository's wins. Read by
+                                    # DigitalOcean alone (the cheapest size in its catalog with at
+                                    # least this much, raising [digitalocean] size or its default);
+                                    # it never refuses a provider, and local runtimes ignore it.
+                                    # Settings shows the size each floor resolves to
 
 # [digitalocean]                    # DigitalOcean's Harness Runtime, for sessions [placement] sends
                                     # there. Off without a credential. Each sandbox is a microVM whose
@@ -1735,7 +1742,15 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
 # base_template = "coding-base"     # the runtime's base the image is rebased onto (DigitalOcean
                                     # no longer accepts the old name "sandbox")
 # region = ""                       # the API host's region; empty for the default
-# size = ""                         # a sandbox size slug; empty for the runtime's default
+# size = ""                         # a sandbox size slug; empty for the cheapest size in the
+                                    # runtime's catalog with at least 2 GiB (mars-2vcpu-2gb today),
+                                    # never the runtime's own 1 GB default. A smaller slug set here
+                                    # is kept; a [placement] memory floor raises either. A slug the
+                                    # catalog does not list, a floor no size meets, or (with no slug
+                                    # set, or a floor) a catalog the node has never read refuses the
+                                    # sandbox with why; a slug set here lets sandboxes start without
+                                    # the catalog, unpriced. Settings shows the size, its memory and
+                                    # price
 # limit = 4                         # sandboxes there at once
 # listen = "0.0.0.0:8443"           # where the node takes its sandboxes' TLS connections
 # node_addr = "203.0.113.7:443"     # what they dial as raw TLS: an address, not a name. A load

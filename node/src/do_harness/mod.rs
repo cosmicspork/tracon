@@ -477,7 +477,8 @@ impl Client {
         self.send(req, "sandbox exec").await
     }
 
-    /// The selectable sandbox sizes, smallest first.
+    /// The selectable sandbox sizes, in the order the API lists them (which
+    /// nothing promises is smallest first: `meter::choose` never relies on it).
     pub async fn sizes(&self) -> Result<Vec<Size>, DoError> {
         let path = format!("{PREFIX}/sessions/sandbox/sizes");
         let root: SizesRoot = self
