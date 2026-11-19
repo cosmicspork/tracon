@@ -479,3 +479,72 @@ fn checkout_exclusions_match_git() {
         .any(|e| e.unwrap().path().unwrap() == Path::new(".git/HEAD"));
     assert!(has_git, "the repository travels whole");
 }
+
+/// An unpack whose caller gives up (the timeout on a sync, an export whose
+/// reader went away) stops reading at once, which drops the stream and so
+/// ends the transfer, and its staging directory goes once nothing writes it.
+/// Nothing that arrives after is written.
+#[tokio::test]
+async fn an_unpack_given_up_stops_its_transfer_and_leaves_nothing() {
+    use tokio::io::AsyncWriteExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let whole = archive(|b| {
+        for i in 0..8 {
+            raw_entry(
+                b,
+                tar::EntryType::Regular,
+                format!("f{i}.txt").as_bytes(),
+                None,
+                b"x",
+            );
+        }
+    });
+    let (mut writer, reader) = tokio::io::duplex(64 * 1024);
+    writer.write_all(&whole[..3 * 1024]).await.unwrap();
+    let path = dir.path().join("staging");
+    let staging = Staging::create(path.clone()).unwrap();
+    assert!(in_flight(&path));
+    let unpacked = tokio::time::timeout(
+        std::time::Duration::from_millis(50),
+        unpack_staged(reader, &staging, None, Limits::default()),
+    )
+    .await;
+    assert!(unpacked.is_err(), "the unpack did not time out");
+    drop(staging);
+
+    let gone = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while path.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(gone.is_ok(), "the staging directory stayed");
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while writer.write_all(&[0u8; 512]).await.is_ok() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "the transfer was left reading");
+    assert!(!in_flight(&path));
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!path.exists(), "the staging directory came back");
+}
+
+/// Kept, it stays where it is, and nothing removes it.
+#[tokio::test]
+async fn a_kept_staging_directory_stays() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("staging");
+    let staging = Staging::create(path.clone()).unwrap();
+    std::fs::write(path.join("a"), "a").unwrap();
+    let dest = path.clone();
+    staging
+        .blocking(move || std::fs::write(dest.join("b"), "b"))
+        .await
+        .unwrap();
+    assert_eq!(staging.keep(), path);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(path.join("a").exists() && path.join("b").exists());
+    assert!(!in_flight(&path));
+}

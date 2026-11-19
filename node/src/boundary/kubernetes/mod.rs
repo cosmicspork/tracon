@@ -563,12 +563,14 @@ impl Backend for KubeBackend {
         let root = self.cfg.runtime.kubernetes.state_mount.join(volume);
         let staged = root.with_extension(format!("staging-{}", uuid::Uuid::now_v7()));
         let _ = std::fs::remove_dir_all(&staged);
-        crate::workspace::copy_tree(source, &staged, false)
-            .map_err(|e| BoundaryError::Other(e.to_string()))?;
-        if root.exists() {
-            std::fs::remove_dir_all(&root)?;
+        if let Err(error) = crate::workspace::copy_tree(source, &staged, false) {
+            let _ = std::fs::remove_dir_all(&staged);
+            return Err(BoundaryError::Other(error.to_string()));
         }
-        std::fs::rename(staged, root)?;
+        if let Err(error) = crate::boundary::swap_staged(&staged, &root) {
+            let _ = std::fs::remove_dir_all(&staged);
+            return Err(error.into());
+        }
         Ok(())
     }
 
