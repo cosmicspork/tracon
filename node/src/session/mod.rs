@@ -224,6 +224,24 @@ fn workspace_of(row: &SessionRow) -> String {
         .to_string()
 }
 
+/// What a session carrying on one whose harness died is told: that it died,
+/// how, and that whatever it was running in the background went with it.
+fn died_note(old: &SessionRow, carried: &[ReviewRow]) -> String {
+    let how = old
+        .last_error
+        .as_deref()
+        .filter(|e| !e.is_empty())
+        .map(|e| format!(" ({e})"))
+        .unwrap_or_default();
+    let why = format!(
+        "This session continues session {}, whose harness process died in the middle of its \
+         work{how} and was not started again. Commands it ran in the background, and their \
+         output, are gone. You inherit none of its context",
+        old.id,
+    );
+    handoff(old, &why, carried)
+}
+
 /// What a session carrying on a suspended, published one is told: where its
 /// work landed, and that what brings it back (a CI failure, a review comment)
 /// is on the forge to read.
@@ -897,10 +915,11 @@ impl Manager {
                 Some(r) if r == state::EndReason::ProviderExhausted.as_str() => {
                     exhausted_note(&old, None, &carried)
                 }
+                Some(r) if r == state::EndReason::HarnessDied.as_str() => died_note(&old, &carried),
                 _ => {
                     return Err(SessionError::Rejected(
-                        "only a session a node restart or an exhausted provider ended, or a \
-                         suspended one, can be continued this way"
+                        "only a session a node restart, an exhausted provider or its harness's \
+                         death ended, or a suspended one, can be continued this way"
                             .into(),
                     ))
                 }
@@ -3478,11 +3497,16 @@ impl Manager {
                 }
             }
             // Kept for a harness that can be started again on this session when
-            // its process dies.
-            let relaunch = adapter.restorable().then(|| supervisor::Relaunch {
-                adapter: adapter.clone(),
-                spec: launch_spec.clone(),
-            });
+            // its process dies, in a sandbox on this node's own runtime. One
+            // placed elsewhere is gone by the time its exit is known, and a
+            // relaunch would be a new paid sandbox of the same size that
+            // would likely die the same way: the session ends instead, to be
+            // carried on (`continue_interrupted`).
+            let relaunch =
+                (adapter.restorable() && !placed.is_elsewhere()).then(|| supervisor::Relaunch {
+                    adapter: adapter.clone(),
+                    spec: launch_spec.clone(),
+                });
             let launched = tokio::time::timeout(
                 STARTUP_TIMEOUT,
                 adapter.launch(runner.as_ref(), launch_spec),

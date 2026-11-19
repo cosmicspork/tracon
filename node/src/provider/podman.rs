@@ -900,6 +900,7 @@ impl SandboxProvider for PodmanProvider {
             "paused" => Status::Paused,
             "exited" | "stopped" => Status::Exited {
                 code: state["ExitCode"].as_i64().unwrap_or(-1) as i32,
+                oom_killed: state["OOMKilled"].as_bool().unwrap_or(false),
             },
             _ => Status::Lost,
         })
@@ -1573,7 +1574,10 @@ mod tests {
         *s.fake.inspect.lock().unwrap() = Some(doc.to_string());
         assert_eq!(
             s.provider.status(&handle).await.unwrap(),
-            Status::Exited { code: 3 }
+            Status::Exited {
+                code: 3,
+                oom_killed: false
+            }
         );
         assert_eq!(
             s.provider.capacity().await.unwrap(),

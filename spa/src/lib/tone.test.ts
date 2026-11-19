@@ -18,6 +18,7 @@ test('failure is red whether the state or the end reason says so', () => {
   expect(sessionTone({ state: 'killed_budget', end_reason: 'budget' })).toBe('crit')
   expect(sessionTone({ state: 'closed', end_reason: 'error' })).toBe('crit')
   expect(sessionTone({ state: 'closed', end_reason: 'incompatible' })).toBe('crit')
+  expect(sessionTone({ state: 'closed', end_reason: 'harness_died' })).toBe('crit')
 })
 
 test('a live session is waiting on you or running', () => {

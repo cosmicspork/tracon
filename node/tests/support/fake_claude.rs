@@ -41,6 +41,9 @@ fn main() {
     let mcp_status =
         std::env::var("FAKE_CLAUDE_MCP_STATUS").unwrap_or_else(|_| "connected".to_string());
     let has_mcp = args.iter().any(|a| a == "--mcp-config");
+    // Dies in its first turn, as a harness the OOM killer takes does: it
+    // starts a tool call and is SIGKILLed before any `result`.
+    let die_mid_turn = std::env::var("FAKE_CLAUDE_DIE_MID_TURN").is_ok();
 
     // The stream-json revision this fake claims to speak. Absent by default,
     // which is what the shipped CLI's init frame looks like; a test sets it to
@@ -96,6 +99,26 @@ fn main() {
                     emit(init);
                 }
                 compact(&session_id);
+            }
+            "user" if die_mid_turn => {
+                if let Some(init) = init.take() {
+                    emit(init);
+                }
+                emit(serde_json::json!({
+                    "type": "assistant",
+                    "message": {
+                        "id": "msg_0",
+                        "role": "assistant",
+                        "content": [
+                            { "type": "tool_use", "id": "toolu_0", "name": "Bash",
+                              "input": { "command": "cargo test --lib", "run_in_background": true } },
+                        ],
+                    },
+                }));
+                // SAFETY: signalling this process itself.
+                unsafe {
+                    libc::kill(libc::getpid(), libc::SIGKILL);
+                }
             }
             "user" => {
                 if let Some(init) = init.take() {

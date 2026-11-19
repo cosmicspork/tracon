@@ -409,6 +409,50 @@ async fn a_session_copies_in_each_service_bundle() {
     );
 }
 
+/// A harness the OOM killer ended says so in its status, not only its code.
+#[test]
+fn an_oom_killed_harness_keeps_its_reason() {
+    use crate::provider::kubernetes::pod::sandbox_status;
+    use k8s_openapi::api::core::v1::{ContainerState, ContainerStateTerminated, ContainerStatus};
+    let ended = |reason: &str, code: i32| PodStatus {
+        phase: Some("Failed".into()),
+        container_statuses: Some(vec![ContainerStatus {
+            name: HARNESS_CONTAINER.into(),
+            state: Some(ContainerState {
+                terminated: Some(ContainerStateTerminated {
+                    exit_code: code,
+                    reason: Some(reason.into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }]),
+        ..Default::default()
+    };
+    assert_eq!(
+        sandbox_status(&ended("OOMKilled", 137)),
+        Status::Exited {
+            code: 137,
+            oom_killed: true
+        }
+    );
+    assert_eq!(
+        sandbox_status(&ended("Error", 2)),
+        Status::Exited {
+            code: 2,
+            oom_killed: false
+        }
+    );
+    assert_eq!(
+        sandbox_status(&PodStatus {
+            phase: Some("Running".into()),
+            ..Default::default()
+        }),
+        Status::Running
+    );
+}
+
 /// A bundle's copy failing names the bundle it was copying.
 #[test]
 fn a_failed_copy_names_its_bundle() {

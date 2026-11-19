@@ -282,6 +282,11 @@ pub struct ExitStatus {
     pub code: Option<i32>,
     /// The signal that killed it, when one did.
     pub signal: Option<i32>,
+    /// It was killed while the sandbox's cgroup counted an out-of-memory
+    /// kill it had not before: the kernel's OOM killer ended it. Absent from
+    /// a sandbox that does not look, which reads as not.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub oom_killed: bool,
 }
 
 impl ExitStatus {
@@ -295,16 +300,19 @@ impl ExitStatus {
             ExitStatus {
                 code: Some(libc::WEXITSTATUS(status)),
                 signal: None,
+                oom_killed: false,
             }
         } else if libc::WIFSIGNALED(status) {
             ExitStatus {
                 code: None,
                 signal: Some(libc::WTERMSIG(status)),
+                oom_killed: false,
             }
         } else {
             ExitStatus {
                 code: None,
                 signal: None,
+                oom_killed: false,
             }
         }
     }

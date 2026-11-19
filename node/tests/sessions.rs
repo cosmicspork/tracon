@@ -2728,6 +2728,47 @@ async fn a_session_a_restart_ended_can_be_continued_once() {
     assert!(answer.to_string().contains(new_id), "{answer}");
 }
 
+/// A session whose harness died and was not started again is carried on
+/// the same way, and its successor is told the harness died, how, and what
+/// went with it.
+#[tokio::test]
+async fn a_session_whose_harness_died_can_be_continued() {
+    state::isolate();
+    let h = Harness::new(10_000).await;
+    let id = insert_running_session(&h.store, 10_000);
+    h.store
+        .update_session(
+            &id,
+            tracon::store::SessionPatch {
+                state: Some("closed".into()),
+                end_reason: Some("harness_died".into()),
+                last_error: Some(
+                    "the harness process died mid-turn: killed by SIGKILL (exit 137)".into(),
+                ),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let (status, row) = h
+        .call("POST", &format!("/api/sessions/{id}/continue"), None)
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{row}");
+    assert_eq!(row["continued_from"], id.as_str());
+    assert_eq!(row["repo_path"], format!("workspace://{id}"));
+    let note = h
+        .store
+        .get_session(row["id"].as_str().unwrap())
+        .unwrap()
+        .unwrap()
+        .draft
+        .unwrap_or_default();
+    assert!(note.contains(&id), "{note}");
+    assert!(note.contains("harness process died"), "{note}");
+    assert!(note.contains("killed by SIGKILL (exit 137)"), "{note}");
+    assert!(note.contains("background"), "{note}");
+    assert!(note.contains("inherit none of its context"), "{note}");
+}
+
 fn published_review(id: &str, session: &str) -> tracon::store::ReviewRow {
     tracon::store::ReviewRow {
         id: id.into(),

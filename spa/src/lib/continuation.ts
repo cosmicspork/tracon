@@ -14,6 +14,7 @@ const ENDED: Record<string, string> = {
   incompatible: 'harness incompatible',
   node_restart: 'node restarted',
   provider_exhausted: 'provider exhausted',
+  harness_died: 'harness died',
   error: 'failed',
 }
 
@@ -21,7 +22,7 @@ const ENDED: Record<string, string> = {
 export function attemptState(a: ContinuationAttempt): string {
   if (a.end_reason) {
     const why = ENDED[a.end_reason] ?? a.end_reason.replaceAll('_', ' ')
-    return a.end_reason === 'error' && a.last_error ? `${why}: ${a.last_error}` : why
+    return (a.end_reason === 'error' || a.end_reason === 'harness_died') && a.last_error ? `${why}: ${a.last_error}` : why
   }
   return a.state.replaceAll('_', ' ')
 }

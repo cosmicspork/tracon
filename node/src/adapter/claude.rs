@@ -20,9 +20,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    AdapterError, HarnessAdapter, HarnessCompat, HarnessEvent, HarnessHandle, HarnessVersion,
-    LaunchSpec, Layout, ModelOption, PermissionReply, PermissionRequest, ProtocolSupport,
-    TurnResult,
+    AdapterError, ExitCause, HarnessAdapter, HarnessCompat, HarnessEvent, HarnessHandle,
+    HarnessVersion, LaunchSpec, Layout, ModelOption, PermissionReply, PermissionRequest,
+    ProtocolSupport, Resume, TurnResult,
 };
 use crate::adapter::types::{self, PermissionOption, ToolCall, ToolCallUpdate, Usage};
 use crate::runner::{RunKind, RunLabels, Runner, RunnerCommand, RunnerError, Spawned};
@@ -401,7 +401,7 @@ const NO_CONVERSATION: &str = "No conversation found";
 pub struct ClaudeHandle {
     writer: Writer,
     session_id: String,
-    turn: Arc<Mutex<Option<oneshot::Sender<TurnResult>>>>,
+    turn: TurnSlot,
     compat: HarnessCompat,
     /// What the pump found wrong with the `system/init` frame, for the turn
     /// that elicited it to fail with rather than with "ended mid-turn".
@@ -411,6 +411,20 @@ pub struct ClaudeHandle {
 /// The handshake refusal, held between the pump that read the init frame and
 /// the prompt that is waiting on it. See `Pump::check_init`.
 type Fault = Arc<Mutex<Option<AdapterError>>>;
+
+/// The turn waiting on a `result`, and whether the process that would send
+/// it is gone. One lock for both, so a turn cannot be installed on a process
+/// the pump has just seen die and then wait for ever.
+#[derive(Default)]
+struct Slot {
+    waiting: Option<oneshot::Sender<TurnResult>>,
+    dead: bool,
+}
+
+type TurnSlot = Arc<Mutex<Slot>>;
+
+/// What a turn fails with when its harness died under it.
+const DIED_MID_TURN: &str = "the harness process died mid-turn";
 
 #[async_trait]
 impl HarnessHandle for ClaudeHandle {
@@ -428,6 +442,15 @@ impl HarnessHandle for ClaudeHandle {
 
     async fn compact(&self) -> Result<TurnResult, AdapterError> {
         self.turn(COMPACT_COMMAND.into()).await
+    }
+
+    /// The CLI carries its own conversation on with `--resume`; its record
+    /// is on the harness state volume, which outlives the process.
+    fn resume_point(&self) -> Option<Resume> {
+        Some(Resume {
+            harness_session_id: self.session_id.clone(),
+            last_seq: 0,
+        })
     }
 
     async fn cancel(&self) -> Result<(), AdapterError> {
@@ -458,7 +481,17 @@ impl ClaudeHandle {
             return Err(fault);
         }
         let (tx, rx) = oneshot::channel();
-        *self.turn.lock().unwrap() = Some(tx);
+        {
+            let mut slot = self.turn.lock().unwrap();
+            // Nothing will ever answer it: the session is told now, not
+            // once the exit has made its way back.
+            if slot.dead {
+                return Err(AdapterError::HarnessDied(
+                    "the harness process is gone; it takes no more turns".into(),
+                ));
+            }
+            slot.waiting = Some(tx);
+        }
         self.writer
             .send(json!({
                 "type": "user",
@@ -475,7 +508,7 @@ impl ClaudeHandle {
                 .lock()
                 .unwrap()
                 .take()
-                .unwrap_or_else(|| AdapterError::Protocol("the harness ended mid-turn".into()))),
+                .unwrap_or_else(|| AdapterError::HarnessDied(DIED_MID_TURN.into()))),
         }
     }
 }
@@ -487,9 +520,9 @@ struct Pump {
     /// Resolves when the harness process is gone. Holding it is not optional:
     /// the runner spawns with `kill_on_drop`, so dropping this future kills
     /// the harness — which looks exactly like a harness that said nothing.
-    done: futures_core::future::BoxFuture<'static, Result<i32, RunnerError>>,
+    done: futures_core::future::BoxFuture<'static, Result<crate::runner::Exit, RunnerError>>,
     writer: Writer,
-    turn: Arc<Mutex<Option<oneshot::Sender<TurnResult>>>>,
+    turn: TurnSlot,
     /// Permission requests still waiting on the operator, by the CLI's own
     /// request id, so a cancelled ask can be answered rather than orphaned.
     open: Arc<Mutex<HashMap<String, ()>>>,
@@ -617,9 +650,17 @@ impl Pump {
                         *fault.lock().unwrap() = Some(refused);
                         // The turn that elicited the frame fails with the
                         // fault; the process is ended rather than driven.
-                        drop(turn.lock().unwrap().take());
+                        end_turns(&turn);
                         drop(done);
-                        let _ = tx.send(HarnessEvent::Exited { code: None }).await;
+                        let _ = tx
+                            .send(HarnessEvent::Exited {
+                                code: None,
+                                cause: ExitCause {
+                                    refused: true,
+                                    ..ExitCause::unknown("its handshake was refused")
+                                },
+                            })
+                            .await;
                         return;
                     }
                     let _ = tx.send(HarnessEvent::Other(v.clone())).await;
@@ -792,7 +833,7 @@ impl Pump {
                         *fault.lock().unwrap() = Some(AdapterError::ConversationGone(format!(
                             "Claude Code has no record of this conversation to resume ({gone})"
                         )));
-                        drop(turn.lock().unwrap().take());
+                        drop(turn.lock().unwrap().waiting.take());
                         continue;
                     }
                     let spent = spent_of(&v, compacted.take().as_ref(), &mut model_usage);
@@ -808,7 +849,7 @@ impl Pump {
                         Some("error_max_turns") => "max_turn_requests",
                         Some(_) => "error",
                     };
-                    if let Some(done) = turn.lock().unwrap().take() {
+                    if let Some(done) = turn.lock().unwrap().waiting.take() {
                         let _ = done.send(TurnResult {
                             stop_reason: stop.into(),
                             usage: spent.usage,
@@ -823,12 +864,19 @@ impl Pump {
                 _ => {}
             }
         }
-        // The stream ended. A turn still waiting will never be answered, so let
-        // it fail rather than hang the session forever.
-        drop(turn.lock().unwrap().take());
-        let code = done.await.ok();
-        let _ = tx.send(HarnessEvent::Exited { code }).await;
+        // The stream ended: the process is gone or going. A turn still
+        // waiting will never be answered, and no later one will be either.
+        end_turns(&turn);
+        let (code, cause) = ExitCause::of(done.await);
+        let _ = tx.send(HarnessEvent::Exited { code, cause }).await;
     }
+}
+
+/// The process is gone: the turn waiting fails, and every later one at once.
+fn end_turns(turn: &TurnSlot) {
+    let mut slot = turn.lock().unwrap();
+    slot.dead = true;
+    drop(slot.waiting.take());
 }
 
 fn control_response(id: &str, decision: PermissionReply) -> Value {
@@ -1155,6 +1203,14 @@ impl HarnessAdapter for ClaudeAdapter {
         true
     }
 
+    /// For the same reason it reopens: a new process launched with
+    /// `--resume` carries the conversation on where the dead one left it.
+    /// The supervisor is given a relaunch only where the sandbox is this
+    /// node's own (`Manager::start`).
+    fn restorable(&self) -> bool {
+        true
+    }
+
     fn compacts(&self) -> bool {
         true
     }
@@ -1298,7 +1354,7 @@ impl HarnessAdapter for ClaudeAdapter {
         // pins. Until then the handle reports the pin, which `version()`
         // already checked against the image at startup.
         let fault: Fault = Arc::new(Mutex::new(None));
-        let turn = Arc::new(Mutex::new(None));
+        let turn: TurnSlot = Arc::default();
         let (tx, rx) = mpsc::channel(256);
         let handle = ClaudeHandle {
             writer: writer.clone(),

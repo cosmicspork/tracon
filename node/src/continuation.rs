@@ -387,7 +387,15 @@ pub fn next_action(s: &Situation<'_>) -> NextAction {
             Some(latest),
         );
     }
-    if is(EndReason::NodeRestart) || is(EndReason::Detached) || is(EndReason::KilledUser) {
+    if is(EndReason::NodeRestart)
+        || is(EndReason::Detached)
+        || is(EndReason::KilledUser)
+        || is(EndReason::HarnessDied)
+    {
+        let died = match latest.last_error {
+            Some(e) if !e.is_empty() => format!("lost its harness ({e})"),
+            _ => "lost its harness".to_string(),
+        };
         return at(
             "continue",
             format!(
@@ -395,6 +403,7 @@ pub fn next_action(s: &Situation<'_>) -> NextAction {
                 match reason {
                     "node_restart" => "was cut off by a node restart",
                     "detached" => "was detached",
+                    "harness_died" => died.as_str(),
                     _ => "was stopped",
                 }
             ),
@@ -1113,6 +1122,10 @@ fn handoff(
         }
         Some("node_restart") => "was cut off when its node restarted".to_string(),
         Some("provider_exhausted") => "stopped when its provider was exhausted".to_string(),
+        Some("harness_died") => match old.last_error.as_deref() {
+            Some(e) if !e.is_empty() => format!("lost its harness: {e}"),
+            _ => "lost its harness".to_string(),
+        },
         Some("phase_done") => "finished its phase".to_string(),
         Some("budget") => "spent its budget".to_string(),
         Some("killed_user") => "was stopped by the operator".to_string(),

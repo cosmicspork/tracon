@@ -69,15 +69,21 @@ struct Loopback {
     /// Every sandbox made gets a socket of its own: one cut off before is
     /// still redialling its own, as a removed container's never could.
     made: std::sync::atomic::AtomicUsize,
+    /// How long removing a sandbox takes before it is done.
+    slow_destroy: Option<Duration>,
 }
 
 impl Loopback {
     fn new(wrong_token: bool) -> Arc<Self> {
-        Arc::new(Loopback {
+        Arc::new(Self::unwrapped(wrong_token))
+    }
+
+    fn unwrapped(wrong_token: bool) -> Self {
+        Loopback {
             dir: Some(tempfile::tempdir().unwrap()),
             wrong_token,
             ..Default::default()
-        })
+        }
     }
 
     fn path(&self, name: &str) -> PathBuf {
@@ -191,6 +197,9 @@ impl SandboxProvider for Loopback {
     }
 
     async fn destroy(&self, handle: &Handle) -> Result<(), ProviderError> {
+        if let Some(slow) = self.slow_destroy {
+            tokio::time::sleep(slow).await;
+        }
         self.destroyed.lock().unwrap().push(handle.0.clone());
         self.gone.lock().unwrap().insert(handle.0.clone());
         self.listeners.lock().unwrap().remove(&handle.0);
@@ -517,7 +526,8 @@ async fn fetch_branch_runs_in_the_live_sandbox_and_in_the_nodes_copy_without_one
 
     // The session stops; its last sync keeps the fetched ref.
     stdin.shutdown().await.unwrap();
-    assert_eq!(spawned.done.await.unwrap(), 0);
+    assert_eq!(spawned.done.await.unwrap().code, 0);
+    tracon::runner::protocol::settled("tracon-h-fetch").await;
     drop((stdin, lines));
     provider.settle().await;
     assert!(files::live_target(&volume).is_none());
@@ -631,7 +641,7 @@ async fn a_sandbox_left_running_is_taken_back_by_the_next_node_process() {
         .expect("kept for the next process");
     assert!(record.harness.is_some());
     stdin.shutdown().await.unwrap();
-    assert_eq!(spawned.done.await.unwrap(), 0);
+    assert_eq!(spawned.done.await.unwrap().code, 0);
     drop((stdin, lines, first));
     assert!(
         provider.destroyed.lock().unwrap().is_empty(),
@@ -665,7 +675,8 @@ async fn a_sandbox_left_running_is_taken_back_by_the_next_node_process() {
     stdin.write_all(b"b\n").await.unwrap();
     assert_eq!(lines.next_line().await.unwrap().unwrap(), "again b");
     stdin.shutdown().await.unwrap();
-    assert_eq!(again.done.await.unwrap(), 0);
+    assert_eq!(again.done.await.unwrap().code, 0);
+    tracon::runner::protocol::settled(name).await;
     assert_eq!(
         *provider.destroyed.lock().unwrap(),
         vec![name.to_string()],
@@ -720,8 +731,15 @@ async fn a_capture_runs_with_its_env_cwd_and_exit_code() {
     provider.settle().await;
 }
 
+/// How long the provider of `a_spawned_harness_streams_stdio_and_reports_its_exit`
+/// takes to remove a sandbox, as a remote one does.
+const SLOW_DESTROY: Duration = Duration::from_secs(3);
+
 async fn a_spawned_harness_streams_stdio_and_reports_its_exit() {
-    let provider = Loopback::new(false);
+    let provider = Arc::new(Loopback {
+        slow_destroy: Some(SLOW_DESTROY),
+        ..Loopback::unwrapped(false)
+    });
     let r = runner(provider.clone());
     let mut spawned = r
         .spawn(sh(
@@ -744,7 +762,20 @@ async fn a_spawned_harness_streams_stdio_and_reports_its_exit() {
     }
     spawned.stdin.shutdown().await.unwrap();
     assert_eq!(lines.next_line().await.unwrap(), None);
-    assert_eq!(spawned.done.await.unwrap(), 3);
+    // The exit is said while the sandbox is still being removed, which this
+    // provider takes its time over: not after.
+    let exit = tokio::time::timeout(SLOW_DESTROY / 2, spawned.done)
+        .await
+        .expect("the exit waited for the sandbox's removal")
+        .unwrap();
+    assert_eq!(exit.code, 3);
+    assert!(provider.destroyed.lock().unwrap().is_empty());
+    tokio::time::timeout(
+        SLOW_DESTROY * 3,
+        tracon::runner::protocol::settled("tracon-h-stdio"),
+    )
+    .await
+    .expect("the sandbox was removed behind the exit");
     assert_eq!(
         *provider.destroyed.lock().unwrap(),
         vec!["tracon-h-stdio".to_string()]
@@ -764,7 +795,7 @@ async fn kill_removes_the_sandbox_and_the_harness_ends() {
     let ended = tokio::time::timeout(Duration::from_secs(10), spawned.done)
         .await
         .expect("the harness outlived its sandbox");
-    assert!(ended.is_err() || ended.unwrap() != 0);
+    assert!(ended.is_err() || ended.unwrap().code != 0);
     assert!(provider
         .destroyed
         .lock()

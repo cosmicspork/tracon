@@ -19,6 +19,7 @@ export function sessionTone(session: Pick<Session, 'state' | 'end_reason'>): Ton
       switch (session.end_reason) {
         case 'error':
         case 'incompatible':
+        case 'harness_died':
         case 'budget':
           return 'crit'
         case 'killed_user':
