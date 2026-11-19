@@ -87,9 +87,16 @@ struct Connection {
     version: String,
 }
 
+/// How an error from a plugin that refused an approved call as stale
+/// begins: what the operator saw has moved since, and nothing was sent.
+pub const STALE: &str = "preview-stale: ";
+
+/// JSON-RPC's code for a method the server does not implement.
+pub const METHOD_NOT_FOUND: i64 = -32601;
+
 /// Why a request to a server did not produce its answer.
 #[derive(Debug)]
-enum Failure {
+pub enum Failure {
     /// Nothing reached the server.
     Unreachable(String),
     /// The request may have reached it; what it did is not known.
@@ -98,14 +105,21 @@ enum Failure {
     Expired,
     /// It answered, and not with a result.
     Refused(String),
+    /// It answered with a JSON-RPC error, kept whole.
+    Rpc {
+        code: i64,
+        message: String,
+        data: Value,
+    },
     /// The node could not make the request: nothing was sent.
     NotSent(String),
 }
 
 impl Failure {
     /// In words, `server` naming what was asked: `MCP server linear`,
-    /// `plugin sql-review`.
-    fn describe(&self, server: &str) -> String {
+    /// `plugin sql-review`. An error whose `data` says `stale` begins
+    /// [`STALE`].
+    pub fn describe(&self, server: &str) -> String {
         match self {
             Failure::Unreachable(e) => format!("{server} is unreachable: {e}"),
             Failure::Unknown(e) => format!(
@@ -114,6 +128,10 @@ impl Failure {
             ),
             Failure::Expired => format!("{server} forgot the session it was given"),
             Failure::Refused(e) => format!("{server}: {e}"),
+            Failure::Rpc { message, data, .. } if data["stale"] == json!(true) => {
+                format!("{STALE}{server}: {message}")
+            }
+            Failure::Rpc { message, .. } => format!("{server}: {message}"),
             Failure::NotSent(e) => format!("{server} was not asked: {e}"),
         }
     }
@@ -610,19 +628,12 @@ impl Registry {
         mut meta: impl FnMut() -> Result<Value, String>,
         timeout: Duration,
     ) -> Result<Value, String> {
-        let http = unix_client(&endpoint.socket);
-        let target = Target {
-            http: &http,
-            url: PLUGIN_URL,
-        };
         let label = format!("plugin {plugin}");
-        let instance = crate::plugin::context::instance_of(&endpoint.token);
         let result = self
-            .request_at(
-                target,
-                (format!("{PLUGIN_KEY}{plugin}"), channel.to_string()),
-                &instance,
-                &[],
+            .plugin_request(
+                endpoint,
+                plugin,
+                channel,
                 "tools/call",
                 || {
                     let meta = meta().map_err(Failure::NotSent)?;
@@ -637,6 +648,36 @@ impl Registry {
             .await
             .map_err(|f| f.describe(&label))?;
         call_result(result, &label, tool)
+    }
+
+    /// One `method` request to the plugin instance at `endpoint`, in the
+    /// MCP session the node holds with it for `channel`. `params` is called
+    /// once for each attempt.
+    pub async fn plugin_request(
+        &self,
+        endpoint: &crate::plugin::supervisor::Endpoint,
+        plugin: &str,
+        channel: &str,
+        method: &str,
+        params: impl FnMut() -> Result<Value, Failure>,
+        timeout: Duration,
+    ) -> Result<Value, Failure> {
+        let http = unix_client(&endpoint.socket);
+        let target = Target {
+            http: &http,
+            url: PLUGIN_URL,
+        };
+        let instance = crate::plugin::context::instance_of(&endpoint.token);
+        self.request_at(
+            target,
+            (format!("{PLUGIN_KEY}{plugin}"), channel.to_string()),
+            &instance,
+            &[],
+            method,
+            params,
+            timeout,
+        )
+        .await
     }
 
     /// One request in the MCP session the node holds with `server` for
@@ -1064,12 +1105,14 @@ async fn rpc(
             }
         };
         if let Some(error) = message.get("error") {
-            return Err(Failure::Refused(
-                error["message"]
+            return Err(Failure::Rpc {
+                code: error["code"].as_i64().unwrap_or_default(),
+                message: error["message"]
                     .as_str()
                     .map(str::to_string)
                     .unwrap_or_else(|| error.to_string()),
-            ));
+                data: error.get("data").cloned().unwrap_or(Value::Null),
+            });
         }
         Ok((message["result"].clone(), session_id))
     };
@@ -1171,6 +1214,33 @@ mod tests {
             rule_id: None,
             reason: None,
         }
+    }
+
+    #[test]
+    fn a_json_rpc_error_is_kept_whole_and_a_stale_one_says_so() {
+        let stale = Failure::Rpc {
+            code: -32002,
+            message: "the issue moved".into(),
+            data: json!({ "stale": true }),
+        };
+        assert_eq!(
+            stale.describe("plugin x"),
+            "preview-stale: plugin x: the issue moved"
+        );
+        assert!(stale.describe("plugin x").starts_with(STALE));
+        let other = Failure::Rpc {
+            code: -32000,
+            message: "no".into(),
+            data: json!({ "stale": false }),
+        };
+        assert_eq!(other.describe("plugin x"), "plugin x: no");
+        let missing = Failure::Rpc {
+            code: METHOD_NOT_FOUND,
+            message: "method not found".into(),
+            data: Value::Null,
+        };
+        assert!(matches!(missing, Failure::Rpc { code: -32601, .. }));
+        assert_eq!(missing.describe("plugin x"), "plugin x: method not found");
     }
 
     #[test]

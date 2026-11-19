@@ -22,6 +22,21 @@
 //!   (`""` for the first) as JSON text. A page that is a string is answered
 //!   as an error with that text.
 //!
+//! Previews and formats, read at each request rather than each start:
+//!
+//! - `preview`: absent, `tracon/preview` answers `-32601`. `on` answers a
+//!   preview whose `token` is the contents of `version` (`v1` without it);
+//!   `refuse` answers error `-32000 cannot preview`; `unpreviewable` answers
+//!   `previewable: false` and no token. Each preview appends its
+//!   `_meta.tracon` to `previews.jsonl`.
+//! - `version`: what a preview is taken against. A `tools/call` whose
+//!   context carries a `preview_token` other than it is refused as stale
+//!   (`data.stale`), and recorded in `calls.jsonl` with `"refused": "stale"`.
+//! - `marked`: `sql` carries `"x-tracon-format": "fake_wiki"` in the listing.
+//!
+//! `tracon/format/convert` converts `fake_wiki` (`h1. X` is `# X`, `*b*` is
+//! `**b**`) to `markdown` and back; anything else is `-32602`.
+//!
 //! Each start writes `env.json` (its whole environment), `pid`, `cwd`, and a line
 //! to `started` (when, in milliseconds, and the mode it read), and says on
 //! stdout and stderr that it started.
@@ -130,6 +145,59 @@ fn answer(request: &Value, result: Value) -> axum::response::Response {
     Json(json!({ "jsonrpc": "2.0", "id": request["id"], "result": result })).into_response()
 }
 
+fn error(request: &Value, error: Value) -> axum::response::Response {
+    Json(json!({ "jsonrpc": "2.0", "id": request["id"], "error": error })).into_response()
+}
+
+fn knob(fake: &Fake, name: &str) -> Option<String> {
+    std::fs::read_to_string(fake.data.join(name))
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
+fn version(fake: &Fake) -> String {
+    knob(fake, "version").unwrap_or_else(|| "v1".into())
+}
+
+fn append(fake: &Fake, file: &str, line: &Value) {
+    let mut out = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(fake.data.join(file))
+        .unwrap();
+    writeln!(out, "{line}").unwrap();
+}
+
+/// `fake_wiki` to Markdown, or back: headings and bold, line by line.
+fn convert(text: &str, to_markdown: bool) -> String {
+    text.lines()
+        .map(|line| {
+            if to_markdown {
+                let line = match line.strip_prefix("h1. ") {
+                    Some(rest) => format!("# {rest}"),
+                    None => line.to_string(),
+                };
+                swap_bold(&line, "*", "**")
+            } else {
+                let line = match line.strip_prefix("# ") {
+                    Some(rest) => format!("h1. {rest}"),
+                    None => line.to_string(),
+                };
+                swap_bold(&line, "**", "*")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn swap_bold(line: &str, from: &str, to: &str) -> String {
+    let parts: Vec<&str> = line.split(from).collect();
+    if parts.len() < 3 || parts.len().is_multiple_of(2) {
+        return line.to_string();
+    }
+    parts.join(to)
+}
+
 async fn mcp(
     State(fake): State<Fake>,
     headers: HeaderMap,
@@ -172,13 +240,17 @@ async fn mcp(
                 .tools
                 .iter()
                 .map(|name| {
+                    let mut sql = json!({ "type": "string" });
+                    if knob(&fake, "marked").is_some() {
+                        sql["x-tracon-format"] = json!("fake_wiki");
+                    }
                     json!({
                         "name": name,
                         "description": format!("The fake's {name}."),
                         "inputSchema": {
                             "type": "object",
                             "properties": {
-                                "sql": { "type": "string" },
+                                "sql": sql,
                                 "ms": { "type": "integer" },
                             },
                         },
@@ -197,14 +269,22 @@ async fn mcp(
                 "own_instance": fake.own_instance,
                 "node_key": fake.node_key,
             });
-            {
-                let mut calls = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(fake.data.join("calls.jsonl"))
-                    .unwrap();
-                writeln!(calls, "{echo}").unwrap();
+            if let Some(token) = params["_meta"]["tracon"]["preview_token"].as_str() {
+                if token != version(&fake) {
+                    let mut refused = echo.clone();
+                    refused["refused"] = json!("stale");
+                    append(&fake, "calls.jsonl", &refused);
+                    return error(
+                        &request,
+                        json!({
+                            "code": -32002,
+                            "message": "the issue moved since the preview",
+                            "data": { "stale": true },
+                        }),
+                    );
+                }
             }
+            append(&fake, "calls.jsonl", &echo);
             if tool == "sleep" {
                 let ms = params["arguments"]["ms"].as_u64().unwrap_or(0);
                 tokio::time::sleep(Duration::from_millis(ms)).await;
@@ -234,6 +314,54 @@ async fn mcp(
                     "isError": tool == "fail",
                 }),
             )
+        }
+        Some("tracon/preview") if knob(&fake, "preview").is_some() => {
+            let params = &request["params"];
+            append(&fake, "previews.jsonl", &params["_meta"]["tracon"]);
+            let tool = params["name"].as_str().unwrap_or_default();
+            match knob(&fake, "preview").as_deref() {
+                Some("refuse") => error(
+                    &request,
+                    json!({ "code": -32000, "message": "cannot preview" }),
+                ),
+                Some("unpreviewable") => answer(
+                    &request,
+                    json!({
+                        "previewable": false,
+                        "summary": format!("fake {tool}"),
+                        "body": "cannot show this one",
+                        "token": null,
+                    }),
+                ),
+                _ => answer(
+                    &request,
+                    json!({
+                        "previewable": true,
+                        "summary": format!("fake {tool}"),
+                        "body": format!(
+                            "```diff\n- old\n+ {}\n```",
+                            params["arguments"]["sql"].as_str().unwrap_or_default()
+                        ),
+                        "token": version(&fake),
+                    }),
+                ),
+            }
+        }
+        Some("tracon/format/convert") => {
+            let params = &request["params"];
+            let text = params["text"].as_str().unwrap_or_default();
+            match (params["format"].as_str(), params["to"].as_str()) {
+                (Some("fake_wiki"), Some("markdown")) => {
+                    answer(&request, json!({ "text": convert(text, true) }))
+                }
+                (Some("fake_wiki"), Some("fake_wiki")) => {
+                    answer(&request, json!({ "text": convert(text, false) }))
+                }
+                _ => error(
+                    &request,
+                    json!({ "code": -32602, "message": "not a format this owns" }),
+                ),
+            }
         }
         _ => Json(json!({
             "jsonrpc": "2.0",

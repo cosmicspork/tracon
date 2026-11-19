@@ -9,12 +9,13 @@
     changedArguments,
     editProblems,
     grantsAccess,
-    issueChanges,
     itemSections,
     outcome,
     pluginRows,
+    previewHash,
     problemsByField,
     amendsNothing,
+    renderedProse,
     replacement,
     resultRows,
     schemaFor,
@@ -82,6 +83,7 @@
     error = null
     missing = false
     refused = {}
+    drafts = {}
     said = ''
     decided = false
     openedFrom = router.previous
@@ -117,8 +119,6 @@
    * what ran, so there is nothing left to compare.
    */
   const replacing = $derived(pending && details ? replacement(details, edited) : null)
-  /** A Jira edit's short fields against the issue as it stands, while it waits. */
-  const fieldChanges = $derived(pending && details ? issueChanges(details, edited) : [])
   const prose = $derived(
     (details?.prose_fields ?? []).filter(
       (k) => typeof shown[k] === 'string' && shown[k] !== '' && k !== replacing?.key,
@@ -145,9 +145,52 @@
   /** A page for the preview origin's sandbox: shown as text here, never rendered. */
   const source = $derived(details?.format === 'source')
 
-  function html(text: string): string {
-    return details?.format === 'jira_wiki' ? renderJiraWiki(text) : render(text)
+  /**
+   * The operator's drafts of prose in a plugin's format, as its owner
+   * rendered them, by the text rendered. A draft not rendered yet, or that
+   * the owner could not render, is shown as source.
+   */
+  let drafts = $state<Record<string, string>>({})
+
+  /**
+   * A prose field as HTML, or null to show its source. Prose in a plugin's
+   * format is shown as that plugin rendered it; the node-native Jira tools'
+   * wiki markup is rendered here until they move to the jira-review plugin.
+   */
+  function html(key: string, text: string, item?: number): string | null {
+    if (!details) return null
+    const md = renderedProse(details, key, text, item) ?? drafts[text]
+    if (md !== undefined) return render(md)
+    if (details.plugin_format === 'jira_wiki' && details.render_error) return renderJiraWiki(text)
+    return null
   }
+
+  /** The prose texts of the draft no rendering covers yet. */
+  const unrendered = $derived.by(() => {
+    if (!details?.plugin_format || !pending) return []
+    const texts: { key: string; text: string; item?: number }[] = [
+      ...prose.map((k) => ({ key: k, text: String(shown[k]) })),
+      ...sections.flatMap((item) => item.prose.map((p) => ({ key: p.key, text: p.text, item: item.index }))),
+    ]
+    return texts
+      .filter((t) => renderedProse(details!, t.key, t.text, t.item) === null && drafts[t.text] === undefined)
+      .map((t) => t.text)
+  })
+
+  // Render the operator's edits through the owning plugin, once they pause.
+  $effect(() => {
+    const texts = unrendered
+    if (texts.length === 0 || details?.render_error) return
+    const timer = setTimeout(() => {
+      for (const text of texts) {
+        api
+          .renderApproval(id, text)
+          .then((r) => (drafts[text] = r.markdown))
+          .catch(() => {})
+      }
+    }, 300)
+    return () => clearTimeout(timer)
+  })
 
   function display(v: unknown): string {
     if (v === undefined || v === null || v === '') return '—'
@@ -177,6 +220,7 @@
         {
           ...(optionId === 'reject_once' ? { reason: text } : optionId === 'request_changes' ? { notes: text } : {}),
           argumentsHash: details.arguments_hash,
+          previewHash: previewHash(details),
         },
       )
       await store.refetch()
@@ -255,7 +299,7 @@
 
   {#if !pending}
     <div class="banner" class:ok={a.state === 'succeeded' || a.state === 'running'} class:crit={a.state === 'failed' || a.state === 'uncertain'} class:dim={a.state === 'rejected' || a.state === 'expired' || a.state === 'changes_requested'}>
-      {outcome(a.state)}
+      {outcome(a.state, a.reason)}
       {#if a.state === 'changes_requested' && a.operator_note}
         <i>Notes: {a.operator_note}</i>
       {:else if a.reason}
@@ -291,23 +335,16 @@
     </div>
   {/if}
 
-  {#if pending && details.issue?.stale}
+  {#if pending && details.preview?.status === 'refused'}
     <div class="banner crit" role="alert">
-      the issue was updated in Jira since this was asked <b
-        >· a field, comment, link or status; what is shown is the issue as it is now, and Allow overwrites only the fields
-        the call sets</b
-      >
+      the plugin refused the preview <b>· {details.preview.error} · you can still decide</b>
     </div>
-  {/if}
-
-  {#if fieldChanges.length}
-    <div class="h4">Changes to the issue <b>{details.issue?.key} · as it is now → as the call leaves it</b></div>
-    <dl class="kv">
-      {#each fieldChanges as c (c.key)}
-        <dt>{c.key}</dt>
-        <dd><del>{c.before || '—'}</del> → <ins>{c.after || '—'}</ins></dd>
-      {/each}
-    </dl>
+  {:else if pending && details.preview?.status === 'shown'}
+    {@const p = details.preview}
+    <div class="h4">Preview <b>{p.summary}{p.previewable ? '' : ' · not previewable'}</b></div>
+    <section class="doc">
+      <article class="md">{@html render(p.body)}</article>
+    </section>
   {/if}
 
   {#if replacing}
@@ -349,6 +386,7 @@
   {/if}
 
   {#each prose as key (key)}
+    {@const rendered = raw[key] || source ? null : html(key, String(shown[key]))}
     <section class="doc">
       <div class="dochead">
         <span>{key}</span>
@@ -360,10 +398,10 @@
           </button>
         {/if}
       </div>
-      {#if raw[key] || source}
+      {#if rendered === null}
         <pre class="src">{shown[key]}</pre>
       {:else}
-        <article class="md">{@html html(String(shown[key]))}</article>
+        <article class="md">{@html rendered}</article>
       {/if}
     </section>
   {/each}
@@ -394,10 +432,11 @@
             </button>
           {/if}
         </div>
-        {#if raw[at] || source}
+        {@const rendered = raw[at] || source ? null : html(p.key, p.text, item.index)}
+        {#if rendered === null}
           <pre class="src">{p.text}</pre>
         {:else}
-          <article class="md">{@html html(p.text)}</article>
+          <article class="md">{@html rendered}</article>
         {/if}
       {/each}
     </section>

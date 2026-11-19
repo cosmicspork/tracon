@@ -1809,6 +1809,12 @@ const MIGRATIONS: &[&str] = &[
         updated_ms  INTEGER NOT NULL
     );
     "#,
+    // 80: the token of the `tracon/preview` a plugin tool's card last showed
+    // (`crate::mcp::Tools::approval_preview`). The node keeps it to sign into
+    // the approved dispatch and never sends it to a page.
+    r#"
+    ALTER TABLE approval ADD COLUMN preview_token TEXT;
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

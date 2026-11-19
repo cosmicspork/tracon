@@ -18,6 +18,9 @@ pub const PENDING: &str = "pending";
 pub const RUNNING: &str = "running";
 pub const SUCCEEDED: &str = "succeeded";
 pub const FAILED: &str = "failed";
+/// How the reason of an approval failed as stale begins: the plugin found
+/// what the operator's card showed had moved, and sent nothing.
+pub const STALE_REASON: &str = "stale: ";
 /// Run, but the remote outcome could not be confirmed.
 pub const UNCERTAIN: &str = "uncertain";
 pub const REJECTED: &str = "rejected";
@@ -214,6 +217,10 @@ pub struct Decision<'a> {
     /// decision lands only if the row still holds exactly these, so an answer
     /// never applies to a call other than the one that was read.
     pub bound_to: Option<&'a str>,
+    /// The preview token the operator's answer was given against. When
+    /// given, the decision lands only if the row still keeps exactly it, so a
+    /// later preview (another tab) is not decided on an older one's read.
+    pub preview_token: Option<&'a str>,
 }
 
 impl Store {
@@ -331,7 +338,8 @@ impl Store {
                 operator_note=?6, claimed_ms=NULL, decided_ms=?7,
                 finished_ms=CASE WHEN ?2 IN ('rejected','changes_requested') THEN ?7 ELSE NULL END
              WHERE id=?1 AND state='pending' AND expires_ms > ?7
-               AND (?8 IS NULL OR arguments = ?8)",
+               AND (?8 IS NULL OR arguments = ?8)
+               AND (?9 IS NULL OR preview_token = ?9)",
             rusqlite::params![
                 id,
                 decision.state,
@@ -340,10 +348,36 @@ impl Store {
                 decision.reason,
                 decision.note,
                 now,
-                decision.bound_to
+                decision.bound_to,
+                decision.preview_token
             ],
         )?;
         Ok(n == 1)
+    }
+
+    /// Keep the token of the preview a waiting approval's card showed, or
+    /// none. A decided approval keeps the one it was decided on.
+    pub fn set_preview_token(&self, id: &str, token: Option<&str>) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE approval SET preview_token=?2 WHERE id=?1 AND state='pending'",
+            rusqlite::params![id, token],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// The token of the preview an approval's card last showed. Kept apart
+    /// from [`ApprovalRow`], which pages and peers are sent.
+    pub fn preview_token(&self, id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let token = conn
+            .query_row(
+                "SELECT preview_token FROM approval WHERE id=?1",
+                [id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        Ok(token.flatten())
     }
 
     /// A session's events of the given kinds, oldest first: what its audit
@@ -679,6 +713,37 @@ mod tests {
         };
         assert!(store.decide_approval("a1", &bound).unwrap());
         assert!(!store.decide_approval("a1", &bound).unwrap());
+    }
+
+    /// The preview token is kept only while the approval waits, never on
+    /// the row pages are sent, and a decision bound to one lands only while
+    /// the row keeps it.
+    #[test]
+    fn a_preview_token_is_kept_while_waiting_and_binds_the_decision() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .insert_approval(&row("a1", "k", now_ms() + 60_000))
+            .unwrap();
+        assert_eq!(store.preview_token("a1").unwrap(), None);
+        assert!(store.set_preview_token("a1", Some("v1")).unwrap());
+        assert_eq!(store.preview_token("a1").unwrap().as_deref(), Some("v1"));
+        let row = store.get_approval("a1").unwrap().unwrap();
+        assert!(!serde_json::to_string(&row).unwrap().contains("v1"));
+
+        assert!(store.set_preview_token("a1", Some("v2")).unwrap());
+        let bound = Decision {
+            preview_token: Some("v1"),
+            ..allow()
+        };
+        assert!(!store.decide_approval("a1", &bound).unwrap());
+        let bound = Decision {
+            preview_token: Some("v2"),
+            ..allow()
+        };
+        assert!(store.decide_approval("a1", &bound).unwrap());
+        // Decided: the token it was decided on stays.
+        assert!(!store.set_preview_token("a1", Some("v3")).unwrap());
+        assert_eq!(store.preview_token("a1").unwrap().as_deref(), Some("v2"));
     }
 
     #[test]

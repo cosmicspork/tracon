@@ -255,6 +255,15 @@ above: run `sql-review --read-only` directly, with the read account from its own
 `.env` or the environment. It is the same program, outside the boundary, and the
 read-only account is still the boundary.
 
+## An approval failed as stale
+
+A plugin tool's approval that ends `failed` with a reason beginning `stale:` is
+expected after a concurrent edit: the plugin found that what the card's preview
+showed (an issue, a set of rows) had moved before the approved call ran, and sent
+nothing. Nothing needs recovering. The agent sees `stale: true` from
+`approval_status` and calls the tool again, which raises a fresh card against the
+target as it is now.
+
 ## Locked out of admin from afar
 
 Admin actions made from off the node need a passkey; made at the node they need

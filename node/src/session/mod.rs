@@ -618,6 +618,10 @@ pub struct OperatorAnswer {
     /// ([`crate::store::approvals::arguments_hash`]). When given, an approval
     /// is decided only if it still holds exactly those.
     pub arguments_hash: Option<String>,
+    /// The hash of the preview token the operator's card showed
+    /// ([`crate::mcp::preview_hash`]). When given, an approval is decided
+    /// only if it still keeps that preview's token.
+    pub preview_hash: Option<String>,
     /// Who answered, as the audit names them: the operator at the node, in a
     /// signed-in browser, with the token, or through a peer. Not sent on to
     /// the owner of a peer's card, which names the peer itself.
@@ -633,6 +637,7 @@ impl OperatorAnswer {
             reason: self.reason,
             notes: self.notes,
             arguments_hash: self.arguments_hash,
+            preview_hash: self.preview_hash,
         }
     }
 }

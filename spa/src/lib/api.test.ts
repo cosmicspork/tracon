@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 
-import { ApiError, call, failureText } from './api'
+import { answerBody, ApiError, call, failureText } from './api'
 
 const cloudflare504 = `<!DOCTYPE html>
 <!--[if lt IE 7]> <html class="no-js ie6 oldie" lang="en-US"> <![endif]-->
@@ -47,4 +47,14 @@ describe('call', () => {
     expect(err.message).not.toContain('<')
     expect(err.message).toContain('504: Gateway time-out')
   })
+})
+
+test('an answer names the arguments and the preview it was read with', () => {
+  expect(answerBody('allow_once', undefined, { argumentsHash: 'a', previewHash: 'p' })).toMatchObject({
+    option_id: 'allow_once',
+    arguments_hash: 'a',
+    preview_hash: 'p',
+  })
+  // Absent, it is left out of the JSON the node reads.
+  expect(JSON.parse(JSON.stringify(answerBody('reject_once', undefined, {})))).toEqual({ option_id: 'reject_once' })
 })

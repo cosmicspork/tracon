@@ -1035,6 +1035,18 @@ the decision would ask about is refused, naming the `[[plugin]]` allow that woul
 it run. Having no session, its `tool_call` and `tool_decided` rows go to the channel's
 external log under the route's path as the lane.
 
+**Previews bind an approval to what the operator saw.** A plugin tool's card asks the
+plugin for `tracon/preview` when it opens (`Tools::approval_preview`), as an asked call
+would be made. The preview's opaque token, the version it was taken against, is kept
+with the approval in the store, never sent to the page, which sees only its hash and
+sends that back with the answer, so `decide_approval` lands only while the same
+preview is kept. The approved dispatch signs the token into the caller context as
+`preview_token`, and the plugin applies against it, refusing with `data.stale` if its
+target has moved. The node settles that as failed, stale, not uncertain, since nothing
+was sent. Staleness is enforced by the plugin at dispatch. The page's display is only
+display. Prose in a format a plugin owns is rendered by that plugin's
+`tracon/format/convert`, a pure function given no context and no credentials.
+
 ### Authority grants
 
 A grant is a local operator decision layered under signed policy, not a

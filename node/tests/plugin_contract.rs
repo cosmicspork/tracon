@@ -33,8 +33,15 @@ struct Vectors {
 }
 
 fn read(name: &str) -> Vectors {
+    read_case(name, "valid")
+}
+
+/// [`read`], with the valid case under `case`: `valid`, or
+/// `valid_preview_token`, the same call approved from a card whose preview
+/// returned a token.
+fn read_case(name: &str, case: &str) -> Vectors {
     let file = vectors(name);
-    let valid = file["valid"].clone();
+    let valid = file[case].clone();
     // sql-review names one call for the file and `signing_bytes`;
     // jira-review a call per case and `signing_bytes_hex`.
     let call = valid
@@ -72,7 +79,11 @@ fn key(file: &Value) -> SigningKey {
 }
 
 fn the_node_writes_what(name: &str) {
-    let v = read(name);
+    the_node_writes_case(name, "valid");
+}
+
+fn the_node_writes_case(name: &str, case: &str) {
+    let v = read_case(name, case);
     let ctx = &v.valid["context"];
     let key = key(&v.file);
     assert_eq!(
@@ -126,6 +137,7 @@ fn the_node_writes_what(name: &str) {
             caller: &caller,
             channel: ctx["channel"].as_str().unwrap(),
             approval_id: ctx["approval_id"].as_str(),
+            preview_token: ctx["preview_token"].as_str(),
             credentials: &credentials,
         },
         issued,
@@ -203,4 +215,69 @@ fn the_plugin_model_refuses_sql_reviews_tampered_contexts() {
 #[test]
 fn the_plugin_model_refuses_jira_reviews_tampered_contexts() {
     the_plugin_side_refuses_what("jira-review");
+}
+
+#[test]
+fn the_node_writes_both_plugins_preview_token_vectors() {
+    for name in ["sql-review", "jira-review"] {
+        the_node_writes_case(name, "valid_preview_token");
+        let v = read_case(name, "valid_preview_token");
+        let plugin = v.valid["context"]["plugin"].as_str().unwrap();
+        let verifier = || {
+            Verifier::new(
+                plugin,
+                v.file["instance"].as_str().unwrap(),
+                v.file["public_key"].as_str().unwrap(),
+            )
+        };
+        let tool = v.call["tool"].as_str().unwrap();
+        let now = v.file["now_ms"].as_i64().unwrap();
+        verifier()
+            .verify(&v.valid["context"], tool, &v.call["arguments"], now)
+            .unwrap();
+        // The token is signed with the rest: a context without it is refused
+        // at the signature.
+        let mut stripped = v.valid["context"].clone();
+        stripped.as_object_mut().unwrap().remove("preview_token");
+        let outcome = verifier().verify(&stripped, tool, &v.call["arguments"], now);
+        assert_eq!(outcome.map_err(|(check, _)| check), Err(4), "{name}");
+    }
+}
+
+/// Writes each file's `valid_preview_token` from its `valid` case: the same
+/// call, approved, carrying `preview_token`, signed with the file's seed and
+/// nonce. Run with `--ignored` and paste the output in; the node owns these
+/// cases until the plugins publish their own.
+#[test]
+#[ignore]
+fn generate_preview_token_vectors() {
+    let tokens = [
+        ("sql-review", "rowhash:9f2c41d07a5e3b68:3"),
+        ("jira-review", r#"{"WRK-1":"2026-11-19T10:00:00.000+0000"}"#),
+    ];
+    for (name, token) in tokens {
+        let v = read(name);
+        let key = key(&v.file);
+        let mut ctx = v.valid["context"].clone();
+        ctx.as_object_mut().unwrap().remove("signature");
+        ctx["preview_token"] = json!(token);
+        if ctx["approval_id"].is_null() {
+            ctx["approval_id"] = json!("apv-0001");
+        }
+        let bytes = context::signing_bytes(&ctx).unwrap();
+        let signature = hex::encode(key.sign(&bytes).to_bytes());
+        ctx["signature"] = json!(signature);
+        let bytes_key = if v.valid.get("signing_bytes").is_some() {
+            "signing_bytes"
+        } else {
+            "signing_bytes_hex"
+        };
+        let case = json!({
+            "call": v.call,
+            "context": ctx,
+            bytes_key: hex::encode(&bytes),
+            "signature": signature,
+        });
+        println!("{name}: {}", serde_json::to_string_pretty(&case).unwrap());
+    }
 }

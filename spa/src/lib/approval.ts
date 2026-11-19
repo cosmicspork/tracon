@@ -47,8 +47,20 @@ export interface ApprovalDetails {
   edited_arguments: unknown
   result: unknown
   input_schema: JsonSchema | null
-  /** `jira_wiki`, `markdown`, or `source` (shown as text, never rendered). */
+  /** `markdown`, or `source` (shown as text, never rendered). */
   format: string
+  /**
+   * The format the prose fields are written in when a plugin owns it
+   * (`jira_wiki`): `rendered` holds them as Markdown, converted by that
+   * plugin, and the arguments stay the source. Null otherwise.
+   */
+  plugin_format?: string | null
+  /** The prose fields, by name, rendered as Markdown by the plugin that owns their format. */
+  rendered?: Record<string, string>
+  /** `rendered` for each item of the item list, in order. */
+  rendered_items?: Record<string, string>[] | null
+  /** Why the prose could not be rendered: the page shows the source. */
+  render_error?: string
   prose_fields: string[]
   locked_fields: string[]
   /**
@@ -80,10 +92,11 @@ export interface ApprovalDetails {
    */
   memory?: ReplacedMemory | null
   /**
-   * The Jira issue an `issue_update` edits, as Jira had it when the page
-   * opened. Absent for any other tool, or when Jira could not say in time.
+   * What a plugin's tool would do, in the plugin's own words, asked when
+   * the page opened. Absent for any other tool, and for a plugin that has
+   * no previews: the generic card.
    */
-  issue?: CurrentIssue
+  preview?: PluginPreview
   /**
    * For a plugin's tool: its build, what it says the tool does and reaches,
    * and what an approved run is lent. Null for any other tool.
@@ -131,16 +144,56 @@ export function pluginRows(details: Pick<ApprovalDetails, 'plugin'>): { key: str
   ]
 }
 
-export interface CurrentIssue {
-  key: string
-  summary: string | null
-  description: string | null
-  priority: string | null
-  labels: string[]
-  parent: string | null
-  updated: string | null
-  /** The issue changed in Jira after the call was asked. */
-  stale: boolean
+export type PluginPreview =
+  | {
+      status: 'shown'
+      /** False: the plugin cannot show the effect; `body` says why and shows what it can. */
+      previewable: boolean
+      /** One line, for the preview's heading. */
+      summary: string
+      /** Markdown: the diff, table or statement. */
+      body: string
+      /**
+       * The hash of the token the preview was taken against, which the
+       * answer sends back so it applies only to this preview. Null when
+       * there is none.
+       */
+      token_sha256: string | null
+    }
+  | {
+      status: 'refused'
+      /** The plugin's refusal: the call can still be decided. */
+      error: string
+    }
+
+/** The hash an answer names to say which preview it was read with, if any. */
+export function previewHash(details: Pick<ApprovalDetails, 'preview'>): string | undefined {
+  const p = details.preview
+  return p?.status === 'shown' && p.token_sha256 ? p.token_sha256 : undefined
+}
+
+/**
+ * A prose field as Markdown: what the plugin owning its format rendered,
+ * when it did and the text is still what was rendered; the text itself when
+ * the node renders its format; null when only the source can be shown.
+ */
+export function renderedProse(
+  details: Pick<ApprovalDetails, 'plugin_format' | 'rendered' | 'rendered_items' | 'arguments' | 'item_list'>,
+  key: string,
+  text: string,
+  item?: number,
+): string | null {
+  if (!details.plugin_format) return text
+  const asked = asArguments(details.arguments)
+  const list = details.item_list
+  const original =
+    item === undefined
+      ? asked[key]
+      : list && Array.isArray(asked[list])
+        ? asArguments((asked[list] as unknown[])[item])[key]
+        : undefined
+  const rendered = item === undefined ? details.rendered?.[key] : details.rendered_items?.[item]?.[key]
+  return rendered !== undefined && original === text ? rendered : null
 }
 
 export interface ReplacedMemory {
@@ -168,7 +221,7 @@ export const REPLACING_FIELD = 'body'
 export interface Replacement {
   key: string
   /** What the call replaces the text of, for the heading. */
-  subject: 'document' | 'memory' | 'issue'
+  subject: 'document' | 'memory'
   /** How the heading names the change: new, or an edit of what. */
   label: string
   /** Nothing stands there yet, so the proposal is all added. */
@@ -196,7 +249,7 @@ function formatLabel(current: string | null, requested: unknown): string | null 
  * the diff follows their edit.
  */
 export function replacement(
-  details: Pick<ApprovalDetails, 'document' | 'memory' | 'proposed_body' | 'issue'>,
+  details: Pick<ApprovalDetails, 'document' | 'memory' | 'proposed_body'>,
   args: Record<string, unknown>,
 ): Replacement | null {
   const body = args[REPLACING_FIELD]
@@ -206,29 +259,13 @@ export function replacement(
   // would otherwise let the caller pick the diff the operator sees.
   const proposed = (before: string) =>
     details.proposed_body !== undefined ? (details.proposed_body ?? before) : typeof body === 'string' ? body : ''
-  const diff = (before: string, key = REPLACING_FIELD) => {
-    // Any other field, such as a Jira description, is the argument as it stands.
-    const other = args[key]
-    const after = key === REPLACING_FIELD ? proposed(before) : typeof other === 'string' ? other : ''
-    const lines = diffLines(before, after)
+  const diff = (before: string) => {
+    const lines = diffLines(before, proposed(before))
     return {
-      key,
+      key: REPLACING_FIELD,
       hunks: hunks(lines),
       added: lines.filter((l) => l.kind === 'add').length,
       removed: lines.filter((l) => l.kind === 'del').length,
-    }
-  }
-  // A Jira description is only ever replaced whole: the diff is the review.
-  if (details.issue) {
-    if (typeof args.description !== 'string') return null
-    const i = details.issue
-    return {
-      ...diff(i.description ?? '', 'description'),
-      subject: 'issue',
-      label: `edit · ${i.key}${i.summary ? ` “${i.summary}”` : ''}`,
-      created: false,
-      title: i.summary,
-      format: null,
     }
   }
   // A memory no longer there has nothing to diff against: the page says so.
@@ -247,32 +284,6 @@ export function replacement(
     title: current?.title ?? null,
     format: formatLabel(current?.format ?? null, args.format),
   }
-}
-
-/** One field a held `issue_update` sets, as the issue has it and as the call would leave it. */
-export interface FieldChange {
-  key: string
-  before: string
-  after: string
-}
-
-/**
- * The short fields a held `issue_update` sets, against the issue as it
- * stands, for the ones the call changes. The description is the diff.
- */
-export function issueChanges(
-  details: Pick<ApprovalDetails, 'issue'>,
-  args: Record<string, unknown>,
-): FieldChange[] {
-  const issue = details.issue
-  if (!issue) return []
-  // Jira answers labels sorted, so a call naming the same set in another order changes nothing.
-  const shown = (v: unknown) =>
-    Array.isArray(v) ? v.map(String).sort().join(', ') : v === null || v === undefined ? '' : String(v)
-  return (['summary', 'priority', 'parent', 'labels'] as const)
-    .filter((key) => key in args && args[key] !== null)
-    .map((key) => ({ key, before: shown(issue[key]), after: shown(args[key]) }))
-    .filter((c) => c.before !== c.after)
 }
 
 /** One item of a list argument, as the page shows it. */
@@ -487,7 +498,11 @@ const SETTLED: Record<string, string> = {
   expired: 'Expired unanswered · nothing ran',
 }
 
+/** How the reason of a call failed as stale begins: what the card showed had moved, and nothing was sent. */
+export const STALE_REASON = 'stale:'
+
 /** What became of a decided approval, or null while it waits. */
-export function outcome(state: string): string | null {
+export function outcome(state: string, reason?: string | null): string | null {
+  if (state === 'failed' && reason?.startsWith(STALE_REASON)) return 'Allowed · failed · stale, nothing was sent'
   return state === 'pending' ? null : (SETTLED[state] ?? state)
 }

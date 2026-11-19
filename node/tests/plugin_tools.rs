@@ -31,6 +31,7 @@ version = "1.0.0"
 contract = 1
 exec = ["bin/fake"]
 egress = ["db.internal:1521"]
+formats = ["fake_wiki"]
 
 [[credential]]
 name = "fake-read"
@@ -246,20 +247,49 @@ impl Rig {
 
     /// Allow approval `id` and wait for the call it holds to settle.
     async fn approve(&self, id: &str) -> approvals::ApprovalRow {
+        self.allow(id, None).await.unwrap();
+        self.settled(id).await
+    }
+
+    /// Allow approval `id`, naming the preview it was read with.
+    async fn allow(
+        &self,
+        id: &str,
+        preview_hash: Option<&str>,
+    ) -> Result<(), tracon::session::SessionError> {
         self.tools
             .answer_approval(
                 id,
                 OperatorAnswer {
                     option_id: tracon::adapter::types::OPTION_ALLOW_ONCE.into(),
-                    arguments: None,
-                    reason: None,
-                    notes: None,
-                    arguments_hash: None,
-                    by: None,
+                    preview_hash: preview_hash.map(str::to_string),
+                    ..Default::default()
                 },
             )
             .await
-            .unwrap();
+    }
+
+    /// The card for approval `id` opened: its preview, if the plugin gave one.
+    async fn open(&self, id: &str) -> Option<Value> {
+        let row = self.store.get_approval(id).unwrap().unwrap();
+        let args: Value = serde_json::from_str(&row.arguments).unwrap();
+        self.tools.approval_preview(&row, &args).await
+    }
+
+    fn knob(&self, channel: &str, name: &str, value: &str) {
+        std::fs::write(self.data("fake", channel).join(name), value).unwrap();
+    }
+
+    fn records(&self, channel: &str, file: &str) -> Vec<Value> {
+        std::fs::read_to_string(self.data("fake", channel).join(file))
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    /// Wait for approval `id`'s call to settle.
+    async fn settled(&self, id: &str) -> approvals::ApprovalRow {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let row = self.store.get_approval(id).unwrap().unwrap();
@@ -606,5 +636,234 @@ async fn a_call_in_flight_holds_off_the_idle_stop() {
     }
     echo(&rig.call("fake__query", json!({})).await);
     assert_eq!(rig.lines("fake", "idle", "started"), 2);
+    rig.manager.plugins().shutdown().await;
+}
+
+fn sha256(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(text.as_bytes()))
+}
+
+/// What an approved call's fake saw, from its settled row.
+fn approved_echo(settled: &approvals::ApprovalRow) -> Value {
+    assert_eq!(settled.state, approvals::SUCCEEDED, "{:?}", settled.reason);
+    let result: Value = serde_json::from_str(settled.result.as_deref().unwrap()).unwrap();
+    echo(&json!({ "content": result["content"], "isError": false }))
+}
+
+#[tokio::test]
+async fn a_preview_is_shown_and_its_token_kept() {
+    let rig = rig(
+        "preview",
+        vec![allow("fake", &["query"])],
+        Policy::shipped(),
+    );
+    rig.listed(&rig.ctx).await;
+    rig.knob("preview", "preview", "on");
+    let id = asked(&rig.call("fake__describe", json!({ "sql": "DROP x" })).await);
+    let shown = rig.open(&id).await.expect("a preview");
+    let preview = &shown["preview"];
+    assert_eq!(preview["status"], "shown", "{shown}");
+    assert_eq!(preview["previewable"], true);
+    assert_eq!(preview["summary"], "fake describe");
+    assert!(preview["body"].as_str().unwrap().contains("+ DROP x"));
+    assert_eq!(preview["token_sha256"], sha256("v1"));
+    assert!(preview.get("token").is_none());
+    assert_eq!(rig.store.preview_token(&id).unwrap().as_deref(), Some("v1"));
+    // Previewed as an asked call: no approval, nothing lent only on one.
+    let previews = rig.records("preview", "previews.jsonl");
+    assert_eq!(previews.len(), 1);
+    let ctx = &previews[0];
+    assert_eq!(ctx["approval_id"], Value::Null);
+    assert!(ctx.get("preview_token").is_none());
+    assert_eq!(ctx["tool"], "describe");
+    assert!(ctx["credentials"].get("fake-write-qa").is_none(), "{ctx}");
+
+    let seen = approved_echo(&rig.approve(&id).await);
+    assert_eq!(seen["meta"]["preview_token"], "v1");
+    assert_eq!(seen["meta"]["approval_id"], id.as_str());
+    rig.manager.plugins().shutdown().await;
+}
+
+#[tokio::test]
+async fn an_approval_gone_stale_between_page_and_dispatch_fails_as_stale() {
+    let rig = rig("stale", vec![allow("fake", &["query"])], Policy::shipped());
+    rig.listed(&rig.ctx).await;
+    rig.knob("stale", "preview", "on");
+    let id = asked(&rig.call("fake__describe", json!({ "sql": "UPDATE" })).await);
+    rig.open(&id).await.expect("a preview");
+    // The target moves after the operator read the card.
+    rig.knob("stale", "version", "v2");
+    let settled = rig.approve(&id).await;
+    assert_eq!(settled.state, approvals::FAILED);
+    let reason = settled.reason.as_deref().unwrap();
+    assert!(reason.starts_with(approvals::STALE_REASON), "{reason}");
+    assert!(
+        reason.contains("the issue moved since the preview"),
+        "{reason}"
+    );
+    assert!(reason.contains("Call fake__describe again"), "{reason}");
+    let status = rig
+        .call("approval_status", json!({ "approval_id": id }))
+        .await;
+    let status: Value = serde_json::from_str(&text(&status)).unwrap();
+    assert_eq!(status["state"], "failed");
+    assert_eq!(status["stale"], true);
+    let calls = rig.records("stale", "calls.jsonl");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["refused"], "stale");
+    rig.manager.plugins().shutdown().await;
+}
+
+#[tokio::test]
+async fn a_plugin_without_preview_gets_the_generic_card() {
+    let rig = rig(
+        "nopreview",
+        vec![allow("fake", &["query"])],
+        Policy::shipped(),
+    );
+    rig.listed(&rig.ctx).await;
+    let id = asked(&rig.call("fake__describe", json!({ "sql": "x" })).await);
+    assert!(rig.open(&id).await.is_none());
+    assert_eq!(rig.store.preview_token(&id).unwrap(), None);
+    let seen = approved_echo(&rig.approve(&id).await);
+    assert!(seen["meta"].get("preview_token").is_none(), "{seen}");
+    rig.manager.plugins().shutdown().await;
+}
+
+#[tokio::test]
+async fn a_refused_preview_is_shown_and_the_call_can_still_be_decided() {
+    let rig = rig(
+        "refused",
+        vec![allow("fake", &["query"])],
+        Policy::shipped(),
+    );
+    rig.listed(&rig.ctx).await;
+    rig.knob("refused", "preview", "refuse");
+    let id = asked(&rig.call("fake__describe", json!({ "sql": "x" })).await);
+    let shown = rig.open(&id).await.expect("the refusal");
+    assert_eq!(shown["preview"]["status"], "refused");
+    assert!(
+        shown["preview"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("plugin fake: cannot preview"),
+        "{shown}"
+    );
+    assert_eq!(rig.store.preview_token(&id).unwrap(), None);
+    let seen = approved_echo(&rig.approve(&id).await);
+    assert!(seen["meta"].get("preview_token").is_none());
+    rig.manager.plugins().shutdown().await;
+}
+
+#[tokio::test]
+async fn an_unpreviewable_call_keeps_no_token() {
+    let rig = rig(
+        "unpreviewable",
+        vec![allow("fake", &["query"])],
+        Policy::shipped(),
+    );
+    rig.listed(&rig.ctx).await;
+    rig.knob("unpreviewable", "preview", "unpreviewable");
+    let id = asked(&rig.call("fake__describe", json!({ "sql": "x" })).await);
+    let shown = rig.open(&id).await.expect("a preview");
+    assert_eq!(shown["preview"]["status"], "shown");
+    assert_eq!(shown["preview"]["previewable"], false);
+    assert_eq!(shown["preview"]["token_sha256"], Value::Null);
+    assert_eq!(rig.store.preview_token(&id).unwrap(), None);
+    let seen = approved_echo(&rig.approve(&id).await);
+    assert!(seen["meta"].get("preview_token").is_none());
+    rig.manager.plugins().shutdown().await;
+}
+
+#[tokio::test]
+async fn an_answer_bound_to_an_older_preview_is_refused() {
+    let rig = rig(
+        "twotabs",
+        vec![allow("fake", &["query"])],
+        Policy::shipped(),
+    );
+    rig.listed(&rig.ctx).await;
+    rig.knob("twotabs", "preview", "on");
+    let id = asked(&rig.call("fake__describe", json!({ "sql": "x" })).await);
+    let first = rig.open(&id).await.unwrap();
+    let h1 = first["preview"]["token_sha256"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    rig.knob("twotabs", "version", "v2");
+    let second = rig.open(&id).await.unwrap();
+    let h2 = second["preview"]["token_sha256"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(h1, h2);
+    let refused = rig.allow(&id, Some(&h1)).await.unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains("the preview changed since you read it"),
+        "{refused}"
+    );
+    assert_eq!(
+        rig.store.get_approval(&id).unwrap().unwrap().state,
+        approvals::PENDING
+    );
+    // Answered on what the second tab read, it runs against that.
+    rig.allow(&id, Some(&h2)).await.unwrap();
+    let seen = approved_echo(&rig.settled(&id).await);
+    assert_eq!(seen["meta"]["preview_token"], "v2");
+    rig.manager.plugins().shutdown().await;
+}
+
+#[tokio::test]
+async fn prose_in_a_plugin_format_is_rendered_by_its_owner() {
+    let rig = rig(
+        "formats",
+        vec![allow("fake", &["query"])],
+        Policy::shipped(),
+    );
+    rig.knob("formats", "marked", "");
+    rig.listed(&rig.ctx).await;
+    let shown = rig.tools.plugin_presentation("fake__describe").unwrap();
+    assert_eq!(shown.prose_fields, ["sql"]);
+    assert_eq!(shown.plugin_format.as_deref(), Some("fake_wiki"));
+    assert_eq!(shown.format, "markdown");
+    assert_eq!(
+        rig.tools
+            .convert("formats", "fake_wiki", "markdown", "h1. T\nsome *b*")
+            .await
+            .unwrap(),
+        "# T\nsome **b**"
+    );
+    assert_eq!(
+        rig.tools
+            .convert("formats", "fake_wiki", "fake_wiki", "# T")
+            .await
+            .unwrap(),
+        "h1. T"
+    );
+    let rendered = rig
+        .tools
+        .approval_rendering("formats", &shown, &json!({ "sql": "h1. Up" }))
+        .await
+        .unwrap();
+    assert_eq!(rendered["rendered"]["sql"], "# Up", "{rendered}");
+
+    // Without its owner, nothing renders it, and the card shows the source.
+    rig.store.plugin_remove("fake", false).unwrap();
+    let refused = rig
+        .tools
+        .convert("formats", "fake_wiki", "markdown", "h1. T")
+        .await
+        .unwrap_err();
+    assert!(refused.contains("no installed plugin owns"), "{refused}");
+    let rendered = rig
+        .tools
+        .approval_rendering("formats", &shown, &json!({ "sql": "h1. Up" }))
+        .await
+        .unwrap();
+    assert!(rendered.get("rendered").is_none());
+    assert!(rendered["render_error"].is_string(), "{rendered}");
     rig.manager.plugins().shutdown().await;
 }

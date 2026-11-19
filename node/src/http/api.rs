@@ -2236,6 +2236,10 @@ pub struct AnswerBody {
     /// answer that names one applies only to a call that still holds it.
     #[serde(default)]
     arguments_hash: Option<String>,
+    /// The `token_sha256` of the plugin preview the operator's card showed:
+    /// an answer that names one applies only while that preview is kept.
+    #[serde(default)]
+    preview_hash: Option<String>,
 }
 
 /// Who an answer came from, as an approval's audit names them. One operator
@@ -2410,6 +2414,7 @@ pub async fn answer_permission(
         reason: b.reason,
         notes: b.notes,
         arguments_hash: b.arguments_hash,
+        preview_hash: b.preview_hash,
         by: Some(answered_by(&s, &parts)),
     };
     match s.manager.answer(&id, answer).await {
@@ -2440,18 +2445,21 @@ pub async fn get_approval(
         text.map(|t| serde_json::from_str::<Value>(t).unwrap_or_else(|_| Value::from(t)))
     };
     let arguments = parse(Some(&a.arguments));
-    // What the call would change, read now: only while it is still undecided.
-    let context = match &arguments {
-        Some(args) if a.state == crate::store::approvals::PENDING => {
-            match crate::mcp::approval_context(s.store(), &a.channel, &a.tool, args)? {
-                Some(context) => Some(context),
-                None => s.tools.remote_approval_context(&a, args).await,
-            }
-        }
-        _ => None,
+    let args = arguments.as_ref().unwrap_or(&Value::Null);
+    let pending = arguments.is_some() && a.state == crate::store::approvals::PENDING;
+    // What the call would change, read now: only while it is still
+    // undecided. For a plugin's tool, the plugin's own preview.
+    let context = match pending {
+        true => match crate::mcp::approval_context(s.store(), &a.channel, &a.tool, args)? {
+            Some(context) => Some(context),
+            None => s.tools.approval_preview(&a, args).await,
+        },
+        false => None,
     };
-    let shown =
-        crate::mcp::schema::presentation_for(&a.tool, arguments.as_ref().unwrap_or(&Value::Null));
+    let shown = s.tools.presentation_for(&a.tool, args);
+    // Prose in a plugin's format, rendered by its owner. The arguments stay
+    // the source.
+    let rendered = s.tools.approval_rendering(&a.channel, &shown, args).await;
     let mut details = json!({
         "approval": a,
         "arguments": arguments,
@@ -2463,6 +2471,7 @@ pub async fn get_approval(
             .or_else(|| s.tools.upstream_schema(&a.tool))
             .or_else(|| s.tools.plugin_schema(&a.tool)),
         "format": shown.format,
+        "plugin_format": shown.plugin_format,
         "prose_fields": shown.prose_fields,
         "locked_fields": shown.locked_fields,
         "item_list": shown.item_list,
@@ -2475,10 +2484,50 @@ pub async fn get_approval(
         // an approved run is lent: facts about the build, not a live read.
         "plugin": s.tools.plugin_approval_context(&a),
     });
-    if let (Some(Value::Object(context)), Some(out)) = (context, details.as_object_mut()) {
-        out.extend(context);
+    if let Some(out) = details.as_object_mut() {
+        for extra in [context, rendered].into_iter().flatten() {
+            if let Value::Object(extra) = extra {
+                out.extend(extra);
+            }
+        }
     }
     Ok(Json(details))
+}
+
+#[derive(Deserialize)]
+pub struct RenderBody {
+    text: String,
+}
+
+/// `POST /api/approvals/{id}/render`: one text in the format the approval's
+/// prose is written in, rendered as Markdown by the plugin that owns it, so
+/// the page shows the operator's draft as it would read.
+pub async fn render_approval(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<RenderBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let a = s
+        .store()
+        .get_approval(&id)?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such approval".into()))?;
+    let args = serde_json::from_str::<Value>(&a.arguments).unwrap_or(Value::Null);
+    let format = s
+        .tools
+        .presentation_for(&a.tool, &args)
+        .plugin_format
+        .ok_or_else(|| {
+            ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "this approval's prose is not in a plugin's format".into(),
+            )
+        })?;
+    let markdown = s
+        .tools
+        .convert(&a.channel, &format, "markdown", &body.text)
+        .await
+        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
+    Ok(Json(json!({ "markdown": markdown })))
 }
 
 pub async fn release_approval(
@@ -7463,6 +7512,7 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                 reason,
                 notes,
                 arguments_hash,
+                preview_hash,
             } => self
                 .manager
                 .answer(
@@ -7473,6 +7523,7 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                         reason,
                         notes,
                         arguments_hash,
+                        preview_hash,
                         by: Some(format!(
                             "operator (through {})",
                             self.store()

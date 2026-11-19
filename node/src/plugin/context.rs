@@ -12,6 +12,7 @@
 //!   "caller": { "kind": "operator" | "agent" | "plugin", "session": "<id>" | null, "harness": "<id>" | null },
 //!   "channel": "<channel>",
 //!   "approval_id": "<id>" | null,
+//!   "preview_token": "<token>",
 //!   "issued_ms": 0,
 //!   "expires_ms": 0,
 //!   "nonce": "<32 lowercase hex>",
@@ -30,6 +31,12 @@
 //! at most 60 s), a nonce it has not seen, and an approval for a write tool.
 //! sql-review's README, "Caller context wire format, v1", is the other side
 //! of this; `tests/fixtures/plugin_contract/` holds both plugins' vectors.
+//!
+//! `preview_token` is present only on a call dispatched from an approved card
+//! whose `tracon/preview` returned a token, and absent otherwise: the plugin
+//! applies against it and refuses with `data.stale` when what it names has
+//! moved. The note `note-plugins-preview-contract` is the wire contract for
+//! it, for `tracon/preview` and for `tracon/format/convert`.
 
 use std::collections::BTreeMap;
 
@@ -152,6 +159,8 @@ pub struct Draft<'a> {
     pub caller: &'a CallerId,
     pub channel: &'a str,
     pub approval_id: Option<&'a str>,
+    /// The token of the preview the operator saw, on an approved call.
+    pub preview_token: Option<&'a str>,
     /// What is lent to this call, by binding.
     pub credentials: &'a BTreeMap<String, BTreeMap<String, String>>,
 }
@@ -180,6 +189,9 @@ pub fn build(
         "nonce": hex::encode(rand::random::<[u8; 16]>()),
         "credentials": draft.credentials,
     });
+    if let Some(token) = draft.preview_token {
+        context["preview_token"] = json!(token);
+    }
     let bytes = signing_bytes(&context).map_err(|e| e.to_string())?;
     context["signature"] = json!(hex::encode(sign(&bytes)?.to_bytes()));
     Ok(context)
@@ -239,6 +251,7 @@ mod tests {
             caller: &caller,
             channel: "personal",
             approval_id: None,
+            preview_token: None,
             credentials: &credentials,
         };
         let ctx = build(&draft, 1_000, |b| Ok(identity.sign(b))).unwrap();
@@ -275,5 +288,54 @@ mod tests {
             |_| panic!("not signed"),
         );
         assert!(refused.unwrap_err().contains("float"));
+    }
+
+    #[test]
+    fn a_preview_token_is_signed_when_present_and_absent_otherwise() {
+        let identity = proto::keys::Identity::from_seed(&[9; 32]);
+        let caller = CallerId {
+            kind: "agent",
+            session: None,
+            harness: None,
+        };
+        let credentials = BTreeMap::new();
+        let args = json!({"key": "WRK-1"});
+        let draft = Draft {
+            plugin: "jira-review",
+            token: "t",
+            tool: "update",
+            arguments: &args,
+            caller: &caller,
+            channel: "personal",
+            approval_id: Some("apv-1"),
+            preview_token: None,
+            credentials: &credentials,
+        };
+        let without = build(&draft, 1_000, |b| Ok(identity.sign(b))).unwrap();
+        assert!(without.get("preview_token").is_none());
+        let with = build(
+            &Draft {
+                preview_token: Some("v1"),
+                ..draft
+            },
+            1_000,
+            |b| Ok(identity.sign(b)),
+        )
+        .unwrap();
+        assert_eq!(with["preview_token"], "v1");
+        let signature: [u8; 64] = hex::decode(with["signature"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let signature = Signature::from_bytes(&signature);
+        let key = identity.verifying_key();
+        key.verify_strict(&signing_bytes(&with).unwrap(), &signature)
+            .unwrap();
+        // The token is signed: dropping it breaks the signature.
+        let mut stripped = with.clone();
+        stripped.as_object_mut().unwrap().remove("preview_token");
+        assert!(key
+            .verify_strict(&signing_bytes(&stripped).unwrap(), &signature)
+            .is_err());
     }
 }
