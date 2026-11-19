@@ -2,10 +2,10 @@
 //! reach: not in its environment, not in its filesystem, not in a tool result.
 //! The harness is given a capability (a tool it may call) rather than a secret.
 //!
-//! This is the difference between a gate and theatre. consulta today reads a
-//! database password from a `.env` on the same UID as the agent that calls it;
-//! an agent with a shell can read that file and open its own unguarded
-//! connection. Here the agent never has the password at all.
+//! This is the difference between a gate and theatre. A tool that reads a
+//! database password from a `.env` on the same UID as the agent that calls it
+//! hands an agent with a shell that file, and its own unguarded connection.
+//! Here the agent never has the password at all.
 //!
 //! At rest the store is sealed under a key derived from the node's identity
 //! seed (`credentials.sealed`), so a copied file is ciphertext on any other
@@ -13,7 +13,6 @@
 //! already live by. A plaintext `credentials.toml` is still accepted as an
 //! import and is sealed on first load.
 
-pub mod guard;
 pub mod upstream;
 
 pub use upstream::{preparation_attachments_for, Attachment};
@@ -83,8 +82,9 @@ pub const KIND_ENV: &str = "env";
 pub const KIND_API_KEY: &str = "api_key";
 pub const KIND_OAUTH: &str = "oauth";
 
-/// One credential and the channels allowed to use it. `--profile` in consulta
-/// becomes a channel binding here: which channel may use which connection.
+/// One credential and the channels allowed to use it. A database profile
+/// (`sql-read-<profile>`) is a channel binding here: which channel may use
+/// which connection.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Credential {
     /// Environment the sidecar needs, injected at spawn and never logged.
@@ -97,7 +97,7 @@ pub struct Credential {
     /// Nodes permitted to use it, by node id. Empty means the node holding
     /// this file, which is the only node that can read it anyway; a list pins
     /// it further, so a store copied to another machine brokers nothing there.
-    /// "consulta on the work node only" is this field.
+    /// "the work database on the work node only" is this field.
     #[serde(default)]
     pub nodes: Vec<String>,
     /// Repositories, written as a `[[repo]]` entry's `path`, whose
@@ -513,6 +513,36 @@ impl Revoked {
     }
 }
 
+/// Credential names the node retired, and what each is called now: an old
+/// name and every `<old>-<profile>` become the new name with the same
+/// profile. consulta's database accounts are `sql-review`'s read account,
+/// which its manifest declares as `sql-read` and `sql-read-*`.
+const RETIRED_NAMES: &[(&str, &str)] = &[("consulta", "sql-read")];
+
+/// The current name for a retired one, if `name` is retired.
+fn current_name(name: &str) -> Option<String> {
+    RETIRED_NAMES.iter().find_map(|(old, new)| {
+        if name == *old {
+            return Some(new.to_string());
+        }
+        name.strip_prefix(old)?
+            .strip_prefix('-')
+            .filter(|profile| !profile.is_empty())
+            .map(|profile| format!("{new}-{profile}"))
+    })
+}
+
+/// What [`Broker::rename_retired`] did with one credential under a retired
+/// name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Rename {
+    /// Moved to its current name, bindings and all.
+    Renamed { from: String, to: String },
+    /// Left where it was: a credential already holds the current name, and
+    /// the operator's is not overwritten.
+    Kept { from: String, to: String },
+}
+
 /// Loaded at startup from a store only the node can open, and written back
 /// whenever a login, an import, or a handoff changes it.
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -661,6 +691,69 @@ impl Broker {
     #[cfg(not(unix))]
     fn refuse_if_too_open(_path: &std::path::Path) -> Result<(), BrokerError> {
         Ok(())
+    }
+
+    /// Rename credentials still under a retired name (`RETIRED_NAMES`),
+    /// keeping everything else about them. One whose current name is taken
+    /// is kept as it is, so nothing the operator put there is overwritten.
+    /// A tombstone under a retired name is copied to the current one, so a
+    /// removed credential is not handed back under its new name either; the
+    /// old one stays for peers that still use it. Nothing to rename,
+    /// nothing changes, so a second run is a no-op.
+    pub fn rename_retired(&mut self) -> Vec<Rename> {
+        let mut out = Vec::new();
+        let retired: Vec<(String, String)> = self
+            .credentials
+            .keys()
+            .filter_map(|name| Some((name.clone(), current_name(name)?)))
+            .collect();
+        for (from, to) in retired {
+            if self.credentials.contains_key(&to) {
+                out.push(Rename::Kept { from, to });
+                continue;
+            }
+            let credential = self.credentials.remove(&from).expect("listed above");
+            self.credentials.insert(to.clone(), credential);
+            out.push(Rename::Renamed { from, to });
+        }
+        let buried: Vec<(String, Tombstone)> = self
+            .revoked
+            .iter()
+            .filter_map(|(name, tombstone)| Some((current_name(name)?, tombstone.clone())))
+            .collect();
+        for (to, tombstone) in buried {
+            if !self.credentials.contains_key(&to) {
+                self.bury(&to, tombstone);
+            }
+        }
+        out
+    }
+
+    /// [`Self::rename_retired`], each rename logged, and the store written
+    /// back to `path` when one moved.
+    pub fn migrate_retired_at(
+        &mut self,
+        path: &Path,
+        key: &DataKey,
+    ) -> Result<Vec<Rename>, BrokerError> {
+        let renames = self.rename_retired();
+        for rename in &renames {
+            match rename {
+                Rename::Renamed { from, to } => tracing::info!(
+                    %from, %to,
+                    "credential {from} renamed {to}: SQL is the sql-review plugin's now"
+                ),
+                Rename::Kept { from, to } => tracing::warn!(
+                    %from, %to,
+                    "credential {from} not renamed: {to} already exists; remove whichever is \
+                     stale with `tracon credential rm`"
+                ),
+            }
+        }
+        if renames.iter().any(|r| matches!(r, Rename::Renamed { .. })) {
+            self.save_at(path, key)?;
+        }
+        Ok(renames)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1382,9 +1475,108 @@ mod tests {
     }
 
     #[test]
+    fn consulta_credentials_are_renamed_once_and_never_over_another() {
+        let mut b: Broker = toml::from_str(
+            r#"
+            [credentials.consulta]
+            channels = ["work"]
+            nodes = ["node-a"]
+            [credentials.consulta.env]
+            DB_BACKEND = "oracle"
+            [credentials.consulta-qa]
+            channels = ["work", "personal"]
+            [credentials.consulta-qa.env]
+            DB_BACKEND = "sqlite"
+            [credentials.consulta-prd]
+            channels = ["work"]
+            [credentials.consulta-prd.env]
+            DB_USER = "old"
+            [credentials.sql-read-prd]
+            channels = ["work"]
+            [credentials.sql-read-prd.env]
+            DB_USER = "new"
+            [credentials.consulta-]
+            [credentials.consultant]
+            [credentials.gh]
+            channels = ["work"]
+            [revoked.consulta-tst]
+            grant_id = "g1"
+            "#,
+        )
+        .unwrap();
+        let default = b.get("consulta").cloned().unwrap();
+        let qa = b.get("consulta-qa").cloned().unwrap();
+        let mut renames = b.rename_retired();
+        renames.sort_by_key(|r| format!("{r:?}"));
+        let renamed = |from: &str, to: &str| Rename::Renamed {
+            from: from.into(),
+            to: to.into(),
+        };
+        assert_eq!(
+            renames,
+            [
+                Rename::Kept {
+                    from: "consulta-prd".into(),
+                    to: "sql-read-prd".into()
+                },
+                renamed("consulta", "sql-read"),
+                renamed("consulta-qa", "sql-read-qa"),
+            ]
+        );
+        // Bindings, nodes and environment move with the name.
+        assert_eq!(b.get("sql-read"), Some(&default));
+        assert_eq!(b.get("sql-read-qa"), Some(&qa));
+        assert!(b.get("consulta").is_none() && b.get("consulta-qa").is_none());
+        // The operator's own sql-read-prd is not overwritten, and the old
+        // one stays for them to resolve.
+        assert_eq!(b.get("sql-read-prd").unwrap().env["DB_USER"], "new");
+        assert_eq!(b.get("consulta-prd").unwrap().env["DB_USER"], "old");
+        // What was never a consulta profile is left alone.
+        for name in ["consulta-", "consultant", "gh"] {
+            assert!(b.get(name).is_some(), "{name}");
+        }
+        // A removed credential stays removed under its new name too.
+        assert_eq!(
+            b.tombstone("sql-read-tst")
+                .and_then(|t| t.grant_id.as_deref()),
+            Some("g1")
+        );
+        assert!(b.tombstone("consulta-tst").is_some());
+        assert!(b.available_to("work", "node-a").contains(&"sql-read"));
+        // Idempotent: what is left is only what was kept.
+        assert_eq!(
+            b.rename_retired(),
+            [Rename::Kept {
+                from: "consulta-prd".into(),
+                to: "sql-read-prd".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn the_rename_is_written_back_only_when_something_moved() {
+        let dir = std::env::temp_dir().join(format!("tracon-broker-rename-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let sealed = dir.join("credentials.sealed");
+        let plain = dir.join("credentials.toml");
+        let key = DataKey::from_bytes([7u8; 32]);
+        let mut b: Broker =
+            toml::from_str("[credentials.consulta]\nchannels = [\"work\"]\n").unwrap();
+        let renames = b.migrate_retired_at(&sealed, &key).unwrap();
+        assert_eq!(renames.len(), 1);
+        let mut back = Broker::load_at(&sealed, &plain, &key).unwrap();
+        assert_eq!(back.names(), ["sql-read"]);
+        // Nothing to rename: nothing written.
+        std::fs::remove_file(&sealed).unwrap();
+        assert!(back.migrate_retired_at(&sealed, &key).unwrap().is_empty());
+        assert!(!sealed.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_credential_pinned_to_a_node_is_unusable_elsewhere() {
         // The store may be copied to another machine; the binding travels
-        // with it and refuses there. "consulta on the work node only".
+        // with it and refuses there. "the work database on the work node only".
         let b = broker();
         assert!(b.env_for("pinned", "work", "node-b").is_ok());
         assert!(matches!(

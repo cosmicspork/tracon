@@ -2434,24 +2434,26 @@ path = "/srv/notes"
                     .to_string_lossy()
                     .into_owned(),
             ),
-            ("consulta.args", String::new()),
         ] {
-            let op = match key {
-                "consulta.args" => Op::set(
-                    KeyPath::parse(key).unwrap(),
-                    toml::Value::Array(
-                        ["run", "python", "-c", "print(1)"]
-                            .map(|a| toml::Value::String(a.into()))
-                            .to_vec(),
-                    ),
-                ),
-                _ => set(key, value.as_str()),
-            };
+            let op = set(key, value.as_str());
             let err = edit_at(&path, &store, &[op], None, "test").err().unwrap();
             assert!(matches!(err, EditError::Refused(_)), "{key}: {err}");
             assert!(err.to_string().contains("path guard"), "{key}: {err}");
             assert_eq!(read(&path), COMMENTED);
         }
+    }
+
+    /// `[consulta]` is retired: a file that still has it loads, takes an
+    /// edit of something else, and keeps the table as the operator wrote it.
+    #[test]
+    fn a_retired_consulta_table_does_not_block_an_edit() {
+        let text =
+            format!("{COMMENTED}\n[consulta]\ncommand = \"uv\"\nargs = [\"run\", \"consulta\"]\n");
+        let (_dir, path) = file(&text);
+        edit_at(&path, &store(), &[set("node_name", "other")], None, "test").unwrap();
+        let after = read(&path);
+        assert!(after.contains("[consulta]\ncommand = \"uv\""), "{after}");
+        assert!(after.contains("node_name = \"other\""), "{after}");
     }
 
     /// A key that already broke a rule is the start's warning, not a reason

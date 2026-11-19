@@ -36,10 +36,6 @@ pub enum PathKind {
     /// and, inside a package manager's prefix, the node's own user. Checked
     /// again just before every spawn.
     Executable,
-    /// Arguments to such a program that decide what it in turn runs
-    /// (`consulta.args`: `uv run --project <dir> consulta`). Held to a fixed
-    /// shape, its project to consulta's own.
-    ExecArgs,
     /// A file whose content the node reads as a credential and sends on.
     /// Only inside a directory set aside for the node's secrets
     /// (`<config dir>/secrets`, `/etc/tracon`); never one of the node's own
@@ -124,15 +120,6 @@ impl KeySpec {
         }
     }
 
-    /// Arguments that decide what an executable runs.
-    const fn exec_args(self) -> Self {
-        KeySpec {
-            exec_path: true,
-            path: Some(PathKind::ExecArgs),
-            ..self
-        }
-    }
-
     const fn path(self, kind: PathKind) -> Self {
         KeySpec {
             fs_path: true,
@@ -188,10 +175,6 @@ pub const KEYS: &[KeySpec] = &[
     live("session.suspend_published_after_secs"),
     live("session.auth_wait_secs"),
     restart("session.worktree_root").path(PathKind::Root),
-    // [consulta]
-    restart("consulta.command").exec(),
-    restart("consulta.args").exec_args(),
-    restart("consulta.timeout_secs"),
     // [publish]
     live("publish.gh").exec(),
     live("publish.glab").exec(),
@@ -1032,8 +1015,6 @@ mod tests {
             assert!(spec.fs_path && !spec.secret && !spec.exec_path, "{key}");
         }
         assert!(lookup(&["embed", "api_key_file"]).fs_path);
-        let args = lookup(&["consulta", "args"]);
-        assert!(args.exec_path && args.path == Some(PathKind::ExecArgs));
         assert_eq!(
             lookup(&["providers", "openrouter", "models", "id"]).key,
             "providers.*.models.id"
@@ -1057,7 +1038,7 @@ mod tests {
     fn every_path_key_says_which_rules_hold_it() {
         for spec in KEYS {
             match spec.path {
-                Some(PathKind::Executable | PathKind::ExecArgs) => {
+                Some(PathKind::Executable) => {
                     assert!(spec.exec_path && !spec.fs_path, "{}", spec.key)
                 }
                 Some(_) => assert!(spec.fs_path && !spec.exec_path, "{}", spec.key),

@@ -20,7 +20,3 @@ data:
 
     [session]
     worktree_root = "/state/work"
-
-    [consulta]
-    command = "uv"
-    args = ["run", "--project", "/opt/consulta", "consulta"]

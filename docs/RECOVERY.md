@@ -217,6 +217,44 @@ another, and the pairing is checked as a session start checks it. A model the
 channel no longer offers is refused by name rather than swapped for the node's
 default, so pass `--model` to carry the work onto one it does.
 
+## SQL after consulta
+
+The node no longer runs SQL. The database tools are the `sql-review` plugin's
+(`tracon plugin add cosmicspork/sql-review`), offered as `sql-review__query`
+and `sql-review__describe`, and the node's own read-only check (a SQL parser
+that refused anything but one `SELECT`) went with consulta.
+
+**For SQL, the database's read-only account is the boundary**, not a parser in
+the node or in the plugin. `sql-review` classifies a statement as a read or a
+write to decide what to do with it, and a misclassified statement still runs on
+the account it was given. So a credential bound as `sql-read` or
+`sql-read-<profile>` must be an account the database itself refuses writes
+from. Binding one that can write removes the only control there is.
+
+Upgrading from a node that ran consulta:
+
+- **`[consulta]` in `node.toml`** still loads and is ignored, with a warning
+  that names the plugin. Delete the table when convenient.
+- **Credentials** `consulta` and `consulta-<profile>` are renamed `sql-read`
+  and `sql-read-<profile>` the first time the new node serves, with their
+  channels, nodes and fields, and each rename is logged. A rename whose new
+  name is already taken is skipped with a warning, so nothing you put there is
+  overwritten: `tracon credential ls` shows both, and `tracon credential rm`
+  removes whichever is stale. The rename runs again at every start and does
+  nothing once no `consulta*` credential is left.
+- **The policy bundle.** The shipped agreements name the plugin's reads from
+  version 25. A node still on an older signed bundle asks for every
+  `sql-review__query` until you sign and install the new one (`tracon policy
+  sign`, then restart).
+- **A mesh in mixed versions.** A peer that has not upgraded still holds, and
+  may hand over, its copy as `consulta`; it is renamed here at the next start,
+  and on the peer once it upgrades.
+
+With the plugin not installed, broken, or the node down, SQL follows step 2
+above: run `sql-review --read-only` directly, with the read account from its own
+`.env` or the environment. It is the same program, outside the boundary, and the
+read-only account is still the boundary.
+
 ## Locked out of admin from afar
 
 Admin actions made from off the node need a passkey; made at the node they need

@@ -1137,7 +1137,7 @@ async fn a_credential_that_arrives_by_handoff_is_published() {
         Ok(tracon::stream::Frame::Providers { .. })
     ));
     // A handoff of something no provider uses changes nothing.
-    p.handoff_received(&["consulta".to_string()]);
+    p.handoff_received(&["sql-read".to_string()]);
     assert!(frames.try_recv().is_err());
 }
 

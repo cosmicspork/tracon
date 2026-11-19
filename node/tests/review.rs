@@ -326,7 +326,7 @@ const WITH_GH: &str = r#"
 "#;
 
 const WITHOUT_GH: &str = r#"
-    [credentials.consulta]
+    [credentials.sql-read]
     channels = ["work"]
 "#;
 

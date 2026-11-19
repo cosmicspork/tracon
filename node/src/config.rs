@@ -24,7 +24,6 @@ pub struct Config {
     pub boundary: Boundary,
     pub gateway: Gateway,
     pub session: SessionDefaults,
-    pub consulta: Consulta,
     pub publish: Publish,
     /// What the GitHub tools may start on their own (`run_dispatch`).
     pub github: Github,
@@ -269,6 +268,16 @@ fn retired_opencode_sections(text: &str) -> Vec<&'static str> {
                 .is_some_and(|t| !t.is_empty())
         })
         .collect()
+}
+
+/// Whether an older `node.toml` still has a `[consulta]` table. SQL left the
+/// node for the `sql-review` plugin, so the table is ignored, empty or not:
+/// it named the program the node used to run, and nothing reads it now.
+fn retired_consulta_section(text: &str) -> bool {
+    toml::from_str::<toml::Value>(text)
+        .ok()
+        .and_then(|value| value.get("consulta").map(toml::Value::is_table))
+        .unwrap_or(false)
 }
 
 /// What a `[qa]` table in an older `node.toml` still configures, if anything.
@@ -2615,17 +2624,6 @@ impl Github {
     }
 }
 
-/// How the node runs the consulta sidecar. It stays a Python process because
-/// Oracle's client is a glibc blob and the node is a static musl binary; the
-/// pure-Python driver is what makes a read-only Oracle path possible at all.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Consulta {
-    pub command: String,
-    pub args: Vec<String>,
-    pub timeout_secs: u64,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Harness {
@@ -3244,20 +3242,6 @@ impl Default for Config {
                 harness_listen: HarnessListen::default(),
             },
             github: Github::default(),
-            consulta: Consulta {
-                command: "uv".into(),
-                args: vec![
-                    "run".into(),
-                    "--project".into(),
-                    dirs::home_dir()
-                        .unwrap_or_default()
-                        .join("src/consulta")
-                        .to_string_lossy()
-                        .into_owned(),
-                    "consulta".into(),
-                ],
-                timeout_secs: 60,
-            },
             publish: Publish {
                 gh: "gh".into(),
                 glab: "glab".into(),
@@ -3316,11 +3300,6 @@ impl Default for SessionDefaults {
 impl Default for Publish {
     fn default() -> Self {
         Config::default().publish
-    }
-}
-impl Default for Consulta {
-    fn default() -> Self {
-        Config::default().consulta
     }
 }
 
@@ -3633,6 +3612,13 @@ impl Config {
         for section in retired_opencode_sections(text) {
             tracing::warn!(
                 "{}: [{section}] is ignored; it configured the OpenCode harness, which was removed",
+                path.display()
+            );
+        }
+        if retired_consulta_section(text) {
+            tracing::warn!(
+                "{}: [consulta] is ignored; SQL left the node for the sql-review plugin, so \
+                 install it with `tracon plugin add cosmicspork/sql-review` and the section can go",
                 path.display()
             );
         }
@@ -4045,6 +4031,18 @@ mod tests {
         assert_eq!(kept.review.max_diff_lines, 800);
         assert_eq!(kept.review.max_files, 60);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_retired_consulta_section_still_loads_and_is_named() {
+        let text =
+            "[consulta]\ncommand = \"uv\"\nargs = [\"run\", \"consulta\"]\ntimeout_secs = 60\n";
+        Config::from_toml(text, Path::new("node.toml"))
+            .expect("an old [consulta] table must not stop the node");
+        assert!(retired_consulta_section(text));
+        assert!(retired_consulta_section("[consulta]\n"));
+        assert!(!retired_consulta_section("[review]\nmax_files = 1\n"));
+        assert!(!retired_consulta_section("consulta = 1\n"));
     }
 
     #[test]

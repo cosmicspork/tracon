@@ -84,10 +84,10 @@ context, and any business domain.
 Build rules: static musl on Linux `x86_64` (the node and `tracon-agent`), and Apple
 Silicon macOS, SPA embedded so every node serves the identical bundle, log to stdout,
 no self-daemonizing, clean SIGTERM, idempotent restart. Supervision is external — the platform's service
-manager, which `tracon service install` or the desktop app sets up. Static
-musl is also why consulta stays a Python sidecar: every Rust Oracle crate wraps a
-dynamically linked glibc blob, and `oracledb` thin mode is a pure-Python wire
-implementation. Recorded so the rewrite is not re-decided.
+manager, which `tracon service install` or the desktop app sets up. The node
+links no database driver: SQL is the `sql-review` plugin's, a separate static binary
+built on Oracle's pure-Rust driver, so static musl never has to carry Oracle's glibc
+client (the reason the node once ran consulta as a Python sidecar).
 
 ### Configuration
 
@@ -231,7 +231,7 @@ bound to its exact bytes, and the node words the prompt (`http::config_prompt`).
 the one thing a phished confirmation would be judged by, so what could change what the
 node runs, trusts, reads, sends or reaches comes first, in full: programs and host
 paths, secrets (named, value not shown), host-only keys, keys the node does not read,
-`auth`, `mesh`, `runtime`, `boundary`, `consulta`, `[harness]`, the gateway's allowlist
+`auth`, `mesh`, `runtime`, `boundary`, `[harness]`, the gateway's allowlist
 and socket, a provider's upstream, credential and sign-in, a repository's path,
 preparation, lent credentials, egress, image, Dockerfile, context and checks, a
 service's name and command, the checks run on submissions, the embedding
@@ -334,10 +334,10 @@ runs. `config::path_guard` holds each such key to rules for what it names
 (`config_schema::PathKind`), and where a rule can be an allowlist, it is one:
 
 - **Programs** (`boundary.podman`, `publish.gh`, `publish.glab`, `publish.git`,
-  `consulta.command`, `runtime.kubernetes.builder.buildctl`): an absolute path without
-  `..`, or a bare name looked up on the node's `PATH`, whose file name is exactly one the
-  key runs (`podman` or `podman-remote`, `gh`, `glab`, `git`, `uv` or `consulta`,
-  `buildctl`), so a shell or interpreter installed somewhere trusted cannot stand in for
+  `runtime.kubernetes.builder.buildctl`, `runtime.apple.container`): an absolute path
+  without `..`, or a bare name looked up on the node's `PATH`, whose file name is exactly
+  one the key runs (`podman` or `podman-remote`, `gh`, `glab`, `git`, `buildctl`,
+  `container`), so a shell or interpreter installed somewhere trusted cannot stand in for
   it. Every symbolic link on the way is followed, by hand, and the directory each link
   lives in counts as much as the target. The target is a regular file with an execute
   bit, and neither it, the path as written, nor any link's directory is inside a place an
@@ -355,18 +355,6 @@ runs. `config::path_guard` holds each such key to rules for what it names
   fails these rules and runs the next one that passes, and every guarded program is given
   the node's `PATH` less every such entry, and less empty and relative ones, so a program
   that runs another (git its helpers, uv its tools) does not find a planted one.
-- **`consulta.args`** decides what `uv` runs and what consulta is told, so with `uv` it
-  must read `run [--frozen|--locked|--no-sync|--offline|--no-dev|--quiet|--no-progress]
-  [--project <dir>] consulta`, with nothing after `consulta`: the node appends the
-  query's own arguments, and consulta's options include where it writes its output.
-  `--with`, `--python`, `--directory`, an index, a script or any other program are
-  refused. The project must be an absolute directory, not `/` or a system directory, out
-  of the places an agent can write, owned as a secret file is (the node's own user may
-  write it: the node image's `/opt/consulta` is the node's), and must hold a
-  `pyproject.toml` naming the project `consulta`. With `consulta` itself as the command,
-  `args` must be empty. The node runs consulta from its state directory, since consulta
-  reads the first `.env` it finds walking up from its working directory and would
-  otherwise take settings from wherever the node was started.
 - **Secret files and directories** (`embed.api_key_file`,
   `runtime.kubernetes.builder.do_token_file`, `.tls_dir`, `.docker_config`): only inside
   a directory set aside for the node's secrets, `<config dir>/secrets` (on macOS inside
@@ -923,8 +911,14 @@ Broker invariants:
 
 What the agent needs are not CLIs to wrap but verbs the node exposes over MCP: the
 credential never leaves the node, the harness never sees a process, and channel
-bindings apply because the tool is the node's. Database access is a read-only SQL
-runner guarded twice, on both sides of the privilege boundary.
+bindings apply because the tool is the node's. The node runs no SQL: database access
+is the `sql-review` plugin's (`sql-review__query`, `sql-review__describe`), lent the
+channel's `sql-read` or `sql-read-<profile>` credential per call. The database's
+read-only account is the boundary. `sql-review` parses a statement only to classify it
+as a read or a write, which is not a security control, so a misclassified write still
+runs on the read-only account and fails there. Credentials named for consulta (`consulta`,
+`consulta-<profile>`) are renamed once as `serve` starts (`Broker::rename_retired`),
+never over a credential already holding the new name.
 
 **Consequential verbs are scoped grants, not open tools.** Merge, publish, ticket
 transition, and deploy exist as narrow tools (`mr_merge`/`pr_merge`, `deploy`, a
