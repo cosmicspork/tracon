@@ -3770,7 +3770,7 @@ impl Manager {
 
     /// A channel a session may run on: one this node holds, or one of the two
     /// labels a standalone node offers before any channel is created.
-    fn channel_usable(&self, channel: &str) -> Result<(), SessionError> {
+    pub fn channel_usable(&self, channel: &str) -> Result<(), SessionError> {
         let known = match self.store.channel_list() {
             Ok(rows) if rows.iter().any(|c| !c.name.starts_with('@')) => rows
                 .iter()

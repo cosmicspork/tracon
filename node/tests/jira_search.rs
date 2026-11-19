@@ -1,263 +1,353 @@
-//! Jira search through the operator API: pages joined by cursor on Cloud,
-//! the offset fallback on Data Center, the board fields mapped, a channel
-//! without the credential refused, and the token never in a response.
+//! Jira search through the operator API, forwarded to the jira-review
+//! plugin's paged `search` (here the fake plugin, `support/fake_plugin.rs`):
+//! called as the operator with a signed caller context, decided by policy
+//! and the `[[plugin]]` entry and never held, logged to the channel's
+//! external log, and answered with the plugin's page unchanged. The plugin
+//! absent, not offered, refusing or failing each has its own status, and the
+//! token is never in a response.
 
 #[path = "support/mod.rs"]
 mod support;
 use support::http::call;
-use support::state;
+use support::plugin::Verifier;
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::path::PathBuf;
 
-use axum::{extract::Query, http::StatusCode, routing::get, Json, Router};
 use serde_json::{json, Value};
 
 use tracon::{
-    broker::{Broker, Credential, SharedBroker},
-    config::Config,
-    http::api::AppState,
-    mcp::Tools,
-    session::Manager,
-    store::Store,
-    stream::Bus,
+    broker::Credential,
+    config::{Config, PluginEntry},
+    plugin::install,
 };
 
-use support::fake::FakeAdapter;
-
 const TOKEN: &str = "jira-secret-token";
+const TOOL: &str = "jira-review__search";
 
-fn issue(id: &str, key: &str, parent: Value) -> Value {
-    let mut fields = json!({
-        "summary": format!("{key} summary"),
-        "status": { "name": "In Progress", "statusCategory": { "key": "indeterminate" } },
-        "priority": { "name": "High" },
-        "issuetype": { "name": "Task" },
-        "labels": ["board", "ops"],
-    });
-    if !parent.is_null() {
-        fields["parent"] = parent;
+const JIRA_REVIEW: &str = r#"name = "jira-review"
+version = "1.0.0"
+contract = 1
+exec = ["bin/jira-review"]
+
+[[credential]]
+name = "jira"
+pattern = "jira-*"
+
+[[tool]]
+name = "search"
+hint = "read"
+"#;
+
+/// The pages the fake answers, by cursor: jira-review's workboard shape.
+fn pages() -> Value {
+    json!({
+        "": {
+            "site": "https://jira.example",
+            "account_email": "me@example.com",
+            "issues": [{
+                "id": "10",
+                "key": "WRK-1",
+                "summary": "WRK-1 summary",
+                "status": "In Progress",
+                "status_category": "indeterminate",
+                "priority": "High",
+                "issue_type": "Task",
+                "labels": ["board", "ops"],
+                "parent": { "key": "WRK-0", "summary": "The epic", "issue_type": "Epic" },
+            }],
+            "next_cursor": "page-2",
+        },
+        "page-2": {
+            "site": "https://jira.example",
+            "account_email": "me@example.com",
+            "issues": [{
+                "id": "11",
+                "key": "WRK-2",
+                "summary": "WRK-2 summary",
+                "status": "To Do",
+                "status_category": "new",
+                "priority": "Low",
+                "issue_type": "Task",
+                "labels": [],
+                "parent": null,
+            }],
+            "next_cursor": null,
+        },
+        "bad": "jira refused the search (400 Bad Request): [\"Error in the JQL Query\"]",
+    })
+}
+
+struct Node {
+    h: support::harness::Harness,
+    state: PathBuf,
+}
+
+/// A node with `entries`, the jira-review fake installed unless `installed`
+/// is false, and a `jira` credential bound to `channel` (and not to
+/// `{channel}-bare`). Each test its own channel: the plugin's data directory
+/// is shared by the binary's tests.
+async fn node(channel: &str, entries: Vec<PluginEntry>, installed: bool) -> Node {
+    let h = support::harness::harness_with(Config {
+        plugin: entries,
+        ..Default::default()
+    })
+    .await;
+    h.manager
+        .plugins()
+        .set_signer(proto::keys::Identity::from_seed(&[7; 32]));
+    let bare = format!("{channel}-bare");
+    for ch in [channel, bare.as_str()] {
+        h.store.channel_put(ch, &[], "{}").unwrap();
     }
-    json!({ "id": id, "key": key, "self": format!("https://jira.example/rest/api/3/issue/{id}"), "fields": fields })
-}
-
-/// Cloud: two pages behind `nextPageToken`.
-async fn cloud() -> String {
-    let app = Router::new().route(
-        "/rest/api/3/search/jql",
-        get(|Query(q): Query<BTreeMap<String, String>>| async move {
-            assert_eq!(
-                q["fields"],
-                "summary,status,priority,issuetype,labels,parent"
-            );
-            assert_eq!(q["maxResults"], "100");
-            match q.get("nextPageToken").map(String::as_str) {
-                None => Json(json!({
-                    "issues": [issue("10", "WRK-1", json!({
-                        "key": "WRK-0",
-                        "fields": { "summary": "The epic", "issuetype": { "name": "Epic" } },
-                    }))],
-                    "nextPageToken": "page-2",
-                    "isLast": false,
-                })),
-                Some("page-2") => Json(json!({
-                    "issues": [issue("11", "WRK-2", Value::Null)],
-                    "isLast": true,
-                })),
-                Some(other) => panic!("unexpected cursor {other}"),
-            }
-        }),
-    );
-    serve(app).await
-}
-
-/// Data Center: the newer endpoint is absent, the older pages by offset.
-async fn data_center() -> String {
-    let app = Router::new()
-        .route(
-            "/rest/api/3/search/jql",
-            get(|| async { (StatusCode::NOT_FOUND, Json(json!({}))) }),
-        )
-        .route(
-            "/rest/api/2/search",
-            get(|Query(q): Query<BTreeMap<String, String>>| async move {
-                let start: usize = q["startAt"].parse().unwrap();
-                let issues: Vec<Value> = (start..(start + 2).min(3))
-                    .map(|n| issue(&n.to_string(), &format!("DC-{n}"), Value::Null))
-                    .collect();
-                Json(json!({ "issues": issues, "startAt": start, "total": 3 }))
-            }),
-        );
-    serve(app).await
-}
-
-async fn refusing() -> String {
-    let app = Router::new().route(
-        "/rest/api/3/search/jql",
-        get(|Query(q): Query<BTreeMap<String, String>>| async move {
-            if q["jql"] == "bad" {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({ "errorMessages": ["Error in the JQL Query"] })),
-                )
-            } else {
-                (
-                    StatusCode::UNAUTHORIZED,
-                    Json(json!({ "errorMessages": ["Unauthorized"] })),
-                )
-            }
-        }),
-    );
-    serve(app).await
-}
-
-async fn serve(app: Router) -> String {
-    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", l.local_addr().unwrap());
-    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
-    base
-}
-
-fn broker_for(base: &str, channels: &[&str]) -> SharedBroker {
-    let broker = Broker::default().shared();
-    broker.write().unwrap().put(
+    h.tools.broker.write().unwrap().put(
         "jira",
         Credential {
             env: [
-                ("JIRA_URL", format!("{base}/")),
-                ("JIRA_EMAIL", "me@example.com".to_string()),
-                ("JIRA_TOKEN", TOKEN.to_string()),
+                ("JIRA_URL", "https://jira.example/"),
+                ("JIRA_EMAIL", "me@example.com"),
+                ("JIRA_TOKEN", TOKEN),
             ]
             .into_iter()
-            .map(|(k, v)| (k.to_string(), v))
+            .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
-            channels: channels.iter().map(|c| c.to_string()).collect(),
+            channels: vec![channel.to_string()],
             ..Credential::default()
         },
     );
-    broker
+    let state = Config::state_dir();
+    if installed {
+        support::plugin::install(&h.store, &state, JIRA_REVIEW);
+        let data = install::data_dir(&state, "jira-review").join(channel);
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("tools"), "search\n").unwrap();
+        std::fs::write(data.join("search.json"), pages().to_string()).unwrap();
+    }
+    Node { h, state }
 }
 
-fn node_with(broker: SharedBroker) -> Router {
-    state::isolate();
-    let store = Arc::new(Store::open_in_memory().unwrap());
-    store.ensure_peer_node("n1").unwrap();
-    let cfg = Arc::new(Config::default());
-    let tools = Arc::new(Tools {
-        broker,
-        cfg: cfg.clone(),
-        policy: tracon::policy::Policy::shipped_shared(),
-        http: reqwest::Client::new(),
-        session: Default::default(),
-        upstream: Default::default(),
-    });
-    let manager = Manager::new(
-        store.clone(),
-        Bus::new(),
-        cfg.clone(),
-        "n1".into(),
-        tools.clone(),
-        Default::default(),
-        Arc::new(tracon::runner::local::LocalBackend),
-    );
-    let state = AppState {
-        manager,
-        cfg,
-        adapter: Arc::new(FakeAdapter {
-            tx: Arc::new(tokio::sync::Mutex::new(None)),
-            tokens: Arc::new(tokio::sync::Mutex::new(0)),
-        }),
-        node_id: "n1".into(),
-        tools,
-        mesh: None,
-        auth: Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
-        enroll: Default::default(),
-    };
-    tracon::http::router(state)
+fn allowing() -> Vec<PluginEntry> {
+    vec![PluginEntry {
+        name: "jira-review".into(),
+        allow: vec!["search".into()],
+        ..Default::default()
+    }]
 }
 
-async fn search(app: &Router, query: &str) -> (u16, Value) {
-    let (status, body) = call(app, "GET", &format!("/api/jira/search?{query}"), None).await;
-    assert!(!body.to_string().contains(TOKEN), "token leaked: {body}");
-    (status.as_u16(), body)
+impl Node {
+    async fn search(&self, query: &str) -> (u16, Value) {
+        let (status, body) = call(
+            &self.h.operator,
+            "GET",
+            &format!("/api/jira/search?{query}"),
+            None,
+        )
+        .await;
+        assert!(!body.to_string().contains(TOKEN), "token leaked: {body}");
+        (status.as_u16(), body)
+    }
+
+    /// What the fake was called with on `channel`, in order.
+    fn calls(&self, channel: &str) -> Vec<Value> {
+        std::fs::read_to_string(
+            install::data_dir(&self.state, "jira-review")
+                .join(channel)
+                .join("calls.jsonl"),
+        )
+        .unwrap_or_default()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+    }
+
+    /// The channel's external log, as `(lane, kind, payload)`.
+    fn log(&self, channel: &str) -> Vec<(Option<String>, String, Value)> {
+        self.h
+            .store
+            .external_events_after(channel, 0, 100)
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.lane, r.kind, r.payload))
+            .collect()
+    }
+
+    /// The `tool_decided` rows of the channel's external log.
+    fn decided(&self, channel: &str) -> Vec<Value> {
+        self.log(channel)
+            .into_iter()
+            .filter(|(lane, kind, _)| {
+                assert_eq!(lane.as_deref(), Some("/api/jira/search"));
+                kind == "tool_decided"
+            })
+            .map(|(_, _, payload)| payload)
+            .collect()
+    }
+
+    async fn shutdown(self) {
+        self.h.manager.plugins().shutdown().await;
+    }
 }
 
 #[tokio::test]
-async fn cloud_pages_join_by_cursor_and_map_the_board_fields() {
-    let base = cloud().await;
-    let app = node_with(broker_for(&base, &["work"]));
+async fn pages_are_the_plugins_called_as_the_operator_and_logged() {
+    let n = node("pages", allowing(), true).await;
 
-    let (status, first) = search(&app, "channel=work&jql=project%20%3D%20WRK").await;
+    let (status, first) = n.search("channel=pages&jql=project%20%3D%20WRK").await;
     assert_eq!(status, 200, "{first}");
-    assert_eq!(first["site"], base);
-    assert_eq!(first["account_email"], "me@example.com");
+    assert_eq!(first, pages()[""]);
     assert_eq!(first["next_cursor"], "page-2");
+
+    let (status, second) = n
+        .search("channel=pages&jql=project%20%3D%20WRK&cursor=page-2")
+        .await;
+    assert_eq!(status, 200, "{second}");
+    assert_eq!(second, pages()["page-2"]);
+    assert_eq!(second["next_cursor"], Value::Null);
+
+    let calls = n.calls("pages");
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls[0]["tool"], "search");
     assert_eq!(
-        first["issues"],
-        json!([{
-            "id": "10",
-            "key": "WRK-1",
-            "summary": "WRK-1 summary",
-            "status": "In Progress",
-            "status_category": "indeterminate",
-            "priority": "High",
-            "issue_type": "Task",
-            "labels": ["board", "ops"],
-            "parent": { "key": "WRK-0", "summary": "The epic", "issue_type": "Epic" },
-        }])
+        calls[0]["arguments"],
+        json!({ "jql": "project = WRK", "page": true })
     );
-    assert!(!first.to_string().contains("rest/api"), "{first}");
+    assert_eq!(
+        calls[1]["arguments"],
+        json!({ "jql": "project = WRK", "page": true, "cursor": "page-2" })
+    );
 
-    let (status, second) = search(&app, "channel=work&jql=project%20%3D%20WRK&cursor=page-2").await;
-    assert_eq!(status, 200, "{second}");
-    assert_eq!(second["next_cursor"], Value::Null);
-    assert_eq!(second["issues"][0]["key"], "WRK-2");
-    assert_eq!(second["issues"][0]["parent"], Value::Null);
+    // The caller context names the operator, and lends the channel's jira.
+    let meta = &calls[0]["meta"];
+    assert_eq!(
+        meta["caller"],
+        json!({ "kind": "operator", "session": null, "harness": null })
+    );
+    assert_eq!(meta["channel"], "pages");
+    assert_eq!(meta["approval_id"], Value::Null);
+    assert_eq!(meta["credentials"]["jira"]["JIRA_TOKEN"], TOKEN);
+    let mut plugin = Verifier::new(
+        "jira-review",
+        calls[0]["own_instance"].as_str().unwrap(),
+        calls[0]["node_key"].as_str().unwrap(),
+    );
+    plugin
+        .verify(
+            meta,
+            "search",
+            &calls[0]["arguments"],
+            meta["issued_ms"].as_i64().unwrap(),
+        )
+        .unwrap();
+
+    // Each call is in the channel's external log, under the route's lane,
+    // and no session holds it.
+    let log = n.log("pages");
+    assert_eq!(
+        log.iter()
+            .filter(|(_, kind, _)| kind == "tool_call")
+            .count(),
+        2,
+        "{log:?}"
+    );
+    let decided = n.decided("pages");
+    assert_eq!(decided.len(), 2, "{decided:?}");
+    for row in &decided {
+        assert_eq!(row["tool"], TOOL);
+        assert_eq!(row["decision"], "policy_allowed");
+        assert_eq!(row["rule"], "plugin.jira-review.allow");
+        assert_eq!(row["outcome"], "ok");
+    }
+    assert!(n.h.store.list_sessions(None).unwrap().is_empty());
+    n.shutdown().await;
 }
 
 #[tokio::test]
-async fn data_center_falls_back_to_offset_paging() {
-    let base = data_center().await;
-    let app = node_with(broker_for(&base, &["work"]));
-
-    let (status, first) = search(&app, "channel=work&jql=x").await;
-    assert_eq!(status, 200, "{first}");
-    assert_eq!(first["next_cursor"], "2");
-    assert_eq!(first["issues"].as_array().unwrap().len(), 2);
-
-    let (status, second) = search(&app, "channel=work&jql=x&cursor=2").await;
-    assert_eq!(status, 200, "{second}");
-    assert_eq!(second["issues"][0]["key"], "DC-2");
-    assert_eq!(second["next_cursor"], Value::Null);
+async fn a_denying_entry_refuses_the_search_before_the_plugin() {
+    let n = node(
+        "denied",
+        vec![PluginEntry {
+            name: "jira-review".into(),
+            deny: vec!["search".into()],
+            ..Default::default()
+        }],
+        true,
+    )
+    .await;
+    let (status, body) = n.search("channel=denied&jql=x").await;
+    assert_eq!(status, 403, "{body}");
+    assert!(
+        body.to_string()
+            .contains("the operator does not allow search on plugin jira-review"),
+        "{body}"
+    );
+    assert!(n.calls("denied").is_empty());
+    let decided = n.decided("denied");
+    assert_eq!(decided.len(), 1, "{decided:?}");
+    assert_eq!(decided[0]["decision"], "denied");
+    assert_eq!(decided[0]["rule"], "plugin.jira-review.deny");
+    n.shutdown().await;
 }
 
 #[tokio::test]
-async fn a_channel_without_the_credential_is_refused() {
-    let base = cloud().await;
-    let app = node_with(broker_for(&base, &["work"]));
-    let (status, body) = search(&app, "channel=personal&jql=x").await;
-    assert_eq!(status, 422, "{body}");
-
-    let app = node_with(Broker::default().shared());
-    let (status, body) = search(&app, "channel=work&jql=x").await;
-    assert_eq!(status, 422, "{body}");
-
-    let (status, body) = search(&app, "channel=work&jql=%20").await;
-    assert_eq!(status, 422, "{body}");
+async fn a_search_that_would_be_asked_is_refused_naming_the_entry() {
+    let n = node("asked", vec![], true).await;
+    let (status, body) = n.search("channel=asked&jql=x").await;
+    assert_eq!(status, 403, "{body}");
+    let text = body.to_string();
+    assert!(text.contains(r#"allow = [\"search\"]"#), "{body}");
+    assert!(text.contains("jira-review"), "{body}");
+    assert!(n.calls("asked").is_empty());
+    let decided = n.decided("asked");
+    assert_eq!(decided.len(), 1, "{decided:?}");
+    assert_eq!(decided[0]["decision"], "refused");
+    assert!(
+        decided[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("never held"),
+        "{decided:?}"
+    );
+    n.shutdown().await;
 }
 
 #[tokio::test]
-async fn jira_refusals_map_to_request_or_upstream() {
-    let base = refusing().await;
-    let app = node_with(broker_for(&base, &["work"]));
+async fn without_the_plugin_the_route_says_how_to_add_it() {
+    let n = node("absent", allowing(), false).await;
+    let (status, body) = n.search("channel=absent&jql=x").await;
+    assert_eq!(status, 503, "{body}");
+    assert!(
+        body.to_string()
+            .contains("tracon plugin add cosmicspork/jira-review"),
+        "{body}"
+    );
+    n.shutdown().await;
+}
 
-    let (status, body) = search(&app, "channel=work&jql=bad").await;
+#[tokio::test]
+async fn a_channel_the_plugin_is_not_offered_on_is_refused() {
+    let n = node("offered", allowing(), true).await;
+    let (status, body) = n.search("channel=offered-bare&jql=x").await;
     assert_eq!(status, 422, "{body}");
+    assert!(body.to_string().contains("jira-*"), "{body}");
+    assert!(n.calls("offered-bare").is_empty());
+
+    let (status, body) = n.search("channel=nowhere&jql=x").await;
+    assert_eq!(status, 422, "{body}");
+
+    let (status, body) = n.search("channel=offered&jql=%20").await;
+    assert_eq!(status, 422, "{body}");
+    n.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_plugins_error_is_a_bad_gateway_with_its_text() {
+    let n = node("failing", allowing(), true).await;
+    let (status, body) = n.search("channel=failing&jql=x&cursor=bad").await;
+    assert_eq!(status, 502, "{body}");
     assert!(
         body.to_string().contains("Error in the JQL Query"),
         "{body}"
     );
-
-    let (status, body) = search(&app, "channel=work&jql=x").await;
-    assert_eq!(status, 502, "{body}");
+    let decided = n.decided("failing");
+    assert_eq!(decided[0]["outcome"], "error");
+    n.shutdown().await;
 }
