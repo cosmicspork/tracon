@@ -165,7 +165,10 @@ pub fn active_base() -> Option<String> {
         .map(|(_, pinned)| pinned.clone())
 }
 
-pub(crate) fn pin(configured: &str, pinned: &str) {
+/// Record the base as pinned: what the boundary's converge does, and a
+/// test standing in for it.
+#[doc(hidden)]
+pub fn pin(configured: &str, pinned: &str) {
     *PINNED.write().unwrap() = Some((configured.to_string(), pinned.to_string()));
 }
 
@@ -534,22 +537,19 @@ pub fn ready_snapshots(store: &Store) -> Vec<String> {
         .collect()
 }
 
-/// The current image of each repository with no ready prepared snapshot:
-/// an entry that prepares nothing, whose sessions elsewhere start from its
-/// image itself.
-pub fn ready_unprepared(store: &Store) -> Vec<String> {
-    let rows = store.repo_images().unwrap_or_default();
-    let prepared: std::collections::BTreeSet<&str> = rows
-        .iter()
-        .filter(|row| row.kind == SNAPSHOT && row.status == "ready")
-        .map(|row| row.repo_path.as_str())
-        .collect();
-    let repos: std::collections::BTreeSet<&str> = rows
-        .iter()
-        .filter(|row| {
-            row.kind == crate::repo_image::BASE && !prepared.contains(row.repo_path.as_str())
-        })
-        .map(|row| row.repo_path.as_str())
+/// The current image of each repository the node built one for, whether
+/// or not it also has a ready prepared snapshot: a session elsewhere starts
+/// from it when the entry prepares nothing, and also when the snapshot the
+/// store has ready is not the current one (its key moved with a new image
+/// or lockfile, or its image is gone), or while the current one's template
+/// builds.
+pub fn current_repo_images(store: &Store) -> Vec<String> {
+    let repos: std::collections::BTreeSet<String> = store
+        .repo_images()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|row| row.kind == crate::repo_image::BASE)
+        .map(|row| row.repo_path)
         .collect();
     repos
         .iter()

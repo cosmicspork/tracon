@@ -215,6 +215,17 @@ async fn session_create(State(s): State<S>, body: String) -> Response {
     let manifest: Value = serde_json::from_str(&body).unwrap();
     let mut api = s.api.lock().unwrap();
     api.manifests.push(manifest.clone());
+    // As the live API answered a create naming a template a sweep removed.
+    if let Some(template) = manifest["template"].as_str() {
+        if !api.templates.values().any(|t| t["name"] == template) {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"id": "conflict",
+                            "message": format!("template \"{template}\" not provisioned for team")})),
+            )
+                .into_response();
+        }
+    }
     let id = api.id("aa");
     let config = api.id("cc");
     let name = manifest["name"].as_str().unwrap_or("").to_string();

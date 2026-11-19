@@ -422,6 +422,25 @@ impl Templates {
         self.states.lock().unwrap().get(name).cloned()
     }
 
+    /// Forget the templates `names`, which are gone from DigitalOcean (a
+    /// sweep removed them, or a create was told they are not there): no
+    /// sandbox starts from one again until `ensure` registers it anew and
+    /// sees it ready, rather than every start being refused for it.
+    pub fn forget(&self, names: &[String]) {
+        if names.is_empty() {
+            return;
+        }
+        let mut states = self.states.lock().unwrap();
+        for name in names {
+            states.remove(name);
+        }
+        drop(states);
+        self.ready
+            .lock()
+            .unwrap()
+            .retain(|_, known| !names.contains(&known.name));
+    }
+
     /// Whether `name` is a template this node registered that none of
     /// `wanted` (template names) is: one under its own stem, or one it made
     /// for peers.
@@ -668,6 +687,26 @@ mod tests {
         assert_eq!(t.kept(SNAPSHOT), std::slice::from_ref(&new));
         assert!(t.is_stale(&old, &t.kept(SNAPSHOT).into_iter().collect()));
         assert_eq!(t.services_of(&new), Some(vec!["browser".to_string()]));
+    }
+
+    /// A template gone from DigitalOcean (swept, or a create refused for it)
+    /// is forgotten: its image has no template ready, so its sessions start
+    /// elsewhere and it is registered anew, rather than every start naming
+    /// it. Another image's is untouched.
+    #[test]
+    fn a_forgotten_template_is_no_longer_ready() {
+        let t = Templates::new(built(), "coding-base", "tracon-tabcd1234").unwrap();
+        let gone = seen_ready(&t, SNAPSHOT);
+        let other = seen_ready(&t, IMAGE);
+        t.forget(std::slice::from_ref(&gone));
+        assert_eq!(
+            t.ready(SNAPSHOT).unwrap_err(),
+            TemplateState::Unknown.describe()
+        );
+        assert_eq!(t.state(SNAPSHOT), TemplateState::Unknown);
+        assert_eq!(t.state_named(&gone), None);
+        assert_eq!(t.kept(SNAPSHOT), std::slice::from_ref(&gone));
+        assert_eq!(t.ready(IMAGE).unwrap(), other);
     }
 
     /// An image a peer asked for is named for the peer's key while what the

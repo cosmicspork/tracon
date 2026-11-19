@@ -281,10 +281,12 @@ pub enum RunnerError {
     Spawn(#[from] std::io::Error),
     #[error("{0}")]
     Other(String),
-    /// The cluster refused to run the command for lack of capacity, before
-    /// anything of it started. `reason` classifies it
-    /// (`provider::kubernetes::pod::Refusal::as_str`); `message` names the resource and
-    /// the setting that sizes it.
+    /// The provider refused to run the command before anything of it
+    /// started: the cluster for lack of capacity, or DigitalOcean for a
+    /// template it no longer has. `reason` classifies it
+    /// (`provider::kubernetes::pod::Refusal::as_str`,
+    /// `provider::digitalocean::TEMPLATE_GONE`); `message` says why, and
+    /// for capacity names the resource and the setting that sizes it.
     #[error("{message}")]
     Refused {
         reason: &'static str,

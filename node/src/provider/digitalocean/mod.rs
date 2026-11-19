@@ -167,6 +167,12 @@ impl Default for Settings {
 /// What a sandbox sends in SNI when nothing else names the node.
 pub const DEFAULT_SERVER_NAME: &str = "tracon-node";
 
+/// What a create refused because its template is gone from DigitalOcean is
+/// classified as (`ProviderError::Refused::reason`): the template is
+/// forgotten, so a session's start chooses its image again, once, and the
+/// template is registered anew for the sessions after it.
+pub const TEMPLATE_GONE: &str = "template_gone";
+
 /// How a sandbox there reaches the node, and so the one destination its
 /// egress admits.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -967,7 +973,21 @@ impl SandboxProvider for DoProvider {
             .map_err(|why| failed(format!("no DigitalOcean sandbox was made: {why}")))?;
         let manifest = self.manifest(name, &template, &size.slug)?;
         let started_ms = crate::store::now_ms();
-        let session = client.create_session(&manifest).await.map_err(failed)?;
+        let session = match client.create_session(&manifest).await {
+            Ok(session) => session,
+            Err(error) if error.is_template_gone() => {
+                tracing::warn!(%template, image = %spec.image, %error, "a DigitalOcean template this node saw ready is gone; forgetting it");
+                self.templates.forget(std::slice::from_ref(&template));
+                return Err(ProviderError::Refused {
+                    reason: TEMPLATE_GONE,
+                    message: format!(
+                        "DigitalOcean no longer has template {template} for {}: {error}",
+                        spec.image
+                    ),
+                });
+            }
+            Err(error) => return Err(failed(error)),
+        };
         let kind = spec
             .labels
             .kind

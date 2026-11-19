@@ -253,8 +253,9 @@ pub enum ProviderError {
     },
     #[error("no such sandbox: {0}")]
     NotFound(String),
-    /// Refused for lack of capacity before anything of it started, as
-    /// `RunnerError::Refused` classifies it.
+    /// Refused before anything of it started (for lack of capacity, or a
+    /// DigitalOcean template found gone), as `RunnerError::Refused`
+    /// classifies it.
     #[error("{message}")]
     Refused {
         reason: &'static str,

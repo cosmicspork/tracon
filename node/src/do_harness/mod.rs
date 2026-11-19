@@ -94,6 +94,13 @@ impl DoError {
         self.status() == Some(404)
     }
 
+    /// A session create refused because the template its manifest names is
+    /// not there: `409`, `template "<name>" not provisioned for team`, as
+    /// the live API answered once a sweep had removed it.
+    pub fn is_template_gone(&self) -> bool {
+        matches!(self, Self::Api { status: 409, message, .. } if message.contains("not provisioned"))
+    }
+
     /// Worth trying again later: rate limiting, a server-side failure, or no
     /// answer at all.
     pub fn is_retryable(&self) -> bool {
@@ -908,6 +915,13 @@ mod tests {
         );
         assert!(listed.is_not_found());
         assert!(listed.to_string().contains("session not found"));
+        let gone = api_error(
+            "session create",
+            StatusCode::CONFLICT,
+            br#"{"id":"conflict","message":"template \"tracon-tf0445456-669d4b47ff4f2845\" not provisioned for team"}"#,
+        );
+        assert!(gone.is_template_gone());
+        assert!(!nested.is_template_gone(), "another conflict");
         let bare = api_error("x", StatusCode::BAD_GATEWAY, b"");
         assert!(bare.to_string().contains("Bad Gateway"));
         assert!(bare.is_retryable());
