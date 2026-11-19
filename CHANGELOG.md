@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.55.0](https://github.com/cosmicspork/tracon/compare/v0.54.0...v0.55.0) (2026-11-19)
+
+
+### Features
+
+* **node,spa:** make sandbox workspace syncs visible to the operator ([#990](https://github.com/cosmicspork/tracon/issues/990)) ([68008f4](https://github.com/cosmicspork/tracon/commit/68008f4e55eeafdf74ca3cd2716e6a6930d10f91))
+* **node,spa:** show a session's open-turn token spend live ([#987](https://github.com/cosmicspork/tracon/issues/987)) ([5311dc7](https://github.com/cosmicspork/tracon/commit/5311dc7d090fe79d63ba4b565e53a19765396b69))
+* **node,spa:** size DigitalOcean sandboxes by a memory floor, 2 GiB by default ([#989](https://github.com/cosmicspork/tracon/issues/989)) ([63a5883](https://github.com/cosmicspork/tracon/commit/63a5883cb2b267f15e11b61239c70c9dcd52a05d))
+* **node:** tracon work start starts a plan or execute session on a task ([#986](https://github.com/cosmicspork/tracon/issues/986)) ([6a4982f](https://github.com/cosmicspork/tracon/commit/6a4982fe908be0bd392159d3883e29983495b386))
+* **spa,node:** generated names like session-loving-bubble-21 in place of raw ids ([#992](https://github.com/cosmicspork/tracon/issues/992)) ([abcd510](https://github.com/cosmicspork/tracon/commit/abcd51003de88bde6c066b0f56ac1745718cc6bd))
+
+
+### Bug Fixes
+
+* **node,sandbox,spa:** relaunch or end a session whose harness dies mid-turn, never turn it again ([#991](https://github.com/cosmicspork/tracon/issues/991)) ([29c2fd1](https://github.com/cosmicspork/tracon/commit/29c2fd1b411f2da658966a68515af5e49ce55f75))
+* **node,sandbox:** stop and clean up a sandbox sync that is given up ([#988](https://github.com/cosmicspork/tracon/issues/988)) ([39be993](https://github.com/cosmicspork/tracon/commit/39be9937f2d70ff0f7cce565ab6ad44d951cfc6a))
+* **node:** keep DigitalOcean templates sessions start from, and forget one that is gone ([#994](https://github.com/cosmicspork/tracon/issues/994)) ([15aef41](https://github.com/cosmicspork/tracon/commit/15aef41d4c408732bde6409d828eba8b4da7db6b))
+* **node:** keep the provider summary peers see when the boundary is re-checked ([#996](https://github.com/cosmicspork/tracon/issues/996)) ([9c9aa4e](https://github.com/cosmicspork/tracon/commit/9c9aa4e1e7a72a7d71a79d9bf8659bf7a7858ab6))
+* **node:** never bring a placement card back to its session as a decision ([#983](https://github.com/cosmicspork/tracon/issues/983)) ([bf53ae8](https://github.com/cosmicspork/tracon/commit/bf53ae8499590bc92580ac0d4605e42e6b6e0bec))
+* **node:** refuse unknown fields on POST /api/sessions and /api/compose ([#985](https://github.com/cosmicspork/tracon/issues/985)) ([886f8ac](https://github.com/cosmicspork/tracon/commit/886f8ac63d839113c584980c89f4549132c6364c))
+* **node:** size report_issue limits to the published GitHub issue body, in characters, stated in the schema ([#984](https://github.com/cosmicspork/tracon/issues/984)) ([7ad6b69](https://github.com/cosmicspork/tracon/commit/7ad6b6997fa1e6c30b7b3b90313cee02847f559c))
+
 ## [0.54.0](https://github.com/cosmicspork/tracon/compare/v0.53.0...v0.54.0) (2026-11-18)
 
 
