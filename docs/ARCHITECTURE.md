@@ -1099,7 +1099,14 @@ the call must not drop the check, its `check_run` row, or the
 session's way back out of `waiting_on_check`. Past that the call returns `checking` with
 the id the review will have, `review_status` carries the wait and then reports the
 review or the same refusal the call would have given, and a retry of the same candidate
-against the same check definitions attaches to the run instead of starting another. A
+against the same check definitions attaches to the run instead of starting another.
+Checks the machine had no room for (a pod the scheduler could not place, the kubelet
+refused, or evicted under memory pressure; `review::checks::no_room`) are no verdict
+and refuse nothing: the submission joins a line (`queued`, the session
+`queued_for_check`), and while anything is in it the node runs checks one at a time,
+the next only once none is running. Stopped short of room three times, they are held
+rather than tried for ever: the agent is told why, the session waits on the operator,
+and submitting the same commit again puts them back in line. A
 restart interrupts whatever was still `running` and closes the sessions that asked for
 it, like every other live session. Sandboxes run on the stock base on every runtime, so
 an entry gives root `build` steps: the node layers them on the pinned

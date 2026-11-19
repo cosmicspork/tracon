@@ -308,6 +308,14 @@ pub trait SandboxProvider: Send + Sync {
 
     async fn status(&self, handle: &Handle) -> Result<Status, ProviderError>;
 
+    /// Why its machine put the sandbox out for lack of room (a kubelet's
+    /// eviction under memory pressure), in the provider's words, when it
+    /// did. `None` when it was not, or the provider cannot say: only a
+    /// provider whose machines evict has anything to answer.
+    async fn evicted(&self, _handle: &Handle) -> Option<String> {
+        None
+    }
+
     async fn pause(&self, _handle: &Handle) -> Result<(), ProviderError> {
         Err(self.unsupported("pause"))
     }

@@ -110,17 +110,14 @@ macro_rules! test_name {
 }
 
 async fn fixture_with(name: &str, credentials: &str, tweak: fn(&mut Config)) -> Fixture {
-    fixture_cloned(
-        name,
-        credentials,
-        tweak,
-        "git clone -q origin.git wt && cd wt && git checkout -qB main \
-         && git config user.email t@e && git config user.name t \
-         && echo base > a.txt && git add -A && git commit -qm base && git push -q origin main \
-         && git checkout -qb feat/x && echo change >> a.txt && git add -A && git commit -qm work",
-    )
-    .await
+    fixture_cloned(name, credentials, tweak, FEATURE_CLONE).await
 }
+
+/// A `main` with one commit pushed, and `feat/x` one commit beyond it.
+const FEATURE_CLONE: &str = "git clone -q origin.git wt && cd wt && git checkout -qB main \
+     && git config user.email t@e && git config user.name t \
+     && echo base > a.txt && git add -A && git commit -qm base && git push -q origin main \
+     && git checkout -qb feat/x && echo change >> a.txt && git add -A && git commit -qm work";
 
 /// A worktree cloned from an origin nothing was ever pushed to, with one
 /// commit on a branch of its own: the first work on a brand-new repository.
@@ -144,6 +141,18 @@ async fn fixture_cloned(
     credentials: &str,
     tweak: fn(&mut Config),
     clone: &str,
+) -> Fixture {
+    fixture_on(name, credentials, tweak, clone, None).await
+}
+
+/// [`fixture_cloned`], with the node's checks and sessions run by `runs_on`
+/// in place of the `LocalBackend` the workspace is imported through.
+async fn fixture_on(
+    name: &str,
+    credentials: &str,
+    tweak: fn(&mut Config),
+    clone: &str,
+    runs_on: Option<Arc<dyn tracon::boundary::Backend>>,
 ) -> Fixture {
     // Per test: these run in parallel and each needs its own repo, its own
     // stub CLI, and its own log to assert against.
@@ -279,7 +288,7 @@ async fn fixture_cloned(
         "n1".into(),
         tools.clone(),
         Default::default(),
-        backend,
+        runs_on.unwrap_or(backend),
     );
     let _ = tools.session.set(tracon::mcp::SessionAccess {
         store: store.clone(),
@@ -4966,7 +4975,8 @@ async fn settled(f: &Fixture, handle: &str) -> Value {
                 json!({ "review_id": handle, "wait_secs": 1 }),
             )
             .await;
-        if v["state"] != "checking" {
+        let waiting = v["state"] == "checking" || (v["state"] == "queued" && v["held"] != true);
+        if !waiting {
             return v;
         }
         assert_eq!(v["still_waiting"], true, "{v}");
@@ -5187,6 +5197,370 @@ async fn a_retried_submission_attaches_to_the_running_checks() {
         1,
         "{kinds:?}"
     );
+}
+
+// ---- checks the machine has no room for ----
+
+/// The node's own runtime, except that the first check runs it is handed are
+/// refused as a cluster refuses a pod it has no room for, each after a
+/// moment, and the checks that do run are timed.
+struct ShortOfRoom {
+    inner: tracon::runner::local::LocalBackend,
+    refusals: Arc<std::sync::Mutex<std::collections::VecDeque<&'static str>>>,
+    ran: Arc<std::sync::Mutex<Vec<(i64, i64)>>>,
+}
+
+impl ShortOfRoom {
+    fn new(refusals: &[&'static str]) -> Arc<Self> {
+        Arc::new(Self {
+            inner: tracon::runner::local::LocalBackend,
+            refusals: Arc::new(std::sync::Mutex::new(refusals.iter().copied().collect())),
+            ran: Default::default(),
+        })
+    }
+}
+
+struct ShortRunner {
+    inner: Arc<dyn tracon::runner::Runner>,
+    refusals: Arc<std::sync::Mutex<std::collections::VecDeque<&'static str>>>,
+    ran: Arc<std::sync::Mutex<Vec<(i64, i64)>>>,
+}
+
+#[async_trait::async_trait]
+impl tracon::runner::Runner for ShortRunner {
+    async fn spawn(
+        &self,
+        cmd: tracon::runner::RunnerCommand,
+    ) -> Result<tracon::runner::Spawned, tracon::runner::RunnerError> {
+        self.inner.spawn(cmd).await
+    }
+    async fn run_capture(
+        &self,
+        cmd: tracon::runner::RunnerCommand,
+    ) -> Result<std::process::Output, tracon::runner::RunnerError> {
+        if cmd.labels.kind != Some(tracon::runner::RunKind::Check) {
+            return self.inner.run_capture(cmd).await;
+        }
+        let refused = self.refusals.lock().unwrap().pop_front();
+        if let Some(reason) = refused {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            return Err(tracon::runner::RunnerError::Refused {
+                reason,
+                message: format!(
+                    "{}: {reason}: The node was low on resource: memory. Container harness \
+                     was using 3929028Ki, request is 2Gi.",
+                    cmd.name
+                ),
+            });
+        }
+        let began = now_ms();
+        let output = self.inner.run_capture(cmd).await;
+        self.ran.lock().unwrap().push((began, now_ms()));
+        output
+    }
+    async fn kill(&self, name: &str) -> Result<(), tracon::runner::RunnerError> {
+        self.inner.kill(name).await
+    }
+    fn capture_name(&self, name: &str) -> String {
+        self.inner.capture_name(name)
+    }
+    async fn resolved_image(&self, image: Option<&str>) -> Option<String> {
+        self.inner.resolved_image(image).await
+    }
+}
+
+#[async_trait::async_trait]
+impl tracon::boundary::Backend for ShortOfRoom {
+    fn kind(&self) -> &'static str {
+        self.inner.kind()
+    }
+    async fn setup(
+        &self,
+        cfg: &Config,
+        rebuild: bool,
+    ) -> Result<(), tracon::boundary::BoundaryError> {
+        self.inner.setup(cfg, rebuild).await
+    }
+    async fn check_all(&self, cfg: &Config, deep: bool) -> tracon::boundary::BoundaryReport {
+        self.inner.check_all(cfg, deep).await
+    }
+    fn runner(&self, extra: Vec<tracon::runner::Mount>) -> Arc<dyn tracon::runner::Runner> {
+        Arc::new(ShortRunner {
+            inner: self.inner.runner(extra),
+            refusals: self.refusals.clone(),
+            ran: self.ran.clone(),
+        })
+    }
+    fn runner_for(
+        &self,
+        harness_id: &str,
+        extra: Vec<tracon::runner::Mount>,
+    ) -> Arc<dyn tracon::runner::Runner> {
+        self.inner.runner_for(harness_id, extra)
+    }
+    async fn import_volume(
+        &self,
+        volume: &str,
+        source: &std::path::Path,
+    ) -> Result<(), tracon::boundary::BoundaryError> {
+        self.inner.import_volume(volume, source).await
+    }
+    async fn export_volume(
+        &self,
+        volume: &str,
+        destination: &std::path::Path,
+    ) -> Result<(), tracon::boundary::BoundaryError> {
+        self.inner.export_volume(volume, destination).await
+    }
+    async fn export_workspace(
+        &self,
+        volume: &str,
+        destination: &std::path::Path,
+    ) -> Result<(), tracon::boundary::BoundaryError> {
+        self.inner.export_workspace(volume, destination).await
+    }
+    async fn clone_volume(
+        &self,
+        source: &str,
+        destination: &str,
+    ) -> Result<(), tracon::boundary::BoundaryError> {
+        self.inner.clone_volume(source, destination).await
+    }
+    async fn list_volumes(
+        &self,
+    ) -> Result<Vec<tracon::boundary::VolumeInfo>, tracon::boundary::BoundaryError> {
+        self.inner.list_volumes().await
+    }
+    async fn remove_volume(&self, volume: &str) -> Result<(), tracon::boundary::BoundaryError> {
+        self.inner.remove_volume(volume).await
+    }
+    fn harness_host(&self) -> String {
+        self.inner.harness_host()
+    }
+    fn harness_home(&self) -> String {
+        self.inner.harness_home()
+    }
+    async fn reconcile(&self, names: &[String]) {
+        self.inner.reconcile(names).await
+    }
+}
+
+/// The fixture, its checks run on `backend`, and tried again soon after
+/// they stop short of room.
+async fn short_fixture(name: &str, backend: Arc<ShortOfRoom>, tweak: fn(&mut Config)) -> Fixture {
+    let f = fixture_on(name, WITH_GH, tweak, FEATURE_CLONE, Some(backend)).await;
+    f.manager
+        .checking()
+        .set_retry_after(std::time::Duration::from_millis(300));
+    f
+}
+
+/// Poll `review_status` until it reads `state`.
+async fn until_state(f: &Fixture, handle: &str, state: &str) -> Value {
+    for _ in 0..100 {
+        let v = f.status_tool(handle).await;
+        if v["state"] == state {
+            return v;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("{handle} never read {state}");
+}
+
+/// A check the machine had no room for, and one it evicted, is no verdict
+/// on the change: the review is not rejected, the checks queue, the agent
+/// waiting sees them queued, and they run again and open the review.
+#[tokio::test]
+async fn a_check_the_machine_had_no_room_for_queues_and_runs_again() {
+    state::isolate();
+    let backend = ShortOfRoom::new(&["unschedulable", "evicted"]);
+    let f = short_fixture(test_name!(), backend.clone(), |_| {}).await;
+    let v = f.tool("s1", "submit_review", submit_waiting(&f, 0)).await;
+    assert_eq!(v["state"], "checking", "{v}");
+    let handle = v["review_id"].as_str().unwrap().to_string();
+
+    let queued = until_state(&f, &handle, "queued").await;
+    assert_eq!(queued["still_waiting"], true, "{queued}");
+    assert_eq!(queued["position"], 1, "{queued}");
+    assert!(
+        queued["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("low on resource: memory"),
+        "{queued}"
+    );
+    let message = queued["message"].as_str().unwrap_or_default();
+    assert!(message.contains("queued for room"), "{message}");
+    assert!(message.contains("nothing has been rejected"), "{message}");
+    // The agent waiting is held on it as on any check: when it settles, the
+    // node brings it back.
+    assert!(
+        f.manager
+            .waits()
+            .open("s1")
+            .iter()
+            .any(|wait| wait.id == handle),
+        "the queued checks are an open wait"
+    );
+
+    let v = settled(&f, &handle).await;
+    assert_eq!(v["state"], "new", "the review opened once they ran: {v}");
+    assert_eq!(session_state(&f), "running");
+    let kinds = f.event_kinds("s1");
+    assert!(!kinds.contains(&"review_rejected".to_string()), "{kinds:?}");
+    assert_eq!(
+        kinds.iter().filter(|kind| *kind == "check_queued").count(),
+        2,
+        "{kinds:?}"
+    );
+    let runs = f
+        .store
+        .check_runs_for_candidate(&head_candidate(&f))
+        .unwrap();
+    let outcomes: Vec<_> = runs.iter().map(|run| run.outcome.as_str()).collect();
+    assert_eq!(
+        outcomes,
+        ["interrupted", "interrupted", "passed"],
+        "{runs:?}"
+    );
+    // Settled, the checks are no longer a wait of their own: what they came
+    // to is the review's, which the node brings back when it is decided.
+    let waits = f.manager.waits().of("s1");
+    assert!(
+        !waits.iter().any(|wait| wait.key.starts_with("checks")),
+        "{waits:?}"
+    );
+    assert!(
+        waits
+            .iter()
+            .any(|wait| wait.key.starts_with("review:") && wait.id == handle),
+        "{waits:?}"
+    );
+}
+
+/// A check that never fits is not tried for ever, and not rejected either:
+/// held, with the cause, the session told and left waiting on the operator.
+/// Submitting the same commit again puts it back in line.
+#[tokio::test]
+async fn a_check_that_never_fits_is_held_until_submitted_again() {
+    state::isolate();
+    let backend = ShortOfRoom::new(&["evicted", "evicted", "evicted"]);
+    let f = short_fixture(test_name!(), backend.clone(), |_| {}).await;
+    let v = f.tool("s1", "submit_review", submit_waiting(&f, 0)).await;
+    let handle = v["review_id"].as_str().unwrap().to_string();
+
+    let mut held = Value::Null;
+    for _ in 0..100 {
+        held = f.status_tool(&handle).await;
+        if held["held"] == true {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(held["state"], "queued", "{held}");
+    assert_eq!(held["held"], true, "{held}");
+    assert_eq!(held["short_of_room"], 3, "{held}");
+    let message = held["message"].as_str().unwrap_or_default();
+    assert!(message.contains("stopped trying"), "{message}");
+    assert!(message.contains("nothing was rejected"), "{message}");
+    assert!(
+        message.contains("submit the same commit again"),
+        "{message}"
+    );
+    assert!(f.store.open_reviews().unwrap().is_empty());
+    let kinds = f.event_kinds("s1");
+    assert!(kinds.contains(&"check_held".to_string()), "{kinds:?}");
+    assert!(!kinds.contains(&"review_rejected".to_string()), "{kinds:?}");
+    // No longer checking: waiting on the operator, who can make room.
+    assert_eq!(session_state(&f), "running");
+    // The node has the news to bring back as a prompt, and the checks are
+    // still a wait.
+    let waits = f.manager.waits().of("s1");
+    assert!(
+        waits
+            .iter()
+            .any(|wait| wait.key.starts_with("checks-held:") && !wait.is_open()),
+        "{waits:?}"
+    );
+    assert!(
+        f.manager
+            .waits()
+            .open("s1")
+            .iter()
+            .any(|wait| wait.id == handle),
+        "{waits:?}"
+    );
+    assert_eq!(f.manager.checking().in_flight(), 0);
+
+    // The operator made room: the same commit, submitted again, runs.
+    let again = f.tool("s1", "submit_review", submit_waiting(&f, 0)).await;
+    assert_eq!(again["review_id"], json!(handle), "{again}");
+    assert_eq!(again["attached"], true, "{again}");
+    assert!(
+        again["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("put them back in line"),
+        "{again}"
+    );
+    let v = settled(&f, &handle).await;
+    assert_eq!(v["state"], "new", "{v}");
+    assert_eq!(backend.ran.lock().unwrap().len(), 1);
+}
+
+/// While one review's checks wait for room, another's queue behind them,
+/// and the two run one after the other, never side by side.
+#[tokio::test]
+async fn checks_queued_for_room_run_one_after_another() {
+    state::isolate();
+    let backend = ShortOfRoom::new(&["evicted"]);
+    let f = short_fixture(test_name!(), backend.clone(), |c| {
+        c.supervision.checks = vec!["sleep 1 && test -f a.txt".into()];
+    })
+    .await;
+    let first = f.tool("s1", "submit_review", submit_waiting(&f, 0)).await;
+    let first = first["review_id"].as_str().unwrap().to_string();
+    until_state(&f, &first, "queued").await;
+
+    // A second review, of a newer commit, while the first waits.
+    let wt = std::path::Path::new(&f.worktree);
+    sh(wt, "echo more >> a.txt && git commit -qam more");
+    let mut args = submit_waiting(&f, 0);
+    args["title"] = json!("feat: another thing");
+    let second = f.tool("s1", "submit_review", args).await;
+    assert_eq!(second["state"], "queued", "{second}");
+    let second = second["review_id"].as_str().unwrap().to_string();
+    assert_ne!(first, second);
+
+    for handle in [&first, &second] {
+        let v = settled(&f, handle).await;
+        assert_eq!(v["state"], "new", "{v}");
+    }
+    let ran = backend.ran.lock().unwrap().clone();
+    assert_eq!(ran.len(), 2, "{ran:?}");
+    let (a, b) = (ran[0], ran[1]);
+    assert!(
+        b.0 >= a.1,
+        "the second began after the first ended: {ran:?}"
+    );
+    assert!(!f.event_kinds("s1").contains(&"review_rejected".to_string()));
+}
+
+/// A refusal that is not for want of room (a quota, which refuses the same
+/// pod whatever room there is) is not queued: the review is refused as
+/// before, as is a check that ran and failed.
+#[tokio::test]
+async fn a_refusal_not_about_room_still_rejects() {
+    state::isolate();
+    let backend = ShortOfRoom::new(&["quota"]);
+    let f = short_fixture(test_name!(), backend, |_| {}).await;
+    let v = f.tool("s1", "submit_review", submit_waiting(&f, 0)).await;
+    let handle = v["review_id"].as_str().unwrap().to_string();
+    let v = settled(&f, &handle).await;
+    assert_eq!(v["state"], "submit_failed", "{v}");
+    let kinds = f.event_kinds("s1");
+    assert!(kinds.contains(&"review_rejected".to_string()), "{kinds:?}");
+    assert!(!kinds.contains(&"check_queued".to_string()), "{kinds:?}");
 }
 
 /// With no required checks there is nothing to wait for: the review comes

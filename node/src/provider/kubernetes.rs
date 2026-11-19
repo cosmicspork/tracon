@@ -1784,6 +1784,12 @@ impl SandboxProvider for KubeSandboxProvider {
         Ok(sandbox_status(&pod.status.unwrap_or_default()))
     }
 
+    async fn evicted(&self, handle: &Handle) -> Option<String> {
+        let pod = self.pods().get_opt(&handle.0).await.ok()??;
+        let machine = pod.spec.as_ref().and_then(|spec| spec.node_name.as_deref());
+        pod::evicted(pod.status.as_ref()?, machine)
+    }
+
     async fn image_identity(&self, handle: &Handle) -> Result<ImageIdentity, ProviderError> {
         // The kubelet posts the running container's `imageID` a moment after
         // the container starts, so a sandbox can say hello before its pod's

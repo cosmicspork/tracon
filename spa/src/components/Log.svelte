@@ -251,6 +251,17 @@
             <div>{e.payload.tail || '(no output)'}</div>
           {/if}
         </details>
+      {:else if e.kind === 'check_queued'}
+        <div class="mark wait">
+          checks queued{e.payload.position ? ` · ${e.payload.position} in line` : ''} · {e.payload.reason
+            ? `the machine had no room: ${e.payload.reason}`
+            : 'the node runs its checks one at a time while it is short of room'}
+        </div>
+      {:else if e.kind === 'check_held'}
+        <div class="mark crit">
+          checks held · no room for them {e.payload.short_of_room} times · {e.payload.reason} · not rejected;
+          submitting the commit again queues them again
+        </div>
       {:else if e.kind === 'check_cancelled'}
         <div class="mark crit">checks cancelled · {e.payload.reason} · nothing was verified</div>
       {:else if e.kind === 'check_not_runnable'}

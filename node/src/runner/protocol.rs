@@ -810,7 +810,24 @@ impl ProtocolRunner {
         let name = self.capture_name(&cmd.name);
         let Started { process, teardown } = self.start(&name, &cmd, shape).await?;
         let output = process.output().await;
+        // A command whose sandbox was lost or killed may have been put out by
+        // its machine for want of room. That is asked before the teardown
+        // removes the sandbox and what its provider knew of it, and only of
+        // a command that did not end on its own.
+        let killed = output
+            .as_ref()
+            .map_or(true, |output| exit_code(output.status) > 128);
+        let evicted = match killed {
+            true => teardown.provider.evicted(&teardown.handle).await,
+            false => None,
+        };
         let taken_back = teardown.conclude().await;
+        if let Some(why) = evicted {
+            return Err(RunnerError::Refused {
+                reason: crate::provider::kubernetes::pod::EVICTED,
+                message: format!("{name}: {why}"),
+            });
+        }
         let output = output.map_err(|e| RunnerError::Other(format!("{name}: {e}")))?;
         // What a preparation installed is its point: one that ran and whose
         // tree never reached the node has prepared nothing, as a fetch whose

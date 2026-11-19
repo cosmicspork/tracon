@@ -33,6 +33,7 @@
       paused: external ? 'Broker access paused' : 'Paused',
       waiting_on_you: 'Waiting on you',
       waiting_on_check: 'Waiting on a check',
+      queued_for_check: 'Queued for room to check',
       suspended: 'Suspended · published',
       closed:
         session.end_reason === 'detached'

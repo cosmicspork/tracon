@@ -62,6 +62,28 @@ impl Cancel for RunToCompletion {
     }
 }
 
+/// Whether a runner's refusal says its machine had no room for the run just
+/// then: the scheduler found none, the kubelet refused the pod at admission
+/// for a resource it ran out of, or evicted it under pressure. Its
+/// classification when it is. A quota is not one: it refuses the same pod
+/// however much room there is, until the operator changes its sizing.
+pub fn no_room(error: &RunnerError) -> Option<&'static str> {
+    use crate::provider::kubernetes::pod::{Refusal, EVICTED, UNSCHEDULABLE};
+    let RunnerError::Refused { reason, .. } = error else {
+        return None;
+    };
+    let short = [
+        UNSCHEDULABLE,
+        EVICTED,
+        Refusal::OutOfCpu.as_str(),
+        Refusal::OutOfMemory.as_str(),
+        Refusal::OutOfPods.as_str(),
+        Refusal::OutOfEphemeralStorage.as_str(),
+        Refusal::OutOfOther.as_str(),
+    ];
+    short.contains(reason).then_some(*reason)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CheckResult {
     pub command: String,
@@ -111,6 +133,12 @@ pub struct CheckReport {
     /// prepared nothing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prepared: Option<Preparation>,
+    /// Why the run stopped short for want of room, when it did: a check or
+    /// the preparation its machine could not schedule, refused, or evicted
+    /// ([`no_room`]). Nothing about the candidate was established, and the
+    /// run is one to make again when there is room, not a verdict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_room: Option<String>,
 }
 
 /// One preparation of a candidate: the repository's `prepare` commands, run
@@ -141,6 +169,10 @@ pub struct PrepareFailure {
     /// failed, and what the repository's `egress` should name.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub refused: Vec<String>,
+    /// Why a `prepare` command could not run, when it was for want of room
+    /// ([`no_room`]): the machine's failing, not the preparation's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_room: Option<&'static str>,
 }
 
 impl PrepareFailure {
@@ -151,6 +183,7 @@ impl PrepareFailure {
             message: message.into(),
             output: String::new(),
             refused: Vec::new(),
+            no_room: None,
         }
     }
 
@@ -272,6 +305,7 @@ pub async fn run_required_for(
     // Made by the first check that actually executes and shared by the rest:
     // the candidate is prepared once, however many checks it has.
     let mut prepared: Option<(Result<Prepared, Stopped>, u64)> = None;
+    let mut short_of_room = None;
 
     for (index, command) in commands.iter().enumerate() {
         // Nothing new is started for work that has been withdrawn.
@@ -593,12 +627,14 @@ pub async fn run_required_for(
                 }
                 (outcome, code, tail(&output_text), metadata)
             }
-            // The cluster had no room for the check's pod past its grace:
-            // said in the scheduler's words, never waited on until the
-            // check's own timeout.
-            Ok(Err(RunnerError::Refused { reason, message }))
-                if reason == crate::provider::kubernetes::pod::UNSCHEDULABLE =>
-            {
+            // The cluster had no room for the check's pod past its grace,
+            // refused it, or put it out under pressure: said in the
+            // cluster's words, never waited on until the check's own
+            // timeout, and never the candidate's failing.
+            Ok(Err(error)) if no_room(&error).is_some() => {
+                let reason = no_room(&error).unwrap_or_default();
+                let message = error.to_string();
+                short_of_room = Some(message.clone());
                 (
                     "interrupted",
                     None,
@@ -606,7 +642,8 @@ pub async fn run_required_for(
                     json!({
                         "execution_backend": backend.kind(),
                         "runner_error": message,
-                        "unschedulable": true,
+                        "unschedulable": reason == crate::provider::kubernetes::pod::UNSCHEDULABLE,
+                        "no_room": reason,
                     }),
                 )
             }
@@ -711,6 +748,16 @@ pub async fn run_required_for(
             missing_tool,
             failures,
         });
+        // The machine that had no room for this check has none for the next
+        // one either: the run is made again whole, when there is.
+        if short_of_room.is_some() {
+            break;
+        }
+    }
+    if let Some((Err(Stopped::Unprepared(failure)), _)) = &prepared {
+        if failure.no_room.is_some() {
+            short_of_room = Some(failure.message.clone());
+        }
     }
     // The checks are over; the tree they were copied from, and the cache
     // they read, are nobody's now.
@@ -734,6 +781,7 @@ pub async fn run_required_for(
         image: recorded_image,
         image_source: environment.image_source,
         cancelled,
+        no_room: short_of_room,
         prepared: prepared.map(|(outcome, ms)| Preparation {
             ok: outcome.is_ok(),
             ms,
@@ -976,6 +1024,7 @@ pub(crate) async fn run_preparation_with(
                 message: secrets.redact(&failure.message),
                 output: secrets.redact(&failure.output),
                 refused: failure.refused,
+                no_room: failure.no_room,
             }))
         }
         prepared => prepared,
@@ -1103,6 +1152,7 @@ async fn run_steps(
                 ),
                 output: String::new(),
                 refused,
+                no_room: None,
             }),
         },
     };
@@ -1141,6 +1191,7 @@ async fn run_steps(
         let output = finished.map_err(|error| {
             Stopped::Unprepared(PrepareFailure {
                 command: Some(command.clone()),
+                no_room: no_room(&error),
                 ..PrepareFailure::said(format!("could not run preparation `{command}`: {error}"))
             })
         })?;
@@ -1170,6 +1221,7 @@ async fn run_steps(
                 ),
                 output: output::with_failures(&output::failure_lines(&text), &tail(&text)),
                 refused,
+                no_room: None,
             }));
         }
     }
@@ -1881,6 +1933,10 @@ mod tests {
         /// Exit status and output handed to a check.
         check_exit: i32,
         check_output: String,
+        /// A refusal handed to a preparation command, or to a check, in
+        /// place of running it: the cluster with no room for its pod.
+        prepare_refused: Option<&'static str>,
+        check_refused: Option<&'static str>,
     }
 
     /// A run's volume by what it is for, without the id that names the run.
@@ -1923,6 +1979,16 @@ mod tests {
                 .unwrap()
                 .push(format!("run {}", cmd.argv.last().unwrap()));
             self.0.commands.lock().unwrap().push(cmd);
+            let refused = match preparing {
+                true => self.0.prepare_refused,
+                false => self.0.check_refused,
+            };
+            if let Some(reason) = refused {
+                return Err(RunnerError::Refused {
+                    reason,
+                    message: format!("{reason}: The node was low on resource: memory."),
+                });
+            }
             Ok(std::process::Output {
                 status: std::process::ExitStatus::from_raw(exit << 8),
                 stdout: if preparing {
@@ -2310,6 +2376,83 @@ mod tests {
                 "run bun install --frozen-lockfile",
                 "close",
             ]
+        );
+    }
+
+    /// A check or a preparation the cluster had no room for, or put out for
+    /// want of it, is no verdict: the report says the run stopped short of
+    /// room and why, the check is `interrupted` and never evidence, and a
+    /// refusal that is not about room (a quota) is not counted as one.
+    #[tokio::test]
+    async fn a_run_the_machine_had_no_room_for_says_so() {
+        use crate::provider::kubernetes::pod::{EVICTED, UNSCHEDULABLE};
+        let snapshot = std::env::temp_dir();
+        let (store, cfg, candidate) = prepared_repo("room1");
+        let backend = RecordingBackend(std::sync::Arc::new(Recorded {
+            check_refused: Some(EVICTED),
+            ..Default::default()
+        }));
+        let report = run_required(
+            &backend,
+            &cfg,
+            &store,
+            &candidate,
+            &snapshot,
+            false,
+            &RunToCompletion,
+        )
+        .await
+        .unwrap();
+        assert!(!report.all_required_passed);
+        assert_eq!(report.results[0].outcome, "interrupted");
+        let said = report.no_room.as_deref().expect("short of room");
+        assert!(said.contains("low on resource: memory"), "{said}");
+        let row = store
+            .check_runs_for_session("s-app")
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(row.outcome, "interrupted");
+        assert!(
+            row.metadata_json.contains("\"no_room\":\"evicted\""),
+            "{}",
+            row.metadata_json
+        );
+
+        let (store, cfg, candidate) = prepared_repo("room2");
+        let backend = RecordingBackend(std::sync::Arc::new(Recorded {
+            prepare_refused: Some(UNSCHEDULABLE),
+            ..Default::default()
+        }));
+        let report = run_required(
+            &backend,
+            &cfg,
+            &store,
+            &candidate,
+            &snapshot,
+            false,
+            &RunToCompletion,
+        )
+        .await
+        .unwrap();
+        let failure = report.prepared.as_ref().unwrap().failure.as_ref().unwrap();
+        assert_eq!(failure.no_room, Some(UNSCHEDULABLE));
+        assert!(report.no_room.is_some(), "{report:?}");
+
+        assert_eq!(
+            no_room(&RunnerError::Refused {
+                reason: "quota",
+                message: "exceeded quota".into()
+            }),
+            None
+        );
+        assert_eq!(no_room(&RunnerError::Other("boom".into())), None);
+        assert_eq!(
+            no_room(&RunnerError::Refused {
+                reason: "out_of_memory",
+                message: String::new()
+            }),
+            Some("out_of_memory")
         );
     }
 

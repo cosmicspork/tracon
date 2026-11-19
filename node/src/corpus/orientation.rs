@@ -461,10 +461,16 @@ fn push_waiting(out: &mut String, facts: &Facts) {
     ));
     let held = named(HELD);
     if !held.is_empty() {
+        // A review's checks are the node's wait, not the operator's, but
+        // they come back the same way, queued for room or running.
+        let checks = match facts.tools.iter().any(|t| t == crate::mcp::review::STATUS) {
+            true => " So do a review's required checks, running or queued for room on the node.",
+            false => "",
+        };
         out.push_str(&format!(
             " A wait on the operator ({}) need not be polled: end your turn, the session stays \
-             open, and the outcome comes back as your next prompt. Ending your turn waits on \
-             nothing else.",
+             open, and the outcome comes back as your next prompt.{checks} Ending your turn \
+             waits on nothing else.",
             held.join(", ")
         ));
     }
@@ -1591,6 +1597,16 @@ mod tests {
         );
         assert!(line.contains("end your turn"), "{line}");
         assert_eq!(text.matches("end your turn").count(), 1, "{text}");
+        // Checks queued for room come back the way the operator's waits do,
+        // said once, beside them.
+        assert!(
+            line.contains("So do a review's required checks, running or queued for room"),
+            "{line}"
+        );
+        assert!(
+            !told(&names(&["question_status"])).contains("queued for room"),
+            "no checks to wait on without review_status"
+        );
 
         // A pipeline wait does not hold the session, so ending the turn is not
         // offered as a way to wait on it.

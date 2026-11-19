@@ -4136,6 +4136,16 @@ impl Manager {
         } else {
             SessionState::Running
         };
+        self.set_check_state(id, state);
+    }
+
+    /// Mark a session's checks as waiting in the node's line for room,
+    /// fenced as [`Self::set_checking`] is.
+    pub fn set_check_queued(&self, id: &str) {
+        self.set_check_state(id, SessionState::QueuedForCheck);
+    }
+
+    fn set_check_state(&self, id: &str, state: SessionState) {
         let mut fenced: Vec<&str> = SessionState::TERMINAL.to_vec();
         fenced.push(SessionState::Paused.as_str());
         match self
