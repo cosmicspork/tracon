@@ -620,7 +620,7 @@
     <div class="banner crit">
       its harness died <b>· {session.last_error ?? 'it was not started again'} · its workspace is kept</b>
       {#if continuedAs}
-        <a class="lnk" href="/sessions/{continuedAs.id}">continued as {continuedAs.id.slice(0, 8)}</a>
+        <Name kind="session" id={continuedAs.id} href="/sessions/{continuedAs.id}" class="lnk" prefix="continued as " />
       {/if}
     </div>
   {:else if session.end_reason === 'item_close'}

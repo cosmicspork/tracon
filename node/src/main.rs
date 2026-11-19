@@ -3831,13 +3831,10 @@ fn resolve_node<'a>(nodes: &'a [serde_json::Value], text: &str) -> Result<&'a se
     }
 }
 
-/// A node's name, or its short id when it has none.
+/// A node's name, or its generated one when it has none.
 fn node_label(n: &serde_json::Value) -> String {
     let id = n["id"].as_str().unwrap_or("");
-    match n["name"].as_str().filter(|m| !m.is_empty()) {
-        Some(name) => format!("{name} ({})", tracon::node_target::short_id(id)),
-        None => tracon::node_target::short_id(id).to_string(),
-    }
+    tracon::names::node(id, n["name"].as_str().filter(|m| !m.is_empty()))
 }
 
 /// What `tracon work start` was given.
@@ -3878,7 +3875,7 @@ async fn work_start(a: WorkStart) -> Result<()> {
             match item["project_id"].as_str() {
                 None => anyhow::bail!(
                     "{} has no project, so there is no repository to start in: give --repo <forge url>",
-                    tracon::node_target::short_id(&id)
+                    tracon::names::task(&id)
                 ),
                 Some(p) => names.remote(p).ok_or_else(|| {
                     anyhow::anyhow!(
@@ -3952,11 +3949,11 @@ async fn work_start(a: WorkStart) -> Result<()> {
         .iter()
         .find(|n| n["id"] == on)
         .map(node_label)
-        .unwrap_or_else(|| tracon::node_target::short_id(on).to_string());
+        .unwrap_or_else(|| tracon::names::node(on, None));
     println!("started {sid}");
     println!(
         "  task         {} {}",
-        tracon::node_target::short_id(&id),
+        tracon::names::task(&id),
         item["title"].as_str().unwrap_or("")
     );
     println!("  node         {node_name}");

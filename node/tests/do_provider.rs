@@ -324,7 +324,7 @@ async fn a_memory_floor_sizes_the_sandbox_and_its_fork(
     stdin.write_all(b"\n").await.unwrap();
     stdin.flush().await.unwrap();
     drop(stdin);
-    assert_eq!(session.done.await.unwrap(), 0);
+    assert_eq!(session.done.await.unwrap().code, 0);
 }
 
 /// A node that has never read the catalog, with no `[digitalocean] size`,
