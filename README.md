@@ -315,6 +315,26 @@ context kept, until the operator raises the budget (on its page, or
 `POST /api/sessions/{id}/budget`) and it carries on. A channel at its daily ceiling
 starts no session at all.
 
+From a terminal, `tracon work start <id>` starts a session on a work item the way
+the Composer does, with no request body to write:
+
+```sh
+tracon work start 71e64e12                  # plan if the item has no plan yet, else execute
+tracon work start 71e64e12 --node homelab   # on a peer: its name, a unique id prefix, or `self`
+tracon work start 71e64e12 --phase execute --branch feat/plugin-supervisor
+```
+
+The session starts in the item's project repository (its forge remote); an item with
+no project, or a project with no remote, needs `--repo <forge url>`. The phase is
+`plan` until the item's plan document exists, then `execute`. The branch is the one
+the item's latest session ran on, so execute carries on from the plan's branch; with
+no earlier session the node names a new `feat/tracon-<id>` branch. The model and
+harness are left to the channel's phase binding and the node's `[harness] id` unless
+`--model` or `--harness` names them. It prints the session id, node, phase, branch,
+model and its link; `--json` prints the row. A refusal from the node (the item is
+blocked or held by another session, execute without a plan, the channel at its
+ceiling) is printed as the node gave it, and the command fails.
+
 **Usage** shows what the node's model gateway counted, per channel, as seen from this
 node. A ChatGPT/Codex subscription is metered in usage windows and credits rather than
 tokens, so for an `openai-codex` provider the page (and the Usage today card in
@@ -1358,6 +1378,7 @@ and revoked the moment the hub loses that key.
 | `tracon skill import <dir[#git-rev]>\|ls\|rm` | skill packages in a channel's launch manifest |
 | `tracon memory ls\|add\|rm\|recall\|batch` | memories, and the promotion batch on demand |
 | `tracon work add\|ls\|ready\|show\|edit\|close\|dep\|rm` | the ledger; `--project` and `--priority` take names (`[work]` names the priorities) |
+| `tracon work start <id> [--phase] [--node] [--branch] [--base] [--model] [--harness] [--budget] [--repo] [--json]` | start a plan or execute session on an item, here or on a peer, as the Composer does (see [Starting work](#starting-work)) |
 | `tracon plugin add <owner/repo\|archive> [--channel]\|ls\|update [name]\|rollback <name>\|rm <name> [--purge]` | plugins: fetched and staged, then installed once you allow the install card |
 | `tracon repo ls\|show\|set\|rm\|build [repo]` | the `[[repo]]` entries (also **Settings → Repositories**), and building a repository's image from its default-branch Dockerfile |
 | `tracon policy keygen\|init\|sign\|push\|show` | the policy bundle |

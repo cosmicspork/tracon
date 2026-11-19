@@ -27,11 +27,17 @@ use tracon::{
 use support::fake::FakeAdapter;
 
 /// A node serving the operator API on a free loopback port, under the id
-/// given, counting the requests it answers.
+/// given, counting the requests it answers and keeping every body posted to
+/// `/api/sessions`. With `answer_sessions` set, it answers those itself with
+/// a row made from the request, as a node that started the session would,
+/// instead of starting one.
 struct Served {
     url: String,
     addr: SocketAddr,
     hits: Arc<AtomicUsize>,
+    state: AppState,
+    posted: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    answer_sessions: Arc<std::sync::atomic::AtomicBool>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -77,14 +83,47 @@ async fn serve_node(node_id: &str) -> Served {
     };
     let hits = Arc::new(AtomicUsize::new(0));
     let counted = hits.clone();
+    let posted = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let answer_sessions = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (keep, answer, self_id) = (posted.clone(), answer_sessions.clone(), node_id.to_string());
     let app = tracon::http::router(state.clone())
-        .layer(axum::middleware::from_fn_with_state(state, auth::guard))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::guard,
+        ))
         .layer(axum::middleware::from_fn(
             move |req: axum::extract::Request, next: axum::middleware::Next| {
                 let counted = counted.clone();
+                let (keep, answer, self_id) = (keep.clone(), answer.clone(), self_id.clone());
                 async move {
+                    use axum::response::IntoResponse;
                     counted.fetch_add(1, Ordering::SeqCst);
-                    next.run(req).await
+                    if req.method() != axum::http::Method::POST
+                        || req.uri().path() != "/api/sessions"
+                    {
+                        return next.run(req).await;
+                    }
+                    let (parts, body) = req.into_parts();
+                    let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+                    let spec: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    keep.lock().unwrap().push(spec.clone());
+                    if !answer.load(Ordering::SeqCst) {
+                        let req = axum::extract::Request::from_parts(parts, bytes.into());
+                        return next.run(req).await;
+                    }
+                    let row = serde_json::json!({
+                        "id": "0190aaaa-0000-7000-8000-00000000c0de",
+                        "node_id": spec["node_id"].as_str().unwrap_or(&self_id),
+                        "channel": spec["channel"],
+                        "work_item_id": spec["work_item_id"],
+                        "repo_path": spec["repo_path"],
+                        "branch": spec["branch"].as_str().unwrap_or("feat/tracon-00000000c0de"),
+                        "phase": spec["phase"],
+                        "model": spec["model"].as_str().unwrap_or("m/bound"),
+                        "harness_id": spec["harness"].as_str().unwrap_or("fake"),
+                        "state": "starting",
+                    });
+                    (axum::http::StatusCode::CREATED, axum::Json(row)).into_response()
                 }
             },
         ));
@@ -102,6 +141,9 @@ async fn serve_node(node_id: &str) -> Served {
         url: format!("http://{addr}"),
         addr,
         hits,
+        state,
+        posted,
+        answer_sessions,
         task,
     }
 }
@@ -403,4 +445,289 @@ async fn a_state_dir_with_no_identity_writes_only_to_tracon_url() {
     let (_, stderr) = text(&out);
     assert!(out.status.success(), "{stderr}");
     assert!(has_token(&other).await);
+}
+
+// `tracon work start`: a thin client over `POST /api/sessions`, resolving
+// what the Composer resolves. The node's own start (readiness, plan, model,
+// forwarding to a peer) is tested where it lives; here the node answers the
+// post itself, so what is checked is what the CLI sent.
+
+const PEER_A: &str = "ab12cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const PEER_B: &str = "ab12dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+const REMOTE: &str = "https://github.com/example/widgets";
+
+/// A node holding a `widgets` project with a forge remote, two peers whose
+/// ids share a prefix (`homelab`, unreachable, and `bazzite`), and the
+/// CLI's state directory for it.
+async fn work_node(name: &str) -> (Served, PathBuf) {
+    let (dir, id) = scratch_state(name);
+    let node = serve_node(&id).await;
+    let store = node.state.store();
+    store
+        .put_node(&support::rows::node_row(&id, "scratch"))
+        .unwrap();
+    let mut homelab = support::rows::node_row(PEER_A, "homelab");
+    homelab.is_self = 0;
+    homelab.reachable = 0;
+    store.put_node(&homelab).unwrap();
+    let mut bazzite = support::rows::node_row(PEER_B, "bazzite");
+    bazzite.is_self = 0;
+    store.put_node(&bazzite).unwrap();
+    store
+        .project_put(&tracon::store::ProjectRow {
+            id: "proj-widgets".into(),
+            channel: "personal".into(),
+            name: "widgets".into(),
+            remote_url: Some(REMOTE.into()),
+            created_ms: 1,
+        })
+        .unwrap();
+    (node, dir)
+}
+
+/// A task on `personal`, in the project given; its full id.
+async fn task(node: &Served, title: &str, project: Option<&str>) -> String {
+    let v: serde_json::Value = reqwest::Client::new()
+        .post(format!("{}/api/work", node.url))
+        .json(&serde_json::json!({ "channel": "personal", "title": title, "project_id": project }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    v["id"].as_str().unwrap().to_string()
+}
+
+async fn work_start(node: &Served, dir: &Path, args: &[&str]) -> (bool, String, String) {
+    let mut all = vec!["work", "start"];
+    all.extend_from_slice(args);
+    let out = tracon(dir, &all)
+        .env("TRACON_URL", &node.url)
+        .output()
+        .await
+        .unwrap();
+    let (stdout, stderr) = text(&out);
+    (out.status.success(), stdout, stderr)
+}
+
+fn posted(node: &Served) -> Vec<serde_json::Value> {
+    node.posted.lock().unwrap().clone()
+}
+
+#[tokio::test]
+async fn work_start_plans_a_task_without_a_plan_in_its_projects_repository() {
+    let (node, dir) = work_node("work-start-plan").await;
+    node.answer_sessions.store(true, Ordering::SeqCst);
+    let id = task(&node, "supervise plugins", Some("proj-widgets")).await;
+
+    let (ok, stdout, stderr) = work_start(&node, &dir, &[&id[..8]]).await;
+    assert!(ok, "{stderr}");
+    let sent = posted(&node);
+    assert_eq!(sent.len(), 1);
+    let spec = sent[0].as_object().unwrap();
+    assert_eq!(spec["channel"], "personal");
+    assert_eq!(spec["repo_path"], REMOTE);
+    assert_eq!(spec["work_item_id"], id.as_str());
+    assert_eq!(spec["phase"], "plan");
+    for unset in [
+        "branch",
+        "base",
+        "model",
+        "harness",
+        "node_id",
+        "budget_tokens",
+    ] {
+        assert!(!spec.contains_key(unset), "{unset} was sent: {spec:?}");
+    }
+    assert!(stdout.contains("plan (no plan yet)"), "{stdout}");
+    assert!(stdout.contains("scratch ("), "the node by name: {stdout}");
+    assert!(stdout.contains("feat/tracon-00000000c0de"), "{stdout}");
+    assert!(stdout.contains("m/bound"), "the resolved model: {stdout}");
+    assert!(
+        stdout.contains(&format!(
+            "{}/sessions/0190aaaa-0000-7000-8000-00000000c0de",
+            node.url
+        )),
+        "{stdout}"
+    );
+}
+
+#[tokio::test]
+async fn work_start_executes_once_a_plan_exists_on_the_latest_sessions_branch() {
+    let (node, dir) = work_node("work-start-execute").await;
+    node.answer_sessions.store(true, Ordering::SeqCst);
+    let id = task(&node, "supervise plugins", Some("proj-widgets")).await;
+    let store = node.state.store();
+    // A plan session, then a later one on another branch.
+    for (sid, branch, created) in [
+        ("s-old", "feat/old", 1_000),
+        ("s-new", "feat/plan-u2", 2_000),
+    ] {
+        let mut row = support::rows::session_row(sid, &node.state.node_id, "personal");
+        row.work_item_id = Some(id.clone());
+        row.branch = branch.into();
+        row.phase = "plan".into();
+        row.state = "ended".into();
+        row.created_ms = created;
+        store.insert_session(&row).unwrap();
+    }
+    // A plan slug whose document is gone is no plan.
+    let slug = tracon::corpus::work::plan_slug(&id);
+    tracon::corpus::work::set_plan(
+        store,
+        node.state.manager.bus(),
+        &node.state.node_id,
+        &id,
+        &slug,
+    )
+    .unwrap();
+    let (ok, _, stderr) = work_start(&node, &dir, &[&id]).await;
+    assert!(ok, "{stderr}");
+    assert_eq!(posted(&node)[0]["phase"], "plan");
+
+    let res = reqwest::Client::new()
+        .put(format!("{}/api/docs/personal/{slug}", node.url))
+        .json(&serde_json::json!({ "body": "# Plan\n\nDo it." }))
+        .send()
+        .await
+        .unwrap();
+    assert!(res.status().is_success(), "{}", res.text().await.unwrap());
+
+    let (ok, stdout, stderr) = work_start(&node, &dir, &[&id[..8]]).await;
+    assert!(ok, "{stderr}");
+    let spec = &posted(&node)[1];
+    assert_eq!(spec["phase"], "execute");
+    assert_eq!(spec["branch"], "feat/plan-u2");
+    assert!(stdout.contains("execute (the task has a plan)"), "{stdout}");
+    assert!(stdout.contains("feat/plan-u2"), "{stdout}");
+
+    // What is given wins over what is found.
+    let (ok, _, stderr) = work_start(
+        &node,
+        &dir,
+        &[
+            &id[..8],
+            "--phase",
+            "plan",
+            "--branch",
+            "feat/again",
+            "--base",
+            "develop",
+            "--model",
+            "m/a",
+            "--harness",
+            "native",
+            "--budget",
+            "5000",
+        ],
+    )
+    .await;
+    assert!(ok, "{stderr}");
+    let spec = &posted(&node)[2];
+    assert_eq!(spec["phase"], "plan");
+    assert_eq!(spec["branch"], "feat/again");
+    assert_eq!(spec["base"], "develop");
+    assert_eq!(spec["model"], "m/a");
+    assert_eq!(spec["harness"], "native");
+    assert_eq!(spec["budget_tokens"], 5000);
+}
+
+#[tokio::test]
+async fn work_start_resolves_the_node_by_name_or_prefix_and_refuses_an_ambiguous_one() {
+    let (node, dir) = work_node("work-start-node").await;
+    node.answer_sessions.store(true, Ordering::SeqCst);
+    let id = task(&node, "supervise plugins", Some("proj-widgets")).await;
+
+    let (ok, stdout, stderr) = work_start(&node, &dir, &[&id[..8], "--node", "BAZZITE"]).await;
+    assert!(ok, "{stderr}");
+    assert_eq!(posted(&node)[0]["node_id"], PEER_B);
+    assert!(stdout.contains("bazzite (ab12dddd)"), "{stdout}");
+    assert!(!stderr.contains("not reachable"), "{stderr}");
+
+    let (ok, _, stderr) = work_start(&node, &dir, &[&id[..8], "--node", "ab12c"]).await;
+    assert!(ok, "{stderr}");
+    assert_eq!(posted(&node)[1]["node_id"], PEER_A);
+    assert!(
+        stderr.contains("node homelab (ab12cccc) is not reachable"),
+        "{stderr}"
+    );
+
+    let (ok, _, stderr) = work_start(&node, &dir, &[&id[..8], "--node", "self"]).await;
+    assert!(ok, "{stderr}");
+    assert_eq!(posted(&node)[2]["node_id"], node.state.node_id.as_str());
+
+    for (text, says) in [
+        ("ab12", "names more than one node"),
+        ("nowhere", "no node \"nowhere\""),
+    ] {
+        let (ok, _, stderr) = work_start(&node, &dir, &[&id[..8], "--node", text]).await;
+        assert!(!ok, "{text}");
+        assert!(stderr.contains(says), "{stderr}");
+        assert!(
+            stderr.contains("homelab (ab12cccc)") && stderr.contains("bazzite (ab12dddd)"),
+            "the known nodes are listed: {stderr}"
+        );
+    }
+    assert_eq!(
+        posted(&node).len(),
+        3,
+        "nothing was posted for a refused --node"
+    );
+}
+
+#[tokio::test]
+async fn work_start_without_a_project_needs_repo_and_json_prints_the_row() {
+    let (node, dir) = work_node("work-start-repo").await;
+    node.answer_sessions.store(true, Ordering::SeqCst);
+    let id = task(&node, "loose task", None).await;
+
+    let (ok, _, stderr) = work_start(&node, &dir, &[&id[..8]]).await;
+    assert!(!ok);
+    assert!(
+        stderr.contains("has no project") && stderr.contains("--repo"),
+        "{stderr}"
+    );
+    assert!(posted(&node).is_empty());
+
+    let (ok, stdout, stderr) = work_start(
+        &node,
+        &dir,
+        &[
+            &id[..8],
+            "--repo",
+            "https://github.com/example/other",
+            "--json",
+        ],
+    )
+    .await;
+    assert!(ok, "{stderr}");
+    assert_eq!(
+        posted(&node)[0]["repo_path"],
+        "https://github.com/example/other"
+    );
+    let row: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(row["id"], "0190aaaa-0000-7000-8000-00000000c0de");
+    assert_eq!(row["work_item_id"], id.as_str());
+}
+
+#[tokio::test]
+async fn work_start_prints_the_nodes_refusal_and_fails() {
+    let (node, dir) = work_node("work-start-refused").await;
+    let id = task(&node, "supervise plugins", Some("proj-widgets")).await;
+
+    // The node itself answers: execute on a task with no plan.
+    let (ok, stdout, stderr) = work_start(
+        &node,
+        &dir,
+        &[&id[..8], "--phase", "execute", "--model", "m/a"],
+    )
+    .await;
+    assert!(!ok, "{stdout}");
+    assert_eq!(posted(&node).len(), 1);
+    assert!(
+        stderr.contains("execute needs a plan: run a plan session for this task first"),
+        "{stderr}"
+    );
+    assert!(!stdout.contains("started"), "{stdout}");
 }

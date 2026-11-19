@@ -551,6 +551,46 @@ enum WorkCommand {
         #[arg(long, default_value = "personal")]
         channel: String,
     },
+    /// Start a plan or execute session on an item, here or on a peer: what
+    /// the Composer does, from a terminal. The session starts in the item's
+    /// project repository; the node still refuses an item that is not ready,
+    /// is held by another session, or (for execute) has no plan.
+    Start {
+        id: String,
+        #[arg(long, default_value = "personal")]
+        channel: String,
+        /// Unset: `plan` when the item has no plan document yet, else
+        /// `execute`.
+        #[arg(long, value_parser = ["plan", "execute"])]
+        phase: Option<String>,
+        /// A node's name, a unique prefix of its id, or `self`. Unset: the
+        /// node this command talks to.
+        #[arg(long)]
+        node: Option<String>,
+        /// Unset: the branch of the item's latest session, so execute
+        /// carries on where the plan left off; with none, the node names a
+        /// new `feat/tracon-…` branch.
+        #[arg(long)]
+        branch: Option<String>,
+        /// The forge branch a new branch starts from instead of the default.
+        #[arg(long)]
+        base: Option<String>,
+        /// `provider/model`. Unset: the channel's binding for the phase.
+        #[arg(long)]
+        model: Option<String>,
+        /// Unset: the node's `[harness] id`.
+        #[arg(long)]
+        harness: Option<String>,
+        /// The session's token budget. Unset: the node's default.
+        #[arg(long, value_name = "TOKENS")]
+        budget: Option<i64>,
+        /// The forge URL to start in. Unset: the item's project's remote.
+        #[arg(long, value_name = "URL")]
+        repo: Option<String>,
+        /// Print the session row the node returned.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3321,6 +3361,8 @@ fn resolve_prefix<'a>(
 struct WorkNames {
     levels: Vec<(String, i64)>,
     projects: Vec<(String, String)>,
+    /// Each project's forge remote, by id, where it has one.
+    remotes: Vec<(String, String)>,
 }
 
 impl WorkNames {
@@ -3355,7 +3397,31 @@ impl WorkNames {
                     .collect()
             })
             .unwrap_or_default();
-        Ok(Self { levels, projects })
+        let remotes = v["projects"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|p| {
+                        let id = p["id"].as_str()?;
+                        let url = p["remote_url"].as_str()?.trim();
+                        (!url.is_empty()).then(|| (id.to_string(), url.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(Self {
+            levels,
+            projects,
+            remotes,
+        })
+    }
+
+    /// The project's forge remote, as the Composer's `projectRepo` reads it.
+    fn remote(&self, id: &str) -> Option<String> {
+        self.remotes
+            .iter()
+            .find(|(p, _)| p == id)
+            .map(|(_, url)| url.clone())
     }
 
     fn priority(&self, text: &str) -> Result<i64> {
@@ -3640,7 +3706,264 @@ async fn work_command(cmd: WorkCommand) -> Result<()> {
             println!("removed {id}");
             Ok(())
         }
+        WorkCommand::Start {
+            id,
+            channel,
+            phase,
+            node,
+            branch,
+            base,
+            model,
+            harness,
+            budget,
+            repo,
+            json,
+        } => {
+            work_start(WorkStart {
+                id,
+                channel,
+                phase,
+                node,
+                branch,
+                base,
+                model,
+                harness,
+                budget,
+                repo,
+                json,
+            })
+            .await
+        }
     }
+}
+
+/// Whether the channel holds the document: a plan slug on an item whose
+/// document was since removed is no plan.
+async fn doc_exists(channel: &str, slug: &str) -> Result<bool> {
+    match node_call(
+        reqwest::Method::GET,
+        &format!("/api/docs/{}/{}", urlencode(channel), urlencode(slug)),
+        None,
+        None,
+    )
+    .await
+    {
+        Ok(_) => Ok(true),
+        Err(e) => match e.downcast_ref::<NodeRefusal>() {
+            Some(r) if r.status == reqwest::StatusCode::NOT_FOUND => Ok(false),
+            _ => Err(e),
+        },
+    }
+}
+
+/// The branch of an item's most recent session, from `GET /api/work/{id}`'s
+/// `sessions`.
+fn latest_branch(sessions: &serde_json::Value) -> Option<String> {
+    sessions
+        .as_array()?
+        .iter()
+        .filter(|s| s["branch"].as_str().is_some_and(|b| !b.is_empty()))
+        .max_by_key(|s| s["created_ms"].as_i64().unwrap_or(0))
+        .and_then(|s| s["branch"].as_str())
+        .map(str::to_string)
+}
+
+/// A node from `GET /api/nodes` by `self`, its name (any case), its full id
+/// or a unique prefix of it.
+fn resolve_node<'a>(nodes: &'a [serde_json::Value], text: &str) -> Result<&'a serde_json::Value> {
+    let text = text.trim();
+    let hits: Vec<&serde_json::Value> = if text.eq_ignore_ascii_case("self") {
+        nodes.iter().filter(|n| n["is_self"] == true).collect()
+    } else {
+        let by_name: Vec<_> = nodes
+            .iter()
+            .filter(|n| {
+                n["name"]
+                    .as_str()
+                    .is_some_and(|m| m.eq_ignore_ascii_case(text))
+            })
+            .collect();
+        if by_name.is_empty() && !text.is_empty() {
+            nodes
+                .iter()
+                .filter(|n| n["id"].as_str().is_some_and(|id| id.starts_with(text)))
+                .collect()
+        } else {
+            by_name
+        }
+    };
+    let known = || {
+        let names: Vec<String> = nodes.iter().map(node_label).collect();
+        if names.is_empty() {
+            "none".to_string()
+        } else {
+            names.join(", ")
+        }
+    };
+    match hits.as_slice() {
+        [one] => Ok(one),
+        [] => anyhow::bail!("no node {text:?}; known: {}", known()),
+        _ => anyhow::bail!(
+            "{text:?} names more than one node; give more of its id. Known: {}",
+            known()
+        ),
+    }
+}
+
+/// A node's name, or its short id when it has none.
+fn node_label(n: &serde_json::Value) -> String {
+    let id = n["id"].as_str().unwrap_or("");
+    match n["name"].as_str().filter(|m| !m.is_empty()) {
+        Some(name) => format!("{name} ({})", tracon::node_target::short_id(id)),
+        None => tracon::node_target::short_id(id).to_string(),
+    }
+}
+
+/// What `tracon work start` was given.
+struct WorkStart {
+    id: String,
+    channel: String,
+    phase: Option<String>,
+    node: Option<String>,
+    branch: Option<String>,
+    base: Option<String>,
+    model: Option<String>,
+    harness: Option<String>,
+    budget: Option<i64>,
+    repo: Option<String>,
+    json: bool,
+}
+
+/// A thin client over `POST /api/sessions`, resolving what the Composer
+/// resolves: the repository from the item's project, the phase from whether
+/// a plan exists, the branch from the item's latest session, and the node by
+/// name. Readiness, the plan requirement and the model are the node's to
+/// decide; its refusal is printed as it comes back.
+async fn work_start(a: WorkStart) -> Result<()> {
+    use reqwest::Method;
+    use serde_json::json;
+    let id = work_resolve(&a.channel, &a.id).await?;
+    let v = node_call(Method::GET, &format!("/api/work/{id}"), None, None).await?;
+    let item = &v["item"];
+    if item.is_null() {
+        anyhow::bail!("no work item {id}");
+    }
+    let channel = item["channel"].as_str().unwrap_or(&a.channel).to_string();
+
+    let repo = match a.repo.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+        Some(r) => r.to_string(),
+        None => {
+            let names = WorkNames::load(&channel).await?;
+            match item["project_id"].as_str() {
+                None => anyhow::bail!(
+                    "{} has no project, so there is no repository to start in: give --repo <forge url>",
+                    tracon::node_target::short_id(&id)
+                ),
+                Some(p) => names.remote(p).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "project {} has no forge remote: give --repo <forge url>",
+                        names.project_name(p)
+                    )
+                })?,
+            }
+        }
+    };
+
+    let (phase, phase_chosen) = match a.phase {
+        Some(p) => (p, false),
+        None => {
+            let planned = match item["phase_plan_slug"].as_str() {
+                Some(slug) => doc_exists(&channel, slug).await?,
+                None => false,
+            };
+            (if planned { "execute" } else { "plan" }.to_string(), true)
+        }
+    };
+
+    let branch = a.branch.or_else(|| latest_branch(&v["sessions"]));
+
+    let nodes = node_call(Method::GET, "/api/nodes", None, None).await?;
+    let nodes = nodes.as_array().cloned().unwrap_or_default();
+    let target = match a.node.as_deref() {
+        Some(text) => {
+            let n = resolve_node(&nodes, text)?;
+            if n["is_self"] != true && n["reachable"] == false {
+                eprintln!(
+                    "warning: node {} is not reachable now; the node forwarding to it will say if it cannot",
+                    node_label(n)
+                );
+            }
+            n["id"].as_str().map(str::to_string)
+        }
+        None => None,
+    };
+
+    let mut body = json!({
+        "channel": channel,
+        "repo_path": repo,
+        "work_item_id": id,
+        "phase": phase,
+    });
+    let fields = [
+        ("branch", branch),
+        ("base", a.base),
+        ("model", a.model),
+        ("harness", a.harness),
+        ("node_id", target),
+    ];
+    for (key, value) in fields {
+        if let Some(value) = value.filter(|v| !v.trim().is_empty()) {
+            body[key] = json!(value);
+        }
+    }
+    if let Some(b) = a.budget {
+        body["budget_tokens"] = json!(b);
+    }
+
+    let row = node_call(Method::POST, "/api/sessions", Some(body), None).await?;
+    if a.json {
+        println!("{}", serde_json::to_string_pretty(&row)?);
+        return Ok(());
+    }
+    let sid = row["id"].as_str().unwrap_or("?");
+    let on = row["node_id"].as_str().unwrap_or("");
+    let node_name = nodes
+        .iter()
+        .find(|n| n["id"] == on)
+        .map(node_label)
+        .unwrap_or_else(|| tracon::node_target::short_id(on).to_string());
+    println!("started {sid}");
+    println!(
+        "  task         {} {}",
+        tracon::node_target::short_id(&id),
+        item["title"].as_str().unwrap_or("")
+    );
+    println!("  node         {node_name}");
+    println!(
+        "  phase        {}{}",
+        row["phase"].as_str().unwrap_or(&phase),
+        if phase_chosen {
+            if phase == "plan" {
+                " (no plan yet)"
+            } else {
+                " (the task has a plan)"
+            }
+        } else {
+            ""
+        }
+    );
+    println!("  branch       {}", row["branch"].as_str().unwrap_or(""));
+    println!("  model        {}", row["model"].as_str().unwrap_or(""));
+    println!(
+        "  harness      {}",
+        row["harness_id"].as_str().unwrap_or("")
+    );
+    println!(
+        "  repository   {}",
+        row["repo_path"].as_str().unwrap_or(&repo)
+    );
+    println!("  open         {}/sessions/{sid}", node_url()?);
+    Ok(())
 }
 
 async fn memory_command(cmd: MemoryCommand) -> Result<()> {
