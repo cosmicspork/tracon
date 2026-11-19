@@ -1790,12 +1790,18 @@ impl Supervisor {
         let state = SessionState::from_stored(&s.state);
         let queueable = matches!(
             state,
-            SessionState::Running | SessionState::WaitingOnYou | SessionState::WaitingOnCheck
+            SessionState::Running
+                | SessionState::WaitingOnYou
+                | SessionState::WaitingOnCheck
+                | SessionState::QueuedForCheck
         );
         // A harness that died is relaunched or the session ended first; what
         // the operator said waits for the relaunched one.
-        let busy =
-            s.turn_active != 0 || state == SessionState::WaitingOnCheck || self.exit_due.is_some();
+        let checking = matches!(
+            state,
+            SessionState::WaitingOnCheck | SessionState::QueuedForCheck
+        );
+        let busy = s.turn_active != 0 || checking || self.exit_due.is_some();
         let behind = self
             .store
             .queued_prompt_count(&self.session_id)
@@ -2525,6 +2531,7 @@ impl SessionState {
             "paused" => Self::Paused,
             "waiting_on_you" => Self::WaitingOnYou,
             "waiting_on_check" => Self::WaitingOnCheck,
+            "queued_for_check" => Self::QueuedForCheck,
             "suspended" => Self::Suspended,
             "killed_budget" => Self::KilledBudget,
             "failed" => Self::Failed,

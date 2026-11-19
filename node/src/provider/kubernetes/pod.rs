@@ -351,6 +351,34 @@ pub(crate) fn unschedulable_error(
     }
 }
 
+/// What a run whose pod the kubelet evicted is classified as
+/// (`RunnerError::Refused::reason`): the machine ran short (of memory,
+/// usually) and put the pod out, which says nothing about its command.
+pub const EVICTED: &str = "evicted";
+
+/// Why the kubelet put this pod out for lack of room on its machine, when it
+/// did: an `Evicted` pod, or one marked for termination by the kubelet
+/// (`DisruptionTarget`, `TerminationByKubelet`) before its phase says so. The
+/// kubelet's own words, which name the resource and what the container used,
+/// and the machine it ran on.
+pub(crate) fn evicted(status: &PodStatus, machine: Option<&str>) -> Option<String> {
+    let said = if status.reason.as_deref() == Some("Evicted") {
+        status.message.clone().unwrap_or_default()
+    } else {
+        let condition = status.conditions.as_deref()?.iter().find(|c| {
+            c.type_ == "DisruptionTarget"
+                && c.status == "True"
+                && c.reason.as_deref() == Some("TerminationByKubelet")
+        })?;
+        condition.message.clone().unwrap_or_default()
+    };
+    let on = machine.map(|m| format!(" from {m}")).unwrap_or_default();
+    Some(match said.trim() {
+        "" => format!("evicted{on}"),
+        said => format!("evicted{on}: {said}"),
+    })
+}
+
 /// Whether the API server refused a create for a ResourceQuota or a
 /// LimitRange: a 403 whose message is the quota's (`exceeded quota`, or
 /// `failed quota: <name>: must specify ...` when the quota covers a resource
@@ -867,6 +895,48 @@ mod tests {
             error.to_string().contains("not enough cpu (requested 250m); [runtime.kubernetes.resources.session] cpu_request"),
             "{error}"
         );
+    }
+
+    /// A pod the kubelet put out for memory pressure is an eviction, in the
+    /// kubelet's words and naming the machine; one that failed otherwise is
+    /// not.
+    #[test]
+    fn an_evicted_pod_is_told_apart_from_one_that_failed() {
+        use k8s_openapi::api::core::v1::PodCondition;
+        let said = "The node was low on resource: memory. Threshold quantity: 100Mi, available: \
+                    52Ki. Container harness was using 3929028Ki, request is 2Gi.";
+        let status = PodStatus {
+            phase: Some("Failed".into()),
+            reason: Some("Evicted".into()),
+            message: Some(said.into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            evicted(&status, Some("pool-1")).as_deref(),
+            Some(format!("evicted from pool-1: {said}").as_str())
+        );
+        // Marked by the kubelet before its phase caught up.
+        let marked = PodStatus {
+            phase: Some("Running".into()),
+            conditions: Some(vec![PodCondition {
+                type_: "DisruptionTarget".into(),
+                status: "True".into(),
+                reason: Some("TerminationByKubelet".into()),
+                message: Some(said.into()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        assert!(evicted(&marked, None)
+            .unwrap()
+            .starts_with("evicted: The node was low"));
+        let failed = PodStatus {
+            phase: Some("Failed".into()),
+            reason: Some("OutOfmemory".into()),
+            ..Default::default()
+        };
+        assert_eq!(evicted(&failed, None), None);
+        assert_eq!(evicted(&PodStatus::default(), None), None);
     }
 
     #[test]

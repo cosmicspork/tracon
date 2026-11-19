@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 
 use crate::{
     mcp::{
+        checking::Stop,
         wait::{wait_secs, MAX_WAIT_SECS},
         CallContext,
     },
@@ -133,9 +134,11 @@ pub fn definitions() -> Vec<Value> {
                 "Wait for a review's verdict and return it: `still_waiting` with the current \
                  state while the review is undecided. A submission whose required checks are \
                  still running reads `still_waiting` with `state: \"checking\"` and how long \
-                 they have run; if they fail it returns `state: \"submit_failed\"` with the \
-                 same message submit_review would have refused with, and nothing was \
-                 submitted. While it waits, `reviewer` says what an AI reviewer of the \
+                 they have run; one whose checks wait for room on the node reads \
+                 `state: \"queued\"` with its `position` in line, or `held: true` once the \
+                 node has stopped trying them, which is no rejection; if they fail it \
+                 returns `state: \"submit_failed\"` with the same message submit_review \
+                 would have refused with, and nothing was submitted. While it waits, `reviewer` says what an AI reviewer of the \
                  latest revision is doing (`state`: starting, running, done, failed or none) \
                  and, once it has given one, its `verdict`, `summary` and `findings`; a \
                  verdict arriving ends the wait early. Its summary and findings are sent \
@@ -375,7 +378,11 @@ async fn submit(
         if let Some(entry) = running_checks_of(store, manager, session_id, &ctx.channel, &head_sha)?
         {
             if named.is_none_or(|id| id == entry.handle) {
-                return Ok(attached(&entry));
+                let released = manager.checking().release(&entry);
+                if released {
+                    queue_checks(manager, session_id, &entry, None);
+                }
+                return Ok(attached(manager, &entry, released));
             }
             return Err(format!(
                 "checks of this commit are already running under review_id {}; call \
@@ -384,6 +391,22 @@ async fn submit(
             ));
         }
         if let Some(id) = named {
+            // Checks held for want of room are not running: a newer commit
+            // takes their place.
+            if let Some(held) = manager
+                .checking()
+                .get(id)
+                .filter(|entry| entry.outcome().is_none() && entry.held().is_some())
+            {
+                held.finish(
+                    Err(
+                        "superseded: a newer commit was submitted under this review_id while \
+                         these checks were held for want of room"
+                            .into(),
+                    ),
+                    false,
+                );
+            }
             if manager
                 .checking()
                 .get(id)
@@ -889,6 +912,7 @@ async fn submit(
             image_source: "external harness",
             cancelled: None,
             prepared: None,
+            no_room: None,
         };
         let recorded = submission.record(store, manager, ctx, checks).await?;
         return publish_if_granted(manager, ctx, recorded).await;
@@ -905,13 +929,24 @@ async fn submit(
     // minutes) drops this future, and the checks, the review they open and
     // the session's way back out of `waiting_on_check` must not go with it.
     let no_checks = commands.is_empty();
-    begin_checks(manager, session_id, &submission.candidate, &commands, rerun);
     let entry = manager.checking().begin(
         &submission.id,
         session_id,
         &submission.candidate.id,
-        commands,
+        commands.clone(),
     );
+    // While anything waits for room the node's checks run one at a time, and
+    // these join the line; with nothing to run there is nothing to queue.
+    let slot = match no_checks {
+        true => None,
+        false => manager.checking().start(&entry),
+    };
+    let queued = !no_checks && slot.is_none();
+    if queued {
+        queue_checks(manager, session_id, &entry, None);
+    } else {
+        begin_checks(manager, session_id, &submission.candidate, &commands, rerun);
+    }
     let mut extras = json!({
         "files": submission.capture.files.len(),
         "added": submission.capture.added,
@@ -925,16 +960,77 @@ async fn submit(
         let manager = manager.clone();
         let ctx = ctx.clone();
         let session_id = session_id.to_string();
+        let entry = entry.clone();
         async move {
-            let report = run_checks(
-                &store,
-                &manager,
-                &session_id,
-                &submission.candidate,
-                &snapshot.root,
-                rerun,
-            )
-            .await;
+            let wants = SessionStillWants {
+                store: store.clone(),
+                session_id: session_id.clone(),
+            };
+            let checking = manager.checking().clone();
+            let mut ready = (!queued).then_some(slot);
+            let report = loop {
+                let slot = match ready.take() {
+                    Some(slot) => slot,
+                    None => match checking
+                        .turn(&entry, || review::checks::Cancel::cancelled(&wants))
+                        .await
+                    {
+                        Ok(slot) => {
+                            begin_checks(
+                                &manager,
+                                &session_id,
+                                &submission.candidate,
+                                &entry.commands,
+                                rerun,
+                            );
+                            Some(slot)
+                        }
+                        // A newer commit took its place under the same
+                        // handle: the session is that submission's now.
+                        Err(Stop::Settled) => {
+                            tokio::task::spawn_blocking(move || drop(snapshot));
+                            return (Err("superseded by a newer submission".into()), false);
+                        }
+                        Err(Stop::Cancelled(reason)) => {
+                            tokio::task::spawn_blocking(move || drop(snapshot));
+                            return (
+                                Err(cancelled_checks(
+                                    &manager,
+                                    &session_id,
+                                    &submission.candidate,
+                                    &reason,
+                                )),
+                                false,
+                            );
+                        }
+                    },
+                };
+                let checked = run_checks(
+                    &store,
+                    &manager,
+                    &session_id,
+                    &submission.candidate,
+                    &snapshot.root,
+                    rerun,
+                )
+                .await;
+                drop(slot);
+                match checked {
+                    Checked::NoRoom(why) => {
+                        let now = checking.stopped_short(&entry, why);
+                        queue_checks(&manager, &session_id, &entry, Some(&now));
+                        // Held, the session waits on the operator now, and
+                        // is brought why as its next prompt.
+                        if now.held.is_some() {
+                            manager.wait_moved(&session_id).await;
+                        }
+                    }
+                    Checked::Ran(report) => {
+                        manager.set_checking(&session_id, false);
+                        break *report;
+                    }
+                }
+            };
             tokio::task::spawn_blocking(move || drop(snapshot));
             let report = match report {
                 Ok(report) => report,
@@ -988,7 +1084,7 @@ async fn submit(
             outcome
         }
         None => {
-            let mut response = checking(&entry);
+            let mut response = checking(manager, &entry);
             if let (Some(response), Some(extras)) =
                 (response.as_object_mut(), extras.as_object_mut())
             {
@@ -1320,10 +1416,11 @@ fn running_checks_of(
     )))
 }
 
-/// What a caller is told while checks run: the handle to wait on, and what is
-/// running.
-fn checking(entry: &crate::mcp::checking::Entry) -> Value {
-    json!({
+/// What a caller is told while checks run or wait for room: the handle to
+/// wait on, what is running, and, while they are queued, where they stand
+/// and why.
+fn checking(manager: &Manager, entry: &crate::mcp::checking::Entry) -> Value {
+    let mut response = json!({
         "review_id": entry.handle,
         "state": "checking",
         "candidate_id": entry.candidate_id,
@@ -1332,19 +1429,85 @@ fn checking(entry: &crate::mcp::checking::Entry) -> Value {
         "message": "The required checks are running on the node; nothing reaches the operator \
                     until they pass. Call review_status with this review_id to wait for them: it \
                     returns the review once they pass, or what failed.",
-    })
+    });
+    let Some(queued) = entry.queued() else {
+        return response;
+    };
+    response["state"] = json!(QUEUED);
+    response["queued_secs"] = json!((now_ms() - queued.since_ms).max(0) / 1000);
+    response["short_of_room"] = json!(queued.short);
+    if let Some(why) = &queued.why {
+        response["reason"] = json!(why);
+    }
+    if let Some(held) = &queued.held {
+        response["held"] = json!(true);
+        response["message"] = json!(held_message(manager, queued.short, held));
+        return response;
+    }
+    let position = manager.checking().position(entry);
+    response["position"] = json!(position);
+    let why = match &queued.why {
+        Some(why) => format!(
+            "the node had no room to run them ({why}; {} of {} tries)",
+            queued.short,
+            crate::mcp::checking::MAX_SHORT
+        ),
+        None => "the node is short of room and runs its checks one at a time".into(),
+    };
+    response["message"] = json!(format!(
+        "The required checks are queued: {why}, and these are {} in line. That is the \
+         node's capacity, not your change, and nothing has been rejected; they run when \
+         their turn comes, and nothing reaches the operator until they pass. Call \
+         review_status with this review_id to wait for them: it returns the review once \
+         they pass, or what failed.",
+        position.map_or("next".to_string(), |at| format!("number {at}")),
+    ));
+    response
 }
 
-/// A retried submission of a commit whose checks are already running.
-fn attached(entry: &crate::mcp::checking::Entry) -> Value {
-    let mut response = checking(entry);
+/// What a review's checks are while they wait for room, as `review_status`
+/// and the session's log call it.
+pub const QUEUED: &str = "queued";
+
+/// What an agent is told once the node has stopped trying its checks for
+/// want of room: nothing is wrong with the change, the operator is the one
+/// who can make room, and a resubmission of the commit queues them again.
+fn held_message(manager: &Manager, short: u32, why: &str) -> String {
+    let sizing = (manager.backend().kind() == "kubernetes").then(|| {
+        let sized = manager.cfg().runtime.kubernetes.resources.command();
+        format!(
+            " A check pod requests {} of memory and may use up to {} \
+             ([runtime.kubernetes.resources.command]), so its machine needs about that much \
+             free beside everything else it runs.",
+            sized.memory_request, sized.memory_limit
+        )
+    });
+    format!(
+        "The node has stopped trying the required checks: its machine had no room for them \
+         {short} times, the last: {why}.{} Nothing about your change was established, and \
+         nothing was rejected: the checks are held, still queued, and this review waits with \
+         them. Tell the operator; once there is room, submit the same commit again to put \
+         them back in line.",
+        sizing.unwrap_or_default()
+    )
+}
+
+/// A retried submission of a commit whose checks are already running, or
+/// queued: a held run is put back in line by it.
+fn attached(manager: &Manager, entry: &crate::mcp::checking::Entry, released: bool) -> Value {
+    let mut response = checking(manager, entry);
     response["attached"] = json!(true);
-    response["message"] = json!(
-        "Checks of this commit are already running for this submission; nothing new was \
-         started, and this call's title, body and other arguments were not used. Call \
+    response["message"] = json!(if released {
+        "The checks of this commit were held for want of room; this submission put them back \
+         in line, to run when their turn comes. This call's title, body and other arguments \
+         were not used. Call review_status with this review_id to wait for the outcome, then \
+         resubmit with it if the words should change."
+    } else {
+        "Checks of this commit are already running or queued for this submission; nothing \
+         new was started, and this call's title, body and other arguments were not used. Call \
          review_status with this review_id to wait for the outcome, then resubmit with it if \
          the words should change."
-    );
+    });
     response
 }
 
@@ -2830,10 +2993,75 @@ fn begin_checks(
     );
 }
 
+/// Put the session in `queued_for_check` and say where its checks stand in
+/// the line: joined behind others (`now` is `None`, or names no stop short),
+/// back in it after stopping short of room, or held. A held submission
+/// leaves the session to wait on the operator, who is the one that can make
+/// room, and the session is brought the news as its next prompt.
+fn queue_checks(
+    manager: &Manager,
+    session_id: &str,
+    entry: &crate::mcp::checking::Entry,
+    now: Option<&crate::mcp::checking::Queued>,
+) {
+    let held = now.and_then(|now| now.held.as_deref());
+    match held {
+        Some(_) => manager.set_checking(session_id, false),
+        None => manager.set_check_queued(session_id),
+    }
+    let mut payload = json!({
+        "candidate_id": entry.candidate_id,
+        "commands": entry.commands,
+        "position": manager.checking().position(entry),
+    });
+    if let Some(now) = now {
+        payload["reason"] = json!(now.why);
+        payload["short_of_room"] = json!(now.short);
+    }
+    match held {
+        Some(reason) => {
+            payload["reason"] = json!(reason);
+            manager.record_event(session_id, ek::CHECK_HELD, payload);
+        }
+        None => manager.record_event(session_id, ek::CHECK_QUEUED, payload),
+    }
+}
+
+/// Checks withdrawn before they ran, or while they waited for room: said as
+/// a cancelled run is, with the session let out of its wait.
+fn cancelled_checks(
+    manager: &Manager,
+    session_id: &str,
+    candidate: &CandidateRow,
+    reason: &str,
+) -> String {
+    manager.set_checking(session_id, false);
+    manager.record_event(
+        session_id,
+        ek::CHECK_CANCELLED,
+        json!({
+            "candidate_id": candidate.id,
+            "head_sha": candidate.head_sha,
+            "reason": reason,
+        }),
+    );
+    format!("checks were cancelled: {reason}. Nothing was verified and no review was opened.")
+}
+
+/// What one run of a submission's checks came to.
+enum Checked {
+    /// A verdict, or the refusal `submit_review` gives.
+    Ran(Box<Result<review::checks::CheckReport, String>>),
+    /// The machine had no room for them, as this says: no verdict, and the
+    /// run is made again when there is room.
+    NoRoom(String),
+}
+
 /// Required checks against the immutable candidate snapshot, after
 /// [`begin_checks`]. The candidate owner receives the verification milestone
 /// even if a later prose-only revision is submitted by another attached
-/// session.
+/// session. The session is left in `waiting_on_check` for the caller to
+/// move.
 async fn run_checks(
     store: &Arc<Store>,
     manager: &Manager,
@@ -2841,7 +3069,7 @@ async fn run_checks(
     candidate: &CandidateRow,
     snapshot: &std::path::Path,
     force_rerun: bool,
-) -> Result<review::checks::CheckReport, String> {
+) -> Checked {
     let report = review::checks::run_required(
         manager.backend().as_ref(),
         manager.cfg(),
@@ -2855,7 +3083,25 @@ async fn run_checks(
         },
     )
     .await;
-    manager.set_checking(session_id, false);
+    // Withdrawn while it ran is a cancellation, whatever else it met.
+    if let Ok(report) = &report {
+        if let (Some(why), None) = (&report.no_room, &report.cancelled) {
+            return Checked::NoRoom(why.clone());
+        }
+    }
+    Checked::Ran(Box::new(judge_checks(
+        manager, session_id, candidate, report,
+    )))
+}
+
+/// What a run of the checks that had room says of the candidate: the report
+/// when every required check passed, otherwise the refusal.
+fn judge_checks(
+    manager: &Manager,
+    session_id: &str,
+    candidate: &CandidateRow,
+    report: Result<review::checks::CheckReport, String>,
+) -> Result<review::checks::CheckReport, String> {
     let report = report?;
     let not_run: Vec<&str> = report
         .results
@@ -4419,14 +4665,35 @@ async fn status(
         .filter(|entry| Some(entry.session_id.as_str()) == ctx.session_id())
     {
         if entry.wait(deadline).await.is_none() {
-            let mut response = checking(&entry);
+            let mut response = checking(manager, &entry);
             response["still_waiting"] = json!(true);
             response["waited_secs"] = json!(wait);
+            let said = match entry.queued() {
+                None => format!(
+                    "Still running the required checks ({}s so far); nothing reaches the \
+                     operator until they pass.",
+                    entry.running_secs()
+                ),
+                Some(queued) if queued.held.is_some() => {
+                    // What the node would otherwise bring back as a prompt.
+                    if let Some(key) = crate::session::waits::held_key(&entry) {
+                        manager.waits().tell(&entry.session_id, &key);
+                    }
+                    response["message"].as_str().unwrap_or_default().to_string()
+                }
+                Some(_) => format!(
+                    "Still queued for room to run the required checks ({}); nothing has \
+                     been rejected, and nothing reaches the operator until they pass.",
+                    response["position"]
+                        .as_u64()
+                        .map_or("next in line".to_string(), |at| format!(
+                            "number {at} in line"
+                        ))
+                ),
+            };
             response["message"] = json!(format!(
-                "Still running the required checks ({}s so far); nothing reaches the \
-                 operator until they pass. The wait is capped at {} seconds; call \
-                 review_status again with the same review_id.{}",
-                entry.running_secs(),
+                "{said} The wait is capped at {} seconds; call review_status again with the \
+                 same review_id.{}",
                 super::wait::cap(ctx),
                 crate::session::waits::brought_back(true)
             ));

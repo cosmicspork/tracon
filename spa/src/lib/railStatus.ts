@@ -16,7 +16,8 @@ export interface Light {
   detail: string[]
 }
 
-const WORKING: SessionState[] = ['starting', 'running', 'waiting_on_check']
+// Checks queued for room are the node's work pending, not the operator's.
+const WORKING: SessionState[] = ['starting', 'running', 'waiting_on_check', 'queued_for_check']
 
 /** Sessions on this node with a harness doing something. */
 export function runningHere(sessions: Iterable<Session>, nodeId: string | undefined): number {

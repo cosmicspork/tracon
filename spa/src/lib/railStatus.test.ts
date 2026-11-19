@@ -24,8 +24,8 @@ test('keep-awake and a recent sleep go to the tooltip, an old sleep does not', (
 
 test('running counts working sessions on this node only', () => {
   const s = (over: Partial<Session>) => ({ node_id: 'me', state: 'running', archived_ms: null, ...over }) as Session
-  const sessions = [s({}), s({ state: 'starting' }), s({ state: 'waiting_on_check' }), s({ state: 'closed' }), s({ state: 'waiting_on_you' }), s({ node_id: 'peer' }), s({ archived_ms: 1 })]
-  expect(runningHere(sessions, 'me')).toBe(3)
+  const sessions = [s({}), s({ state: 'starting' }), s({ state: 'waiting_on_check' }), s({ state: 'queued_for_check' }), s({ state: 'closed' }), s({ state: 'waiting_on_you' }), s({ node_id: 'peer' }), s({ archived_ms: 1 })]
+  expect(runningHere(sessions, 'me')).toBe(4)
   expect(runningHere(sessions, undefined)).toBe(0)
 })
 

@@ -14,6 +14,10 @@ pub enum SessionState {
     /// Defined here because the schema and the interface both name it; nothing
     /// in this slice runs deterministic checks between turns yet.
     WaitingOnCheck,
+    /// Its required checks wait in the node's line for room to run
+    /// (`mcp::checking`): the machine had none, so the node runs its checks
+    /// one at a time. Neither working nor waiting on the operator.
+    QueuedForCheck,
     /// Its work is published and it went idle, so it was put away: container
     /// stopped, egress grant revoked, workspace kept. Not ended — ending it is
     /// the operator's — and carried on as a new session on that workspace
@@ -32,6 +36,7 @@ impl SessionState {
             Self::Paused => "paused",
             Self::WaitingOnYou => "waiting_on_you",
             Self::WaitingOnCheck => "waiting_on_check",
+            Self::QueuedForCheck => "queued_for_check",
             Self::Suspended => "suspended",
             Self::Closed => "closed",
             Self::KilledBudget => "killed_budget",
@@ -254,6 +259,14 @@ pub mod event_kind {
     pub const WORK_SHOWN: &str = "work_shown";
     /// Deterministic checks began at submit (`commands`).
     pub const CHECK_STARTED: &str = "check_started";
+    /// A submission's checks joined the node's line for room
+    /// (`candidate_id`, `commands`, `position`), and, after stopping short of
+    /// room, why (`reason`) and how many times (`short_of_room`).
+    pub const CHECK_QUEUED: &str = "check_queued";
+    /// The node stopped trying a submission's checks after they stopped short
+    /// of room too often (`reason`, `short_of_room`): held, not rejected,
+    /// until the commit is submitted again.
+    pub const CHECK_HELD: &str = "check_held";
     /// One check finished (`command`, `ok`, `exit`, `tail`, `ms`).
     pub const CHECK_RESULT: &str = "check_result";
     /// All nonempty operator-required checks passed (or exact immutable
@@ -379,6 +392,7 @@ mod tests {
             SessionState::Paused,
             SessionState::WaitingOnYou,
             SessionState::WaitingOnCheck,
+            SessionState::QueuedForCheck,
             SessionState::Closed,
             SessionState::KilledBudget,
             SessionState::Failed,

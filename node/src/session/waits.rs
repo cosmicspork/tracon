@@ -65,7 +65,9 @@ impl Wait {
     /// session made itself is kept only in that process (as its grant is);
     /// the rest is in the store.
     pub fn survives_restart(&self) -> bool {
-        !self.key.starts_with("checks:") && !self.key.starts_with("egress:")
+        !self.key.starts_with("checks:")
+            && !self.key.starts_with("checks-held:")
+            && !self.key.starts_with("egress:")
     }
 
     /// The handle a held session's log names it by.
@@ -160,6 +162,16 @@ pub fn asked_key(approval_id: &str) -> String {
 
 pub fn checks_key(entry: &Entry) -> String {
     format!("checks:{}:{}", entry.handle, entry.started_ms)
+}
+
+/// Checks the node has stopped trying for want of room: told once each time
+/// they are held, while the checks themselves stay an open wait.
+pub fn held_key(entry: &Entry) -> Option<String> {
+    let queued = entry.queued().filter(|queued| queued.held.is_some())?;
+    Some(format!(
+        "checks-held:{}:{}:{}",
+        entry.handle, entry.started_ms, queued.since_ms
+    ))
 }
 
 /// What a status tool adds when it answers a session that it is still
@@ -343,6 +355,30 @@ fn collect(
         if decided.is_none() {
             running.insert(entry.handle.clone());
         }
+        // Held for want of room, they wait on the operator to make some:
+        // news to bring back, though the checks are still to run.
+        if let (None, Some(key), Some(held)) = (&decided, held_key(&entry), entry.held()) {
+            waits.push(Wait {
+                key,
+                tool: review::STATUS,
+                id: entry.handle.clone(),
+                about: format!("the required checks ({}), held", entry.commands.join(", ")),
+                decided: Some(json!({
+                    "review_id": entry.handle,
+                    "state": review::QUEUED,
+                    "held": true,
+                    "still_waiting": true,
+                    "candidate_id": entry.candidate_id,
+                    "checks": entry.commands,
+                    "reason": held,
+                    "message": format!(
+                        "The node has stopped trying these checks: its machine had no room \
+                         for them ({held}). Nothing was rejected. Tell the operator; once \
+                         there is room, submit the same commit again to put them back in line."
+                    ),
+                })),
+            });
+        }
         waits.push(Wait {
             key: checks_key(&entry),
             tool: review::STATUS,
@@ -469,6 +505,13 @@ pub fn prompt(decided: &[Wait], open: &[Wait]) -> String {
             "An AI reviewer has given its verdict on a review you are waiting on. It is \
              advisory: the operator has not decided yet. Each result below is what its status \
              tool returns now.\n"
+        } else if decided
+            .iter()
+            .all(|wait| wait.key.starts_with("checks-held:"))
+        {
+            "The node could not find room to run a review's required checks and has stopped \
+             trying them on its own. Nothing about your change was established and nothing was \
+             rejected. Each result below is what its status tool returns now.\n"
         } else {
             "The operator has decided something you were waiting on. Each result below is \
              what its status tool returns now.\n"

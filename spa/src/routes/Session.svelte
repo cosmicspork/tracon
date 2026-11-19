@@ -251,6 +251,12 @@
     return cmds[done] ?? cmds.at(-1) ?? null
   })
   const checkElapsed = $derived(checkStarted ? formatAge(checkStarted.at_ms, clock.now) : '')
+  // Where the checks wait for room: the last check_queued, while the session
+  // says they are queued.
+  const checkQueued = $derived.by(() => {
+    if (session?.state !== 'queued_for_check') return null
+    return [...store.events].reverse().find((e) => e.kind === 'check_queued') ?? null
+  })
   // How many decisions a session held between turns, or put away by a node
   // that stopped under it, is waiting on: what its latest state change named.
   const waitingOn = $derived.by(() => {
@@ -370,6 +376,7 @@
     if (session.state === 'suspended') return 'suspended; continue it to carry on'
     if (session.state === 'starting') return 'starting'
     if (session.state === 'waiting_on_check') return `running ${checkCommand ?? 'the checks'}`
+    if (session.state === 'queued_for_check') return 'its checks are queued for room'
     if (busy) return 'a turn is running'
     if (session.budget_tokens > 0 && spent(session) >= session.budget_tokens) return 'over budget'
     return null
@@ -378,7 +385,9 @@
   // returns; the box stays open and says so.
   // A turn or the checks running: the node holds a prompt for the agent
   // rather than refusing it.
-  const composer = $derived(composerState(inputReason, busy || session?.state === 'waiting_on_check'))
+  const composer = $derived(
+    composerState(inputReason, busy || session?.state === 'waiting_on_check' || session?.state === 'queued_for_check'),
+  )
   const placeholder = $derived(
     unreachable !== null
       ? `${unreachable} — the prompt is sent when it returns`
@@ -544,6 +553,15 @@
     <div class="banner crit">failed <b>· {humanizeError(session.last_error) ?? 'the harness stopped without saying why'}</b></div>
   {:else if session.state === 'waiting_on_check'}
     <div class="banner dim">running <code>{checkCommand ?? 'checks'}</code> <b>· {checkElapsed} · input disabled until it finishes</b></div>
+  {:else if session.state === 'queued_for_check'}
+    <div class="banner dim">
+      checks queued for room{checkQueued?.payload.position ? ` · ${checkQueued.payload.position} in line` : ''}
+      <b
+        >· {checkQueued?.payload.reason
+          ? `the machine had no room: ${checkQueued.payload.reason}`
+          : 'the node runs its checks one at a time while it is short of room'} · they run when their turn comes</b
+      >
+    </div>
   {:else if atBudget}
     <div class="banner">
       held at budget <b
