@@ -98,12 +98,44 @@ async fn the_explanation_answers_in_the_terms_the_operator_thinks_in() {
         true => assert!(execution.contains("tracon-sandbox-base"), "{execution}"),
         false => assert!(execution.contains("harness"), "{execution}"),
     }
-    assert_eq!(view["access"]["workspace"], "/work/tree");
     assert_eq!(view["access"]["branch"], "feat/x");
     assert_eq!(view["limits"]["budget_tokens"], 1000);
     assert_eq!(view["limits"]["tokens_used"], 250);
     assert!(view["limits"]["permission_timeout_secs"].as_i64().unwrap() > 0);
     assert_eq!(view["policy"]["trusted"], true);
+}
+
+/// Where a session's work is: a sandboxed harness works in its sandbox, and
+/// the node's last export of it (`worktree_path`) is not that place. An
+/// external harness's worktree is.
+#[tokio::test]
+async fn the_workspace_shown_is_where_the_harness_works() {
+    state::isolate();
+    let h = harness().await;
+    let mut sandboxed = session_row("s1");
+    let snapshot = tracon::workspace::snapshot_path("s1");
+    sandboxed.worktree_path = Some(snapshot.display().to_string());
+    h.store.insert_session(&sandboxed).unwrap();
+    let view = explain(&h, "s1").await;
+    assert_eq!(view["access"]["workspace"], "/work");
+    assert_eq!(view["access"]["workspace_in"], "sandbox");
+    assert_eq!(
+        view["access"]["node_copy"],
+        tracon::workspace::volume_name("s1")
+    );
+    assert_ne!(
+        view["access"]["workspace"].as_str(),
+        Some(snapshot.display().to_string().as_str())
+    );
+
+    let mut external = session_row("s2");
+    external.harness_id = "external".into();
+    external.worktree_path = Some("/home/someone/worktrees/x".into());
+    h.store.insert_session(&external).unwrap();
+    let view = explain(&h, "s2").await;
+    assert_eq!(view["access"]["workspace"], "/home/someone/worktrees/x");
+    assert_eq!(view["access"]["workspace_in"], "host");
+    assert_eq!(view["access"]["node_copy"], Value::Null);
 }
 
 /// The point of the whole surface: an action's standing here is produced by

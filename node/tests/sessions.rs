@@ -858,6 +858,88 @@ async fn a_budget_is_not_changed_for_another_nodes_session_or_an_ended_one() {
         .is_none());
 }
 
+/// A take-back the node could not do becomes one `workspace_sync` event on
+/// the session whose sandbox it was, however many follow it, and the session
+/// API says how current the node's copy is from it once the sandbox is gone.
+#[tokio::test]
+async fn a_failed_take_back_is_one_event_on_its_session_and_in_its_api() {
+    use tracon::runner::sandbox_files::{SyncOutcome, SyncReport};
+    state::isolate();
+    let h = Harness::new(1000).await;
+    let id = insert_running_session(&h.store, 1000);
+    let other = insert_running_session(&h.store, 1000);
+    for (session, container) in [(&id, "tracon-h-sync1"), (&other, "tracon-h-sync2")] {
+        h.store
+            .update_session(
+                session,
+                tracon::store::SessionPatch {
+                    container_name: Some(container.into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+    let report = |failures: u32, why: &str, record: bool| SyncReport {
+        sandbox: "tracon-h-sync1".into(),
+        outcome: SyncOutcome::Failed,
+        why: why.into(),
+        files: 0,
+        bytes: 0,
+        ms: 40,
+        error: Some("the tree is over the checkout limits".into()),
+        failures,
+        recovered: 0,
+        last_ok_ms: Some(1_000),
+        record,
+    };
+    let syncs = |session: &str| {
+        h.store
+            .events_after(session, 0, 1000)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "workspace_sync")
+            .collect::<Vec<_>>()
+    };
+    // Nothing yet: a session nothing was taken back from says nothing.
+    let (_, body) = h.call("GET", &format!("/api/sessions/{id}"), None).await;
+    assert_eq!(body["files_sync"], Value::Null);
+
+    h.manager
+        .workspace_synced(&report(1, "during a turn", true));
+    h.manager.workspace_synced(&report(2, "turn end", false));
+    let recorded = syncs(&id);
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    let payload = &recorded[0].payload;
+    assert_eq!(payload["outcome"], "failed");
+    assert_eq!(payload["why"], "during a turn");
+    assert_eq!(payload["failures"], 1);
+    assert_eq!(payload["last_ok_ms"], 1_000);
+    assert_eq!(payload["error"], "the tree is over the checkout limits");
+    assert!(syncs(&other).is_empty(), "only the sandbox's own session");
+    let (_, body) = h.call("GET", &format!("/api/sessions/{id}"), None).await;
+    assert_eq!(body["files_sync"]["failures"], 1);
+    assert_eq!(body["files_sync"]["live"], false);
+    assert_eq!(body["files_sync"]["last_ok_ms"], 1_000);
+
+    // The last take-back is always recorded, and the count it carries is
+    // the API's.
+    h.manager.workspace_synced(&report(3, "exit", true));
+    assert_eq!(syncs(&id).len(), 2);
+    let (_, body) = h.call("GET", &format!("/api/sessions/{id}"), None).await;
+    assert_eq!(body["files_sync"]["failures"], 3);
+    assert_eq!(body["files_sync"]["why"], "exit");
+    assert_eq!(
+        body["files_sync"]["last_error"],
+        "the tree is over the checkout limits"
+    );
+
+    // A sandbox that is no session's (a preparation's) records nothing.
+    let mut stray = report(1, "exit", true);
+    stray.sandbox = "tracon-prep-x".into();
+    h.manager.workspace_synced(&stray);
+    assert_eq!(syncs(&id).len(), 2);
+}
+
 fn insert_running_session(store: &Arc<Store>, budget: i64) -> String {
     insert_session_for_item(store, budget, None)
 }

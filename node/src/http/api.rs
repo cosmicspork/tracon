@@ -1610,6 +1610,9 @@ pub async fn get_session(
         // What its sandboxes on an elastic provider cost, beside `cost_usd`
         // (the model's): kept on the node that ran it, as `usage` is.
         "runtime": crate::metrics::session_runtime(s.store(), &id),
+        // How current the node's copy of its sandboxed work is: null for
+        // an external session and one whose files are mounted.
+        "files_sync": crate::session::files_sync(s.store(), &s.node_id, &row),
         "ceiling": ceiling,
         "exhaustion": exhaustion,
         "shown_work": s.store().shown_work_for_session(&id)?,

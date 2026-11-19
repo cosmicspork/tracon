@@ -20,6 +20,7 @@
   import { budgetProblem, heldAtBudget, suggestedBudget } from '../lib/budget'
   import { externalAgent, formatAge, formatBudget, formatTokens } from '../lib/format'
   import { runtimeNote as runtimeNoteFor, usageNote as usageNoteFor } from '../lib/usage'
+  import { filesSyncNote, logRoot } from '../lib/filesSync'
   import { repetitionHint } from '../lib/log'
   import { askMode, compactOffered, compactionRunning, composerState, sessionControls } from '../lib/session-actions'
   import { router } from '../lib/router.svelte'
@@ -31,6 +32,7 @@
     type OperatorQuestion,
     type SessionExhaustion,
     type SessionRuntime,
+    type FilesSync,
     type SignInWait,
     type SessionUsage,
     type ShownWork as ShownWorkItem,
@@ -47,6 +49,7 @@
   let error = $state<string | null>(null)
   let usage = $state<SessionUsage | null>(null)
   let runtime = $state<SessionRuntime | null>(null)
+  let filesSync = $state<FilesSync | null>(null)
   let ceiling = $state<CeilingInfo | null>(null)
   let exhaustion = $state<SessionExhaustion | null>(null)
   let signInWait = $state<SignInWait | null>(null)
@@ -85,6 +88,7 @@
     questions = result.questions
     usage = result.usage
     runtime = result.runtime ?? null
+    filesSync = result.files_sync ?? null
     ceiling = result.ceiling
     exhaustion = result.exhaustion ?? null
     signInWait = result.sign_in_wait ?? null
@@ -229,6 +233,7 @@
 
   const usageNote = $derived(usageNoteFor(usage))
   const runtimeNote = $derived(runtimeNoteFor(runtime))
+  const syncNote = $derived(filesSyncNote(filesSync, clock.now, session?.turn_active === 1))
 
   let controlling = $state(false)
   let confirmingKill = $state(false)
@@ -437,6 +442,9 @@
     {/if}
     {#if runtimeNote}
       <span class="mono" title={runtimeNote.title}>{runtimeNote.text}</span>
+    {/if}
+    {#if syncNote}
+      <span class="mono files-sync" class:stale={syncNote.warn} title={syncNote.title}>{syncNote.text}</span>
     {/if}
     {#if session.manifest_digest}
       <span
@@ -655,7 +663,7 @@
     <div class="banner dim">{unreachable} <b>· the log resumes when {owner?.name ?? 'it'} returns</b></div>
   {/if}
 
-  <Log events={store.events} openChunks={store.openChunks} toolProgress={store.toolProgress} toolOutput={store.toolOutput} root={session.worktree_path} />
+  <Log events={store.events} openChunks={store.openChunks} toolProgress={store.toolProgress} toolOutput={store.toolOutput} root={logRoot(session)} />
   <!-- Open by default once the session has ended: that is when what it came
        to is the question. -->
   <OutcomePanel {id} open={isTerminal(session.state) || router.hash === '#outcome'} />
@@ -676,7 +684,7 @@
        following either link again reopens a panel the operator collapsed. -->
   {#if router.hash === '#authority'}
     {#key router.revision}
-      <SessionAuthorityPanel {id} open />
+      <SessionAuthorityPanel {id} open copy={syncNote} />
     {/key}
   {/if}
 
@@ -753,6 +761,10 @@
      alarmed: the number is unknown, which is a thing to look at, not a fault. */
   .unsure {
     color: var(--wait);
+  }
+  /* The node's copy of the sandbox's work may be missing some of it. */
+  .files-sync.stale {
+    color: var(--crit);
   }
   .sp {
     flex: 1;

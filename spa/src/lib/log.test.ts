@@ -424,6 +424,19 @@ test("a workspace's preparation reads as what it did and what it cost the start"
   }
 })
 
+test("taking the sandbox's work back reads as what the node's copy missed", () => {
+  const error = 'taking the trees back took longer than 120s'
+  const lines: [Record<string, unknown>, string, string][] = [
+    [{ outcome: 'timed_out', why: 'during a turn', error, failures: 1, ms: 120_000 }, `work not taken back · during a turn · ${error} · the node keeps its last copy`, 'crit'],
+    [{ outcome: 'failed', why: 'exit', error: 'the sandbox is gone', failures: 3 }, 'the sandbox ended with changes the node may not have · the sandbox is gone · 3 failures in a row', 'crit'],
+    [{ outcome: 'ok', why: 'turn end', recovered: 2, files: 12, bytes: 48_200, ms: 2_000 }, 'work taken back again · after 2 failed syncs · turn end · 12 files, 48 KB · 2s', 'ok'],
+    [{ outcome: 'ok', why: 'exit', files: 12, bytes: 48_200, ms: 2_000 }, 'work taken back as the sandbox ended · 12 files, 48 KB · 2s', 'mark'],
+  ]
+  for (const [payload, text, tone] of lines) {
+    expect(eventLine(ev('workspace_sync', null, payload))).toEqual({ text, tone: tone as 'crit' })
+  }
+})
+
 test('a queued message says where it went, or that it is still waiting', () => {
   const at = (kind: string, payload: Record<string, unknown>, at_ms: number) => ({ ...ev(kind, null, payload), at_ms })
   const events = [

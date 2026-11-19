@@ -772,6 +772,7 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         manager: manager.clone(),
     });
     manager.record_egress_refusals();
+    manager.report_workspace_syncs();
     // A node killed outright leaves its plugins' sockets behind.
     tokio::task::spawn_blocking(crate::plugin::supervisor::sweep_sockets);
     // Off unless `[digitalocean]` names a credential and `[placement]

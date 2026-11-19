@@ -118,6 +118,13 @@ pub mod event_kind {
     /// started (`outcome`: prepared, failed, timed_out, cancelled, not_run;
     /// `commands`, `ms`, and `detail` or `reason` when it did not prepare).
     pub const WORKSPACE_PREPARED: &str = "workspace_prepared";
+    /// How taking the sandbox's trees back to the node went (`outcome`: ok,
+    /// failed or timed_out; `why`: turn end, during a turn, exit; `files`,
+    /// `bytes`, `ms`, `error`, `failures` in a row, `recovered` and
+    /// `last_ok_ms`). Recorded for the first failure after a success, for
+    /// the success that ends a run of them, and for the sandbox's last
+    /// take-back whatever it came to: never for each periodic success.
+    pub const WORKSPACE_SYNC: &str = "workspace_sync";
     /// The repository's image is being built before the harness can start in
     /// it (`status`, `repo`). Minutes, once per repository; the start event
     /// that follows says which image the session got.

@@ -9,6 +9,7 @@
 
 import { roomWords } from './capabilities'
 import { exhaustionNote } from './exhaustion'
+import { formatBytes } from './data'
 import { formatDuration, formatTokens } from './format'
 import { toolName } from './nodetools'
 import { callKind } from './transcript'
@@ -569,6 +570,42 @@ export function eventLine(e: Event): EventLine | null {
           return line('mark', ['workspace preparation stopped', str(p.reason)])
         default:
           return line('sys', ['workspace not prepared', str(p.reason)])
+      }
+    }
+    case 'workspace_sync': {
+      // Taking the sandbox's work back to the node. Recorded for the first
+      // failure in a run, the success that ends one, and the sandbox's last
+      // take-back: a failure means the node's copy is older than the work.
+      const why = str(p.why)
+      const exit = why === 'exit'
+      const took = num(p.ms) !== null ? formatDuration(num(p.ms)!) : ''
+      const failures = num(p.failures) ?? 0
+      const files = num(p.files)
+      const what = files !== null && files > 0 ? `${files} files, ${formatBytes(num(p.bytes) ?? 0)}` : ''
+      switch (str(p.outcome)) {
+        case 'ok': {
+          const recovered = num(p.recovered) ?? 0
+          if (recovered > 0)
+            return line('ok', [
+              'work taken back again',
+              `after ${recovered} failed ${recovered === 1 ? 'sync' : 'syncs'}`,
+              why,
+              what,
+              took,
+            ])
+          return line('mark', [exit ? 'work taken back as the sandbox ended' : 'work taken back', what, took])
+        }
+        case 'failed':
+        case 'timed_out':
+          return line('crit', [
+            exit ? 'the sandbox ended with changes the node may not have' : 'work not taken back',
+            exit ? '' : why,
+            str(p.error) || (str(p.outcome) === 'timed_out' ? 'timed out' : ''),
+            failures > 1 ? `${failures} failures in a row` : '',
+            exit ? '' : 'the node keeps its last copy',
+          ])
+        default:
+          return line('sys', ['work taken back', why])
       }
     }
     case 'check_prepared': {

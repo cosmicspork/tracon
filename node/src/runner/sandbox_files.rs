@@ -34,6 +34,13 @@
 //! dies (or a node that restarts) mid-run loses what changed since its last
 //! completed sync: at most one turn, or [`SYNC_EVERY`] of a long one.
 //!
+//! **How the syncs went is the session's to see.** Every take-back is
+//! reported ([`set_reporter`]): the session manager records the first failure
+//! after a success, the success that ends a run of failures and the last
+//! take-back as `workspace_sync` events, and a third failure in a row tells
+//! the operator. [`sync_status`] is what the session API says of a running
+//! sandbox's copy: when it last matched, and how many syncs have failed since.
+//!
 //! **Nothing from the sandbox is trusted.** Every archive is unpacked by
 //! `tracon_sandbox::files::unpack` with the rules `workspace::validate_tree`
 //! holds a runtime's tree to (regular files, directories and links only; no
@@ -71,7 +78,10 @@ pub const SYNC_EVERY: Duration = Duration::from_secs(60);
 
 /// How long one sync may take before it is abandoned (and the node keeps the
 /// copy it had).
-const SYNC_WITHIN: Duration = Duration::from_secs(120);
+pub const SYNC_WITHIN: Duration = Duration::from_secs(120);
+
+/// Why the last take-back of a sandbox runs, as its report says.
+pub const WHY_EXIT: &str = "exit";
 
 /// Bounds for a tree that carries what a preparation installed
 /// (`node_modules`, `vendor/`): a checkout's limits are far below it. Its
@@ -195,6 +205,8 @@ pub fn sync_mode(volume: &str, kind: RunKind) -> Option<(Mode, Limits)> {
 pub struct FilesStore {
     root: PathBuf,
     every: Duration,
+    /// How long one take-back may run before it is abandoned.
+    within: Duration,
     /// Volumes it keeps that are never sent, whatever a run mounts.
     withheld: Vec<String>,
     /// Keep every volume a run names, making an empty one where none is
@@ -207,6 +219,7 @@ impl FilesStore {
         FilesStore {
             root: root.into(),
             every: SYNC_EVERY,
+            within: SYNC_WITHIN,
             withheld: Vec::new(),
             every_volume: false,
         }
@@ -239,6 +252,13 @@ impl FilesStore {
     /// [`SYNC_EVERY`].
     pub fn sync_every(mut self, every: Duration) -> Self {
         self.every = every;
+        self
+    }
+
+    /// Abandon a take-back that runs longer than `within` rather than
+    /// [`SYNC_WITHIN`].
+    pub fn sync_within(mut self, within: Duration) -> Self {
+        self.within = within;
         self
     }
 
@@ -722,7 +742,10 @@ impl Plan {
             let _guard = lock.lock().await;
             send(conn, p).await?;
         }
-        Ok(self.adopt(conn, name, kind))
+        let attached = self.adopt(conn, name, kind);
+        // What it was just sent is the node's copy: as current as it gets.
+        attached.inner.tracker.lock().unwrap().last_ok_ms = Some(crate::store::now_ms());
+        Ok(attached)
     }
 
     /// The targets [`Self::readopt`] sends again: what the sandbox is never
@@ -788,6 +811,8 @@ impl Plan {
             })
             .collect();
         let inner = Arc::new(Inner {
+            within: self.store.within,
+            tracker: Mutex::new(Tracker::default()),
             conn: conn.clone(),
             name: name.to_string(),
             store: self.store.clone(),
@@ -861,6 +886,10 @@ struct Inner {
     name: String,
     store: FilesStore,
     syncs: Vec<Sync>,
+    /// How long one take-back may run.
+    within: Duration,
+    /// How its take-backs have gone, for the session API and its reports.
+    tracker: Mutex<Tracker>,
     /// A turn is running: the periodic sync runs only then.
     turn: AtomicBool,
     finished: AtomicBool,
@@ -870,12 +899,13 @@ struct Inner {
 }
 
 impl Inner {
-    async fn sync(&self, why: &str) -> Result<(), FilesError> {
+    async fn sync(&self, why: &str) -> Result<TreeSummary, FilesError> {
         let _one = self.syncing.lock().await;
         if self.conn.is_closed() {
             return Err(FilesError::Refused("the sandbox is gone".into()));
         }
         let started = std::time::Instant::now();
+        let mut taken = TreeSummary::default();
         for sync in &self.syncs {
             let lock = crate::workspace::volume_lock(&sync.volume);
             let _guard = lock.lock().await;
@@ -889,7 +919,8 @@ impl Inner {
                 .conn
                 .export_reader(&sync.target, sync.mode.exclusions())
                 .await?;
-            self.store
+            let got = self
+                .store
                 .receive(
                     &sync.volume,
                     &sync.sub_path,
@@ -900,6 +931,10 @@ impl Inner {
                     &sync.nested,
                 )
                 .await?;
+            taken.files += got.files;
+            taken.dirs += got.dirs;
+            taken.links += got.links;
+            taken.bytes += got.bytes;
         }
         tracing::debug!(
             sandbox = %self.name,
@@ -907,25 +942,41 @@ impl Inner {
             ms = started.elapsed().as_millis() as u64,
             "took the sandbox's trees back"
         );
-        Ok(())
+        Ok(taken)
     }
 
-    /// `sync`, bounded and logged: a failed sync keeps the node's last copy.
+    /// `sync`, bounded, logged and reported: a failed sync keeps the node's
+    /// last copy, and the session hears of it (see [`Tracker`]).
     async fn sync_logged(&self, why: &str) -> Result<(), FilesError> {
-        match tokio::time::timeout(SYNC_WITHIN, self.sync(why)).await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => {
-                tracing::warn!(sandbox = %self.name, why, %error, "could not take the sandbox's trees back; the node keeps its last copy");
-                Err(error)
+        self.tracker.lock().unwrap().in_flight += 1;
+        let started = std::time::Instant::now();
+        let result = bounded(self.within, self.sync(why)).await;
+        match &result {
+            Ok(_) => {}
+            Err((SyncOutcome::TimedOut, _)) => {
+                tracing::warn!(sandbox = %self.name, why, "taking the sandbox's trees back timed out; the node keeps its last copy")
             }
-            Err(_) => {
-                tracing::warn!(sandbox = %self.name, why, "taking the sandbox's trees back timed out; the node keeps its last copy");
-                Err(FilesError::Refused(format!(
-                    "taking the trees back took longer than {}s",
-                    SYNC_WITHIN.as_secs()
-                )))
+            Err((_, error)) => {
+                tracing::warn!(sandbox = %self.name, why, %error, "could not take the sandbox's trees back; the node keeps its last copy")
             }
         }
+        let outcome = match &result {
+            Ok(summary) => Ok(*summary),
+            Err((outcome, error)) => Err((*outcome, error.to_string())),
+        };
+        let report = {
+            let mut tracker = self.tracker.lock().unwrap();
+            tracker.in_flight = tracker.in_flight.saturating_sub(1);
+            tracker.observe(
+                &self.name,
+                why,
+                outcome,
+                started.elapsed().as_millis() as u64,
+                crate::store::now_ms(),
+            )
+        };
+        report_sync(report);
+        result.map(|_| ()).map_err(|(_, error)| error)
     }
 
     /// The last sync, once: what it returns is only ever the first call's.
@@ -938,10 +989,197 @@ impl Inner {
         }
         let taken = match self.syncs.is_empty() {
             true => Ok(()),
-            false => self.sync_logged("exit").await,
+            false => self.sync_logged(WHY_EXIT).await,
         };
         unregister(self);
         taken
+    }
+}
+
+/// How one take-back ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncOutcome {
+    Ok,
+    Failed,
+    TimedOut,
+}
+
+impl SyncOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SyncOutcome::Ok => "ok",
+            SyncOutcome::Failed => "failed",
+            SyncOutcome::TimedOut => "timed_out",
+        }
+    }
+}
+
+/// One take-back, as it is reported past the node's log: to the reporter
+/// [`set_reporter`] installed, which records the ones worth recording on the
+/// sandbox's session and tells the operator when they keep failing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SyncReport {
+    /// The sandbox's (the run's) name, which its session row carries.
+    pub sandbox: String,
+    pub outcome: SyncOutcome,
+    /// `turn end`, `during a turn`, `exit` or `asked`.
+    pub why: String,
+    /// What came back, when it did.
+    pub files: u64,
+    pub bytes: u64,
+    pub ms: u64,
+    pub error: Option<String>,
+    /// Failures in a row, this one included: 0 after a success.
+    pub failures: u32,
+    /// For a success after failures: how many it ended.
+    pub recovered: u32,
+    /// When the node's copy last matched the sandbox's.
+    pub last_ok_ms: Option<i64>,
+    /// Worth a `workspace_sync` event: the first failure after a success,
+    /// a recovery, and the last take-back whatever it came to. Periodic
+    /// successes and repeated failures are not.
+    pub record: bool,
+}
+
+impl SyncReport {
+    /// The sandbox's last take-back, before it is removed.
+    pub fn is_exit(&self) -> bool {
+        self.why == WHY_EXIT
+    }
+}
+
+/// How a running sandbox's take-backs stand, for the session API.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct SyncStatus {
+    /// When the node's copy last matched the sandbox's: its last successful
+    /// take-back, or when its trees were sent in.
+    pub last_ok_ms: Option<i64>,
+    /// Failed take-backs in a row.
+    pub failures: u32,
+    pub last_error: Option<String>,
+    /// A take-back is running now.
+    pub in_flight: bool,
+    /// The sandbox is running.
+    pub live: bool,
+}
+
+/// The running state of one sandbox's take-backs, and which of them are
+/// worth reporting: pure, so its rules are tested without a sandbox.
+#[derive(Debug, Default)]
+struct Tracker {
+    last_ok_ms: Option<i64>,
+    failures: u32,
+    last_error: Option<String>,
+    in_flight: u32,
+    /// The last take-back has been reported.
+    finished: bool,
+}
+
+impl Tracker {
+    /// Count one take-back in and say what to report of it.
+    fn observe(
+        &mut self,
+        sandbox: &str,
+        why: &str,
+        outcome: Result<TreeSummary, (SyncOutcome, String)>,
+        ms: u64,
+        now_ms: i64,
+    ) -> SyncReport {
+        let exit = why == WHY_EXIT;
+        let mut report = SyncReport {
+            sandbox: sandbox.to_string(),
+            outcome: SyncOutcome::Ok,
+            why: why.to_string(),
+            files: 0,
+            bytes: 0,
+            ms,
+            error: None,
+            failures: 0,
+            recovered: 0,
+            last_ok_ms: None,
+            record: false,
+        };
+        match outcome {
+            Ok(summary) => {
+                report.files = summary.files;
+                report.bytes = summary.bytes;
+                report.recovered = std::mem::take(&mut self.failures);
+                report.record = report.recovered > 0;
+                self.last_ok_ms = Some(now_ms);
+                self.last_error = None;
+            }
+            Err((outcome, error)) => {
+                self.failures += 1;
+                report.outcome = outcome;
+                report.record = self.failures == 1;
+                self.last_error = Some(error.clone());
+                report.error = Some(error);
+            }
+        }
+        report.failures = self.failures;
+        report.last_ok_ms = self.last_ok_ms;
+        if exit {
+            report.record = true;
+            self.finished = true;
+        }
+        report
+    }
+
+    fn status(&self, live: bool) -> SyncStatus {
+        SyncStatus {
+            last_ok_ms: self.last_ok_ms,
+            failures: self.failures,
+            last_error: self.last_error.clone(),
+            in_flight: self.in_flight > 0,
+            live: live && !self.finished,
+        }
+    }
+}
+
+/// `sync` bounded by `within`: how it failed, when it did.
+async fn bounded<T>(
+    within: Duration,
+    sync: impl std::future::Future<Output = Result<T, FilesError>>,
+) -> Result<T, (SyncOutcome, FilesError)> {
+    match tokio::time::timeout(within, sync).await {
+        Ok(Ok(taken)) => Ok(taken),
+        Ok(Err(error)) => Err((SyncOutcome::Failed, error)),
+        Err(_) => Err((
+            SyncOutcome::TimedOut,
+            FilesError::Refused(format!(
+                "taking the trees back took longer than {}",
+                humane(within)
+            )),
+        )),
+    }
+}
+
+fn humane(d: Duration) -> String {
+    match d.as_secs() {
+        0 => format!("{}ms", d.as_millis()),
+        secs => format!("{secs}s"),
+    }
+}
+
+/// Who hears of every take-back: the session manager, once it is up.
+pub type SyncReporter = Arc<dyn Fn(SyncReport) + Send + std::marker::Sync>;
+
+fn reporter() -> &'static Mutex<Option<SyncReporter>> {
+    static REPORTER: OnceLock<Mutex<Option<SyncReporter>>> = OnceLock::new();
+    REPORTER.get_or_init(Default::default)
+}
+
+/// Hand every take-back's report to `report` from now on (`None`: to
+/// nobody). It runs on the task that synced, so it must not block.
+pub fn set_reporter(report: Option<SyncReporter>) {
+    *reporter().lock().unwrap() = report;
+}
+
+fn report_sync(report: SyncReport) {
+    let hook = reporter().lock().unwrap().clone();
+    if let Some(hook) = hook {
+        hook(report);
     }
 }
 
@@ -982,7 +1220,7 @@ impl Attached {
 
     /// Take the trees back now, as a turn's end does.
     pub async fn sync(&self) -> Result<(), FilesError> {
-        self.inner.sync("asked").await
+        self.inner.sync("asked").await.map(|_| ())
     }
 }
 
@@ -1058,6 +1296,15 @@ pub async fn finish_named(name: &str) {
     if let Some(inner) = named(name) {
         let _ = inner.finish().await;
     }
+}
+
+/// How the take-backs of the running sandbox of this name have gone. `None`
+/// when no running session's sandbox of that name takes trees back: its
+/// files are mounted, or it has ended (its last report then says).
+pub fn sync_status(name: &str) -> Option<SyncStatus> {
+    let inner = named(name)?;
+    let tracker = inner.tracker.lock().unwrap();
+    Some(tracker.status(!inner.conn.is_closed()))
 }
 
 /// Whether a running sandbox holds this volume.

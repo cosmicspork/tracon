@@ -248,7 +248,9 @@ function authority(s, o = {}) {
     access: {
       credentials: ['anthropic (model, via gateway)', 'github · cosmic-example (review publication only)'],
       egress: ['crates.io', 'static.crates.io', 'index.crates.io', 'registry.npmjs.org'],
-      workspace: s.worktree_path,
+      workspace: s.harness_id === 'external' ? s.worktree_path : '/work',
+      workspace_in: s.harness_id === 'external' ? 'host' : 'sandbox',
+      node_copy: s.harness_id === 'external' ? null : `tracon-workspace-${s.id}`,
       repo: s.repo_path,
       branch: s.branch,
       external_broker: false,
@@ -651,6 +653,42 @@ export default [
       ],
       api: {
         'GET /api/awake': { held: true, reason: '1 session working', method: 'logind', error: null, last_suspend: null },
+      },
+    }),
+  },
+  {
+    id: 'sessions-running-files-sync-failing',
+    area: 'sessions',
+    route: `/sessions/${S.working.id}#authority`,
+    title: "Running, the node cannot take the sandbox's work back",
+    since: '#980',
+    note: 'The header says how old the node copy is and that the last 3 syncs failed, in red; the log has one red workspace_sync line for the run, not one per attempt; "Can reach" shows /work in its sandbox with the same note, never the export path.',
+    api: page(S.working, {
+      events: [
+        ...opening(S.working.id, { model: 'openai-codex/gpt-6-luna', branch: 'feat/service-sidecars', prompt: 'Run the whole test suite and fix what fails.' }),
+        ev(S.working.id, 'tool_call', { title: 'bash: cargo test --workspace', kind: 'execute' }, -900000, 'call_s1'),
+        ev(S.working.id, 'workspace_sync', { outcome: 'timed_out', why: 'during a turn', files: 0, bytes: 0, ms: 120000, error: 'taking the trees back took longer than 120s', failures: 1, recovered: 0, last_ok_ms: -720000, sandbox: 'tracon-h-b2e1d4' }, -600000),
+      ],
+      detail: {
+        files_sync: { last_ok_ms: -720000, failures: 3, last_error: 'taking the trees back took longer than 120s', in_flight: true, live: true },
+      },
+    }),
+  },
+  {
+    id: 'sessions-ended-files-sync-failed',
+    area: 'sessions',
+    route: `/sessions/${S.working.id}`,
+    title: "Ended, its sandbox's last take-back failed",
+    since: '#980',
+    note: 'A red header note that stays: "the sandbox ended with changes the node may not have"; the log ends with the exit take-back in red.',
+    api: page({ ...S.working, state: 'closed', end_reason: 'harness_exit', turn_active: 0 }, {
+      events: [
+        ...opening(S.working.id, { model: 'openai-codex/gpt-6-luna', branch: 'feat/service-sidecars', prompt: 'Run the whole test suite and fix what fails.' }),
+        ev(S.working.id, 'workspace_sync', { outcome: 'ok', why: 'during a turn', files: 1843, bytes: 48200000, ms: 9200, error: null, failures: 0, recovered: 2, last_ok_ms: -400000, sandbox: 'tracon-h-b2e1d4' }, -400000),
+        ev(S.working.id, 'workspace_sync', { outcome: 'failed', why: 'exit', files: 0, bytes: 0, ms: 3, error: 'the sandbox is gone', failures: 1, recovered: 0, last_ok_ms: -400000, sandbox: 'tracon-h-b2e1d4' }, -120000),
+      ],
+      detail: {
+        files_sync: { last_ok_ms: -400000, failures: 1, last_error: 'the sandbox is gone', in_flight: false, live: false, outcome: 'failed', why: 'exit' },
       },
     }),
   },

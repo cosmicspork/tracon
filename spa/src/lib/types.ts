@@ -364,6 +364,9 @@ export interface Session {
   channel: string
   work_item_id: string | null
   repo_path: string
+  /** An external session's host worktree. For any other, the node's last
+   * export of its workspace (for a review, a diff or a publication), which
+   * can be hours old: never where its work is. See `FilesSync`. */
   worktree_path: string | null
   branch: string
   harness_id: string
@@ -1171,7 +1174,13 @@ export interface SessionAuthority {
   access: {
     credentials: string[]
     egress: string[]
+    /** Where the harness works: /work in its sandbox, or an external
+     * harness's host worktree. */
     workspace: string
+    /** Absent from an older node. */
+    workspace_in?: 'sandbox' | 'host'
+    /** The volume that holds the node's copy of a sandboxed session's work. */
+    node_copy?: string | null
     repo: string
     branch: string
     external_broker: boolean
@@ -1780,6 +1789,24 @@ export interface SandboxUsage {
 }
 
 /** What a session's sandboxes cost, beside its model cost. */
+/** How current the node's copy of a sandboxed session's work is
+ * (`files_sync` on `GET /api/sessions/:id`): from its running sandbox, or,
+ * once that has ended, from its last `workspace_sync` event. */
+export interface FilesSync {
+  /** When the node's copy last matched the sandbox's. */
+  last_ok_ms: number | null
+  /** Failed take-backs in a row. */
+  failures: number
+  last_error: string | null
+  /** A take-back is running now. */
+  in_flight: boolean
+  /** The sandbox is running. */
+  live: boolean
+  /** From the last event, once the sandbox has ended. */
+  outcome?: 'ok' | 'failed' | 'timed_out'
+  why?: string
+}
+
 export interface SessionRuntime {
   cost_usd: number | null
   hours: number
