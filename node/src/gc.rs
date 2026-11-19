@@ -42,6 +42,12 @@
 //! goes only with its volume: when the volume could not be removed, the
 //! directory stays beside it.
 //!
+//! A staging copy beside the volumes the node keeps for its sandboxes
+//! (`<volume>.staging-<id>`) belongs to the import, clone or sync writing
+//! it, and goes once none in this process is and it is an hour old. One a
+//! swap moved aside (`…-old`) whose volume is missing is that volume's only
+//! copy: it stays, and the node puts it back at its next start.
+//!
 //! Images on Podman and in Apple's `container` store are swept by
 //! `crate::image_gc`: only those carrying this node's owner labels, by class
 //! (superseded bases, repository images, snapshots, dangling builds, and with
@@ -59,6 +65,11 @@ use crate::store::Store;
 /// A workspace nothing references yet may be about to be: a browser import
 /// is referenced only once a session starts on it.
 pub const WORKSPACE_GRACE_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// A staging copy no sync in this process owns may still be an import's or
+/// a clone's, which are not registered: one is left this long. A sync
+/// gives up after minutes.
+pub const STAGING_GRACE_MS: i64 = 60 * 60 * 1000;
 
 /// What `session::materialize` names the volumes every session shares,
 /// after the prefix.
@@ -512,6 +523,70 @@ pub fn classify_directory(
     }
 }
 
+/// Whether a staging copy beside the volumes (see
+/// [`crate::boundary::staging_of`]) is still needed. `old` is a volume's own
+/// copy a swap moved aside, `volume_exists` whether that volume is there.
+pub fn classify_staging(
+    old: bool,
+    volume_exists: bool,
+    in_flight: bool,
+    created_ms: Option<i64>,
+    owners: &Owners,
+) -> (bool, String) {
+    if in_flight {
+        return verdict(false, "a sync or copy is writing it now");
+    }
+    if old && !volume_exists {
+        return verdict(
+            false,
+            "its volume's only copy, left by a swap that did not finish; the node puts it back at start",
+        );
+    }
+    if created_ms.is_none_or(|created| owners.now_ms - created < STAGING_GRACE_MS) {
+        return verdict(
+            false,
+            "made in the last hour; an import or a copy may still be writing it",
+        );
+    }
+    verdict(
+        true,
+        "left by a sync, import or copy of a volume that did not finish",
+    )
+}
+
+/// The staging copies beside the volumes under `root`, named by their path
+/// under the state dir where they are in it, else by their full path.
+fn staging_items(root: &Path, state_dir: &Path, owners: &Owners) -> Vec<(Item, PathBuf)> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut items = Vec::new();
+    for entry in entries.flatten() {
+        let entry_name = entry.file_name().to_string_lossy().into_owned();
+        let Some((volume, old)) = crate::boundary::staging_of(&entry_name) else {
+            continue;
+        };
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let (remove, reason) = classify_staging(
+            old,
+            std::fs::symlink_metadata(root.join(volume)).is_ok(),
+            tracon_sandbox::files::in_flight(&path),
+            created_ms(&path),
+            owners,
+        );
+        let name = path
+            .strip_prefix(state_dir)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        items.push((item("directory", name, remove, reason), path));
+    }
+    items
+}
+
 /// Top-level directories no current code reads.
 const RETIRED_DIRECTORIES: [(&str, &str); 5] = [
     (
@@ -832,7 +907,15 @@ pub async fn sweep(
             });
         }
     }
-    for (mut item, path) in directory_items(&Config::state_dir(), &owners) {
+    let state_dir = Config::state_dir();
+    let staging = backend
+        .sandbox_files_store()
+        .map(|files| staging_items(files.root(), &state_dir, &owners))
+        .unwrap_or_default();
+    for (mut item, path) in directory_items(&state_dir, &owners)
+        .into_iter()
+        .chain(staging)
+    {
         hold_with_volume(&mut item, &failed_volumes, &owners.prefix);
         if apply && item.remove {
             let removed = match path.is_dir() {
@@ -942,6 +1025,39 @@ mod tests {
         let seen = verdicts(&o);
         assert_eq!(seen[&at(&partial)], (true, "file"));
         assert_eq!(seen[&at(&current_tar)], (false, "file"));
+    }
+
+    /// A staging copy goes once nothing in the process writes it and it is
+    /// an hour old; a volume's only copy, moved aside by a swap cut short,
+    /// stays for the node's start to put back.
+    #[test]
+    fn a_staging_copy_goes_once_nothing_writes_it() {
+        let o = owners();
+        let old = Some(o.now_ms - 2 * STAGING_GRACE_MS);
+        let new = Some(o.now_ms - 60_000);
+        assert!(classify_staging(false, true, false, old, &o).0);
+        assert!(classify_staging(true, true, false, old, &o).0);
+        assert!(!classify_staging(false, true, false, new, &o).0);
+        assert!(!classify_staging(false, true, true, old, &o).0);
+        assert!(!classify_staging(true, false, false, old, &o).0);
+        assert!(!classify_staging(false, true, false, None, &o).0);
+    }
+
+    /// The sweep lists them under the store's root, by their path under the
+    /// state dir.
+    #[test]
+    fn staging_copies_are_listed_by_where_they_are() {
+        let state = tempfile::tempdir().unwrap();
+        let root = state.path().join("sandbox-files");
+        let volume = crate::config::resource_name("workspace-a");
+        std::fs::create_dir_all(root.join(&volume)).unwrap();
+        std::fs::create_dir_all(root.join(format!("{volume}.staging-x"))).unwrap();
+        let mut o = owners();
+        o.now_ms = created_ms(&root).unwrap() + 2 * STAGING_GRACE_MS;
+        let items = staging_items(&root, state.path(), &o);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].0.name, format!("sandbox-files/{volume}.staging-x"));
+        assert!(items[0].0.remove, "{}", items[0].0.reason);
     }
 
     #[test]

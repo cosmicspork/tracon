@@ -346,20 +346,28 @@ impl FilesStore {
         }
         let to = self.path(dest)?;
         self.remove(dest)?;
-        let staging = self.staging(dest);
-        std::fs::create_dir_all(&staging)?;
-        let copied = tokio::process::Command::new("cp")
-            .args(["-dRp", "--reflink=auto", "--"])
-            .arg(from.join("."))
-            .arg(&staging)
-            .output()
+        std::fs::create_dir_all(&self.root)?;
+        // A caller that gives up stops the copy, and the staging copy goes
+        // once nothing writes it.
+        let staging = tree::Staging::create(self.staging(dest))?;
+        let (path, stopped) = (staging.path().to_path_buf(), staging.stopped());
+        let copied = staging
+            .blocking(move || clone_tree(&from, &path, &stopped))
             .await;
-        if !copied.is_ok_and(|out| out.status.success()) {
-            let _ = std::fs::remove_dir_all(&staging);
-            crate::workspace::copy_tree(&from, &staging, false)?;
+        if let Err(error) = copied {
+            staging.discard().await;
+            return Err(error);
         }
-        std::fs::rename(&staging, &to)?;
-        Ok(())
+        match std::fs::rename(staging.path(), &to) {
+            Ok(()) => {
+                staging.keep();
+                Ok(())
+            }
+            Err(error) => {
+                staging.discard().await;
+                Err(error.into())
+            }
+        }
     }
 
     /// Remove the volume (an alias goes, not what it names). One that does
@@ -393,6 +401,10 @@ impl FilesStore {
     /// the node's copy. Nothing is changed unless the whole archive passes.
     /// `nested` are paths inside it that other mounts provide, which the node
     /// sends at every start and never takes back.
+    ///
+    /// Dropping the future stops the unpack and closes `reader`; the staging
+    /// directory goes once nothing writes it, and a commit that already began
+    /// runs to its end.
     #[allow(clippy::too_many_arguments)]
     pub async fn receive<R>(
         &self,
@@ -407,6 +419,36 @@ impl FilesStore {
     where
         R: AsyncRead + Unpin + Send + 'static,
     {
+        self.receive_holding(
+            volume,
+            sub_path,
+            target,
+            reader,
+            mode,
+            limits,
+            nested,
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// [`Self::receive`], releasing `held` (the locks a sync holds) only
+    /// once its blocking work has ended, even when the caller gave up before.
+    #[allow(clippy::too_many_arguments)]
+    async fn receive_holding<R>(
+        &self,
+        volume: &str,
+        sub_path: &str,
+        target: &str,
+        reader: R,
+        mode: Mode,
+        limits: Limits,
+        nested: &[PathBuf],
+        held: Vec<Box<dyn Send>>,
+    ) -> Result<TreeSummary, FilesError>
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+    {
         let base = self.path(volume)?;
         if self.is_alias(volume) {
             return Err(FilesError::Refused(format!(
@@ -417,29 +459,51 @@ impl FilesStore {
         std::fs::create_dir_all(&base)?;
         real_directories(&base, &relative)?;
         let dest = base.join(&relative);
-        let staging = self.staging(volume);
-        std::fs::create_dir(&staging)?;
+        let staging = tree::Staging::create(self.staging(volume))?;
+        for held in held {
+            staging.hold(held);
+        }
         let mount = Some(PathBuf::from(target));
-        let summary = match tree::unpack_async(reader, staging.clone(), mount, limits).await {
+        let summary = match tree::unpack_staged(reader, &staging, mount, limits).await {
             Ok(summary) => summary,
             Err(error) => {
-                let _ = std::fs::remove_dir_all(&staging);
+                staging.discard().await;
                 return Err(error.into());
             }
         };
         let root = self.root.clone();
         let nested = nested.to_vec();
-        let committed = tokio::task::spawn_blocking(move || {
-            let committed = commit(&root, &dest, &staging, mode, &nested);
-            if committed.is_err() {
-                let _ = std::fs::remove_dir_all(&staging);
+        let (path, stopped) = (staging.path().to_path_buf(), staging.stopped());
+        let volume = volume.to_string();
+        let committed = staging
+            .blocking(move || {
+                // Its caller gave up: the node keeps its last copy, as it was
+                // told.
+                if stopped.is_cancelled() {
+                    return Err(FilesError::Refused(format!(
+                        "taking {volume} back was abandoned before its commit"
+                    )));
+                }
+                let committed = commit(&root, &dest, &path, mode, &nested);
+                if committed.is_ok() && stopped.is_cancelled() {
+                    tracing::warn!(
+                        volume,
+                        "a sandbox's tree was committed after its caller gave up; the node's copy is the one just taken back"
+                    );
+                }
+                committed
+            })
+            .await;
+        match committed {
+            Ok(()) => {
+                staging.keep();
+                Ok(summary)
             }
-            committed
-        })
-        .await
-        .map_err(|e| FilesError::Io(std::io::Error::other(e)))?;
-        committed?;
-        Ok(summary)
+            Err(error) => {
+                staging.discard().await;
+                Err(error)
+            }
+        }
     }
 
     /// Split a run's mounts into what the provider mounts and what goes over
@@ -575,6 +639,48 @@ fn real_directories(base: &Path, relative: &Path) -> Result<(), FilesError> {
 /// Whether `path` is strictly inside `dir`.
 fn inside(path: &str, dir: &str) -> bool {
     Path::new(path) != Path::new(dir) && Path::new(path).starts_with(dir)
+}
+
+/// Copy `from` into the directory `to` with the system `cp` (sharing
+/// extents where the filesystem can), or in process where `cp` cannot.
+/// Stops, killing `cp`, once `stopped` is set.
+fn clone_tree(
+    from: &Path,
+    to: &Path,
+    stopped: &tokio_util::sync::CancellationToken,
+) -> Result<(), FilesError> {
+    let child = std::process::Command::new("cp")
+        .args(["-dRp", "--reflink=auto", "--"])
+        .arg(from.join("."))
+        .arg(to)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    let copied = match child {
+        Ok(mut child) => loop {
+            if stopped.is_cancelled() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(FilesError::Refused("the copy was abandoned".into()));
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => break status.success(),
+                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break false;
+                }
+            }
+        },
+        Err(_) => false,
+    };
+    if !copied {
+        let _ = std::fs::remove_dir_all(to);
+        crate::workspace::copy_tree(from, to, false)?;
+    }
+    Ok(())
 }
 
 /// Finish a received tree in `staging` and put it at `dest`.
@@ -794,7 +900,7 @@ impl Plan {
             syncs,
             turn: AtomicBool::new(false),
             finished: AtomicBool::new(false),
-            syncing: tokio::sync::Mutex::new(()),
+            syncing: Arc::new(tokio::sync::Mutex::new(())),
             periodic: Mutex::new(None),
         });
         if kind == RunKind::Session && !inner.syncs.is_empty() {
@@ -864,21 +970,26 @@ struct Inner {
     /// A turn is running: the periodic sync runs only then.
     turn: AtomicBool,
     finished: AtomicBool,
-    /// One sync at a time per sandbox.
-    syncing: tokio::sync::Mutex<()>,
+    /// One sync at a time per sandbox, held until the blocking work of one
+    /// abandoned midway has ended.
+    syncing: Arc<tokio::sync::Mutex<()>>,
     periodic: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl Inner {
     async fn sync(&self, why: &str) -> Result<(), FilesError> {
-        let _one = self.syncing.lock().await;
+        // Shared with each receive, which holds it, and the volume's lock,
+        // until its blocking work ends: a sync given up midway still holds
+        // both while its unpack stops and while a commit it began finishes.
+        let one = Arc::new(self.syncing.clone().lock_owned().await);
         if self.conn.is_closed() {
             return Err(FilesError::Refused("the sandbox is gone".into()));
         }
         let started = std::time::Instant::now();
         for sync in &self.syncs {
-            let lock = crate::workspace::volume_lock(&sync.volume);
-            let _guard = lock.lock().await;
+            let guard = crate::workspace::volume_lock(&sync.volume)
+                .lock_owned()
+                .await;
             if sync.refuse_live && is_live(&sync.volume) {
                 return Err(FilesError::Refused(format!(
                     "{} is held by a running sandbox, whose copy is the newer",
@@ -890,7 +1001,7 @@ impl Inner {
                 .export_reader(&sync.target, sync.mode.exclusions())
                 .await?;
             self.store
-                .receive(
+                .receive_holding(
                     &sync.volume,
                     &sync.sub_path,
                     &sync.target,
@@ -898,6 +1009,7 @@ impl Inner {
                     sync.mode,
                     sync.limits,
                     &sync.nested,
+                    vec![Box::new(one.clone()), Box::new(guard)],
                 )
                 .await?;
         }

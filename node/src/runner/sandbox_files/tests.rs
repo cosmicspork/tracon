@@ -700,3 +700,134 @@ fn a_session_from_a_snapshot_is_not_sent_the_cache() {
     assert_eq!(targets, ["/work"]);
     assert!(provided.contains(&podman_cache[1]), "{provided:?}");
 }
+
+/// Wait, a bounded while, for `done`.
+async fn eventually(what: &str, mut done: impl FnMut() -> bool) {
+    for _ in 0..500 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("never: {what}");
+}
+
+/// Whether the other end of `writer` was dropped: a write fails, rather
+/// than waiting for room.
+async fn closed(writer: &mut tokio::io::DuplexStream) -> bool {
+    use tokio::io::AsyncWriteExt as _;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if writer.write_all(&[0u8; 512]).await.is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+fn eight_files() -> Vec<u8> {
+    archive(|b| {
+        for i in 0..8 {
+            file(b, &format!("f{i}.txt"), b"after");
+        }
+    })
+}
+
+/// A sync given up mid-unpack (its timeout, a caller that went away) stops
+/// reading the sandbox's archive, leaves no staging copy behind, and never
+/// commits what arrives after.
+#[tokio::test]
+async fn a_receive_given_up_leaves_nothing_and_stops_its_transfer() {
+    use tokio::io::AsyncWriteExt as _;
+    let volume = "vol";
+    let (_dir, store) = store_with(volume);
+    let whole = eight_files();
+    let (mut writer, reader) = tokio::io::duplex(64 * 1024);
+    // Three of the eight entries (a header and a block each), and the
+    // stream left open.
+    writer.write_all(&whole[..3 * 1024]).await.unwrap();
+    let received = tokio::time::timeout(
+        Duration::from_millis(50),
+        store.receive(
+            volume,
+            "",
+            "/work",
+            reader,
+            Mode::Whole,
+            checkout_limits(),
+            &[],
+        ),
+    )
+    .await;
+    assert!(received.is_err(), "the receive did not time out");
+    eventually("the staging copy goes", || {
+        listing(store.root()) == [volume]
+    })
+    .await;
+    assert!(closed(&mut writer).await, "the transfer was left reading");
+
+    let _ = writer.write_all(&whole[3 * 1024..]).await;
+    let _ = writer.shutdown().await;
+    drop(writer);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let tree = store.tree(volume).unwrap();
+    assert_eq!(listing(&tree), vec!["kept.txt"]);
+    assert_eq!(
+        std::fs::read_to_string(tree.join("kept.txt")).unwrap(),
+        "before"
+    );
+    assert_eq!(listing(store.root()), vec![volume], "staging came back");
+}
+
+/// What a sync holds (the sandbox's sync lock, the volume's lock) is held
+/// until the work of a receive it gave up on has ended: the next sync never
+/// starts beside it.
+#[tokio::test]
+async fn a_given_up_receive_holds_its_locks_until_its_work_ends() {
+    use tokio::io::AsyncWriteExt as _;
+    let volume = "vol";
+    let (_dir, store) = store_with(volume);
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    let held = lock.clone().lock_owned().await;
+    let whole = eight_files();
+    let (mut writer, reader) = tokio::io::duplex(64 * 1024);
+    writer.write_all(&whole[..3 * 1024]).await.unwrap();
+    let received = tokio::time::timeout(
+        Duration::from_millis(50),
+        store.receive_holding(
+            volume,
+            "",
+            "/work",
+            reader,
+            Mode::Whole,
+            checkout_limits(),
+            &[],
+            vec![Box::new(held)],
+        ),
+    )
+    .await;
+    assert!(received.is_err(), "the receive did not time out");
+    let next = tokio::time::timeout(Duration::from_secs(5), lock.lock())
+        .await
+        .expect("the lock was never released");
+    // Released only once its staging copy was gone.
+    assert_eq!(listing(store.root()), vec![volume]);
+    drop(next);
+}
+
+/// A copy given up leaves no staging copy behind once its `cp` is stopped.
+#[tokio::test]
+async fn a_clone_given_up_leaves_nothing() {
+    let source = crate::config::resource_name("prep-a");
+    let (_dir, store) = store_with(&source);
+    let dest = crate::config::resource_name("warm-a");
+    let cloned = tokio::time::timeout(Duration::ZERO, store.clone_volume(&source, &dest)).await;
+    assert!(cloned.is_err(), "the clone did not time out");
+    eventually("the staging copy goes", || {
+        listing(store.root()) == [source.clone()]
+    })
+    .await;
+}
