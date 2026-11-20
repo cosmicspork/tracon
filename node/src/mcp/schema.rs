@@ -133,6 +133,21 @@ const PRESENTATIONS: &[(&str, &str, &[&str], &[&str])] = &[
             "summary",
         ],
     ),
+    // A plugin's card is its own account of what it will do, decided as it
+    // stands: allowing it runs nothing here, so there is nothing to edit.
+    (
+        crate::store::approvals::PLUGIN_CARD_TOOL,
+        "markdown",
+        &["summary"],
+        &[
+            "plugin",
+            "version",
+            "title",
+            "summary",
+            "content",
+            "requested_for",
+        ],
+    ),
     // A trial held to build its Dockerfile builds what the card shows.
     (
         super::setup::TRY,

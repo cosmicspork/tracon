@@ -1,6 +1,8 @@
 <script lang="ts">
   import { api, ApiError } from '../lib/api'
   import Name from '../components/Name.svelte'
+  import PluginCardContent from '../components/PluginCardContent.svelte'
+  import { askedBy, pluginCard } from '../lib/plugin-card'
   import {
     approvalArguments,
     approvalFields,
@@ -95,6 +97,8 @@
   })
 
   const original = $derived(asArguments(details?.arguments))
+  /** A card a plugin raised: its content is shown as it is, and takes no edit. */
+  const card = $derived(details ? pluginCard(details.approval.tool, original) : null)
   const schema = $derived(schemaFor(details?.input_schema ?? null, original))
   const pending = $derived(details?.approval.state === 'pending')
   const lapsed = $derived(pending && details !== null && details.approval.expires_ms <= clock.now)
@@ -268,10 +272,14 @@
   </div>
 
   <dl class="kv">
+    {#if card}
+      <dt>Asked by</dt>
+      <dd class="m">{askedBy(card)}</dd>
+    {/if}
     {#if a.session_id}
       <dt>Session</dt>
       <dd class="m"><Name kind="session" id={a.session_id} href="/sessions/{a.session_id}" /></dd>
-    {:else}
+    {:else if !card}
       <dt>Asked by</dt>
       <dd class="m">{details.lane ?? 'an external agent'}</dd>
     {/if}
@@ -404,6 +412,10 @@
     </section>
   {/each}
 
+  {#if card}
+    <PluginCardContent blocks={card.content} />
+  {/if}
+
   {#each sections as item (item.index)}
     {@const list = details.item_list ?? ''}
     <section class="doc item">
@@ -448,7 +460,7 @@
         <dd class:m={typeof original[key] !== 'string' || !String(original[key]).includes(' ')}>{display(original[key])}</dd>
       {/each}
     </dl>
-  {:else if open}
+  {:else if open && !card}
     <div class="h4">Arguments <b>edit before allowing if you want to</b></div>
     <div class="form">
       {#each fields as f (f.key)}

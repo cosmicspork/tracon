@@ -741,6 +741,9 @@ impl Manager {
                 std::time::Duration::from_secs(secs)
             }),
         ));
+        // A plugin's calls back to the node are the tools' to answer.
+        let host: std::sync::Weak<dyn crate::plugin::host::Host> = Arc::downgrade(&tools) as _;
+        plugins.set_host(host);
         Self {
             plugins,
             tools,

@@ -1104,6 +1104,25 @@ allow-downloads allow-modals"`: same-origin is the plugin's own, never the inter
 and popups and top-level navigation stay off. Access from the phone through the hub
 waits with the rest of the mesh work.
 
+**A plugin calls the node back as itself, on a socket that knows which instance it is.**
+A plugin whose manifest names `node_methods` is started with `--node-socket`, a socket
+`plugin::host` serves for that start alone; the supervisor binds it before the spawn and
+drops it when the start ends. A request carries the instance's start token as a bearer
+token, compared by its hash, and is answered only for a method the manifest names, which
+the install card showed. Who is asking is the socket's, never the request's word. The
+methods are `mcp::plugin_host`'s, reached through a weak reference the session manager
+sets, since the tools own the supervisor. `approval/request` holds a `plugin_card`
+approval whose arguments are the plugin's content in node formats (Markdown, unified
+diff, word diff as before and after, key-value table, source); the page renders it and
+allows no edit, and allowing it settles the card as approved without running anything,
+for the plugin to act on. A card raised `on_behalf` of the agent call being served is
+that session's once the node has verified the context is its own signature for this
+instance and channel, so the session's wait covers it: the plugin can attribute only a
+call it was actually sent. `approval/status` waits as an agent's status call does, on the
+plugin's own cards only. `tools/call` runs through the operator API's unheld path
+(`Tools::call_for_operator`) with a `Caller::Plugin`, so the signed policy and the
+callee's entry decide it, the channel's external log records it, and an ask is a refusal.
+
 ### Authority grants
 
 A grant is a local operator decision layered under signed policy, not a

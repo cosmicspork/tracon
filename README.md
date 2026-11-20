@@ -1058,7 +1058,8 @@ session. Each GitHub release carries one `<name>-<version>-<target>.tar.gz` per 
 `checksums.txt` that lists them. An archive holds `tracon-plugin.toml`, `bin/`, and
 optionally `ui/`, and nothing else. The manifest (contract 1) gives the plugin's name,
 version, the program it runs under `bin/`, the broker credentials it may be lent, the
-tools it offers, its UI, the hosts it says it reaches, and the document formats it owns.
+tools it offers, its UI, the hosts it says it reaches, the document formats it owns, and
+the node methods it calls (see "A plugin calling the node" below).
 An unknown key is refused.
 
 `tracon plugin add owner/repo` fetches the latest release for this node's target and
@@ -1092,7 +1093,8 @@ it is offered to first lists its tools. A process stops once it has gone unused 
 `[[plugin]]` entry's `idle_timeout_secs` (15 minutes by default). It also stops when the
 plugin is updated, rolled back or removed, and when the node shuts down; the next use
 starts the version active then. The node checks the build's digest again and runs its
-`exec` with `--socket <path> --data <dir>` appended. The environment is empty except for
+`exec` with `--socket <path> --data <dir>` appended (and `--node-socket <path>` for a
+plugin that calls the node). The environment is empty except for
 `TRACON_PLUGIN_TOKEN` (fresh for each start and held only in the node's memory),
 `TRACON_NODE_KEY` (the node id) and `TRACON_CONTRACT=1`. Credentials are never in it:
 they are lent per call. The socket is in a 0700 directory of the node's runtime
@@ -1205,6 +1207,55 @@ API off; its files are still served. Pages are opened on the node's own machine 
 the listener is loopback, and reaching it from the phone through the hub comes later.
 Every URL a plugin's page uses must be relative (Vite's `base: './'`, `fetch('api/x')`),
 since it is served under `/t/<token>/`.
+
+#### A plugin calling the node
+
+A plugin can call the node back, as itself, for what it cannot do alone: put a card in
+front of you, push you a notification, or use another plugin's tool. It names the
+methods it calls in its manifest, and the install card lists them under **Calls the
+node**:
+
+```toml
+node_methods = ["approval/request", "approval/status", "notify", "tools/call"]
+```
+
+A plugin that names any is started with `--node-socket <path>` as well: a socket the node
+serves for that one start, in the same 0700 directory as the plugin's own, gone when the
+start ends. Each request is a JSON-RPC 2.0 call, `POST /` with a JSON body and
+`Authorization: Bearer <TRACON_PLUGIN_TOKEN>`. Any other token, an earlier start's
+included, is refused with HTTP 401 (`-32001`), and a method the manifest does not name
+with `-32601`. The node knows which plugin and channel a request is from by the socket it
+arrived on, never by what the request says. Errors: `-32602` for params the method does
+not take, `-32003` for a refusal (`data.decision` is `denied` or `asked` for a tool call),
+`-32000` for a failure.
+
+- **`approval/request`** puts a card in your queue: `title` (one line, up to 200
+  characters), an optional Markdown `summary`, and `content`, a list of 1 to 64 blocks
+  (512 KiB in all), each in a format the node renders: `{format: "markdown", text}`,
+  `{format: "diff", text}` (a unified diff), `{format: "word_diff", before, after}` (a
+  text before and after, which the page diffs by word), `{format: "table", rows:
+  [{key, value}]}` and `{format: "source", text, language?}`, each with an optional
+  `title`. `request_key` makes a repeat while the card waits return that card (otherwise
+  identical content does), and `expires_secs` shortens its wait. It returns
+  `{approval_id, state: "pending", new}`. The card names the plugin as who asked. A plugin
+  raising one while it serves an agent's call passes that call's `_meta.tracon` as
+  `on_behalf`: once the node has checked the signature is its own, for this instance and
+  channel, issued in the last ten minutes, and from an agent, the card is that agent's
+  session's as well, so the session waits on it and hears your decision. A card takes no
+  edit: allow it, reject it, or ask for changes.
+- **`approval/status`** takes `approval_id` (or `approval_ids`) of cards this plugin
+  raised on this channel and waits up to `wait_secs` (at most 45, the default) for a
+  decision, as an agent's status call does: `still_waiting`, `approved`, `rejected`,
+  `changes_requested` (with your `notes`) or `expired`. Allowing a card runs nothing on
+  the node; the plugin does what it asked to once it reads `approved`.
+- **`notify`** takes `title`, `message` and an optional `path`, and pushes to your
+  devices as `notify_operator` does, its title led by the plugin's name.
+- **`tools/call`** takes `name` (`<plugin>__<tool>`, another plugin's) and `arguments`,
+  and calls it as the plugin: its caller context names kind `plugin` with
+  `caller.plugin` set. It is decided as the operator API's calls are, by the signed
+  policy and the callee's `[[plugin]]` entry, logged on the channel's external log under
+  `plugin:<name>`, and never held: one that would be asked is refused, naming the allow
+  that would let it run.
 
 #### SQL
 
