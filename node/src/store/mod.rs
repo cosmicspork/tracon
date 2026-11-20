@@ -331,9 +331,9 @@ impl Store {
                 last_error, turn_active, draft, draft_updated_ms, created_ms, started_mono_ms,
                 ended_mono_ms, updated_ms, project_id, phase, policy_version, review_id,
                 harness_agent, harness_found, harness_protocol, parent_session, continued_from,
-                forked_from)
+                forked_from, request_id)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,
-                ?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37)",
+                ?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37,?38)",
             rusqlite::params![
                 s.id,
                 s.node_id,
@@ -371,10 +371,29 @@ impl Store {
                 s.harness_protocol,
                 s.parent_session,
                 s.continued_from,
-                s.forked_from
+                s.forked_from,
+                s.request_id
             ],
         )?;
         Ok(())
+    }
+
+    /// The session `node_id` made on `channel` for the create that carried
+    /// `request_id`: its own, or a peer's as mirrored here.
+    pub fn session_by_request(
+        &self,
+        node_id: &str,
+        channel: &str,
+        request_id: &str,
+    ) -> Result<Option<SessionRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            &format!("{SESSION_SELECT} WHERE node_id=?1 AND channel=?2 AND request_id=?3"),
+            [node_id, channel, request_id],
+            SessionRow::from_row,
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     pub fn get_session(&self, id: &str) -> Result<Option<SessionRow>> {
@@ -1863,9 +1882,9 @@ impl Store {
                 last_error, turn_active, draft, draft_updated_ms, created_ms, started_mono_ms,
                 ended_mono_ms, updated_ms, project_id, phase, policy_version, review_id,
                 harness_agent, harness_found, harness_protocol, legacy_ms, parent_session,
-                continued_from, forked_from)
+                continued_from, forked_from, request_id)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,NULL,
-                NULL,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36)
+                NULL,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37)
              ON CONFLICT(id) DO UPDATE SET node_id=?2, channel=?3, work_item_id=?4, repo_path=?5,
                 worktree_path=?6, branch=?7, harness_id=?8, harness_version=?9,
                 harness_session_id=?10, container_name=?11, model=?12, budget_tokens=?13,
@@ -1874,7 +1893,7 @@ impl Store {
                 started_mono_ms=?23, ended_mono_ms=?24, updated_ms=?25, project_id=?26,
                 phase=?27, policy_version=?28, review_id=?29, harness_agent=?30,
                 harness_found=?31, harness_protocol=?32, legacy_ms=?33, parent_session=?34,
-                continued_from=?35, forked_from=?36",
+                continued_from=?35, forked_from=?36, request_id=COALESCE(?37, request_id)",
             rusqlite::params![
                 s.id,
                 s.node_id,
@@ -1911,7 +1930,8 @@ impl Store {
                 s.legacy_ms,
                 s.parent_session,
                 s.continued_from,
-                s.forked_from
+                s.forked_from,
+                s.request_id
             ],
         )?;
         Ok(())
@@ -2905,6 +2925,13 @@ mod records {
         /// has no manifest, and on rows written before the column.
         #[serde(default)]
         pub manifest_digest: Option<String>,
+        /// The id the caller gave the create that made this session, when it
+        /// gave one: a create retried with the same id on the same owner and
+        /// channel is answered with this row instead of making another.
+        /// Written once, at creation. Omitted from the wire when absent, so
+        /// a peer on an older build reads the row as before.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub request_id: Option<String>,
         /// What the open turn has spent so far through the gateway: input
         /// plus output of its `model_usage` rows, cache reads left out, the
         /// same figure the gateway's budget check adds to `tokens_used`
@@ -2963,6 +2990,7 @@ mod records {
                 continued_from: r.get("continued_from")?,
                 forked_from: r.get("forked_from")?,
                 manifest_digest: r.get("manifest_digest")?,
+                request_id: r.get("request_id")?,
                 // Only the reads built on `SESSION_SELECT` compute it.
                 open_turn_tokens: r.get("open_turn_tokens").unwrap_or(0),
             })
@@ -4353,6 +4381,7 @@ mod tests {
                 forked_from: None,
                 manifest_digest: None,
                 open_turn_tokens: 0,
+                request_id: None,
             })
             .unwrap();
     }

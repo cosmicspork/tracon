@@ -763,6 +763,7 @@ async fn an_external_item_named_by_its_worktree_joins_the_project_a_session_ther
                 harness: None,
                 on_exhaustion: None,
                 told_reviews: Vec::new(),
+                request_id: None,
                 project_id: None,
             },
             Arc::new(support::fake::FakeAdapter {
@@ -2662,6 +2663,7 @@ async fn an_item_in_use_takes_its_sessions_project_and_is_not_closed_or_deleted_
                 harness: None,
                 on_exhaustion: None,
                 told_reviews: Vec::new(),
+                request_id: None,
                 project_id: None,
             },
             Arc::new(support::fake::FakeAdapter {

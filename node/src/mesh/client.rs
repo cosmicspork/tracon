@@ -130,6 +130,9 @@ pub struct MeshClient {
     invites: Mutex<HashMap<String, enroll::Invite>>,
     /// Commands this node sent and is waiting on, by command id.
     pub(super) pending: Mutex<HashMap<String, tokio::sync::oneshot::Sender<Result<Value, String>>>>,
+    /// Commands this node stopped waiting on, by command id, so an answer
+    /// that arrives after all is reconciled rather than dropped.
+    pub(super) late: Mutex<HashMap<String, super::forward::Late>>,
     /// Who runs commands addressed to this node. Set once the session manager
     /// exists; until then commands are answered with an error.
     pub(super) executor: std::sync::OnceLock<Arc<dyn super::forward::CommandExecutor>>,
@@ -211,6 +214,7 @@ impl MeshClient {
             policy,
             invites: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
+            late: Mutex::new(HashMap::new()),
             executor: std::sync::OnceLock::new(),
             broker: std::sync::OnceLock::new(),
             on_handoff: std::sync::OnceLock::new(),
@@ -1219,11 +1223,15 @@ impl MeshClient {
                 return Opened::Applied;
             }
             Payload::Ack { cmd_id, ok, err } if env.is_direct() => {
-                if let Some(tx) = self.pending.lock().unwrap().remove(cmd_id) {
-                    let _ = tx.send(match err {
-                        Some(e) => Err(e.clone()),
-                        None => Ok(ok.clone().unwrap_or(Value::Null)),
-                    });
+                let waiting = self.pending.lock().unwrap().remove(cmd_id);
+                match waiting {
+                    Some(tx) => {
+                        let _ = tx.send(match err {
+                            Some(e) => Err(e.clone()),
+                            None => Ok(ok.clone().unwrap_or(Value::Null)),
+                        });
+                    }
+                    None => self.late_ack(sender, cmd_id, ok.as_ref(), err.as_deref()),
                 }
                 return Opened::Applied;
             }

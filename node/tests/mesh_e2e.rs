@@ -52,6 +52,47 @@ async fn node_admins(
     rings: &[(&str, Keyring)],
     admins: &[String],
 ) -> Node {
+    node_built(seed, name, hub, rings, admins, Build::default()).await
+}
+
+/// What a test changes about how a node is built.
+#[derive(Clone, Default)]
+struct Build {
+    /// `[mesh] command_timeout_secs`, when not the tests' 10.
+    command_timeout_secs: Option<u64>,
+    /// Hold the first create a peer sends this long before running it, as
+    /// an owner slow to resolve and write a session does.
+    first_create_delay: Option<Duration>,
+}
+
+/// Runs commands as the node's own state does, except that the first create
+/// waits `delay` first.
+struct SlowFirstCreate {
+    inner: AppState,
+    delay: Duration,
+    held: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl tracon::mesh::forward::CommandExecutor for SlowFirstCreate {
+    async fn execute(&self, sender: &str, command: Command) -> Result<serde_json::Value, String> {
+        if matches!(command, Command::Create { .. })
+            && !self.held.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            tokio::time::sleep(self.delay).await;
+        }
+        tracon::mesh::forward::CommandExecutor::execute(&self.inner, sender, command).await
+    }
+}
+
+async fn node_built(
+    seed: u8,
+    name: &str,
+    hub: &str,
+    rings: &[(&str, Keyring)],
+    admins: &[String],
+    build: Build,
+) -> Node {
     let id = identity(seed);
     let store = Arc::new(Store::open_in_memory().unwrap());
     store
@@ -70,7 +111,7 @@ async fn node_admins(
     cfg.mesh.hub_url = Some(hub.to_string());
     cfg.mesh.poll_secs = 1;
     cfg.mesh.heartbeat_secs = 5;
-    cfg.mesh.command_timeout_secs = 10;
+    cfg.mesh.command_timeout_secs = build.command_timeout_secs.unwrap_or(10);
     cfg.session.permission_timeout_secs = 30;
     cfg.node_name = name.to_string();
     cfg.mesh.admin_peers = admins.to_vec();
@@ -127,7 +168,14 @@ async fn node_admins(
         auth: std::sync::Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
         enroll: Default::default(),
     };
-    client.set_executor(Arc::new(state.clone()));
+    match build.first_create_delay {
+        Some(delay) => client.set_executor(Arc::new(SlowFirstCreate {
+            inner: state.clone(),
+            delay,
+            held: Default::default(),
+        })),
+        None => client.set_executor(Arc::new(state.clone())),
+    }
     // Providers wired the way `serve` wires them, with every published
     // summary carried into the node row so it rides the hello.
     let providers = tracon::providers::Providers::new(
@@ -180,6 +228,17 @@ async fn pair_opts(
     silent: Option<&Identity>,
     b_admins: &[String],
 ) -> (Node, Node) {
+    pair_built(b_only, silent, b_admins, Build::default(), Build::default()).await
+}
+
+/// As `pair_opts`, with A and B built as given.
+async fn pair_built(
+    b_only: &[&str],
+    silent: Option<&Identity>,
+    b_admins: &[String],
+    a_build: Build,
+    b_build: Build,
+) -> (Node, Node) {
     let a_id = identity(1);
     let b_id = identity(2);
     let both: &[&str] = &[MESH_CHANNEL, "personal"];
@@ -201,14 +260,16 @@ async fn pair_opts(
             Keyring::genesis(&b_id.x25519_public(), &DataKey::generate()),
         ));
     }
-    let a = node(
+    let a = node_built(
         1,
         "alpha",
         &hub,
         &[(MESH_CHANNEL, mesh), ("personal", personal)],
+        &[identity(1).node_id()],
+        a_build,
     )
     .await;
-    let b = node_admins(2, "beta", &hub, &b_rings, b_admins).await;
+    let b = node_built(2, "beta", &hub, &b_rings, b_admins, b_build).await;
     // Both say hello so each knows the other's sealing key.
     a.client.hello().await.unwrap();
     b.client.hello().await.unwrap();
@@ -2071,6 +2132,142 @@ async fn a_command_past_its_deadline_is_refused_and_an_undated_one_still_runs() 
         b.store.get_session("late-1").unwrap().unwrap().state,
         "closed"
     );
+}
+
+/// A create past its deadline is refused unrun like any other command: the
+/// owner makes no session for a sender that stopped waiting long ago.
+#[tokio::test]
+async fn a_create_past_its_deadline_makes_no_session() {
+    use tracon::mesh::forward::DEADLINE_SKEW_MS;
+    state::isolate();
+    let (a, b) = pair().await;
+    let bi = b.id.node_id();
+    let stale = tracon::store::now_ms() - DEADLINE_SKEW_MS - 60_000;
+    let create = Command::Create {
+        spec: json!({"channel": "personal", "repo_path": "forge.invalid/e2e/stale",
+                     "model": "m/a", "request_id": "stale-1"}),
+        work_item: None,
+    };
+    let result = a
+        .client
+        .command_until(&bi, create, Duration::from_secs(5), Some(stale))
+        .await;
+    assert!(refused_with(&result, "expired"), "{result:?}");
+    assert!(b.store.list_sessions(None).unwrap().is_empty());
+}
+
+/// An owner that makes the session but answers after its sender stopped
+/// waiting. The sender says the outcome is unknown, not that the owner is
+/// unreachable, and names the request id; the session is there on the
+/// owner and comes to the sender; and the create sent again with that id,
+/// through the sender or straight to the owner, is answered with that same
+/// session, never a second one. An owner known to be away is not sent the
+/// create at all, and is called unreachable.
+#[tokio::test]
+async fn a_create_answered_late_is_unknown_and_retried_with_its_request_id_once() {
+    state::isolate();
+    // A waits 1s × the create factor (4s), then a 3s grace; B holds its
+    // first create for 9s.
+    let (a, b) = pair_built(
+        &[],
+        None,
+        &[identity(1).node_id()],
+        Build {
+            command_timeout_secs: Some(1),
+            ..Build::default()
+        },
+        Build {
+            first_create_delay: Some(Duration::from_secs(9)),
+            ..Build::default()
+        },
+    )
+    .await;
+    let bi = b.id.node_id();
+    let (st, item) = call(
+        &b.app,
+        "POST",
+        "/api/work",
+        Some(json!({"channel": "personal", "title": "Slow on B"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{item}");
+    let spec = json!({"channel": "personal", "repo_path": "forge.invalid/e2e/slow-owner",
+                      "model": "m/a", "node_id": bi, "work_item_id": item["id"],
+                      "phase": "plan", "request_id": "req-slow-1"});
+
+    let (st, v) = call(&a.app, "POST", "/api/sessions", Some(spec.clone())).await;
+    assert_eq!(st, StatusCode::GATEWAY_TIMEOUT, "{v}");
+    assert_eq!(v["error"]["kind"], "outcome_unknown", "{v}");
+    assert_eq!(v["error"]["request_id"], "req-slow-1", "{v}");
+    let said = v["error"]["message"].as_str().unwrap();
+    assert!(said.contains("tracon work show"), "{said}");
+    assert!(said.contains("req-slow-1"), "{said}");
+    assert!(!said.contains("unreachable"), "{said}");
+
+    // B made it after all, and A comes to hold it too.
+    wait_for("B to make the session", || {
+        b.store
+            .session_by_request(&bi, "personal", "req-slow-1")
+            .ok()
+            .flatten()
+            .is_some()
+    })
+    .await;
+    let made = b
+        .store
+        .session_by_request(&bi, "personal", "req-slow-1")
+        .unwrap()
+        .unwrap();
+    wait_for("A to hold B's session", || {
+        a.store.get_session(&made.id).ok().flatten().is_some()
+    })
+    .await;
+
+    // Sent again with the same id: that session, not a second.
+    let (st, row) = call(&a.app, "POST", "/api/sessions", Some(spec.clone())).await;
+    assert_eq!(st, StatusCode::CREATED, "{row}");
+    assert_eq!(row["id"], made.id.as_str(), "{row}");
+    assert_eq!(row["request_id"], "req-slow-1", "{row}");
+    // Straight to the owner, past A's mirror: the owner answers it too.
+    let mut forwarded = spec.clone();
+    forwarded.as_object_mut().unwrap().remove("node_id");
+    let again = a
+        .client
+        .command(
+            &bi,
+            Command::Create {
+                spec: forwarded,
+                work_item: None,
+            },
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(again["id"], made.id.as_str(), "{again}");
+    let on_item = |store: &Store| {
+        store
+            .list_sessions(None)
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.work_item_id.as_deref() == item["id"].as_str())
+            .count()
+    };
+    assert_eq!(on_item(&b.store), 1, "one session on the owner");
+
+    // Known to be away: refused up front, and nothing is sent.
+    a.store.set_reachable(&bi, false).unwrap();
+    let mut other = spec.clone();
+    other["request_id"] = json!("req-away-1");
+    let (st, v) = call(&a.app, "POST", "/api/sessions", Some(other)).await;
+    assert_eq!(st, StatusCode::GATEWAY_TIMEOUT, "{v}");
+    assert_eq!(v["error"]["kind"], "unreachable", "{v}");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(b
+        .store
+        .session_by_request(&bi, "personal", "req-away-1")
+        .unwrap()
+        .is_none());
+    assert_eq!(on_item(&b.store), 1);
 }
 
 /// A build that cannot read a command answers it, so a newer sender is told

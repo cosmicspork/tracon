@@ -58,6 +58,60 @@ fn template_gone(error: &crate::adapter::AdapterError) -> bool {
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
 const COMMAND_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+/// How many times `[mesh] command_timeout_secs` a create forwarded to a peer
+/// is given. The owner answers once the session's row is written, after it
+/// has resolved the repository, the project and the harness, which on a
+/// managed clone means git, and the answer then comes back through the hub:
+/// the generic deadline left too little of that to a reachable owner. The
+/// owner holds the create to the same, longer, deadline.
+pub const CREATE_TIMEOUT_FACTOR: u32 = 4;
+
+/// How long a create whose owner did not answer in time waits on for the
+/// session to arrive anyway, as a mirror or as the owner's late answer,
+/// before it says the outcome is unknown.
+const LATE_CREATE_GRACE: Duration = Duration::from_secs(3);
+
+/// A request id is the caller's, and it is written on a row and sent to
+/// peers: a short token, not text.
+fn check_request_id(request_id: &str) -> Result<(), SessionError> {
+    let fits = !request_id.is_empty()
+        && request_id.len() <= 64
+        && request_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if fits {
+        Ok(())
+    } else {
+        Err(SessionError::Source(
+            "request_id must be 1 to 64 letters, digits, `-` or `_` (a UUID, say)".into(),
+        ))
+    }
+}
+
+/// The creates in flight on this node that carry a request id, one lock per
+/// channel and id, so a create sent again while the first is still being
+/// made waits for it and then finds its row, rather than racing it to a
+/// second session (or to "the task is held by" the first).
+#[derive(Default)]
+struct RequestLocks(std::sync::Mutex<HashMap<RequestKey, Arc<Mutex<()>>>>);
+
+/// A create's channel and request id.
+type RequestKey = (String, String);
+
+impl RequestLocks {
+    async fn hold(&self, channel: &str, request_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut map = self.0.lock().unwrap();
+            // Nobody holds or waits on a lock only the map refers to.
+            map.retain(|_, lock| Arc::strong_count(lock) > 1);
+            map.entry((channel.to_string(), request_id.to_string()))
+                .or_default()
+                .clone()
+        };
+        lock.lock_owned().await
+    }
+}
+
 /// What a session the node stopped under in the middle of a turn is told
 /// when it carries on in the sandbox it ran in.
 const CARRY_ON_AFTER_RESTART: &str = "The node restarted during the last turn, which was cut \
@@ -139,6 +193,14 @@ pub struct NewSession {
     /// its decision delivered as usual.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub told_reviews: Vec<String>,
+    /// The caller's id for this create, so that sending it again after an
+    /// answer that never arrived cannot make a second session: the owner
+    /// answers a create whose id it already made a session for on the
+    /// channel with that session. Absent: every create makes one. A create
+    /// forwarded to a peer always carries one, minted here when the caller
+    /// gave none. A peer on an older build ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
     /// The project the session runs in, when it carries one on from another
     /// session (a moved session keeps its source's). Used only when this node
     /// has that project on the session's channel; otherwise the project is
@@ -598,8 +660,20 @@ pub enum SessionError {
     /// The session belongs to another node: `(node_id, channel)`.
     #[error("session is owned by node {0}")]
     Remote(String, String),
-    #[error("node {0} did not answer; it may be unreachable")]
+    /// The owner was known to be unreachable, so nothing was sent to it:
+    /// the command did not run there.
+    #[error("node {0} is unreachable; nothing was sent to it, so try again when it returns")]
     PeerUnreachable(String),
+    /// A command was sent and no answer came in time. It may have run on
+    /// the owner, late or with its answer lost on the way back, or not at
+    /// all. For a create, `request_id` is the id it was sent with: sending
+    /// the create again with it is safe, since the owner answers with the
+    /// session the first one made, if it made one.
+    #[error("{}", outcome_unknown(.node, .request_id.as_deref()))]
+    OutcomeUnknown {
+        node: String,
+        request_id: Option<String>,
+    },
     #[error("this node is not on a mesh; the session's owner cannot be reached")]
     NoMesh,
     #[error("{0}")]
@@ -623,6 +697,24 @@ pub enum SessionError {
     Legacy { id: String, harness: String },
     #[error(transparent)]
     Store(#[from] crate::store::StoreError),
+}
+
+/// What [`SessionError::OutcomeUnknown`] says: that nothing is known either
+/// way, how to check, and how to try again without doing it twice.
+fn outcome_unknown(node: &str, request_id: Option<&str>) -> String {
+    match request_id {
+        Some(request_id) => format!(
+            "node {node} did not answer in time, so it is not known whether it created the \
+             session: it may still. Check with `tracon work show <task>` (or the sessions \
+             list), or send the same create again with request_id {request_id}, which \
+             returns the session if one was made rather than making a second \
+             (`tracon work start` does this itself)"
+        ),
+        None => format!(
+            "node {node} did not answer in time, so it is not known whether the command ran \
+             there: check the session before sending it again"
+        ),
+    }
 }
 
 /// The operator's answer to a card. A harness's permission request reads only
@@ -718,6 +810,8 @@ pub struct Manager {
     restart: Arc<crate::restart::Restart>,
     /// Held while a continuation is checked and started; see [`Continuing`].
     continuing: Arc<Mutex<()>>,
+    /// Creates in flight by their request id; see [`RequestLocks`].
+    requests: Arc<RequestLocks>,
     /// What counts against `[placement] local_limit`: the live sessions
     /// not placed on DigitalOcean, and the ones placed here still starting.
     slots: Arc<placing::Slots>,
@@ -790,6 +884,7 @@ impl Manager {
             told: Arc::default(),
             restart: Arc::default(),
             continuing: Arc::default(),
+            requests: Arc::default(),
             slots: Arc::default(),
             sign_in_waits: Arc::default(),
         }
@@ -984,6 +1079,7 @@ impl Manager {
             harness: Some(harness.to_string()),
             on_exhaustion: None,
             told_reviews: told_reviews(&carried),
+            request_id: None,
             project_id: None,
         };
         self.create(spec).await
@@ -1107,6 +1203,7 @@ impl Manager {
             harness,
             on_exhaustion: choice,
             told_reviews: told,
+            request_id: None,
             project_id: None,
         };
         let row = self.create(spec).await?;
@@ -1318,6 +1415,7 @@ impl Manager {
             harness: Some(was.harness_id.clone()),
             on_exhaustion: None,
             told_reviews: Vec::new(),
+            request_id: None,
             project_id: None,
         };
         let row = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
@@ -1940,6 +2038,12 @@ impl Manager {
     /// that is unreachable is queued and delivered when it returns (the
     /// operator asked for it; the outbox keeps it); anything else must be
     /// answered now or fail, because the operator is waiting on the result.
+    ///
+    /// Every command sent here changes something on the owner, so silence
+    /// is not a failure: an owner known to be away is not sent the command
+    /// at all ([`SessionError::PeerUnreachable`]), and one that was sent it
+    /// and did not answer in time may have run it
+    /// ([`SessionError::OutcomeUnknown`]).
     async fn forward(
         &self,
         node_id: &str,
@@ -1947,17 +2051,24 @@ impl Manager {
         queue_if_unreachable: bool,
     ) -> Result<serde_json::Value, SessionError> {
         let mesh = self.mesh.get().ok_or(SessionError::NoMesh)?;
-        let timeout = Duration::from_secs(self.cfg.mesh.command_timeout_secs.max(1));
-        if queue_if_unreachable && !mesh.peer_reachable(node_id) {
+        let mut timeout = Duration::from_secs(self.cfg.mesh.command_timeout_secs.max(1));
+        if matches!(command, proto::frame::Command::Create { .. }) {
+            timeout *= CREATE_TIMEOUT_FACTOR;
+        }
+        if !mesh.peer_reachable(node_id) {
+            if !queue_if_unreachable {
+                return Err(SessionError::PeerUnreachable(node_id.to_string()));
+            }
             mesh.send_command(node_id, command)
                 .map_err(|e| SessionError::Rejected(e.to_string()))?;
             return Ok(json!({ "queued_for_owner": true }));
         }
         match mesh.command(node_id, command, timeout).await {
             Ok(v) => Ok(v),
-            Err(crate::mesh::forward::CommandError::Timeout) => {
-                Err(SessionError::PeerUnreachable(node_id.to_string()))
-            }
+            Err(crate::mesh::forward::CommandError::Timeout) => Err(SessionError::OutcomeUnknown {
+                node: node_id.to_string(),
+                request_id: None,
+            }),
             Err(
                 e @ crate::mesh::forward::CommandError::OlderPeer { .. }
                 | e @ crate::mesh::forward::CommandError::Refused(_)
@@ -2020,6 +2131,7 @@ impl Manager {
                     forked_from: None,
                     manifest_digest: None,
                     open_turn_tokens: 0,
+                    request_id: None,
                 })
                 .expect("test session row");
         }
@@ -2285,11 +2397,28 @@ impl Manager {
         mut spec: NewSession,
         chosen: Option<Arc<dyn HarnessAdapter>>,
     ) -> Result<SessionRow, SessionError> {
+        if let Some(request_id) = spec.request_id.as_deref() {
+            check_request_id(request_id)?;
+        }
         // Asked to run elsewhere: the owner validates and starts it; its row
         // arrives back both in the ack and, shortly, as a mirrored session.
         if let Some(node) = spec.node_id.as_deref().filter(|n| *n != self.node_id) {
             let mut remote = spec.clone();
             remote.node_id = None;
+            // Sent with an id even when the caller gave none, so that what
+            // is said when no answer comes can name a safe way to retry.
+            let request_id = remote
+                .request_id
+                .get_or_insert_with(|| uuid::Uuid::now_v7().to_string())
+                .clone();
+            // Asked again for a create already answered, or reconciled from
+            // a late answer: the mirror is the session.
+            if let Some(row) = self
+                .store
+                .session_by_request(node, &remote.channel, &request_id)?
+            {
+                return Ok(row);
+            }
             // The peer resolves the repository on its own disk, so it is sent
             // the forge identity, never this node's path to its clone.
             if remote.workspace_id.is_none() {
@@ -2302,7 +2431,8 @@ impl Manager {
                     .work_item_change(&self.node_id, &remote.channel, id)?,
                 None => None,
             };
-            let v = self
+            let channel = remote.channel.clone();
+            let sent = self
                 .forward(
                     node,
                     proto::frame::Command::Create {
@@ -2311,7 +2441,32 @@ impl Manager {
                     },
                     false,
                 )
-                .await?;
+                .await;
+            let v = match sent {
+                Ok(v) => v,
+                // The owner may have made it, and its row may yet arrive:
+                // as a mirrored session, or as the late answer itself.
+                Err(SessionError::OutcomeUnknown { node, .. }) => {
+                    let deadline = Instant::now() + LATE_CREATE_GRACE;
+                    loop {
+                        if let Some(row) =
+                            self.store
+                                .session_by_request(&node, &channel, &request_id)?
+                        {
+                            return Ok(row);
+                        }
+                        if Instant::now() >= deadline {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    return Err(SessionError::OutcomeUnknown {
+                        node,
+                        request_id: Some(request_id),
+                    });
+                }
+                Err(e) => return Err(e),
+            };
             let row: SessionRow =
                 serde_json::from_value(v).map_err(|e| SessionError::Rejected(e.to_string()))?;
             let _ = self.store.ensure_peer_node(node);
@@ -2320,6 +2475,22 @@ impl Manager {
                 .publish_untapped(Frame::Session(Box::new(row.clone())));
             return Ok(row);
         }
+        // A create sent again with the id of one already made, here: the
+        // session that one made. Two with the same id at once are taken one
+        // after the other, so the second finds the first's row.
+        let _same_request = match spec.request_id.clone() {
+            Some(request_id) => {
+                let guard = self.requests.hold(&spec.channel, &request_id).await;
+                if let Some(row) =
+                    self.store
+                        .session_by_request(&self.node_id, &spec.channel, &request_id)?
+                {
+                    return Ok(row);
+                }
+                Some(guard)
+            }
+            None => None,
+        };
         self.refuse_while_restarting()?;
         self.validate_review_context(&spec)?;
         // A dangling ancestor is worse than none: it reads as history that
@@ -2619,6 +2790,7 @@ impl Manager {
             forked_from: spec.forked_from.clone(),
             manifest_digest: None,
             open_turn_tokens: 0,
+            request_id: spec.request_id.clone(),
         };
         self.store.insert_session(&row)?;
         self.store.exhaustion_choose(&id, &on_exhaustion)?;

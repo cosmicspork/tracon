@@ -67,6 +67,7 @@ fn session_row(id: &str, state: &str, created_ms: i64) -> SessionRow {
         forked_from: None,
         manifest_digest: None,
         open_turn_tokens: 0,
+        request_id: None,
     }
 }
 

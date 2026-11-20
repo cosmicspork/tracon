@@ -72,6 +72,7 @@ fn session(id: &str, channel: &str, phase: &str, item: Option<&str>) -> SessionR
         forked_from: None,
         manifest_digest: None,
         open_turn_tokens: 0,
+        request_id: None,
     }
 }
 

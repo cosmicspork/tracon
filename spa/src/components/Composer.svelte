@@ -16,6 +16,7 @@
   import { cannotWork } from '../lib/readiness'
   import { eligibleNodes, harnessChoice, modelsForChannel, nodeHarnesses, nodeReadiness } from '../lib/nodes'
   import { defaultRepo, managedFor, projectRepo, repoLabel } from '../lib/repo'
+  import { StartRequest } from '../lib/requestId'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
   import type { ManagedRepo, NodeInfo, PreparationPreview as Preparation, RepoReadiness, WorkView } from '../lib/types'
@@ -247,6 +248,9 @@
     if (bound.budget_tokens && !budget) budget = String(bound.budget_tokens)
   })
 
+  // Not reactive: only the next start reads it.
+  const startRequest = new StartRequest()
+
   async function start(e: SubmitEvent) {
     e.preventDefault()
     if (!ready) return
@@ -267,16 +271,22 @@
         harness: harness || undefined,
       }
       const lines = prompt.trim().split('\n')
+      // A start the node could not answer for keeps its request id, so
+      // pressing start again finds the session if it was made.
+      const create = (spec: Parameters<typeof api.createSession>[0]) =>
+        api.createSession({ ...spec, request_id: startRequest.idFor(spec) })
       const session = item
-        ? await api.createSession({ ...common, work_item_id: item.id })
+        ? await create({ ...common, work_item_id: item.id })
         : structured
           ? (await api.compose({ ...common, phase: 'plan', title: lines[0], body: lines.slice(1).join('\n').trim() })).session
-          : await api.createSession({ ...common, initial_prompt: prompt.trim() })
+          : await create({ ...common, initial_prompt: prompt.trim() })
+      startRequest.settle(null)
       if (!item) rememberChannel(channel)
       await store.refetch()
       router.go(`/sessions/${session.id}`)
     } catch (e) {
       error = e instanceof Error ? e.message : String(e)
+      startRequest.settle(e instanceof ApiError ? e.kind : null)
       if (e instanceof ApiError && e.workItemId) savedItem = e.workItemId
     } finally {
       busy = false

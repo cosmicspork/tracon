@@ -627,6 +627,12 @@ enum WorkCommand {
         /// Print the session row the node returned.
         #[arg(long)]
         json: bool,
+        /// The id this start is sent with. Unset: a new one. Give the one an
+        /// earlier start printed when its node did not answer in time: the
+        /// node answers with the session that start made, if it made one,
+        /// instead of starting a second.
+        #[arg(long, value_name = "ID")]
+        request_id: Option<String>,
     },
 }
 
@@ -4018,6 +4024,7 @@ async fn work_command(cmd: WorkCommand) -> Result<()> {
             budget,
             repo,
             json,
+            request_id,
         } => {
             work_start(WorkStart {
                 id,
@@ -4031,6 +4038,7 @@ async fn work_command(cmd: WorkCommand) -> Result<()> {
                 budget,
                 repo,
                 json,
+                request_id,
             })
             .await
         }
@@ -4132,6 +4140,7 @@ struct WorkStart {
     budget: Option<i64>,
     repo: Option<String>,
     json: bool,
+    request_id: Option<String>,
 }
 
 /// A thin client over `POST /api/sessions`, resolving what the Composer
@@ -4220,7 +4229,12 @@ async fn work_start(a: WorkStart) -> Result<()> {
         body["budget_tokens"] = json!(b);
     }
 
-    let row = node_call(Method::POST, "/api/sessions", Some(body), None).await?;
+    let request_id = a
+        .request_id
+        .filter(|r| !r.trim().is_empty())
+        .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+    body["request_id"] = json!(request_id);
+    let row = post_start(&body, &id, &channel, &request_id).await?;
     if a.json {
         println!("{}", serde_json::to_string_pretty(&row)?);
         return Ok(());
@@ -4264,6 +4278,73 @@ async fn work_start(a: WorkStart) -> Result<()> {
     );
     println!("  open         {}/sessions/{sid}", node_url()?);
     Ok(())
+}
+
+/// `POST /api/sessions` for `work start`. A node that forwarded the start to
+/// a peer and heard nothing back in time cannot say whether the peer made
+/// the session: then the item's sessions are read for one with this
+/// request id, and the same body, id and all, is sent once more, which the
+/// owner answers with the session the first made if it made one. Still
+/// nothing, and what is printed says how to check and how to retry safely.
+async fn post_start(
+    body: &serde_json::Value,
+    task: &str,
+    channel: &str,
+    request_id: &str,
+) -> Result<serde_json::Value> {
+    let mut unknown = String::new();
+    for attempt in 0..2 {
+        match node_call(
+            reqwest::Method::POST,
+            "/api/sessions",
+            Some(body.clone()),
+            None,
+        )
+        .await
+        {
+            Ok(row) => return Ok(row),
+            Err(e) => match e.downcast_ref::<NodeRefusal>() {
+                Some(r) if r.kind.as_deref() == Some("outcome_unknown") => {
+                    unknown = r.message.clone();
+                    if let Some(row) = session_by_request(task, request_id).await {
+                        return Ok(row);
+                    }
+                    if attempt == 0 {
+                        eprintln!(
+                            "the session's node did not answer in time; sending the start again \
+                             with the same request id ({request_id}), which cannot start a second session"
+                        );
+                    }
+                }
+                _ => return Err(e),
+            },
+        }
+    }
+    let task_name = tracon::names::task(task);
+    anyhow::bail!(
+        "{unknown}\n\nThe session may still be created. Check with `tracon work show {task_name} \
+         --channel {channel}`, or retry safely with `tracon work start {task_name} --channel \
+         {channel} --request-id {request_id}` and the same options: that returns the session if \
+         one was made instead of starting another."
+    )
+}
+
+/// The item's session made for `request_id`, among the node's own and the
+/// ones it mirrors from peers, if it has it.
+async fn session_by_request(task: &str, request_id: &str) -> Option<serde_json::Value> {
+    let v = node_call(
+        reqwest::Method::GET,
+        &format!("/api/work/{task}"),
+        None,
+        None,
+    )
+    .await
+    .ok()?;
+    v["sessions"]
+        .as_array()?
+        .iter()
+        .find(|s| s["request_id"] == request_id)
+        .cloned()
 }
 
 async fn memory_command(cmd: MemoryCommand) -> Result<()> {

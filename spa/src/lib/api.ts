@@ -478,6 +478,10 @@ export const api = {
     node_id?: string
     phase?: 'plan' | 'execute'
     harness?: string
+    /** The caller's id for this start: sent again with the same id after
+        an `outcome_unknown` 504, the node answers with the session the
+        first made rather than starting a second. */
+    request_id?: string
   }) => call<Session>('POST', '/api/sessions', spec),
   /** Carry on a session a node restart cut off, as a new session on its workspace. */
   continueSession: (id: string) => call<Session>('POST', `/api/sessions/${id}/continue`),
