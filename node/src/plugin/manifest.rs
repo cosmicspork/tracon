@@ -174,6 +174,14 @@ fn egress_ok(entry: &str) -> bool {
             && p.bytes().all(|b| b.is_ascii_digit())
             && p.parse::<u32>().is_ok_and(|n| (1..=65535).contains(&n))
     });
+    // A leading `*.` names every host under a domain (a Jira Cloud site, say).
+    // Egress is shown on cards, never enforced, so a pattern is enough; it
+    // must still leave a domain of at least two labels.
+    let host = match host.strip_prefix("*.") {
+        Some(domain) if domain.contains('.') => domain,
+        Some(_) => return false,
+        None => host,
+    };
     let host_ok = !host.is_empty()
         && host.len() <= 253
         && host.split('.').all(|label| {
@@ -561,6 +569,31 @@ pub fn diff(old: &Manifest, new: &Manifest) -> Vec<String> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn egress_takes_a_host_a_port_or_a_domain_wildcard() {
+        for ok in [
+            "db.internal",
+            "db.internal:1521",
+            "*.atlassian.net:443",
+            "*.atlassian.net",
+        ] {
+            assert!(egress_ok(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "*",
+            "*.net",
+            "*.*.atlassian.net",
+            "a*.atlassian.net",
+            "jira.*.net",
+            "db.internal:0",
+            "db.internal:99999",
+            "-db.internal",
+        ] {
+            assert!(!egress_ok(bad), "{bad}");
+        }
+    }
 
     /// The contract's own example, with `egress` where TOML keeps it
     /// top-level.
