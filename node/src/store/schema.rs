@@ -1828,6 +1828,14 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE approval ADD COLUMN plugin_digest TEXT;
     "#,
+    // 83: the arguments hash of the call a plugin tool's card last showed a
+    // `tracon/preview` of (`crate::mcp::Tools::approval_preview`), NULL when
+    // its last preview was refused, failed or not offered. Allow is refused
+    // unless it names the call that would run, when the plugin's
+    // `[[plugin]]` entry requires a preview.
+    r#"
+    ALTER TABLE approval ADD COLUMN preview_shown_for TEXT;
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

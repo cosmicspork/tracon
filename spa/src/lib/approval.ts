@@ -98,6 +98,13 @@ export interface ApprovalDetails {
    */
   preview?: PluginPreview
   /**
+   * Why Allow is held on a plugin tool's card: the plugin offered no preview
+   * of the call as it stands (none at all, or its preview failed), and its
+   * `[[plugin]]` entry requires one. Names the setting that lifts it. Absent
+   * when Allow is not held for a preview.
+   */
+  allow_blocked?: string | null
+  /**
    * For a plugin's tool: its build, what it says the tool does and reaches,
    * and what an approved run is lent. Null for any other tool.
    */
@@ -198,6 +205,19 @@ export function previewOutdated(
   edited: Record<string, unknown>,
 ): boolean {
   return !!details?.preview && previewedFor !== null && diffArguments(previewedFor, edited).length > 0
+}
+
+/**
+ * Whether Allow can be pressed, and the node's reason when a missing preview
+ * is what holds it. While an edit is being previewed, the edit's preview
+ * decides, so the last answer's reason is not shown over it.
+ */
+export function allowGate(
+  details: Pick<ApprovalDetails, 'allow_blocked'> | null,
+  state: { busy: boolean; blocked: boolean; outdated: boolean },
+): { disabled: boolean; why: string | null } {
+  const why = state.outdated ? null : details?.allow_blocked || null
+  return { disabled: state.busy || state.blocked || state.outdated || why !== null, why }
 }
 
 /** The hash an answer names to say which preview it was read with, if any. */

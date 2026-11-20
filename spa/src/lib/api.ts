@@ -650,7 +650,7 @@ export const api = {
    * no plugin previews.
    */
   previewApproval: (id: string, args: Record<string, unknown>) =>
-    call<Pick<ApprovalDetails, 'preview'>>('POST', `/api/approvals/${id}/preview`, { arguments: args }),
+    call<Pick<ApprovalDetails, 'preview' | 'allow_blocked'>>('POST', `/api/approvals/${id}/preview`, { arguments: args }),
   // Documents: read by slug, search by content, edit with the hash last read.
   docs: (channel?: string, kind?: string, archived = false) => {
     const q = new URLSearchParams()

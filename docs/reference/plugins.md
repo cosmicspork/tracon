@@ -687,6 +687,14 @@ upstream and writes nothing. Answer:
   a write that would be refused.
 - The node waits at most 15 seconds (or the call's timeout, if shorter).
 
+**Allow requires a shown preview by default.** For a plugin tool, the operator can allow
+a card only once the page has shown your preview of the call as it will run. A
+`previewable: false` answer counts as shown; a refusal, an error, a timeout or `-32601`
+does not. So implement `tracon/preview` for every tool that can be asked, answering
+`previewable: false` with a line of why when you cannot show the effect. Reject and
+Request changes stay open without a preview. An operator can opt a plugin out with
+`require_preview = false` in its `[[plugin]]` entry.
+
 ### Applying against the token
 
 The approved `tools/call` carries the token back, signed, as `preview_token`. Apply
