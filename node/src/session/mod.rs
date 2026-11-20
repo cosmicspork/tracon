@@ -171,6 +171,12 @@ pub struct NewSession {
     pub parent_session: Option<String>,
     #[serde(default)]
     pub continued_from: Option<String>,
+    /// The session this one is a fork of (`SessionRow::forked_from`). Not
+    /// lineage, and not checked against this node's sessions: a fork started
+    /// here from a peer's session names that session, whose row may not have
+    /// mirrored here yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<String>,
     /// The harness to run this session on. Absent: the node's configured
     /// `[harness] id`. A session runs the harness it names for its whole life;
     /// the node holds an image for every supported one.
@@ -1069,6 +1075,7 @@ impl Manager {
             workspace_id: Some(workspace_id),
             parent_session: Some(old.id.clone()),
             continued_from: Some(old.id.clone()),
+            forked_from: None,
             harness: Some(harness.to_string()),
             on_exhaustion: None,
             told_reviews: told_reviews(&carried),
@@ -1192,6 +1199,7 @@ impl Manager {
             workspace_id: Some(workspace_id),
             parent_session: Some(old.id.clone()),
             continued_from: Some(old.id.clone()),
+            forked_from: None,
             harness,
             on_exhaustion: choice,
             told_reviews: told,
@@ -1403,6 +1411,7 @@ impl Manager {
             workspace_id: Some(workspace_of(&was)),
             parent_session: None,
             continued_from: None,
+            forked_from: None,
             harness: Some(was.harness_id.clone()),
             on_exhaustion: None,
             told_reviews: Vec::new(),
@@ -2119,6 +2128,7 @@ impl Manager {
                     legacy_ms: None,
                     parent_session: None,
                     continued_from: None,
+                    forked_from: None,
                     manifest_digest: None,
                     open_turn_tokens: 0,
                     request_id: None,
@@ -2777,6 +2787,7 @@ impl Manager {
             legacy_ms: None,
             parent_session: spec.parent_session.clone(),
             continued_from: spec.continued_from.clone(),
+            forked_from: spec.forked_from.clone(),
             manifest_digest: None,
             open_turn_tokens: 0,
             request_id: spec.request_id.clone(),

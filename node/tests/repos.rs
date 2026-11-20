@@ -48,6 +48,7 @@ fn session_at(id: &str, repo: &str, created_ms: i64) -> SessionRow {
         legacy_ms: None,
         parent_session: None,
         continued_from: None,
+        forked_from: None,
         manifest_digest: None,
         open_turn_tokens: 0,
         request_id: None,

@@ -696,6 +696,14 @@ export function eventLine(e: Event): EventLine | null {
       const name = to ? nameOf('session', to) : ''
       return line('mark', ['moved to another node', to ? `continues as ${name}` : ''], to ? `/sessions/${to}` : undefined, name || undefined, to || undefined)
     }
+    case 'forked': {
+      // A fork of this session started, on this node or another; this
+      // session carries on as it was.
+      const to = str(p.to_session)
+      const name = to ? nameOf('session', to) : ''
+      const branch = str(p.branch)
+      return line('mark', ['forked', to ? `as ${name}` : '', branch ? `on ${branch}` : ''], to ? `/sessions/${to}` : undefined, name || undefined, to || undefined)
+    }
     case 'review_taken_over': {
       // The continuation took over a review the attempt before it left open
       // or sent back for changes; the link is that attempt.

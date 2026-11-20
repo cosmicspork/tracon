@@ -282,6 +282,19 @@ impl MeshClient {
         let _ = self.executor.set(executor);
     }
 
+    /// Hand a staged transfer to the executor (a fork's starts there), off
+    /// the receive loop: starting a session reads and writes a workspace.
+    fn transfer_staged(&self, sender: &str, transfer_id: &str) {
+        let Some(executor) = self.executor.get().cloned() else {
+            return;
+        };
+        let sender = sender.to_string();
+        let transfer_id = transfer_id.to_string();
+        tokio::spawn(async move {
+            executor.transfer_staged(&sender, &transfer_id).await;
+        });
+    }
+
     /// Is the hub connected and the peer recently heard from?
     pub fn peer_reachable(&self, node_id: &str) -> bool {
         matches!(self.state.borrow().hub, HubState::Connected)
@@ -931,6 +944,7 @@ impl MeshClient {
                 ) {
                     Ok(id) => {
                         tracing::info!(from = %sender, transfer = %id, "candidate transfer staged for confirmation");
+                        self.transfer_staged(sender, &id);
                         return Opened::Applied;
                     }
                     Err(error) => {
@@ -963,6 +977,7 @@ impl MeshClient {
                 ) {
                     Ok(crate::transfers::ChunkOutcome::Staged(id)) => {
                         tracing::info!(from = %sender, transfer = %id, "candidate transfer staged for confirmation");
+                        self.transfer_staged(sender, &id);
                         return Opened::Applied;
                     }
                     Ok(outcome) => {

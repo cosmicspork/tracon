@@ -240,6 +240,7 @@ mod tests {
             "workspace_id",
             "parent_session",
             "continued_from",
+            "forked_from",
             "harness",
         ] {
             v[key] = json!("x");

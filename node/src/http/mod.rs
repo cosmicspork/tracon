@@ -6,6 +6,7 @@ mod config_prompt;
 pub mod device;
 pub mod environments;
 pub mod evidence;
+pub mod fork;
 mod mcp;
 pub mod metrics;
 pub mod names;
@@ -377,6 +378,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/archive-legacy", post(api::archive_legacy))
         .route("/api/sessions/{id}/reopen", post(api::reopen_session))
         .route("/api/sessions/{id}/continue", post(api::continue_session))
+        .route("/api/sessions/{id}/fork", post(fork::fork_session))
         .route(
             "/api/sessions/{id}/continuation",
             get(api::session_continuation),

@@ -1836,7 +1836,14 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE approval ADD COLUMN preview_shown_for TEXT;
     "#,
-    // 84: the id the caller gave a session's create, so a create retried
+    // 84: the session a session was forked from (`SessionRow::forked_from`):
+    // a new session on a branch of its own from that session's, which
+    // carried on. Indexed for a session's forks.
+    r#"
+    ALTER TABLE session ADD COLUMN forked_from TEXT;
+    CREATE INDEX session_forked_from ON session(forked_from);
+    "#,
+    // 85: the id the caller gave a session's create, so a create retried
     // after an answer that never arrived (a peer's late ack, a proxy's 504)
     // finds the session the first one made instead of making a second. One
     // per owner and channel; NULL for every session made without one.

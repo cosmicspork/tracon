@@ -692,12 +692,23 @@ async fn capture_branch(
         .snapshot_workspace(&session.id)
         .await
         .map_err(|error| error.to_string())?;
+    capture_branch_from(s, session, &snapshot, head_sha).await
+}
+
+/// `capture_branch`, from a snapshot of the session's workspace already
+/// taken.
+pub(super) async fn capture_branch_from(
+    s: &AppState,
+    session: &crate::store::SessionRow,
+    snapshot: &std::path::Path,
+    head_sha: &str,
+) -> Result<transfers::TransferGit, String> {
     let origin = crate::environment::origin_repo(s.store(), Some(&session.id))?
         .and_then(|repo| crate::forge::managed_identity(&crate::config::Config::state_dir(), &repo))
         .filter(|identity| crate::mesh::recipe::valid_identity(identity).is_ok());
     transfers::capture_git(
         &s.cfg.live().publish.git,
-        &snapshot,
+        snapshot,
         head_sha,
         &session.branch,
         origin,
@@ -732,6 +743,12 @@ pub async fn export_transfer(
                 && row.harness_id != crate::session::external::HARNESS_ID
                 && row.phase != Phase::Review.as_str()
         });
+    if body.intent == transfers::TransferIntent::Fork {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "a fork starts from a session: POST /api/sessions/{id}/fork",
+        ));
+    }
     let moving = body.intent == transfers::TransferIntent::Move;
     if moving && owner.is_none() {
         return Err(ApiError::new(
@@ -806,7 +823,7 @@ pub async fn export_transfer(
 /// frame, else in pieces (`only` sends just those pieces again). Returns how
 /// many frames were queued. The outbox is durable, so a delivery cut off by
 /// a restart carries on, and the receiver keeps the pieces it has.
-fn deliver_mesh(
+pub(super) fn deliver_mesh(
     s: &AppState,
     transfer: &SignedTransfer,
     destination: &str,
@@ -928,10 +945,12 @@ pub async fn stage_transfer(
     })))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub struct ImportTransferBody {
     /// A package can be inspected and staged automatically, but materializing
     /// its code and starting a harness always needs this explicit operator bit.
+    /// A fork is the one exception: its origin's operator chose to start it
+    /// here, so it starts once staged (`start_staged_fork`).
     confirm: bool,
     #[serde(default)]
     model: String,
@@ -945,8 +964,9 @@ pub struct ImportTransferBody {
 /// package's branch is recreated with its commits on this node's own clone of
 /// its origin; a move's session takes over the source's work item, project
 /// and budget, links back to it, and is told the export note and the source's
-/// last state as its first prompt. A version 1 package imports its files as
-/// it always has.
+/// last state as its first prompt. A fork's session starts on its own
+/// branch, links to its source by `forked_from`, and its source is told. A
+/// version 1 package imports its files as it always has.
 pub async fn import_transfer(
     State(s): State<AppState>,
     Path(id): Path<String>,
@@ -958,6 +978,60 @@ pub async fn import_transfer(
             "set confirm=true to materialize this staged transfer",
         ));
     }
+    let imported = import_staged(&s, id, body).await?;
+    Ok((StatusCode::CREATED, Json(imported)))
+}
+
+/// A fork's package arrived from its origin and is staged: start the fork,
+/// as its origin's operator asked. A member of the channel may already start
+/// a session here (a forwarded create), and the package is signed by the
+/// node that sent it and names this node, so nothing else is asked. Anything
+/// that is not such a fork stays staged for an operator to import.
+pub async fn start_staged_fork(
+    s: &AppState,
+    sender: &str,
+    id: &str,
+) -> ApiResult<Option<serde_json::Value>> {
+    let Some(row) = s.store().transfer(id)? else {
+        return Ok(None);
+    };
+    let transfer: SignedTransfer = serde_json::from_str(&row.package_json).map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "stored transfer is corrupt",
+        )
+    })?;
+    let forked = transfer
+        .payload
+        .source
+        .as_ref()
+        .is_some_and(|source| source.intent == transfers::TransferIntent::Fork);
+    if !forked
+        || transfer.payload.origin_node != sender
+        || transfer.payload.target_node.as_deref() != Some(s.node_id.as_str())
+    {
+        return Ok(None);
+    }
+    // Delivered again (a resend): the fork it started is the one.
+    if s.store()
+        .transfer_import(id)?
+        .is_some_and(|row| row.session_id.is_some())
+    {
+        return Ok(None);
+    }
+    let body = ImportTransferBody {
+        confirm: true,
+        ..Default::default()
+    };
+    import_staged(s, id.to_string(), body).await.map(Some)
+}
+
+/// What `import_transfer` does once confirmed.
+pub(super) async fn import_staged(
+    s: &AppState,
+    id: String,
+    body: ImportTransferBody,
+) -> ApiResult<serde_json::Value> {
     let row = s
         .store()
         .transfer(&id)?
@@ -991,10 +1065,17 @@ pub async fn import_transfer(
         .source
         .as_ref()
         .filter(|source| source.intent == transfers::TransferIntent::Move);
-    // The real branch, unless the operator names another.
+    let forking = transfer
+        .payload
+        .source
+        .as_ref()
+        .filter(|source| source.intent == transfers::TransferIntent::Fork);
+    let fork = forking.and(transfer.payload.fork.as_ref());
+    // The real branch (a fork's own), unless the operator names another.
     let branch = body
         .branch
         .clone()
+        .or_else(|| fork.map(|fork| fork.branch.clone()))
         .or_else(|| carried.map(|git| git.branch.clone()))
         .unwrap_or_else(|| format!("continuation/{}", id.get(..12).unwrap_or(&id)));
     // What a move takes over, as far as this node can see it. The source
@@ -1004,7 +1085,7 @@ pub async fn import_transfer(
         Some(source) => s.store().get_session(&source.session_id)?.map(|row| row.id),
         None => None,
     };
-    let work_item_id = match moving.and_then(|source| source.work_item_id.as_deref()) {
+    let mut work_item_id = match moving.and_then(|source| source.work_item_id.as_deref()) {
         Some(item) => s
             .store()
             .work_get(item)?
@@ -1012,7 +1093,10 @@ pub async fn import_transfer(
             .map(|row| row.id),
         None => None,
     };
-    let project_id = match (moving.and_then(|source| source.project.as_ref()), carried) {
+    let carried_project = moving
+        .or(forking)
+        .and_then(|source| source.project.as_ref());
+    let project_id = match (carried_project, carried) {
         (Some(project), _) => {
             if s.store().project_get(&project.id)?.is_none() {
                 s.store().project_put(&crate::store::ProjectRow {
@@ -1043,12 +1127,41 @@ pub async fn import_transfer(
         },
         (None, None) => None,
     };
-    let phase = match moving {
+    let mut phase = match moving {
         Some(source) if source.phase == Phase::Plan.as_str() && work_item_id.is_some() => {
             Phase::Plan
         }
         _ => Phase::Execute,
     };
+    // A fork takes the task it was given, or a new one made for it here
+    // (once: a retried import reuses it), never its source's.
+    if let (Some(source), Some(fork)) = (forking, fork) {
+        let made = s
+            .store()
+            .transfer_events(&id)?
+            .into_iter()
+            .find(|event| event.kind == "fork_item_created")
+            .and_then(|event| event.detail);
+        let chosen = match made {
+            Some(item) => super::fork::ForkTask::Made(item),
+            None => {
+                let chosen = super::fork::fork_task(
+                    s,
+                    &channel,
+                    project_id.as_deref(),
+                    source.work_item_id.as_deref(),
+                    fork,
+                )?;
+                if let super::fork::ForkTask::Made(item) = &chosen {
+                    s.store()
+                        .append_transfer_event(&id, "fork_item_created", Some(item), None)?;
+                }
+                chosen
+            }
+        };
+        phase = super::fork::fork_phase(s, &channel, &chosen);
+        work_item_id = chosen.item().map(str::to_string);
+    }
     let mut spec = NewSession {
         channel: channel.clone(),
         repo_path: String::new(),
@@ -1056,14 +1169,16 @@ pub async fn import_transfer(
         base: None,
         work_item_id: work_item_id.clone(),
         model: match body.model.trim() {
-            "" => moving
-                .map(|source| source.model.clone())
+            "" => fork
+                .and_then(|fork| fork.model.clone())
+                .or_else(|| moving.or(forking).map(|source| source.model.clone()))
                 .unwrap_or_default(),
             named => named.to_string(),
         },
         budget_tokens: body
             .budget_tokens
-            .or_else(|| moving.map(|source| source.budget_tokens)),
+            .or_else(|| fork.and_then(|fork| fork.budget_tokens))
+            .or_else(|| moving.or(forking).map(|source| source.budget_tokens)),
         initial_prompt: None,
         node_id: None,
         phase,
@@ -1072,7 +1187,8 @@ pub async fn import_transfer(
         workspace_id: None,
         parent_session: continued_from.clone(),
         continued_from: continued_from.clone(),
-        harness: None,
+        forked_from: forking.map(|source| source.session_id.clone()),
+        harness: fork.and_then(|fork| fork.harness.clone()),
         on_exhaustion: None,
         told_reviews: Vec::new(),
         request_id: None,
@@ -1084,7 +1200,9 @@ pub async fn import_transfer(
     // model is only a preference: one this node cannot run falls back to
     // the node's own resolution.
     let mut preflight = s.manager.preflight(&spec);
-    if preflight.is_err() && body.model.trim().is_empty() && !spec.model.is_empty() {
+    let chosen_model = fork.is_some_and(|fork| fork.model.is_some());
+    if preflight.is_err() && body.model.trim().is_empty() && !chosen_model && !spec.model.is_empty()
+    {
         spec.model = String::new();
         preflight = s.manager.preflight(&spec);
     }
@@ -1191,7 +1309,22 @@ pub async fn import_transfer(
         }
     };
     spec.workspace_id = Some(workspace.id.clone());
-    spec.initial_prompt = transfers::first_prompt(&transfer, &branch, history);
+    spec.initial_prompt = match forking {
+        // A fork is told the task it is on here, which may be one just made.
+        Some(source) => Some(transfers::fork_prompt(&transfers::ForkPrompt {
+            source,
+            origin_node: &transfer.payload.origin_node,
+            head_sha: transfer.payload.candidate["head_sha"]
+                .as_str()
+                .unwrap_or_default(),
+            source_branch: carried.map(|git| git.branch.as_str()),
+            branch: &branch,
+            note: &transfer.payload.context.note,
+            history,
+            work_item_id: work_item_id.as_deref(),
+        })),
+        None => transfers::first_prompt(&transfer, &branch, history),
+    };
     let session = match s.manager.create(spec).await {
         Ok(session) => session,
         Err(error) => {
@@ -1211,18 +1344,40 @@ pub async fn import_transfer(
     // told, through the outbox, so an origin that is offline closes it when
     // it is back. Without the mesh nothing can tell it, and the operator
     // stops the source there.
-    let source_close = match moving {
+    // The source is told: a move's closes once the import is confirmed, a
+    // fork's records the fork and carries on. The origin is told through the
+    // outbox, so an origin that is offline hears when it is back. Without the
+    // mesh nothing can tell it, and the operator stops a moved source there.
+    let told_source = moving.or(forking);
+    let source_close = match told_source {
         None => None,
         Some(source) if transfer.payload.origin_node == s.node_id => {
-            match s
-                .manager
-                .end_moved(&source.session_id, &session.id, &s.node_id, &id)
-                .await
-            {
-                Ok(_) => Some("closed"),
-                Err(error) => {
-                    tracing::warn!(transfer = %id, %error, "moved source not closed");
-                    Some("not_closed")
+            if forking.is_some() {
+                super::fork::record_forked(
+                    s,
+                    &source.session_id,
+                    super::fork::Forked {
+                        to_session: &session.id,
+                        to_node: &s.node_id,
+                        branch: &session.branch,
+                        head_sha: transfer.payload.candidate["head_sha"]
+                            .as_str()
+                            .unwrap_or_default(),
+                        transfer_id: Some(&id),
+                    },
+                );
+                Some("recorded")
+            } else {
+                match s
+                    .manager
+                    .end_moved(&source.session_id, &session.id, &s.node_id, &id)
+                    .await
+                {
+                    Ok(_) => Some("closed"),
+                    Err(error) => {
+                        tracing::warn!(transfer = %id, %error, "moved source not closed");
+                        Some("not_closed")
+                    }
                 }
             }
         }
@@ -1251,22 +1406,21 @@ pub async fn import_transfer(
             None => Some("not_sent"),
         },
     };
-    Ok((
-        StatusCode::CREATED,
-        Json(json!({
-            "transfer_id": id,
-            "workspace_id": workspace.id,
-            "session": session,
-            "history": history,
-            "branch": branch,
-            "source_session": moving.map(|source| &source.session_id),
-            "continued_from": continued_from,
-            "work_item_id": work_item_id,
-            "project_id": session.project_id,
-            "source_close": source_close,
-            "source_session_changed": source_close == Some("closed"),
-        })),
-    ))
+    Ok(json!({
+        "transfer_id": id,
+        "workspace_id": workspace.id,
+        "session": session,
+        "history": history,
+        "branch": branch,
+        "source_session": told_source.map(|source| &source.session_id),
+        "continued_from": continued_from,
+        "forked_from": forking.map(|source| &source.session_id),
+        "work_item_id": work_item_id,
+        "project_id": session.project_id,
+        "source_close": moving.and(source_close),
+        "source_notice": forking.and(source_close),
+        "source_session_changed": moving.is_some() && source_close == Some("closed"),
+    }))
 }
 
 pub async fn get_transfer(
@@ -1924,6 +2078,7 @@ async fn compose_inner(s: AppState, c: ComposeBody) -> ApiResult<Response> {
         workspace_id: c.workspace_id,
         parent_session: None,
         continued_from: None,
+        forked_from: None,
         harness: c.harness,
         on_exhaustion: None,
         told_reviews: Vec::new(),
@@ -6126,7 +6281,7 @@ pub async fn delete_work(
     Ok(Json(json!({ "ok": true })))
 }
 
-fn work_err(e: crate::corpus::work::WorkError) -> ApiError {
+pub(super) fn work_err(e: crate::corpus::work::WorkError) -> ApiError {
     use crate::corpus::work::WorkError::*;
     match e {
         Title => ApiError(StatusCode::BAD_REQUEST, e.to_string()),
@@ -7789,7 +7944,12 @@ async fn close_moved_source(
         .payload
         .source
         .as_ref()
-        .filter(|source| source.intent == transfers::TransferIntent::Move)
+        .filter(|source| {
+            matches!(
+                source.intent,
+                transfers::TransferIntent::Move | transfers::TransferIntent::Fork
+            )
+        })
         .ok_or_else(|| {
             ApiError::new(
                 StatusCode::CONFLICT,
@@ -7801,6 +7961,41 @@ async fn close_moved_source(
             StatusCode::UNPROCESSABLE_ENTITY,
             "the importing session id is malformed",
         ));
+    }
+    // A fork leaves its source running: the source only records where its
+    // fork started, so its page lists it.
+    if source.intent == transfers::TransferIntent::Fork {
+        let recorded = super::fork::record_forked(
+            s,
+            &source.session_id,
+            super::fork::Forked {
+                to_session: session_id,
+                to_node: sender,
+                branch: transfer
+                    .payload
+                    .fork
+                    .as_ref()
+                    .map(|fork| fork.branch.as_str())
+                    .unwrap_or_default(),
+                head_sha: transfer.payload.candidate["head_sha"]
+                    .as_str()
+                    .unwrap_or_default(),
+                transfer_id: Some(transfer_id),
+            },
+        );
+        if recorded {
+            s.store().append_transfer_event(
+                transfer_id,
+                "fork_started",
+                Some(session_id),
+                Some(&source.session_id),
+            )?;
+        }
+        return Ok(json!({
+            "source_session": source.session_id,
+            "closed": false,
+            "forked": recorded,
+        }));
     }
     let closed = s
         .manager
@@ -7820,6 +8015,24 @@ async fn close_moved_source(
 /// Commands other nodes forward to this one run exactly as local requests do.
 #[async_trait::async_trait]
 impl crate::mesh::forward::CommandExecutor for AppState {
+    async fn transfer_staged(&self, sender: &str, transfer_id: &str) {
+        match start_staged_fork(self, sender, transfer_id).await {
+            Ok(Some(started)) => tracing::info!(
+                from = %sender,
+                transfer = %transfer_id,
+                session = %started["session"]["id"].as_str().unwrap_or_default(),
+                "fork started from a peer's session"
+            ),
+            Ok(None) => {}
+            Err(ApiError(_, error)) => tracing::warn!(
+                from = %sender,
+                transfer = %transfer_id,
+                %error,
+                "fork from a peer's session not started; it stays staged for an import"
+            ),
+        }
+    }
+
     async fn execute(
         &self,
         sender: &str,

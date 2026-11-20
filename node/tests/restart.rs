@@ -183,6 +183,7 @@ fn spec() -> NewSession {
         workspace_id: None,
         parent_session: None,
         continued_from: None,
+        forked_from: None,
         harness: None,
         on_exhaustion: None,
         told_reviews: Vec::new(),

@@ -1317,6 +1317,148 @@ pub async fn seed_from_history(
     })
 }
 
+/// The commit a session's branch is at in `repo` (a node-owned, sanitized
+/// snapshot of its workspace): `refs/heads/<branch>`, or the checked-out
+/// commit when the branch is not there under that name.
+pub async fn branch_head(git: &str, repo: &Path, branch: &str) -> Result<String, WorkspaceError> {
+    if plain_branch(branch).is_ok() {
+        if let Ok(tip) = run_git(
+            git,
+            Some(repo),
+            "fork",
+            [
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}^{{commit}}"),
+            ],
+        )
+        .await
+        {
+            if hex_id(&tip) {
+                return Ok(tip);
+            }
+        }
+    }
+    let head = run_git(
+        git,
+        Some(repo),
+        "fork",
+        ["rev-parse", "--verify", "HEAD^{commit}"],
+    )
+    .await?;
+    if !hex_id(&head) {
+        return Err(WorkspaceError::Git {
+            op: "fork",
+            message: "the workspace has no commit to fork from".into(),
+        });
+    }
+    Ok(head)
+}
+
+/// Seed a fork's workspace from its source's repository on this node: the
+/// source's commits up to `head`, checked out on the fork's own `branch`,
+/// with the source's view of its forge (`origin/*` and `origin/HEAD`), so a
+/// diff against the base and a review of the fork's work read as the
+/// source's do. No package and no bundle: `repo` is a node-owned, sanitized
+/// snapshot of the source's workspace, fetched from as `seed_from_clone`
+/// clones, so none of its Git configuration reaches the fork. Only what is
+/// committed travels; the source's uncommitted changes stay with it.
+pub async fn fork_from_repo(
+    git: &str,
+    repo: &Path,
+    head: &str,
+    branch: &str,
+    id: &str,
+) -> Result<Workspace, WorkspaceError> {
+    plain_branch(branch)?;
+    if !hex_id(head) {
+        return Err(WorkspaceError::Git {
+            op: "fork",
+            message: format!("{head:?} is not a commit id"),
+        });
+    }
+    let stage = staging_path(id);
+    let _ = std::fs::remove_dir_all(&stage);
+    std::fs::create_dir_all(&stage)?;
+    run_git(git, Some(&stage), "init", ["init", "-q", "-b", branch]).await?;
+    // The commit is fetched through a ref of its own in the source, as a
+    // bundle is written, so the fetch never depends on what the source's
+    // upload-pack lets a bare object id name.
+    let name = bundle_ref();
+    run_git(git, Some(repo), "fork", ["update-ref", &name, head]).await?;
+    let repo_arg = repo.to_string_lossy().into_owned();
+    let fetched = run_git(
+        git,
+        Some(&stage),
+        "fetch",
+        [
+            "fetch",
+            "--no-tags",
+            &repo_arg,
+            &format!("+{name}:refs/tracon/fork-head"),
+            "+refs/remotes/origin/*:refs/remotes/origin/*",
+        ],
+    )
+    .await;
+    let _ = run_git(git, Some(repo), "fork", ["update-ref", "-d", &name]).await;
+    fetched?;
+    if let Ok(default) = run_git(
+        git,
+        Some(repo),
+        "fork",
+        ["symbolic-ref", "refs/remotes/origin/HEAD"],
+    )
+    .await
+    {
+        let named = default
+            .strip_prefix("refs/remotes/origin/")
+            .is_some_and(|name| plain_branch(name).is_ok());
+        if named {
+            run_git(
+                git,
+                Some(&stage),
+                "symbolic-ref",
+                ["symbolic-ref", "refs/remotes/origin/HEAD", &default],
+            )
+            .await?;
+        }
+    }
+    let at = run_git(
+        git,
+        Some(&stage),
+        "fork",
+        ["rev-parse", "--verify", "refs/tracon/fork-head^{commit}"],
+    )
+    .await?;
+    if at != head {
+        return Err(WorkspaceError::Git {
+            op: "fork",
+            message: "the fetched commit is not the source's head".into(),
+        });
+    }
+    run_git(
+        git,
+        Some(&stage),
+        "checkout",
+        ["checkout", "--force", "-B", branch, head],
+    )
+    .await?;
+    run_git(
+        git,
+        Some(&stage),
+        "fork",
+        ["update-ref", "-d", "refs/tracon/fork-head"],
+    )
+    .await?;
+    sanitize_git(&stage)?;
+    Ok(Workspace {
+        id: id.to_string(),
+        volume: volume_name(id),
+        snapshot: snapshot_path(id),
+    })
+}
+
 async fn run_git<'a>(
     git: &str,
     dir: Option<&Path>,

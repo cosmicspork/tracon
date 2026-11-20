@@ -20,6 +20,11 @@ use crate::stream::Frame;
 #[async_trait::async_trait]
 pub trait CommandExecutor: Send + Sync {
     async fn execute(&self, sender: &str, command: Command) -> Result<Value, String>;
+
+    /// A transfer package `sender` sent this node directly is staged under
+    /// `transfer_id`. A fork's package starts its session here; anything
+    /// else waits for an operator's import.
+    async fn transfer_staged(&self, _sender: &str, _transfer_id: &str) {}
 }
 
 /// How far the owner's clock may run ahead of the sender's before a command

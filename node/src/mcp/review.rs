@@ -4556,6 +4556,7 @@ async fn start_review_session(
         workspace_id: Some(workspace_id),
         parent_session: None,
         continued_from: None,
+        forked_from: None,
         harness: None,
         on_exhaustion: None,
         told_reviews: Vec::new(),
