@@ -330,9 +330,10 @@ impl Store {
                 budget_tokens, tokens_used, cost_usd, context_used, context_size, state, end_reason,
                 last_error, turn_active, draft, draft_updated_ms, created_ms, started_mono_ms,
                 ended_mono_ms, updated_ms, project_id, phase, policy_version, review_id,
-                harness_agent, harness_found, harness_protocol, parent_session, continued_from)
+                harness_agent, harness_found, harness_protocol, parent_session, continued_from,
+                forked_from)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,
-                ?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36)",
+                ?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37)",
             rusqlite::params![
                 s.id,
                 s.node_id,
@@ -369,7 +370,8 @@ impl Store {
                 s.harness_found,
                 s.harness_protocol,
                 s.parent_session,
-                s.continued_from
+                s.continued_from,
+                s.forked_from
             ],
         )?;
         Ok(())
@@ -1861,9 +1863,9 @@ impl Store {
                 last_error, turn_active, draft, draft_updated_ms, created_ms, started_mono_ms,
                 ended_mono_ms, updated_ms, project_id, phase, policy_version, review_id,
                 harness_agent, harness_found, harness_protocol, legacy_ms, parent_session,
-                continued_from)
+                continued_from, forked_from)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,NULL,
-                NULL,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35)
+                NULL,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36)
              ON CONFLICT(id) DO UPDATE SET node_id=?2, channel=?3, work_item_id=?4, repo_path=?5,
                 worktree_path=?6, branch=?7, harness_id=?8, harness_version=?9,
                 harness_session_id=?10, container_name=?11, model=?12, budget_tokens=?13,
@@ -1872,7 +1874,7 @@ impl Store {
                 started_mono_ms=?23, ended_mono_ms=?24, updated_ms=?25, project_id=?26,
                 phase=?27, policy_version=?28, review_id=?29, harness_agent=?30,
                 harness_found=?31, harness_protocol=?32, legacy_ms=?33, parent_session=?34,
-                continued_from=?35",
+                continued_from=?35, forked_from=?36",
             rusqlite::params![
                 s.id,
                 s.node_id,
@@ -1908,7 +1910,8 @@ impl Store {
                 s.harness_protocol,
                 s.legacy_ms,
                 s.parent_session,
-                s.continued_from
+                s.continued_from,
+                s.forked_from
             ],
         )?;
         Ok(())
@@ -2886,6 +2889,14 @@ mod records {
         /// parent and continues nothing.
         #[serde(default)]
         pub continued_from: Option<String>,
+        /// The session this one was forked from: a new session started on a
+        /// branch of its own from that session's branch and context, on this
+        /// node or another, while that session carried on. Not a
+        /// continuation, so not part of the lineage `continued_from` and
+        /// `parent_session` make; the source records a `forked` event naming
+        /// this session, and its forks are the sessions that name it here.
+        #[serde(default)]
+        pub forked_from: Option<String>,
         /// The launch manifest this session was staged from: the operator's
         /// skills, instructions, agents, approved plugins and the provider
         /// set and policy revision the launch settled, as one digest. Written
@@ -2950,6 +2961,7 @@ mod records {
                 legacy_ms: r.get("legacy_ms")?,
                 parent_session: r.get("parent_session")?,
                 continued_from: r.get("continued_from")?,
+                forked_from: r.get("forked_from")?,
                 manifest_digest: r.get("manifest_digest")?,
                 // Only the reads built on `SESSION_SELECT` compute it.
                 open_turn_tokens: r.get("open_turn_tokens").unwrap_or(0),
@@ -4338,6 +4350,7 @@ mod tests {
                 legacy_ms: None,
                 parent_session: None,
                 continued_from: None,
+                forked_from: None,
                 manifest_digest: None,
                 open_turn_tokens: 0,
             })

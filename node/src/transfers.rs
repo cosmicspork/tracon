@@ -9,6 +9,12 @@
 //! own clone, and, for a move, the source session's links (its work item,
 //! project, budget and last state), so the new session takes the work over.
 //! A version 1 package (files only) still verifies and imports as before.
+//!
+//! A fork is a version 2 package too: the branch's history, the source
+//! session it was forked from, and how the fork starts (its own branch name,
+//! model, budget and task). Its source keeps running and keeps its task; the
+//! receiver starts the fork once the package is staged, as a forwarded
+//! session start from a member of the channel would.
 
 use std::{
     fs,
@@ -142,10 +148,47 @@ pub struct TransferPayload {
     /// left out of its serialisation, so a version 1 digest is unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<TransferGit>,
-    /// Version 2: the session the work is moving from, for a move.
+    /// Version 2: the session the work is moving from, for a move, or
+    /// forked from, for a fork.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<TransferSource>,
+    /// Version 2, a fork only: how the fork starts on the receiver.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork: Option<TransferFork>,
 }
+
+/// How a forked session starts: on a branch of its own, with its own model,
+/// budget and harness when the operator chose them (else the source's), and
+/// on a task of its own or none. The source keeps its task.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransferFork {
+    /// The fork's own branch, which the source's commits are checked out on.
+    pub branch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    /// An existing task on the channel for the fork to take.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_item_id: Option<String>,
+    /// A new task made for the fork where it starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_item: Option<ForkItem>,
+}
+
+/// A task made for a fork as it starts.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ForkItem {
+    pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub body: String,
+}
+
+/// The longest title and body a fork's new task may carry.
+pub const MAX_FORK_ITEM_TITLE_BYTES: usize = 512;
+pub const MAX_FORK_ITEM_BODY_BYTES: usize = 16 * 1024;
 
 /// The branch's Git objects: a bundle of its commits from `history.base_sha`
 /// (which the receiver reads from its own clone of `origin`) to
@@ -176,6 +219,10 @@ pub enum TransferIntent {
     /// project and budget, links back to it, and the source is closed once
     /// the receiver has imported.
     Move,
+    /// The work is forked: a new session starts on a branch of its own from
+    /// the source's, linked to it by `forked_from`, and the source carries on
+    /// with its task, reviews and branch as they were.
+    Fork,
 }
 
 /// The project the source session ran in, as the receiver records it.
@@ -245,6 +292,7 @@ pub struct TransferSource {
 pub struct Extras {
     pub git: Option<TransferGit>,
     pub source: Option<TransferSource>,
+    pub fork: Option<TransferFork>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -268,7 +316,9 @@ impl SignedTransfer {
     }
 
     pub fn verify(&self) -> Result<(), TransferError> {
-        let extended = self.payload.git.is_some() || self.payload.source.is_some();
+        let extended = self.payload.git.is_some()
+            || self.payload.source.is_some()
+            || self.payload.fork.is_some();
         let expected = if extended {
             TRANSFER_VERSION_HISTORY
         } else {
@@ -284,6 +334,22 @@ impl SignedTransfer {
         }
         if let Some(source) = &self.payload.source {
             verify_source(source)?;
+        }
+        let forked = self
+            .payload
+            .source
+            .as_ref()
+            .is_some_and(|source| source.intent == TransferIntent::Fork);
+        match &self.payload.fork {
+            Some(fork) if forked => verify_fork(fork)?,
+            None if !forked => {}
+            _ => {
+                return Err(TransferError::Invalid(
+                    "a fork names the session it was forked from and how it starts, \
+                     and only a fork does"
+                        .into(),
+                ))
+            }
         }
         let bytes = self.payload_bytes()?;
         validate_files(&self.payload.files)?;
@@ -425,6 +491,31 @@ fn verify_git(git: &TransferGit) -> Result<(), TransferError> {
     Ok(())
 }
 
+fn verify_fork(fork: &TransferFork) -> Result<(), TransferError> {
+    let long = |value: &Option<String>| {
+        value
+            .as_deref()
+            .is_some_and(|value| value.is_empty() || value.len() > MAX_SOURCE_FIELD_BYTES)
+    };
+    if !branch_name(&fork.branch)
+        || long(&fork.model)
+        || long(&fork.harness)
+        || long(&fork.work_item_id)
+        || fork.budget_tokens.is_some_and(|budget| budget < 0)
+        || (fork.work_item_id.is_some() && fork.new_item.is_some())
+        || fork.new_item.as_ref().is_some_and(|item| {
+            item.title.trim().is_empty()
+                || item.title.len() > MAX_FORK_ITEM_TITLE_BYTES
+                || item.body.len() > MAX_FORK_ITEM_BODY_BYTES
+        })
+    {
+        return Err(TransferError::Invalid(
+            "the fork's start is malformed or too large".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// A branch name as a package may carry it: one Git would take, never an
 /// option, and bounded.
 pub fn branch_name(name: &str) -> bool {
@@ -530,14 +621,6 @@ pub fn export_with(
     }
     let evidence = serde_json::to_value(store.candidate_evidence(candidate_id)?)?;
     let candidate_value = serde_json::to_value(&candidate)?;
-    let mut documents = Vec::with_capacity(selection.documents.len());
-    for slug in unique(selection.documents) {
-        let row = store
-            .doc_get(&channel, &slug)?
-            .filter(|row| row.format == "markdown" && row.archived == 0)
-            .ok_or_else(|| TransferError::DocumentNotFound(slug.clone()))?;
-        documents.push(row);
-    }
     let materialized = serde_json::from_str::<Value>(&candidate.capture_json)
         .ok()
         .and_then(|capture| capture["materialized"].as_bool())
@@ -547,14 +630,7 @@ pub fn export_with(
             "candidate has no immutable materialized source set".into(),
         ));
     }
-    let mut memories = Vec::with_capacity(selection.memories.len());
-    for id in unique(selection.memories) {
-        let row = store
-            .memory_get(&id)?
-            .filter(|row| row.channel == channel && row.deleted == 0)
-            .ok_or_else(|| TransferError::MemoryNotFound(id.clone()))?;
-        memories.push(row);
-    }
+    let context = select_context(store, &channel, selection)?;
     let candidate_files = store.candidate_files(candidate_id)?;
     if candidate_files.len() > MAX_TRANSFER_FILES {
         return Err(TransferError::TooManyFiles);
@@ -581,7 +657,7 @@ pub fn export_with(
         })
         .collect();
     validate_files(&files)?;
-    let extended = extras.git.is_some() || extras.source.is_some();
+    let extended = extras.git.is_some() || extras.source.is_some() || extras.fork.is_some();
     let payload = TransferPayload {
         version: if extended {
             TRANSFER_VERSION_HISTORY
@@ -596,13 +672,10 @@ pub fn export_with(
         candidate: candidate_value,
         evidence,
         files,
-        context: TransferContext {
-            documents,
-            memories,
-            note: selection.note,
-        },
+        context,
         git: extras.git,
         source: extras.source,
+        fork: extras.fork,
     };
     let payload_bytes = serde_json::to_vec(&payload)?;
     if payload_bytes.len() > MAX_TRANSFER_BYTES {
@@ -620,6 +693,47 @@ pub fn export_with(
     store.insert_transfer(&transfer.as_row()?)?;
     store.append_transfer_event(transfer.id(), "exported", None, None)?;
     Ok(transfer)
+}
+
+/// The selected documents and memories of `channel`, and the note, as a
+/// package or a fork on this node carries them: only Markdown documents that
+/// are not archived and memories that are not deleted, each named once.
+pub fn select_context(
+    store: &Store,
+    channel: &str,
+    selection: ContextSelection,
+) -> Result<TransferContext, TransferError> {
+    if selection.documents.len() > MAX_CONTEXT_DOCUMENTS
+        || selection.memories.len() > MAX_CONTEXT_MEMORIES
+    {
+        return Err(TransferError::Invalid(
+            "too many selected context records".into(),
+        ));
+    }
+    if selection.note.len() > MAX_HANDOFF_NOTE_BYTES {
+        return Err(TransferError::Invalid("the note is too long".into()));
+    }
+    let mut documents = Vec::with_capacity(selection.documents.len());
+    for slug in unique(selection.documents) {
+        let row = store
+            .doc_get(channel, &slug)?
+            .filter(|row| row.format == "markdown" && row.archived == 0)
+            .ok_or_else(|| TransferError::DocumentNotFound(slug.clone()))?;
+        documents.push(row);
+    }
+    let mut memories = Vec::with_capacity(selection.memories.len());
+    for id in unique(selection.memories) {
+        let row = store
+            .memory_get(&id)?
+            .filter(|row| row.channel == channel && row.deleted == 0)
+            .ok_or_else(|| TransferError::MemoryNotFound(id.clone()))?;
+        memories.push(row);
+    }
+    Ok(TransferContext {
+        documents,
+        memories,
+        note: selection.note,
+    })
 }
 
 /// Verify a direct mesh delivery and stage it. This never creates a workspace
@@ -1264,6 +1378,19 @@ pub fn first_prompt(transfer: &SignedTransfer, branch: &str, history: bool) -> O
     let payload = &transfer.payload;
     let note = payload.context.note.trim();
     let source = payload.source.as_ref();
+    if let Some(source) = source.filter(|source| source.intent == TransferIntent::Fork) {
+        let fork = payload.fork.clone().unwrap_or_default();
+        return Some(fork_prompt(&ForkPrompt {
+            source,
+            origin_node: &payload.origin_node,
+            head_sha: payload.candidate["head_sha"].as_str().unwrap_or_default(),
+            source_branch: payload.git.as_ref().map(|git| git.branch.as_str()),
+            branch,
+            note,
+            history,
+            work_item_id: fork.work_item_id.as_deref(),
+        }));
+    }
     if source.is_none() && note.is_empty() {
         return None;
     }
@@ -1356,6 +1483,114 @@ pub fn first_prompt(transfer: &SignedTransfer, branch: &str, history: bool) -> O
     Some(out)
 }
 
+/// What a fork's first prompt is written from.
+pub struct ForkPrompt<'a> {
+    /// The session forked from, as `describe_source` read it.
+    pub source: &'a TransferSource,
+    /// The node the source runs on.
+    pub origin_node: &'a str,
+    /// The commit the fork starts at.
+    pub head_sha: &'a str,
+    /// The source's own branch, when known.
+    pub source_branch: Option<&'a str>,
+    /// The fork's own branch.
+    pub branch: &'a str,
+    /// The operator's note.
+    pub note: &'a str,
+    /// Whether the branch's commits arrived, not only its files.
+    pub history: bool,
+    /// The task the fork itself is on, when it has one.
+    pub work_item_id: Option<&'a str>,
+}
+
+/// A fork's first prompt: that it is a fork of the source at a commit, that
+/// the source carries on with its own task, reviews and branch, what the
+/// fork has (its own branch, with the commits), the operator's note, and the
+/// source's last check. Written alike for a fork on the same node and one on
+/// another.
+pub fn fork_prompt(fork: &ForkPrompt<'_>) -> String {
+    let source = fork.source;
+    let short = fork.head_sha.get(..12).unwrap_or(fork.head_sha);
+    let mut out = format!(
+        "This session is a fork of {} (id {}) at commit {short}, on node {}. That session \
+         carries on as it was, with its own task, reviews and branch{}. You inherit none of \
+         its context: not its conversation, not its plan, not what it had already tried.",
+        crate::names::session(&source.session_id),
+        source.session_id,
+        crate::names::node(fork.origin_node, None),
+        fork.source_branch
+            .map(|branch| format!(" `{branch}`"))
+            .unwrap_or_default(),
+    );
+    out.push_str("\n\n");
+    let branch = fork.branch;
+    if fork.history {
+        out.push_str(&format!(
+            "What you do have is its work so far, with its commits, on a branch of your own, \
+             `{branch}`, checked out on top of the base it started from. Start by reading the \
+             workspace (the log and the diff against the base) and say what you find before \
+             changing anything."
+        ));
+    } else {
+        out.push_str(&format!(
+            "What you do have is its files, on a branch of your own, `{branch}`, without their \
+             Git history. Start by reading the workspace and say what you find before changing \
+             anything."
+        ));
+    }
+    let note = fork.note.trim();
+    if !note.is_empty() {
+        out.push_str("\n\nThe operator's note for this fork:\n\n");
+        for line in note.lines() {
+            out.push_str("> ");
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out.push_str(&format!(
+        "\n\nWhen it was forked it was {} in the {} phase.",
+        source.state, source.phase
+    ));
+    if let Some(item) = source.work_item_id.as_deref() {
+        out.push_str(&format!(
+            " It is working on item {item}, which stays with it."
+        ));
+    }
+    match fork.work_item_id {
+        Some(item) => out.push_str(&format!(" You are on item {item}.")),
+        None => out.push_str(" You are on no item."),
+    }
+    if !source.open_reviews.is_empty() {
+        out.push_str(
+            "\n\nIt has these open, and they stay with it; they are not yours to poll. When \
+             your work is ready, call `submit_review` from your branch, which opens a review \
+             of its own:\n\n",
+        );
+        for review in &source.open_reviews {
+            out.push_str(&format!(
+                "- {} `{}` ({}): {}\n",
+                review.kind, review.id, review.state, review.title
+            ));
+        }
+    }
+    if let Some(check) = &source.last_check {
+        let command = check
+            .command
+            .as_deref()
+            .map(|command| format!(" `{command}`"))
+            .unwrap_or_default();
+        let exit = check
+            .exit_code
+            .map(|code| format!(", exit {code}"))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "\n\nIts last check{command} came to {}{exit}.",
+            check.outcome
+        ));
+    }
+    out
+}
+
 /// Read a package off disk without a node, a store, or a harness.
 ///
 /// A package is the archive of a piece of work, and an archive nobody can open
@@ -1420,6 +1655,11 @@ pub fn package_jsonl(transfer: &SignedTransfer) -> Vec<Value> {
     if let Some(source) = &payload.source {
         let mut record = serde_json::to_value(source).unwrap_or_default();
         record["kind"] = serde_json::json!("source");
+        out.push(record);
+    }
+    if let Some(fork) = &payload.fork {
+        let mut record = serde_json::to_value(fork).unwrap_or_default();
+        record["kind"] = serde_json::json!("fork");
         out.push(record);
     }
     for document in &payload.context.documents {
@@ -1786,7 +2026,125 @@ mod tests {
                     about: "Which base?".into(),
                 }],
             }),
+            fork: None,
         }
+    }
+
+    fn forked_extras() -> Extras {
+        let mut extras = moved_extras();
+        extras.source.as_mut().unwrap().intent = TransferIntent::Fork;
+        extras.fork = Some(TransferFork {
+            branch: "feat/move-fork".into(),
+            budget_tokens: Some(1234),
+            new_item: Some(ForkItem {
+                title: "the follow-up".into(),
+                body: String::new(),
+            }),
+            ..Default::default()
+        });
+        extras
+    }
+
+    /// A fork's package is version 2 and signed with how the fork starts; a
+    /// fork with no start, a start with no fork, or a malformed start is
+    /// refused.
+    #[test]
+    fn a_fork_package_carries_its_start_and_is_refused_without_one() {
+        let (store, identity, candidate_id) = setup();
+        let transfer = export_with(
+            &store,
+            &identity,
+            &candidate_id,
+            ContextSelection::default(),
+            Some("receiver".into()),
+            forked_extras(),
+        )
+        .unwrap();
+        assert_eq!(transfer.payload.version, TRANSFER_VERSION_HISTORY);
+        transfer.verify().unwrap();
+        let kinds: Vec<String> = package_jsonl(&transfer)
+            .iter()
+            .map(|record| record["kind"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "package",
+                "candidate",
+                "evidence",
+                "git",
+                "source",
+                "fork",
+                "file"
+            ]
+        );
+
+        let mut tampered = transfer.clone();
+        tampered.payload.fork.as_mut().unwrap().budget_tokens = Some(9);
+        assert!(matches!(tampered.verify(), Err(TransferError::BadDigest)));
+
+        let refused = |extras: Extras| {
+            export_with(
+                &store,
+                &identity,
+                &candidate_id,
+                ContextSelection::default(),
+                None,
+                extras,
+            )
+            .is_err()
+        };
+        let mut startless = forked_extras();
+        startless.fork = None;
+        assert!(refused(startless));
+        let mut sourceless = moved_extras();
+        sourceless.fork = forked_extras().fork;
+        assert!(refused(sourceless));
+        let mut misnamed = forked_extras();
+        misnamed.fork.as_mut().unwrap().branch = "--upload-pack=x".into();
+        assert!(refused(misnamed));
+        let mut both = forked_extras();
+        both.fork.as_mut().unwrap().work_item_id = Some("item-2".into());
+        assert!(refused(both));
+    }
+
+    /// A fork is told it is a fork of its source at the head, that the
+    /// source keeps its task and reviews, its own branch, and the note.
+    #[test]
+    fn a_fork_is_told_what_it_forked_from_and_that_the_source_carries_on() {
+        let (store, identity, candidate_id) = setup();
+        let transfer = export_with(
+            &store,
+            &identity,
+            &candidate_id,
+            ContextSelection {
+                note: "try the other parser".into(),
+                ..Default::default()
+            },
+            None,
+            forked_extras(),
+        )
+        .unwrap();
+        let prompt = first_prompt(&transfer, "feat/move-fork", true).unwrap();
+        for expected in [
+            "is a fork of",
+            "(id s1) at commit ",
+            &HEAD_SHA[..12],
+            "carries on as it was",
+            "its own task, reviews and branch `feat/move`",
+            "a branch of your own, `feat/move-fork`",
+            "> try the other parser",
+            "item item-1, which stays with it",
+            "review `rev-1` (pending): Add the thing",
+            "last check `just check` came to failed, exit 1",
+        ] {
+            assert!(
+                prompt.contains(expected),
+                "{expected:?} missing from:\n{prompt}"
+            );
+        }
+        assert!(!prompt.contains("yours now"), "{prompt}");
+        assert!(!prompt.contains("Which base?"), "{prompt}");
     }
 
     /// A package without history or a moved session is the version 1 package

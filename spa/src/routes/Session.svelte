@@ -306,6 +306,11 @@
   const continuedAs = $derived(
     [...store.sessions.values()].find((s) => s.continued_from === id),
   )
+  // Sessions forked from this one, oldest first: each started on a branch of
+  // its own from this one's, which carried on.
+  const forks = $derived(
+    [...store.sessions.values()].filter((s) => s.forked_from === id).sort((a, b) => a.created_ms - b.created_ms),
+  )
   let continuing = $state(false)
   async function carryOn() {
     if (continuing) return
@@ -531,6 +536,18 @@
       <b>· workspace inherited</b>
     </div>
   {/if}
+  {#if session.forked_from}
+    <div class="banner dim">
+      forked from <Name kind="session" id={session.forked_from} href="/sessions/{session.forked_from}" class="lnk" />
+      <b>· on a branch of its own; that session carries on</b>
+    </div>
+  {/if}
+  {#if forks.length}
+    <div class="banner dim">
+      {forks.length === 1 ? 'fork' : 'forks'}
+      {#each forks as fork, i (fork.id)}{#if i}, {/if}<Name kind="session" id={fork.id} href="/sessions/{fork.id}" class="lnk" /> <b>on {fork.branch}</b>{/each}
+    </div>
+  {/if}
 
   {#if session.harness_id === 'external' && isTerminal(session.state) && channelStopped}
     <div class="banner dim">
@@ -699,7 +716,7 @@
   <OutcomePanel {id} open={isTerminal(session.state) || router.hash === '#outcome'} />
   <SessionAuditPanel {id} open={router.hash === '#audit'} />
   <ShownWork items={shownWork} />
-  <TransferExport channel={session.channel} />
+  <TransferExport channel={session.channel} {session} />
 
   {#each questions as question (question.id)}
     <OperatorQuestionCard {question} done={refreshQuestions} />

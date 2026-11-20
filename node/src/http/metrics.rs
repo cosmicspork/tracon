@@ -115,6 +115,7 @@ mod tests {
             legacy_ms: None,
             parent_session: None,
             continued_from: None,
+            forked_from: None,
         }
     }
 
