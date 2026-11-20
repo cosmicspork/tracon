@@ -1655,11 +1655,17 @@ timeouts, default channel, claim grace, suspend-after), `[publish]`, `[github] d
 `[supervision]`, `[review]`, `[notify] contact`, `[memory] promote_at`, provider prices,
 `[runtime] approved_images` and the `[docs]` export keys, from the next session, turn,
 check or push. The rest wait for a restart, and every screen of the interface says which
-until then ("node.toml changed: restart to apply ..."). **Restart when idle** stops
-taking new sessions, turns and review submissions, waits for running turns, checks and
-reviews in progress to finish (30 minutes at most, then it gives up and says why), and
-restarts; **Restart now** lists the sessions it
-would end and asks first. The same is `POST /api/admin/restart` with
+until then ("node.toml changed: restart to apply ..."), with one **Restart**. The same
+control is in Settings › System › Restart on every node, whether or not a change is
+waiting (a restart into an unchanged file clears what the node holds in memory); the card
+also says how this node restarts, what the restart applies, and why it cannot where it
+cannot. With nothing running and no session live, **Restart** restarts at once. Otherwise
+one step names the running turns, checks, reviews and plugin instances and the live
+sessions a restart ends, and offers **Restart when they finish** (it stops taking new
+sessions, turns and review submissions and waits for the running work, 30 minutes at
+most, then gives up and says why), **End them and restart now**, or Cancel. A restart
+that is waiting can be withdrawn (**Don't restart**) or hurried along. What is running is
+kept current as turns start and end. The same is `POST /api/admin/restart` with
 `{"mode": "when_idle" | "now", "expected_hash": "<GET /api/restart's config.hash>"}`. It
 is an administrator's action, confirmed with a passkey from anywhere but the node itself,
 and works under the user service and in a container restarted whenever it exits
@@ -2484,8 +2490,9 @@ kubectl -n <namespace> port-forward deploy/tracon-node 7420:7420
 The ConfigMap only seeds `node.toml`. An init container copies it onto the state
 volume once, and from then on the node reads and writes the copy there
 (`/state/config/tracon/node.toml`); delete that file to reseed. A change that waits
-for a restart is applied with **Restart when idle** in the interface (or
-`POST /api/admin/restart`): the node drains, exits 0, and the kubelet starts the
+for a restart, or a restart to clear the node's state, is done with **Restart** in the
+interface (the banner, or Settings › System › Restart), or `POST /api/admin/restart`:
+the node drains, exits 0, and the kubelet starts the
 container again on the same volume and pod IP, so a phone with a passkey restarts it
 without `kubectl`. That needs `TRACON_RESTART_BY_EXIT=1` in the pod's environment, as
 `deploy/kubernetes/base/deployment.yaml` sets it; without it the restart is refused. Every sandbox pod

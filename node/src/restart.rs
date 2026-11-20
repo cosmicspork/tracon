@@ -1,7 +1,9 @@
 //! Restarting the node from its own API, without cutting work off.
 //!
 //! A restart is what applies a `node.toml` key the running node cannot take
-//! in live (`config::live`). It is asked for in one of two modes:
+//! in live (`config::live`), or simply starts the node again on the same
+//! file (to clear what it holds in memory). It is asked for in one of two
+//! modes:
 //!
 //! - `when_idle`, the default: the node stops taking new sessions and new
 //!   turns, waits (bounded) for the turns and required checks already running
@@ -15,8 +17,8 @@
 //! restarted into.
 //!
 //! What restarts the node is whatever supervises it. Under the fixed user
-//! service (systemd, launchd) that is the service's own restart, as the
-//! maintenance route has always done. Where the deployment says the
+//! service (systemd, launchd) that is the service's own restart, as
+//! `tracon service restart` does. Where the deployment says the
 //! container is restarted when its process exits ([`EXIT_ENV`], which the
 //! Kubernetes manifests set), the node shuts down the way SIGTERM shuts it
 //! down and exits 0, and the kubelet starts it again on the same volume and
@@ -365,19 +367,28 @@ pub async fn status(manager: &Manager) -> Value {
     })
 }
 
-/// Send the status on the stream if what the banner says changed since it
-/// was last sent. Called from the node's 15-second tick, so the look itself
-/// is cheap: the file's hash and diff, and the plan. Asking the supervisor
-/// (which runs `systemctl`) is left to a change.
+/// Send the status on the stream if what the banner and the Settings card
+/// say changed since it was last sent: the file, the plan, the last error,
+/// and what is running (`busy`, `closing`). Called from the node's 15-second
+/// tick, which catches checks, review submissions and plugin instances, and
+/// from [`watch`] whenever a session on this node changes, at most once a
+/// second. The look itself is cheap: the file's hash and diff, the plan and
+/// a read of the store. Asking the supervisor (which runs `systemctl`) is
+/// left to a change, so it runs at most once a second while work starts and
+/// stops.
 pub async fn publish(manager: &Manager) {
     let shown = {
         let pending =
             crate::config::live::pending_restart_at(manager.cfg(), &Config::config_path());
+        let busy = busy(manager);
+        let closing = closing(manager);
         let state = manager.restart().state.lock();
         json!({
             "config": pending,
             "plan": state.plan,
             "last_error": state.last_error,
+            "busy": busy,
+            "closing": closing,
         })
     };
     {
@@ -388,6 +399,42 @@ pub async fn publish(manager: &Manager) {
         state.published = Some(shown);
     }
     manager.bus().publish(Frame::Restart(status(manager).await));
+}
+
+/// How long [`watch`] lets a burst of session changes settle before it
+/// looks: a turn starting writes the session, then its events.
+pub const WATCH_SETTLE: Duration = Duration::from_secs(1);
+
+/// Keep the published status following the work running on this node: a
+/// session of this node changing (its state, a turn starting or ending) or
+/// one of its events publishes the status again, once the burst has settled.
+/// Runs for the life of the node, beside the 15-second tick.
+pub async fn watch(manager: Manager) {
+    use tokio::sync::broadcast::error::RecvError;
+    let mut rx = manager.bus().subscribe();
+    let ours = |frame: &Frame, node_id: &str| match frame {
+        Frame::Session(row) => row.node_id == node_id,
+        Frame::Event { node_id: of, .. } => of == node_id,
+        _ => false,
+    };
+    loop {
+        match rx.recv().await {
+            Ok(frame) if ours(&frame, manager.node_id()) => {}
+            Ok(_) => continue,
+            Err(RecvError::Lagged(_)) => {}
+            Err(RecvError::Closed) => return,
+        }
+        tokio::time::sleep(WATCH_SETTLE).await;
+        // What arrived meanwhile is covered by the look about to be taken.
+        loop {
+            match rx.try_recv() {
+                Ok(_) | Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::TryRecvError::Closed) => return,
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+            }
+        }
+        publish(&manager).await;
+    }
 }
 
 /// The file as it is now, if it is `expected` and loads; else why not.

@@ -110,7 +110,6 @@ export interface Maintenance {
     state: { state: 'running' | 'stopped' | 'unknown'; detail: string }
     install: LifecycleCapability
     uninstall: LifecycleCapability
-    restart: LifecycleCapability
   }
   boundary: NodeInfo
   mesh: unknown | null
@@ -156,10 +155,6 @@ export const admin = {
     }),
   uninstall: () =>
     call<{ scheduled: true; operation: 'uninstall'; target: string; effect: string }>('POST', '/api/admin/maintenance/uninstall', {
-      confirm: true,
-    }),
-  restart: () =>
-    call<{ scheduled: true; operation: 'restart'; target: string; effect: string }>('POST', '/api/admin/maintenance/restart', {
       confirm: true,
     }),
 }

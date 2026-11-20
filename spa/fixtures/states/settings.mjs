@@ -487,7 +487,6 @@ const MAINTENANCE = {
     unit_installed: true,
     state: { state: 'running', detail: 'active (running) since 3 h ago' },
     install: cap(true, 'The unit file can be written and the user manager reloaded.', 'Reinstalling rewrites the fixed unit; node.toml and state are untouched.'),
-    restart: cap(false, '2 sessions are active; a restart would end them as node_restart.', 'Wait for them to finish or stop them, then restart.'),
     uninstall: cap(true, 'The unit is installed by tracon and can be removed.', 'Run `tracon service install` to bring it back.'),
   },
   boundary: selfNode(),
@@ -689,7 +688,7 @@ const BASE = {
   },
   '/api/restart': {
     config: { boot_hash: CONFIG_FILE.hash, hash: CONFIG_FILE.hash, keys: [], unparseable: false },
-    restart: { available: true, mechanism: 'systemd', reason: null },
+    restart: { available: true, mechanism: 'systemd user service', reason: null },
     plan: null,
     busy: { turns: [], checks: 0, reviews: 0, plugins: [] },
     closing: [],
@@ -1223,7 +1222,7 @@ export default [
   // --- System and Access (Maintenance was split between them) -----------------
   // The ids keep their old `maintenance` names so the audit history lines up.
   S('maintenance', '/settings#system', 'System: configuration, boundary, service, harnesses, storage, data', {
-    note: 'Two harnesses (native image stale), capabilities (restart unavailable), runtime storage and the data inventory. The session transfer inbox is on Sessions now (docs-transfer-inbox).',
+    note: 'Two harnesses (native image stale), service capabilities, the Restart card, runtime storage and the data inventory. The session transfer inbox is on Sessions now (docs-transfer-inbox).',
   }),
   S('access', '/settings#access', 'Access & devices: operator token, administrator access, devices, your own harness', {
     note: 'What was the top and the tail of Maintenance (operator access, external harness MCP lines per channel) with Devices & notifications between.',
@@ -1243,12 +1242,29 @@ export default [
       '/api/admin/maintenance': {
         ...MAINTENANCE,
         active_sessions: 0,
-        service: { ...MAINTENANCE.service, state: { state: 'unknown', detail: 'systemctl --user is-active returned no answer within 5 s' }, restart: cap(true, 'No sessions are active.', 'The node answers again within a few seconds of a restart.') },
+        service: { ...MAINTENANCE.service, state: { state: 'unknown', detail: 'systemctl --user is-active returned no answer within 5 s' } },
         boundary: selfNode({ state: 'refused' }),
       },
     },
+  }),
+  S('restart-confirm', '/settings#system', 'System: Restart with a turn running and a live session', {
+    since: '#995',
+    note: 'Settings › System › Restart with nothing changed in node.toml: the one Restart, after reading the status again, names the running turn and the live sessions and offers to wait for them, end them now, or cancel.',
+    over: {
+      '/api/restart': {
+        config: { boot_hash: CONFIG_FILE.hash, hash: CONFIG_FILE.hash, keys: [], unparseable: false },
+        restart: { available: true, mechanism: 'exit for the container to be restarted', reason: null },
+        plan: null,
+        busy: { turns: ['s-busy'], checks: 0, reviews: 0, plugins: [] },
+        closing: [
+          { id: 's-busy', channel: 'personal', repo_path: '/home/op/src/tracon', branch: 'feat/restart-card', state: 'running', turn_active: true },
+          { id: 's-idle', channel: 'work', repo_path: '/home/op/src/infra', branch: 'fix/probe', state: 'idle', turn_active: false },
+        ],
+        last_error: null,
+      },
+    },
     act: async (page) => {
-      await click(page, 'Restart this serving node…')
+      await click(page, 'Restart', { exact: true })
     },
   }),
   S('maintenance-reconciling', '/settings#system', 'System: the node setting up its boundary after an update', {
