@@ -895,7 +895,7 @@ review threads (file, line, resolved or outdated) and conversation with
 `mr_for_branch`, and sees each reviewer's latest verdict in `pr_status`, all
 unattended. Replying to a thread, and resolving it, is `pr_reply` / `mr_reply`,
 which you are asked about like any other comment. So is a comment on a GitHub issue,
-`github_issue_comment`, named apart from Jira's `issue_comment`. So is marking a draft
+`github_issue_comment`. So is marking a draft
 ready for review, or turning it back into a draft with `ready: false` (`pr_ready` /
 `mr_ready`): one already in that state is left alone, and a closed or merged one is refused. CI reads the same on either
 forge: a run's jobs and the step that failed (`run_status` with `run_id` /
@@ -1117,13 +1117,22 @@ node restart waits for running plugin processes as it waits for turns.
 A plugin's tools are offered to execute sessions and external harnesses as
 `<plugin>__<tool>`, beside the node's own, on a channel that binds a credential the
 manifest declares (by its `name`, or a binding its `pattern` matches), or on every
-channel when it declares none. Plan and review sessions are offered none. A call is
+channel when it declares none. A plan session is offered only jira-review's reads
+(`search`, `issue`, `transitions`), as it was the node's own Jira reads, and a review
+session none. A call is
 decided as an `[[mcp_server]]` tool's is: the signed policy first, under the `tool` kind
 and the namespaced name, then the lists in the plugin's `[[plugin]]` entry, by the
 plugin's own name for the tool. A signed denial wins, then the entry's `deny`, then its
 `ask`; its `allow` runs a tool without asking only while the signed bundle is trusted. A
 tool that neither names is asked. The manifest's `read`/`write` hint is shown on the card
-and never decides anything:
+and never decides anything. A tool the manifest marks `consequential = true` is never
+run because something allows it by name, neither the bundle nor the entry's `allow`: the
+node adds a required `operation_id` to its schema (at least 8 letters, digits or dashes,
+kept by the node and never sent to the plugin), asks every call, and runs one
+unattended only under a `plugin_call` [grant](#granting-authority) naming that exact
+call, which its card shows. An allowed call is recorded under its `operation_id`, so
+the same id and arguments again return the recorded outcome rather than running twice.
+The entry's `deny` and `ask` still apply:
 
 ```toml
 [[plugin]]
@@ -1196,6 +1205,27 @@ loads and is ignored, with a warning naming the plugin. On its first start the n
 renames credentials `consulta` and `consulta-<profile>` to `sql-read` and
 `sql-read-<profile>`, bindings and all, and logs each one; one whose new name is already
 taken is left as it is, with a warning, so you can remove whichever is stale.
+
+#### Jira
+
+The node talks to no Jira of its own either: the tracker tools are the
+[`jira-review`](https://github.com/cosmicspork/jira-review) plugin's. Install it with
+`tracon plugin add cosmicspork/jira-review`. It is lent the channel's `jira` credential
+(or `jira-<profile>`, for a call's `profile`), the same one the node's own Jira tools
+used, with the same fields: `JIRA_URL` with `JIRA_EMAIL` and `JIRA_TOKEN` for Jira
+Cloud, or `JIRA_PAT` for Data Center. A channel that bound `jira` before needs nothing
+more. The shipped working agreements (from bundle v26) run its reads unattended
+(`jira-review__search`, `jira-review__issue`, `jira-review__transitions`); its writes
+(`update`, `comment`, `create`, `link`) are asked, each card showing the plugin's preview
+of the change, and an approved write fails as stale if the issue moved since the card
+was read. `jira-review__transition` is consequential: asked every call unless a grant
+names it. A description or comment written in Jira wiki markup is shown on the card as
+jira-review renders it, since it owns the `jira_wiki` format.
+
+This replaces the node's own `issue`, `issue_search`, `issue_transitions`,
+`issue_comment`, `issue_update`, `issue_create`, `issue_link` and `issue_transition`. A
+call to one of those names is refused with the name that replaced it, and nothing is
+asked. Past approvals of them still open, their wiki markup shown as source.
 
 ### Asking, pinging, and complaining
 
@@ -1313,8 +1343,8 @@ field while the card keeps waiting. Reject with a reason, or request changes wit
 `approval_status` returns `rejected` with that reason or `changes_requested`
 with the notes. Neither runs anything; the agent revises and calls the tool
 again, which asks anew. `GET /api/approvals/{id}` returns one card with the
-tool's schema, which arguments are prose and how it is written (`jira_wiki` or
-`markdown`), and which are locked, and claims it while it is open; `POST /api/approvals/{id}/release` lets it go.
+tool's schema, which arguments are prose and how it is written (`markdown`, or a
+format a plugin owns, such as jira-review's `jira_wiki`), and which are locked, and claims it while it is open; `POST /api/approvals/{id}/release` lets it go.
 
 For an investigation or handoff with no code to publish, use **`submit_report`**.
 It puts a narrative report in the operator queue and requests a notification,
@@ -1336,8 +1366,9 @@ channel's Jira credential: the call is decided by policy and logged to the
 channel's external log under the lane `/api/jira/search`. It answers 503 until
 `tracon plugin add cosmicspork/jira-review` installs the plugin, 422 on a channel
 that binds no `jira` (or `jira-*`) credential, and 403 unless the call is allowed,
-since the operator API never holds a call for approval: until the policy bundle
-allows it (v26), add to `node.toml`:
+since the operator API never holds a call for approval. The shipped policy bundle
+allows it from version 26; a node still on an older signed bundle needs, until you
+sign and install the new one:
 
 ```toml
 [[plugin]]
@@ -2246,12 +2277,14 @@ neither reaches past a signed deny.
 
 ### Granting authority
 
-Merging, publishing, transitioning a ticket, and deploying are not something a
-policy rule's argument text matches unattended — they are scoped grants, made and
-revoked one at a time in **Settings → Permissions & policies**, beside the signed rules
-they sit under. A grant names one target (a pull request, a merge request, an
-issue's exact transition, a deployment job) and, for merge, publish, and deploy,
-the one commit it covers; the branch moving to a later sha makes the grant no
+Merging, publishing, deploying, and calling a plugin tool its manifest marks
+`consequential` (jira-review's `transition`) are not something a policy rule's
+argument text matches unattended — they are scoped grants, made and revoked one at
+a time in **Settings → Permissions & policies**, beside the signed rules they sit
+under. A grant names one target (a pull request, a merge request, a deployment job,
+or one plugin call, `plugin_call` on `plugin:<plugin>__<tool>:<sha256 of its
+arguments>`, which the call's card names) and, for merge, publish, and deploy, the
+one commit it covers; the branch moving to a later sha makes the grant no
 longer apply, rather than carrying it forward. A publish grant also binds what the
 forge will show: an update's target names the change (`…:change:<n>:prose:<hash>`),
 and the hash covers any separate description or comment. A publish that rewrites

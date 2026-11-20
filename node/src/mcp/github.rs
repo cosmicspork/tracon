@@ -21,8 +21,8 @@ use crate::{broker::SharedBroker, forge::Forge, mcp::CallContext};
 pub const CREDENTIAL: &str = "gh";
 pub const PR_STATUS: &str = "pr_status";
 pub const PR_COMMENT: &str = "pr_comment";
-/// Named for the forge, not `gh issue comment`'s `issue_comment`: that is
-/// Jira's tool, and a channel can hold both (#593).
+/// Named for the forge, not `gh issue comment`'s `issue_comment`: that was
+/// the node's own Jira tool, and a past approval may still name it (#593).
 pub const ISSUE_COMMENT: &str = "github_issue_comment";
 pub const RUN_STATUS: &str = "run_status";
 pub const PR_MERGE: &str = "pr_merge";

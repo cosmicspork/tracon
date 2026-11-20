@@ -291,7 +291,7 @@
     expires_ms: null as number | null,
     reason: '',
   })
-  let grantResource = $state<'repository' | 'deployment' | 'ticket' | 'advanced'>('repository')
+  let grantResource = $state<'repository' | 'deployment' | 'plugin' | 'advanced'>('repository')
   let grantConfirmation = $state<Omit<AuthorityGrant, 'id' | 'revoked_ms' | 'created_ms'> | null>(null)
   let revoking = $state('')
   const grantTargetHint = $derived(
@@ -299,8 +299,8 @@
       ? 'github:owner/repo:pr:42'
       : grantResource === 'deployment'
         ? 'gitlab:group/project:environment:staging'
-        : grantResource === 'ticket'
-          ? 'github:owner/repo:issue:42'
+        : grantResource === 'plugin'
+          ? 'plugin:jira-review__transition:<sha256, from the card>'
           : 'canonical, no-space identifier',
   )
   async function loadAuthority() {
@@ -1171,9 +1171,9 @@
         </div>
       {:else}
         <div class="grid">
-          <label><span>Action</span><select bind:value={grant.action}><option value="merge">merge</option><option value="publish">publish</option><option value="ticket_transition">ticket transition</option><option value="deploy">deploy</option><option value="terminal">terminal</option></select></label>
+          <label><span>Action</span><select bind:value={grant.action}><option value="merge">merge</option><option value="publish">publish</option><option value="plugin_call">plugin call</option><option value="deploy">deploy</option><option value="terminal">terminal</option></select></label>
           <label><span>Decision</span><select bind:value={grant.verdict}><option value="ask">ask · safe default</option><option value="allow">allow</option><option value="deny">deny</option></select></label>
-          <label><span>Resource type</span><select bind:value={grantResource}><option value="repository">pull or merge request</option><option value="deployment">GitLab deployment</option><option value="ticket">ticket transition</option><option value="advanced">advanced canonical target</option></select></label>
+          <label><span>Resource type</span><select bind:value={grantResource}><option value="repository">pull or merge request</option><option value="deployment">GitLab deployment</option><option value="plugin">consequential plugin call</option><option value="advanced">advanced canonical target</option></select></label>
           <label><span>Channel scope</span><input bind:value={grant.channel} placeholder={store.node?.default_channel ?? 'personal'} /></label>
           <label class="wide"><span>Exact target</span><input bind:value={grant.target} placeholder={grantTargetHint} spellcheck="false" /><small>One identifier; the grant matches only this.</small></label>
           <label class="wide"><span>Reason</span><input bind:value={grant.reason} placeholder="why this exact scoped action is needed" /></label>

@@ -934,15 +934,27 @@ read-only account is the boundary. `sql-review` parses a statement only to class
 as a read or a write, which is not a security control, so a misclassified write still
 runs on the read-only account and fails there. Credentials named for consulta (`consulta`,
 `consulta-<profile>`) are renamed once as `serve` starts (`Broker::rename_retired`),
-never over a credential already holding the new name.
+never over a credential already holding the new name. Jira is the `jira-review`
+plugin's the same way: the node has no Jira client, and the channel's `jira` credential
+is what the plugin's manifest declares, so it binds with no rename. The node's old Jira
+tool names (`mcp::RETIRED_JIRA`) are refused with the plugin's name for each, and their
+past approvals are presented as source (`schema::PRESENTATIONS`).
 
-**Consequential verbs are scoped grants, not open tools.** Merge, publish, ticket
-transition, and deploy exist as narrow tools (`mr_merge`/`pr_merge`, `deploy`, a
-ticket transition) rather than being absent, but each dispatch is decided twice:
-the signed policy first — a trusted deny always wins — then a scoped [authority
-grant](#authority-grants) naming that one target and, for merge, publish, and
-deploy, the one revision it covers. A grant that does not exist, or whose target
-moved, is asked, never assumed.
+**Consequential verbs are scoped grants, not open tools.** Merge, publish, deploy, and
+a plugin tool its manifest marks `consequential` (jira-review's `transition`) exist as
+narrow tools rather than being absent, but each dispatch is decided twice: the signed
+policy first — a trusted deny always wins — then a scoped [authority
+grant](#authority-grants) naming that one target and, for merge, publish, and deploy,
+the one revision it covers. A grant that does not exist, or whose target moved, is
+asked, never assumed. A consequential plugin tool is never allowed by name: the bundle
+naming it and the `[[plugin]]` entry's `allow` are both passed over, and only an
+`authority::PLUGIN_CALL` grant decides it unattended. The node cannot read what a
+plugin's arguments act on, so that grant's target is the one call,
+`plugin:<plugin>__<tool>:<sha256 of the canonical arguments without operation_id>`
+(`mcp::plugin_consequential`). As for the node's own verbs, the call needs an
+`operation_id`, which the node adds to the listed schema, strips before the plugin sees
+the arguments, and records the outcome under (`authority_action`), so a retry replays
+it.
 
 **Policy decides every tool call before the broker is touched.** An allow rule names
 the tool exactly; a deny returns its reason to the agent; a tool the bundle does not
@@ -1035,7 +1047,11 @@ declares, and a call is decided by `upstream::decide` under an `Entry` for the p
 the signed policy by the namespaced name, a signed denial dominating, then the
 `[[plugin]]` entry's deny, ask and allow, whose allow widens nothing without a trusted
 bundle; a tool neither names is asked. The manifest's hint is shown and never read by
-the decision, since it is the plugin's own word. Every call carries `_meta.tracon`, a
+the decision, since it is the plugin's own word; its `consequential` mark is read, and
+only ever makes a call harder to run. The policy matches a plugin call's arguments
+without the prose its schema marks (`x-tracon-format`), as it matches the node's own
+comment tools without theirs (`Tools::policy_arguments`), so a comment may name what a
+denial names and is put to the operator instead. Every call carries `_meta.tracon`, a
 caller context signed with the node's identity key (`plugin::context`): it binds the
 call to its tool and canonical arguments, to the instance by the hash of its start
 token, so a process left from an earlier start cannot answer for the new one, and to a
@@ -1072,7 +1088,7 @@ asking), then the store's live grants for that channel, action, and target — a
 grant's own `deny` or `ask` outranks a broader policy `allow`, and no matching
 grant asks. Every dispatch reads grants at that instant, so expiry and revocation
 take effect immediately, never at the next poll. A grant is scoped to one target
-(a pull request, a merge request, an issue's exact transition, a deployment job)
+(a pull request, a merge request, a deployment job, one consequential plugin call)
 and, for merge, publish, and deploy, the one revision it covers; the target
 moving to a later sha drops the grant rather than carrying it forward silently.
 Grants are made and revoked one at a time in Settings → Permissions & policies.

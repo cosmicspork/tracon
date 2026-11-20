@@ -125,6 +125,14 @@ async fn node(channel: &str, entries: Vec<PluginEntry>, installed: bool) -> Node
     Node { h, state }
 }
 
+/// A node still on a signed bundle from before v26, which names no
+/// jira-review read: trusted, and allowing nothing by name.
+fn older_bundle(n: &Node) {
+    let mut policy: tracon::policy::Policy = toml::from_str("version = 25").unwrap();
+    policy.trusted = true;
+    *n.h.tools.policy.write() = policy;
+}
+
 fn allowing() -> Vec<PluginEntry> {
     vec![PluginEntry {
         name: "jira-review".into(),
@@ -189,7 +197,8 @@ impl Node {
 
 #[tokio::test]
 async fn pages_are_the_plugins_called_as_the_operator_and_logged() {
-    let n = node("pages", allowing(), true).await;
+    // The shipped bundle (v26) runs the search with no `[[plugin]]` entry.
+    let n = node("pages", vec![], true).await;
 
     let (status, first) = n.search("channel=pages&jql=project%20%3D%20WRK").await;
     assert_eq!(status, 200, "{first}");
@@ -253,10 +262,23 @@ async fn pages_are_the_plugins_called_as_the_operator_and_logged() {
     for row in &decided {
         assert_eq!(row["tool"], TOOL);
         assert_eq!(row["decision"], "policy_allowed");
-        assert_eq!(row["rule"], "plugin.jira-review.allow");
+        assert_eq!(row["rule"], "brokered-reads");
         assert_eq!(row["outcome"], "ok");
     }
     assert!(n.h.store.list_sessions(None).unwrap().is_empty());
+    n.shutdown().await;
+}
+
+/// On a bundle from before v26, the operator's entry is what lets it run.
+#[tokio::test]
+async fn an_older_bundle_runs_the_search_under_the_operators_entry() {
+    let n = node("entry", allowing(), true).await;
+    older_bundle(&n);
+    let (status, page) = n.search("channel=entry&jql=x").await;
+    assert_eq!(status, 200, "{page}");
+    let decided = n.decided("entry");
+    assert_eq!(decided.len(), 1, "{decided:?}");
+    assert_eq!(decided[0]["rule"], "plugin.jira-review.allow");
     n.shutdown().await;
 }
 
@@ -290,6 +312,7 @@ async fn a_denying_entry_refuses_the_search_before_the_plugin() {
 #[tokio::test]
 async fn a_search_that_would_be_asked_is_refused_naming_the_entry() {
     let n = node("asked", vec![], true).await;
+    older_bundle(&n);
     let (status, body) = n.search("channel=asked&jql=x").await;
     assert_eq!(status, 403, "{body}");
     let text = body.to_string();

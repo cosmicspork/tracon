@@ -255,9 +255,9 @@ async fn a_revoked_grant_stops_being_explained_as_live() {
         "POST",
         "/api/authority/grants",
         Some(json!({
-            "action": "ticket_transition",
+            "action": "plugin_call",
             "verdict": "allow",
-            "target": "jira:WRK-1",
+            "target": "plugin:jira-review__transition:0123abcd",
             "channel": "personal",
             "reason": "the operator moved this one by hand",
         })),
@@ -357,7 +357,7 @@ async fn every_action_a_grant_can_carry_is_explained() {
     h.store.insert_session(&session_row("s1")).unwrap();
     let view = explain(&h, "s1").await;
 
-    for action in ["merge", "publish", "ticket_transition", "deploy"] {
+    for action in ["merge", "publish", "deploy", "plugin_call"] {
         assert!(
             tracon::authority::valid_action(action),
             "{action} is no longer an action the node accepts; fix this list"

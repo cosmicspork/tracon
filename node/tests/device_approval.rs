@@ -323,7 +323,7 @@ async fn approve_with(
 
 fn grant() -> Value {
     json!({
-        "action": "ticket_transition",
+        "action": "deploy",
         "verdict": "deny",
         "target": "PROJ-1",
         "channel": "personal",

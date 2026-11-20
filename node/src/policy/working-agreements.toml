@@ -22,7 +22,7 @@
 # refuses a different bundle under the version it already runs, and offers
 # the shipped one only when its version is higher.
 
-version = 25
+version = 26
 
 # --- 1. The harness and Git's internals stay the node's ---------------------
 # The harness's own configuration is the node's to write, not the session's.
@@ -69,9 +69,9 @@ matches = [
 # Merging and moving a ticket used to be denied here too, by the shell lines
 # an agent ran when it drove `gh`, `glab` and `acli` itself. A session holds no
 # credential for any of them, so those lines fail on their own, and the
-# brokered tools that do merge or transition are asked and need a narrow
-# authority grant (below). Denying them as well only told every session about
-# tools it does not have.
+# brokered tools that merge, deploy or move a ticket are asked unless a narrow
+# authority grant names the call (below). Denying them as well only told every
+# session about tools it does not have.
 
 # --- Inside the boundary -----------------------------------------------------
 # Reading, editing and running commands in the session's own container. What a
@@ -102,10 +102,12 @@ kinds = ["write"]
 # --- Brokered tools ----------------------------------------------------------
 # What the node does on the agent's behalf is decided here too, before the
 # broker is touched. A tool is allowed by name; one not named is asked. The
-# merge, transition, and deploy tools also require narrow authority grants.
-# A grant never overrides a signed policy denial. A plugin's tool is named
-# `<plugin>__<tool>`: SQL is the `sql-review` plugin's, and its reads run on
-# the database's read-only account, which is the boundary.
+# merge and deploy tools, and a plugin tool its manifest marks consequential
+# (jira-review's `transition`), are never allowed by name: each call is asked
+# unless a narrow authority grant names it. A grant never overrides a signed
+# policy denial. A plugin's tool is named `<plugin>__<tool>`: SQL is the
+# `sql-review` plugin's, and its reads run on the database's read-only
+# account, which is the boundary; Jira is the `jira-review` plugin's.
 
 [[rule]]
 id = "brokered-reads"
@@ -133,9 +135,9 @@ matches = [
     "run_status",
     "run_logs",
     "run_wait",
-    "issue",
-    "issue_search",
-    "issue_transitions",
+    "jira-review__search",
+    "jira-review__issue",
+    "jira-review__transitions",
 ]
 
 # Writing to the forge or the tracker — a comment, an edited field, a new

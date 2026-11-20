@@ -270,7 +270,7 @@ async fn confirm(
 
 fn grant() -> Value {
     json!({
-        "action": "ticket_transition",
+        "action": "deploy",
         "verdict": "deny",
         "target": "PROJ-1",
         "channel": "personal",

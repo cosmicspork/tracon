@@ -465,7 +465,10 @@ async fn plugin_entries_decide_as_mcp_server_entries_do() {
     // Its ask holds over the policy's allow.
     asked(&rig.call("fake__sleep", json!({ "ms": 1 })).await);
     // A tool neither names is asked.
-    asked(&rig.call("fake__fail", json!({})).await);
+    asked(
+        &rig.call("fake__fail", json!({ "operation_id": "entries-fail-1" }))
+            .await,
+    );
     assert_eq!(rig.lines("fake", "entries", "calls.jsonl"), 1);
     // The signed policy alone allows a tool of a plugin with no entry.
     echo(&rig.call("open__query", json!({})).await);
@@ -865,5 +868,170 @@ async fn prose_in_a_plugin_format_is_rendered_by_its_owner() {
         .unwrap();
     assert!(rendered.get("rendered").is_none());
     assert!(rendered["render_error"].is_string(), "{rendered}");
+    rig.manager.plugins().shutdown().await;
+}
+
+/// A plugin that declares no credential, with a consequential tool and a
+/// tool that carries prose.
+const MOVE: &str = r#"name = "move"
+version = "1.0.0"
+contract = 1
+exec = ["bin/move"]
+
+[[tool]]
+name = "transition"
+hint = "write"
+consequential = true
+
+[[tool]]
+name = "note"
+hint = "write"
+"#;
+
+fn install_move(rig: &Rig, channel: &str) {
+    support::plugin::install(&rig.store, &rig.state, MOVE);
+    let data = rig.data("move", channel);
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("tools"), "transition\nnote\n").unwrap();
+}
+
+/// What a `plugin_call` grant allowing exactly this call names.
+fn plugin_call_target(tool: &str, args: &Value) -> String {
+    format!("plugin:{tool}:{}", sha256(&args.to_string()))
+}
+
+/// A tool its manifest marks `consequential` takes an `operation_id` the node
+/// keeps and never sends on, is asked however it is allowed by name, runs
+/// unattended only under a grant naming that one call, and is replayed, not
+/// repeated, under the same id.
+#[tokio::test]
+async fn a_consequential_plugin_tool_needs_a_grant_naming_the_call() {
+    let channel = "consequential";
+    let rig = rig(
+        channel,
+        vec![allow("move", &["*"])],
+        allowing(&["move__transition", "move__note"]),
+    );
+    install_move(&rig, channel);
+    // Listed with the node's operation_id, required.
+    let listed = rig.rpc(&rig.ctx, "tools/list", json!({})).await;
+    let transition = listed["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "move__transition")
+        .cloned()
+        .expect("move__transition listed");
+    assert_eq!(
+        transition["inputSchema"]["properties"]["operation_id"]["type"],
+        "string"
+    );
+    assert!(transition["inputSchema"]["required"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("operation_id")));
+    let note = listed["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "move__note")
+        .cloned()
+        .unwrap();
+    assert!(note["inputSchema"]["properties"]
+        .get("operation_id")
+        .is_none());
+
+    // No operation id: refused before anything is asked.
+    let out = rig
+        .call("move__transition", json!({ "sql": "WRK-1 to Done" }))
+        .await;
+    assert_eq!(out["isError"], true, "{out}");
+    assert!(text(&out).contains("operation_id"), "{out}");
+    // The bundle and the entry both allow it by name: it is asked anyway.
+    let call = json!({ "sql": "WRK-1 to Done", "operation_id": "move-wrk-1-done" });
+    let id = asked(&rig.call("move__transition", call.clone()).await);
+    assert_eq!(rig.lines("move", channel, "calls.jsonl"), 0);
+    // Approved, it runs once, without the node's operation_id.
+    let seen = approved_echo(&rig.approve(&id).await);
+    assert_eq!(seen["arguments"], json!({ "sql": "WRK-1 to Done" }));
+    assert_eq!(rig.lines("move", channel, "calls.jsonl"), 1);
+    // The same operation again is asked, and once allowed is the recorded
+    // outcome, not another call.
+    let again = asked(&rig.call("move__transition", call.clone()).await);
+    let replayed = approved_echo(&rig.approve(&again).await);
+    assert_eq!(replayed["arguments"], json!({ "sql": "WRK-1 to Done" }));
+    assert_eq!(rig.lines("move", channel, "calls.jsonl"), 1);
+
+    // A grant naming one call allows that call, under a new id, unattended.
+    let granted = json!({ "sql": "WRK-2 to Done" });
+    let now = tracon::store::now_ms();
+    rig.store
+        .authority_grant_insert(&tracon::store::AuthorityGrantRow {
+            id: "g-move".into(),
+            action: tracon::authority::PLUGIN_CALL.into(),
+            verdict: "allow".into(),
+            target: plugin_call_target("move__transition", &granted),
+            channel: channel.into(),
+            session_id: None,
+            revision: None,
+            expires_ms: None,
+            revoked_ms: None,
+            reason: "under test".into(),
+            created_ms: now,
+        })
+        .unwrap();
+    let mut with_id = granted.clone();
+    with_id["operation_id"] = json!("move-wrk-2-done");
+    let ran = rig.call("move__transition", with_id).await;
+    assert_eq!(echo(&ran)["arguments"], granted);
+    assert_eq!(rig.lines("move", channel, "calls.jsonl"), 2);
+    // Any other call of the tool is not the one granted.
+    asked(
+        &rig.call(
+            "move__transition",
+            json!({ "sql": "WRK-3 to Done", "operation_id": "move-wrk-3-done" }),
+        )
+        .await,
+    );
+    // An ordinary tool of the same plugin runs as its entry allows.
+    echo(&rig.call("move__note", json!({ "sql": "hello" })).await);
+    rig.manager.plugins().shutdown().await;
+}
+
+/// A plugin tool's prose, the arguments its schema marks with a format, is
+/// what the call says rather than what it does: a comment may name what a
+/// denial names and is asked instead. What the call acts on is still matched.
+#[tokio::test]
+async fn a_plugin_tools_marked_prose_is_not_matched_against_a_denial() {
+    let channel = "prose";
+    let mut policy: Policy = toml::from_str(
+        r#"
+        version = 9
+        [[rule]]
+        id = "no-push"
+        verdict = "deny"
+        reason = "Under test."
+        matches = ["git push"]
+        "#,
+    )
+    .unwrap();
+    policy.trusted = true;
+    let rig = rig(channel, vec![], policy);
+    install_move(&rig, channel);
+    std::fs::write(rig.data("move", channel).join("marked"), "").unwrap();
+    rig.listed(&rig.ctx).await;
+    asked(
+        &rig.call(
+            "move__note",
+            json!({ "sql": "Deployed after git push.", "ms": 1 }),
+        )
+        .await,
+    );
+    // Unmarked, the same words are matched.
+    let out = rig
+        .call("move__note", json!({ "sql": "fine", "where": "git push" }))
+        .await;
+    assert_eq!(out["isError"], true, "{out}");
+    assert!(text(&out).contains("no-push"), "{out}");
     rig.manager.plugins().shutdown().await;
 }

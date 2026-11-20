@@ -303,6 +303,7 @@ test("a plugin tool's card says its build, its own word on the tool, and what is
       tool: 'write',
       hint: 'write',
       consequential: true,
+      grant_target: 'plugin:sql-review__write:ab12',
       egress: ['db.internal:1521'],
       credentials: [
         { name: 'sql-read', lend: 'always', bindings: ['sql-read-qa'] },
@@ -316,6 +317,7 @@ test("a plugin tool's card says its build, its own word on the tool, and what is
     { key: 'Says it', value: 'writes, consequential' },
     { key: 'Reaches', value: 'db.internal:1521' },
     { key: 'Lent on allow', value: 'sql-read-qa, sql-write-qa (only because you approve this card)' },
+    { key: 'Grant target', value: 'plugin_call plugin:sql-review__write:ab12' },
   ])
   const quiet = pluginRows({
     plugin: { name: 'open', version: '1.0.0', tool: 'query', hint: 'read', consequential: false, egress: [], credentials: [] },
