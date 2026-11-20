@@ -83,6 +83,8 @@ import type {
   SessionRuntime,
   ManifestView,
   ReviewerView,
+  ForkRequest,
+  ForkResult,
 } from './types'
 
 import type { HtmlBundleSelection } from './html-bundle'
@@ -362,6 +364,10 @@ export const api = {
       '/api/transfers',
       body,
     ),
+  /** Fork a session: a new one on a branch of its own from its branch and
+   * context, here or on another node of its channel; the source carries on. */
+  forkSession: (id: string, body: ForkRequest) =>
+    call<ForkResult>('POST', `/api/sessions/${encodeURIComponent(id)}/fork`, body),
   stageTransfer: (transfer: CandidateTransfer) =>
     call<TransferStage>('POST', '/api/transfers/stage', { transfer }),
   transfers: () => call<{ transfers: TransferInboxItem[] }>('GET', '/api/transfers'),

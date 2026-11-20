@@ -33,14 +33,20 @@ struct Harness {
     app: axum::Router,
     store: Arc<Store>,
     manager: Manager,
+    state: AppState,
 }
 
 impl Harness {
     async fn new(budget: i64) -> Self {
+        Self::new_as(budget, "n1").await
+    }
+
+    /// A harness whose node is `node_id`.
+    async fn new_as(budget: i64, node_id: &str) -> Self {
         let store = Arc::new(Store::open_in_memory().unwrap());
         store
             .put_node(&NodeRow {
-                id: "n1".into(),
+                id: node_id.into(),
                 name: "test".into(),
                 state: "ready".into(),
                 failed_check: None,
@@ -85,25 +91,27 @@ impl Harness {
             store.clone(),
             Bus::new(),
             cfg.clone(),
-            "n1".into(),
+            node_id.into(),
             tools.clone(),
             Default::default(),
             Arc::new(tracon::runner::local::LocalBackend),
         );
-        let app = tracon::http::router(AppState {
+        let state = AppState {
             manager: manager.clone(),
             cfg,
             adapter,
-            node_id: "n1".into(),
+            node_id: node_id.into(),
             tools,
             mesh: None,
             auth: std::sync::Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
             enroll: Default::default(),
-        });
+        };
+        let app = tracon::http::router(state.clone());
         Self {
             app,
             store,
             manager,
+            state,
         }
     }
 
@@ -237,6 +245,7 @@ async fn an_explicit_model_the_channel_cannot_authenticate_is_refused_by_create_
             workspace_id: None,
             parent_session: None,
             continued_from: None,
+            forked_from: None,
             harness: None,
             on_exhaustion: None,
             told_reviews: Vec::new(),
@@ -1025,6 +1034,7 @@ fn insert_session_for_item(store: &Arc<Store>, budget: i64, item: Option<&str>) 
             legacy_ms: None,
             parent_session: None,
             continued_from: None,
+            forked_from: None,
             manifest_digest: None,
             open_turn_tokens: 0,
         })
@@ -2051,6 +2061,7 @@ async fn reconcile_after_restart_closes_paused_sessions_and_keeps_an_external_fe
             legacy_ms: None,
             parent_session: None,
             continued_from: None,
+            forked_from: None,
             manifest_digest: None,
             open_turn_tokens: 0,
         })
@@ -3425,6 +3436,7 @@ async fn orientation_setup(
                 workspace_id: None,
                 parent_session: None,
                 continued_from: None,
+                forked_from: None,
                 harness: None,
                 on_exhaustion: None,
                 told_reviews: Vec::new(),
@@ -3579,6 +3591,7 @@ async fn an_execute_session_starts_on_its_plan_without_a_nudge() {
                 workspace_id: None,
                 parent_session: None,
                 continued_from: None,
+                forked_from: None,
                 harness: None,
                 on_exhaustion: None,
                 told_reviews: Vec::new(),
@@ -4843,6 +4856,7 @@ async fn a_review_sent_back_while_its_continuation_is_made_is_told_once() {
         workspace_id: Some(old.id.clone()),
         parent_session: Some(old.id.clone()),
         continued_from: Some(old.id.clone()),
+        forked_from: None,
         harness: None,
         on_exhaustion: None,
         told_reviews: tracon::session::told_reviews(&carried),
@@ -5229,6 +5243,7 @@ async fn a_harness_that_never_starts_fails_the_session_visibly_and_removes_the_h
                 workspace_id: None,
                 parent_session: None,
                 continued_from: None,
+                forked_from: None,
                 harness: None,
                 on_exhaustion: None,
                 told_reviews: Vec::new(),
@@ -7636,6 +7651,7 @@ async fn a_moved_session_takes_over_a_peers_item_and_project_but_not_its_review(
             workspace_id: Some(format!("transfer-{}", uuid::Uuid::now_v7())),
             parent_session: Some(source.clone()),
             continued_from: Some(source.clone()),
+            forked_from: None,
             harness: None,
             on_exhaustion: None,
             told_reviews: Vec::new(),
@@ -7766,6 +7782,7 @@ async fn importing_a_package_with_history_recreates_the_branch_and_delivers_the_
         tracon::transfers::Extras {
             git: Some(carried),
             source: None,
+            fork: None,
         },
     )
     .unwrap();
@@ -7811,4 +7828,495 @@ async fn importing_a_package_with_history_recreates_the_branch_and_delivers_the_
         "Ada second\nAda first"
     );
     assert_eq!(git(&volume, &["status", "--porcelain"]), "");
+}
+
+/// A git command in `dir` for the fork tests, its stdout trimmed.
+fn fork_git(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{args:?}: {out:?}");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// A source session running here whose workspace is a clone of a forge with
+/// `main`, on `feat/x` with two commits of its own and one file it has not
+/// committed. Returns the session and its head.
+fn forkable_source(
+    h: &Harness,
+    forge_root: &std::path::Path,
+    item: Option<&str>,
+) -> (String, String) {
+    let forge = forge_root.join("forge.git");
+    let seed = forge_root.join("seed");
+    std::fs::create_dir_all(&seed).unwrap();
+    fork_git(
+        forge_root,
+        &["init", "-q", "--bare", "-b", "main", "forge.git"],
+    );
+    fork_git(&seed, &["init", "-q", "-b", "main"]);
+    fork_git(&seed, &["config", "user.email", "ada@example.com"]);
+    fork_git(&seed, &["config", "user.name", "Ada"]);
+    std::fs::write(seed.join("README"), "base\n").unwrap();
+    fork_git(&seed, &["add", "-A"]);
+    fork_git(&seed, &["commit", "-qm", "base"]);
+    fork_git(&seed, &["push", "-q", forge.to_str().unwrap(), "main"]);
+
+    let source = insert_session_for_item(&h.store, 4321, item);
+    let volume = Config::state_dir()
+        .join("local-runtime")
+        .join(tracon::workspace::volume_name(&source));
+    std::fs::create_dir_all(volume.parent().unwrap()).unwrap();
+    fork_git(
+        forge_root,
+        &[
+            "clone",
+            "-q",
+            forge.to_str().unwrap(),
+            volume.to_str().unwrap(),
+        ],
+    );
+    fork_git(&volume, &["config", "user.email", "ada@example.com"]);
+    fork_git(&volume, &["config", "user.name", "Ada"]);
+    fork_git(&volume, &["checkout", "-q", "-b", "feat/x"]);
+    std::fs::write(volume.join("hello.txt"), "hi\n").unwrap();
+    fork_git(&volume, &["add", "-A"]);
+    fork_git(&volume, &["commit", "-qm", "first"]);
+    std::fs::write(volume.join("hello.txt"), "hello\n").unwrap();
+    fork_git(&volume, &["commit", "-qam", "second"]);
+    std::fs::write(volume.join("scratch.txt"), "not committed\n").unwrap();
+    let head = fork_git(&volume, &["rev-parse", "HEAD"]);
+    (source, head)
+}
+
+/// A fork on the same node needs no package: the new session starts at once
+/// on a branch of its own, named from the source's, in a workspace branched
+/// from the source's repository with its commits and its view of the forge,
+/// and only what was committed. It keeps the source's model and budget,
+/// names the source, and is told it is a fork at the head with the note. The
+/// source carries on, keeps its task, and records the fork; the fork is not
+/// part of the source's lineage.
+#[tokio::test]
+async fn a_fork_on_the_same_node_branches_from_the_sources_workspace_and_leaves_it_running() {
+    state::isolate();
+    let h = Harness::new(1000).await;
+    h.store
+        .channel_put(
+            "personal",
+            b"ring",
+            r#"{"phases":{"execute":{"requires_plan":false}}}"#,
+        )
+        .unwrap();
+    let item = tracon::corpus::work::create(
+        &h.store,
+        &Bus::new(),
+        "n1",
+        tracon::corpus::work::NewWork {
+            channel: "personal".into(),
+            project_id: None,
+            title: "the source's task".into(),
+            body: String::new(),
+            deps: vec![],
+            priority: 0,
+            discovered_from: None,
+            discovered_by_session: None,
+            discovered_by_lane: None,
+        },
+    )
+    .unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let (source, head) = forkable_source(&h, tmp.path(), Some(&item.id));
+
+    // The source's own task is not the fork's to take.
+    let (status, refused) = h
+        .call(
+            "POST",
+            &format!("/api/sessions/{source}/fork"),
+            Some(json!({ "work_item_id": item.id })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    // Nor is its branch.
+    let (status, refused) = h
+        .call(
+            "POST",
+            &format!("/api/sessions/{source}/fork"),
+            Some(json!({ "branch": "feat/x" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+
+    let (status, forked) = h
+        .call(
+            "POST",
+            &format!("/api/sessions/{source}/fork"),
+            Some(json!({ "note": "try the streaming approach instead" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{forked}");
+    assert_eq!(forked["delivery"], "local");
+    assert_eq!(forked["head_sha"], json!(head));
+    assert_eq!(forked["branch"], "feat/x-fork");
+    let fork = forked["session"]["id"].as_str().unwrap().to_string();
+    let row = h.store.get_session(&fork).unwrap().unwrap();
+    assert_eq!(row.forked_from.as_deref(), Some(source.as_str()));
+    assert_eq!(row.continued_from, None);
+    assert_eq!(row.parent_session, None);
+    assert_eq!(row.branch, "feat/x-fork");
+    assert_eq!(row.model, "m/a");
+    assert_eq!(row.budget_tokens, 4321);
+    assert_eq!(row.work_item_id, None, "the source keeps its task");
+    let draft = row.draft.unwrap_or_default();
+    assert!(draft.contains("is a fork of"), "{draft}");
+    assert!(draft.contains(&head[..12]), "{draft}");
+    assert!(
+        draft.contains("try the streaming approach instead"),
+        "{draft}"
+    );
+    assert!(draft.contains("which stays with it"), "{draft}");
+
+    // Its workspace: the source's commits on its own branch, the forge's
+    // base as the source had it, and nothing uncommitted.
+    let workspace = forked["workspace_id"].as_str().unwrap();
+    let volume = Config::state_dir()
+        .join("local-runtime")
+        .join(tracon::workspace::volume_name(workspace));
+    assert_eq!(fork_git(&volume, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        fork_git(&volume, &["branch", "--show-current"]),
+        "feat/x-fork"
+    );
+    assert_eq!(
+        fork_git(&volume, &["log", "--format=%an %s"]),
+        "Ada second\nAda first\nAda base"
+    );
+    assert_eq!(
+        fork_git(&volume, &["log", "--format=%s", "origin/HEAD..HEAD"]),
+        "second\nfirst"
+    );
+    assert!(!volume.join("scratch.txt").exists());
+    assert_eq!(fork_git(&volume, &["status", "--porcelain"]), "");
+
+    // The source runs on, holding its task, and records its fork.
+    let was = h.store.get_session(&source).unwrap().unwrap();
+    assert_eq!(was.state, "running");
+    assert_eq!(was.work_item_id.as_deref(), Some(item.id.as_str()));
+    let recorded = h
+        .store
+        .session_events_of_kind(&source, "forked")
+        .unwrap()
+        .pop()
+        .expect("a forked event on the source");
+    assert_eq!(recorded.payload["to_session"], json!(fork));
+    assert_eq!(recorded.payload["to_node"], "n1");
+    assert_eq!(recorded.payload["branch"], "feat/x-fork");
+    assert_eq!(recorded.payload["head_sha"], json!(head));
+    let lineage: Vec<String> = h
+        .store
+        .session_lineage(&source)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(lineage, vec![source.clone()], "a fork continues nothing");
+
+    // A second fork, on a new task of its own, takes the next free branch.
+    let (status, again) = h
+        .call(
+            "POST",
+            &format!("/api/sessions/{source}/fork"),
+            Some(json!({
+                "new_item": { "title": "split off the follow-up" },
+                "budget_tokens": 99,
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{again}");
+    assert_eq!(again["branch"], "feat/x-fork-2");
+    let second = h
+        .store
+        .get_session(again["session"]["id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.budget_tokens, 99);
+    let task = second.work_item_id.expect("a task of its own");
+    assert_ne!(task, item.id);
+    assert_eq!(
+        h.store.work_get(&task).unwrap().unwrap().title,
+        "split off the follow-up"
+    );
+    assert_eq!(second.phase, "execute");
+    let forks = h
+        .store
+        .session_events_of_kind(&source, "forked")
+        .unwrap()
+        .len();
+    assert_eq!(forks, 2);
+}
+
+/// A fork package arrives from the source's node, and this node starts the
+/// fork once it is staged: on its own branch with the source's commits, its
+/// own budget and model, no task of the source's, naming its source, and
+/// told it is a fork at the head with the note. A package from a node other
+/// than its origin, and one that is not a fork, stay staged for an import.
+#[tokio::test]
+async fn a_fork_from_another_node_starts_here_once_its_package_is_staged() {
+    state::isolate();
+    let h = Harness::new(1000).await;
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    fork_git(&source, &["init", "-q", "-b", "work"]);
+    fork_git(&source, &["config", "user.email", "ada@example.com"]);
+    fork_git(&source, &["config", "user.name", "Ada"]);
+    std::fs::write(source.join("hello.txt"), "hi\n").unwrap();
+    fork_git(&source, &["add", "-A"]);
+    fork_git(&source, &["commit", "-qm", "first"]);
+    std::fs::write(source.join("hello.txt"), "hello\n").unwrap();
+    fork_git(&source, &["commit", "-qam", "second"]);
+    let head = fork_git(&source, &["rev-parse", "HEAD"]);
+    let tree = fork_git(&source, &["rev-parse", "HEAD^{tree}"]);
+
+    let identity = proto::keys::Identity::from_seed(&[7u8; 32]);
+    let origin = identity.node_id();
+    h.store.channel_put("personal", b"ring", "{}").unwrap();
+    h.store.node_channel_add(&origin, "personal").unwrap();
+    let candidate_id = format!("{head}:personal");
+    h.store
+        .insert_candidate(&tracon::store::CandidateRow {
+            id: candidate_id.clone(),
+            head_sha: head.clone(),
+            tree_sha: Some(tree),
+            channel: "personal".into(),
+            owner_session_id: None,
+            source_kind: "git".into(),
+            captured_ms: 1,
+            capture_json: r#"{"materialized":true}"#.into(),
+        })
+        .unwrap();
+    h.store
+        .insert_candidate_files(
+            &candidate_id,
+            &[tracon::store::CandidateFile {
+                path: "hello.txt".into(),
+                mode: 0o100644,
+                content: b"hello\n".to_vec(),
+            }],
+        )
+        .unwrap();
+    let carried = tracon::transfers::capture_git("git", &source, &head, "work", None)
+        .await
+        .unwrap();
+    let source_session = uuid::Uuid::now_v7().to_string();
+    let described = tracon::transfers::TransferSource {
+        intent: tracon::transfers::TransferIntent::Fork,
+        session_id: source_session.clone(),
+        phase: "execute".into(),
+        state: "running".into(),
+        model: "m/a".into(),
+        harness: "fake".into(),
+        budget_tokens: 500,
+        tokens_used: 10,
+        work_item_id: Some("the-sources-task".into()),
+        project: None,
+        open_reviews: Vec::new(),
+        last_check: None,
+        waiting_on: Vec::new(),
+    };
+    let package = |target: &str, fork: bool| {
+        tracon::transfers::export_with(
+            &h.store,
+            &identity,
+            &candidate_id,
+            tracon::transfers::ContextSelection {
+                note: "try it without the cache".into(),
+                ..Default::default()
+            },
+            Some(target.into()),
+            tracon::transfers::Extras {
+                git: Some(carried.clone()),
+                source: fork.then(|| described.clone()),
+                fork: fork.then(|| tracon::transfers::TransferFork {
+                    branch: "work-fork".into(),
+                    budget_tokens: Some(4242),
+                    ..Default::default()
+                }),
+            },
+        )
+        .unwrap()
+    };
+
+    // Not a fork: it waits for an operator's import.
+    let plain = package("n1", false);
+    let staged = tracon::transfers::receive_mesh(
+        &h.store,
+        "n1",
+        &origin,
+        "personal",
+        serde_json::to_value(&plain).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        tracon::http::api::start_staged_fork(&h.state, &origin, &staged)
+            .await
+            .ok()
+            .unwrap()
+            .is_none()
+    );
+
+    let transfer = package("n1", true);
+    assert_eq!(transfer.payload.version, 2);
+    let staged = tracon::transfers::receive_mesh(
+        &h.store,
+        "n1",
+        &origin,
+        "personal",
+        serde_json::to_value(&transfer).unwrap(),
+    )
+    .unwrap();
+    // Only the package's origin starts it.
+    assert!(
+        tracon::http::api::start_staged_fork(&h.state, "someone-else", &staged)
+            .await
+            .ok()
+            .unwrap()
+            .is_none()
+    );
+    let started = tracon::http::api::start_staged_fork(&h.state, &origin, &staged)
+        .await
+        .ok()
+        .unwrap()
+        .expect("the fork starts");
+    assert_eq!(started["history"], json!(true));
+    assert_eq!(started["forked_from"], json!(source_session));
+    assert_eq!(started["continued_from"], Value::Null);
+    // No mesh here to tell the origin.
+    assert_eq!(started["source_notice"], "not_sent");
+    assert_eq!(started["source_close"], Value::Null);
+
+    let fork = h
+        .store
+        .get_session(started["session"]["id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(fork.forked_from.as_deref(), Some(source_session.as_str()));
+    assert_eq!(fork.continued_from, None);
+    assert_eq!(fork.branch, "work-fork");
+    assert_eq!(fork.budget_tokens, 4242);
+    assert_eq!(fork.model, "m/a");
+    assert_eq!(fork.work_item_id, None);
+    let draft = fork.draft.unwrap_or_default();
+    assert!(draft.contains("is a fork of"), "{draft}");
+    assert!(draft.contains(&head[..12]), "{draft}");
+    assert!(draft.contains("try it without the cache"), "{draft}");
+    assert!(
+        draft.contains("the-sources-task, which stays with it"),
+        "{draft}"
+    );
+
+    let workspace = started["workspace_id"].as_str().unwrap();
+    let volume = Config::state_dir()
+        .join("local-runtime")
+        .join(tracon::workspace::volume_name(workspace));
+    assert_eq!(fork_git(&volume, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        fork_git(&volume, &["branch", "--show-current"]),
+        "work-fork"
+    );
+    assert_eq!(
+        fork_git(&volume, &["log", "--format=%an %s"]),
+        "Ada second\nAda first"
+    );
+
+    // Started once: the same package delivered again starts nothing.
+    let again = tracon::http::api::start_staged_fork(&h.state, &origin, &staged).await;
+    assert!(again.ok().unwrap().is_none());
+}
+
+/// The fork's node tells the source's node it started the fork: the source
+/// records the fork and keeps running. Only the node the package was sent
+/// to can say so, and saying it twice records it once.
+#[tokio::test]
+async fn the_source_records_a_fork_another_node_started_and_keeps_running() {
+    use tracon::mesh::forward::CommandExecutor;
+    state::isolate();
+    let (identity, _) = tracon::mesh::identity::load_or_generate().unwrap();
+    let me = identity.node_id();
+    let h = Harness::new_as(1000, &me).await;
+    h.store.channel_put("personal", b"ring", "{}").unwrap();
+    // The helper writes a session of node "n1"; this one is this node's.
+    h.store.ensure_peer_node("n1").unwrap();
+    let template = insert_running_session(&h.store, 1000);
+    let mut row = h.store.get_session(&template).unwrap().unwrap();
+    row.id = uuid::Uuid::now_v7().to_string();
+    row.node_id = me.clone();
+    h.store.insert_session(&row).unwrap();
+    let source = row.id.clone();
+
+    let head = "8c4be91f03a2d6e7b5c18c4be91f03a2d6e7b5c1".to_string();
+    let candidate_id = format!("{head}:personal");
+    h.store
+        .insert_candidate(&tracon::store::CandidateRow {
+            id: candidate_id.clone(),
+            head_sha: head.clone(),
+            // The empty tree: the package carries no files.
+            tree_sha: Some("4b825dc642cb6eb9a060e54bf8d69288fbee4904".into()),
+            channel: "personal".into(),
+            owner_session_id: Some(source.clone()),
+            source_kind: "git".into(),
+            captured_ms: 1,
+            capture_json: r#"{"materialized":true}"#.into(),
+        })
+        .unwrap();
+    let described = tracon::transfers::describe_source(
+        &h.store,
+        &row,
+        tracon::transfers::TransferIntent::Fork,
+        Vec::new(),
+    )
+    .unwrap();
+    let transfer = tracon::transfers::export_with(
+        &h.store,
+        &identity,
+        &candidate_id,
+        Default::default(),
+        Some("n2".into()),
+        tracon::transfers::Extras {
+            git: None,
+            source: Some(described),
+            fork: Some(tracon::transfers::TransferFork {
+                branch: "feat/x-fork".into(),
+                ..Default::default()
+            }),
+        },
+    )
+    .unwrap();
+    let told = || proto::frame::Command::TransferImported {
+        transfer_id: transfer.id().to_string(),
+        session_id: "s-fork".into(),
+    };
+    assert!(h.state.execute("n3", told()).await.is_err());
+    let answer = h.state.execute("n2", told()).await.unwrap();
+    assert_eq!(answer["forked"], json!(true));
+    assert_eq!(answer["closed"], json!(false));
+    let still = h.store.get_session(&source).unwrap().unwrap();
+    assert_eq!(still.state, "running");
+    assert_eq!(still.end_reason, None);
+    let recorded = h.store.session_events_of_kind(&source, "forked").unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].payload["to_session"], "s-fork");
+    assert_eq!(recorded[0].payload["to_node"], "n2");
+    assert_eq!(recorded[0].payload["branch"], "feat/x-fork");
+    assert_eq!(recorded[0].payload["head_sha"], json!(head));
+    let again = h.state.execute("n2", told()).await.unwrap();
+    assert_eq!(again["forked"], json!(false));
+    assert_eq!(
+        h.store
+            .session_events_of_kind(&source, "forked")
+            .unwrap()
+            .len(),
+        1
+    );
 }

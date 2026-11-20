@@ -1073,6 +1073,7 @@ pub async fn carry_on(
         workspace_id: Some(workspace_id),
         parent_session: Some(old.id.clone()),
         continued_from: Some(old.id.clone()),
+        forked_from: None,
         harness,
         // The policy the old attempt ran under carries over with the work.
         on_exhaustion: store.exhaustion(&old.id)?.map(|row| row.choice()),

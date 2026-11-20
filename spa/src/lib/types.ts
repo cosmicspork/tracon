@@ -337,8 +337,48 @@ export interface TransferImport {
   work_item_id?: string | null
   project_id?: string | null
   source_close?: 'closed' | 'not_closed' | 'queued' | 'not_sent' | null
+  /** For a fork: the session it was forked from, and whether that one has
+   * recorded the fork yet. */
+  forked_from?: string | null
+  source_notice?: 'recorded' | 'queued' | 'not_sent' | null
   source_session_changed: boolean
 }
+
+/** `POST /api/sessions/{id}/fork`. */
+export interface ForkRequest {
+  /** Absent or this node: the fork starts here. */
+  destination_node?: string
+  branch?: string
+  note?: string
+  documents?: string[]
+  memories?: string[]
+  model?: string
+  budget_tokens?: number
+  work_item_id?: string
+  new_item?: { title: string; body?: string }
+}
+
+export type ForkResult =
+  | {
+      delivery: 'local'
+      destination_node: string
+      session: Session
+      forked_from: string
+      head_sha: string
+      branch: string
+      workspace_id: string
+      work_item_id: string | null
+    }
+  | {
+      delivery: 'mesh_queued'
+      destination_node: string
+      transfer_id: string
+      forked_from: string
+      head_sha: string
+      branch: string
+      pieces: number
+      note: string
+    }
 
 export interface Invite {
   code: string
@@ -425,6 +465,10 @@ export interface Session {
   /** Lineage, when this session was made from another one. */
   parent_session?: string | null
   continued_from?: string | null
+  /** The session this one is a fork of: started on a branch of its own from
+   * that session's, which carried on. Not lineage; that session's forks are
+   * the sessions naming it here. */
+  forked_from?: string | null
   /** The launch manifest this session was staged from. Written once, at
    * launch: a later revision is for the next session, not this one. */
   manifest_digest?: string | null

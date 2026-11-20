@@ -485,6 +485,7 @@ async fn a_meshed_node_refuses_sessions_on_channels_without_keys() {
         workspace_id: None,
         parent_session: None,
         continued_from: None,
+        forked_from: None,
         harness: None,
         on_exhaustion: None,
         told_reviews: Vec::new(),

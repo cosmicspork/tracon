@@ -1836,6 +1836,13 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE approval ADD COLUMN preview_shown_for TEXT;
     "#,
+    // 84: the session a session was forked from (`SessionRow::forked_from`):
+    // a new session on a branch of its own from that session's, which
+    // carried on. Indexed for a session's forks.
+    r#"
+    ALTER TABLE session ADD COLUMN forked_from TEXT;
+    CREATE INDEX session_forked_from ON session(forked_from);
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

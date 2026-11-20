@@ -415,6 +415,38 @@ enum SessionCommand {
     /// Carry on a session a node restart cut off: a new session on the same
     /// workspace, branch and harness, opening with a handoff note.
     Continue { id: String },
+    /// Fork a session: a new session from its branch and context, on a
+    /// branch of its own, here or on another node of its channel, while the
+    /// session itself keeps running with its own task.
+    ///
+    /// The fork opens knowing it is a fork of the session at its head
+    /// commit, with your note. It names its source, and the source records
+    /// the fork.
+    Fork {
+        id: String,
+        /// The node to start the fork on (a name or id). Defaults to this
+        /// node.
+        #[arg(long)]
+        to: Option<String>,
+        /// The fork's branch. Defaults to the source's with `-fork`.
+        #[arg(long)]
+        branch: Option<String>,
+        /// What the fork is for, given to it in its first prompt.
+        #[arg(long, default_value = "")]
+        note: String,
+        /// The model it runs. Defaults to the source's.
+        #[arg(long)]
+        model: Option<String>,
+        /// Its token budget. Defaults to the source's.
+        #[arg(long)]
+        budget: Option<i64>,
+        /// An existing task for the fork (the source keeps its own).
+        #[arg(long, conflicts_with = "new_task")]
+        task: Option<String>,
+        /// Make a new task with this title for the fork.
+        #[arg(long)]
+        new_task: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2692,6 +2724,74 @@ async fn session_command(cmd: SessionCommand) -> Result<()> {
             println!(
                 "\nThe new session opens with a handoff note: it inherits the workspace, \
                  not the old session's context."
+            );
+            Ok(())
+        }
+        SessionCommand::Fork {
+            id,
+            to,
+            branch,
+            note,
+            model,
+            budget,
+            task,
+            new_task,
+        } => {
+            let id = session_resolve(&id).await?;
+            let destination = match to.as_deref().map(str::trim).filter(|to| !to.is_empty()) {
+                Some(to) => Some(
+                    node_resolve(Some("node"), to, None)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|hit| hit.id)
+                        .unwrap_or_else(|| to.to_string()),
+                ),
+                None => None,
+            };
+            let v = node_call(
+                Method::POST,
+                &format!("/api/sessions/{id}/fork"),
+                Some(serde_json::json!({
+                    "destination_node": destination,
+                    "branch": branch,
+                    "note": note,
+                    "model": model,
+                    "budget_tokens": budget,
+                    "work_item_id": task,
+                    "new_item": new_task.map(|title| serde_json::json!({ "title": title })),
+                })),
+                None,
+            )
+            .await?;
+            let head = v["head_sha"].as_str().unwrap_or("");
+            let head = head.get(..12).unwrap_or(head);
+            if v["delivery"] == "local" {
+                println!(
+                    "forked {id} at {head} as {} on {}",
+                    v["session"]["id"].as_str().unwrap_or("?"),
+                    v["branch"].as_str().unwrap_or("?")
+                );
+                println!(
+                    "  model        {}",
+                    v["session"]["model"].as_str().unwrap_or("")
+                );
+                println!(
+                    "  task         {}",
+                    v["work_item_id"].as_str().unwrap_or("none")
+                );
+            } else {
+                println!(
+                    "fork of {id} at {head} on {} queued for {}",
+                    v["branch"].as_str().unwrap_or("?"),
+                    v["destination_node"].as_str().unwrap_or("?")
+                );
+                println!("  transfer     {}", v["transfer_id"].as_str().unwrap_or(""));
+                println!("\nIt starts on that node once the package arrives.");
+            }
+            println!(
+                "\nThe source keeps running with its own task; the fork opens knowing it is a \
+                 fork, with your note."
             );
             Ok(())
         }

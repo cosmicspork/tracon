@@ -327,6 +327,7 @@ test('each 0.29.0 kind reads as a sentence, not its name', () => {
     ['review_taken_over', { review_id: 'r', state: 'revising', from_session: '0b1c2d3e-4f50', to_session: 's2' }, `review sent back for changes taken over · from ${generatedName('session', '0b1c2d3e-4f50')}`],
     ['review_taken_over', { review_id: 'r', state: 'new' }, 'open review taken over'],
     ['moved', { to_session: '0b1c2d3e-4f50', to_node: 'n', transfer_id: 't' }, `moved to another node · continues as ${generatedName('session', '0b1c2d3e-4f50')}`],
+    ['forked', { to_session: '0b1c2d3e-4f50', to_node: 'n', branch: 'feat/x-fork', head_sha: 'abc' }, `forked · as ${generatedName('session', '0b1c2d3e-4f50')} · on feat/x-fork`],
     [
       'review_decision',
       { source: 'operator', review_id: 'r', decision: 'approved', reconciled: 'https://forge.test/pull/7' },

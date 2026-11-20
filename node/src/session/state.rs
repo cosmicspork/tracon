@@ -261,6 +261,10 @@ pub mod event_kind {
     /// (`to_session`, `to_node`, `transfer_id`). The session ends with
     /// `moved` right after.
     pub const MOVED: &str = "moved";
+    /// A fork of the session started (`to_session`, `to_node`, `branch`,
+    /// `head_sha`, and `transfer_id` when it went to another node). The
+    /// session carries on as it was.
+    pub const FORKED: &str = "forked";
     /// A plan session wrote its plan document; the item now carries its slug.
     pub const PLAN_ARTIFACT: &str = "plan_artifact";
     /// The agent showed the operator its work (`id`, `title`, `format`,

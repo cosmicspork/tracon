@@ -74,6 +74,7 @@ fn session_row(id: &str, item: Option<&str>) -> SessionRow {
         legacy_ms: None,
         parent_session: None,
         continued_from: None,
+        forked_from: None,
         manifest_digest: None,
         open_turn_tokens: 0,
     }
