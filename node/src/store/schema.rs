@@ -1815,6 +1815,13 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE approval ADD COLUMN preview_token TEXT;
     "#,
+    // 81: the loopback port a plugin's UI is served on, given the first time
+    // it is opened and kept, so its origin stays the same; kept while the
+    // plugin is removed with its data, and freed when it is purged.
+    r#"
+    ALTER TABLE plugin ADD COLUMN ui_port INTEGER;
+    CREATE UNIQUE INDEX plugin_ui_port ON plugin(ui_port) WHERE ui_port IS NOT NULL;
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

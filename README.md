@@ -1185,6 +1185,27 @@ you type, and the source is one click away. If the owner is removed or cannot an
 the card shows the source. The contract for previews, tokens and formats is the note
 `note-plugins-preview-contract`.
 
+#### Plugin pages
+
+A plugin whose manifest has `[ui]` (an `entry` under `ui/` and a `title`) gets a page in
+the interface's **Plugins** section. Opening it frames the plugin's `ui/` files, which
+the node serves itself, on a loopback port of the plugin's own: the first free one in
+`[plugins] ui_port_first..ui_port_last` (7440 to 7459 by default), kept for the plugin
+so its origin stays the same. The frame's address carries a capability token minted for
+that plugin and channel; the page's scripts run on the plugin's origin, never the
+interface's, and its CSP lets them talk only to that origin. What the page asks of
+`api/...` reaches the plugin's process for the channel as your request: the node passes
+the method, path, body and a few headers, and adds a `tracon-context` header holding the
+same signed caller context a tool call carries, with kind `operator`, tool `tracon/ui`,
+and `arguments_sha256` the hash of `{"body_sha256", "method", "path"}` for that request.
+A page's changes must come from its own origin, and they are logged to the channel's
+external log under `/plugins/<name>/ui`; reads are not logged. `deny = ["ui"]` in the
+plugin's `[[plugin]]` entry (or a signed policy rule denying `<name>__ui`) turns its
+API off; its files are still served. Pages are opened on the node's own machine only:
+the listener is loopback, and reaching it from the phone through the hub comes later.
+Every URL a plugin's page uses must be relative (Vite's `base: './'`, `fetch('api/x')`),
+since it is served under `/t/<token>/`.
+
 #### SQL
 
 The node runs no SQL of its own: the database tools are the
@@ -1980,6 +2001,8 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
 # [plugins]
 # owners = ["cosmicspork"]          # GitHub owners whose releases `tracon plugin add` may install;
                                     # changed at the node only. A local archive is not held to it
+# ui_port_first = 7440              # loopback ports plugin pages are served on, one per plugin with
+# ui_port_last = 7459               # a UI, kept for it once given; needs a restart
 
 # [[plugin]]                        # your settings for an installed plugin, by name; may come before
                                     # the install

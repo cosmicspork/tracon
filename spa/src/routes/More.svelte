@@ -10,6 +10,10 @@
     <svg viewBox="0 0 24 24"><path d="M12 3c-4 2-7 5-7 9a7 7 0 0 0 14 0c0-4-3-7-7-9z" /><path d="M12 8v8M9 12h6" /></svg>
     <span><b>Memories</b><small>What sessions learned, kept for the next one</small></span>
   </a>
+  <a href="/plugins">
+    <svg viewBox="0 0 24 24"><path d="M9 4v4M15 4v4" /><path d="M6 8h12v4a6 6 0 0 1-12 0z" /><path d="M12 18v3" /></svg>
+    <span><b>Plugins</b><small>Pages installed plugins bring, each framed on its own origin</small></span>
+  </a>
   <a href="/usage">
     <svg viewBox="0 0 24 24"><path d="M5 19V11M10 19V5M15 19v-6M20 19V8" /></svg>
     <span><b>Usage</b><small>Sessions, tokens and cost by channel</small></span>

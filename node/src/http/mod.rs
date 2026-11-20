@@ -10,6 +10,7 @@ mod mcp;
 pub mod metrics;
 pub mod passkey;
 mod peer_admin;
+pub mod plugin_ui;
 mod plugins;
 mod policy_admin;
 pub mod preview;
@@ -58,13 +59,21 @@ pub fn router(state: AppState) -> Router {
         .docs
         .preview_origin()
         .expect("validated preview origin");
-    // The one origin this interface is allowed to frame: the node's own
-    // document preview listener, which is sandboxed untrusted HTML.
+    // The origins this interface is allowed to frame: the node's own
+    // document preview listener, which is sandboxed untrusted HTML, and the
+    // plugin UI listeners (`plugin_ui`), each a sandboxed origin of its own.
+    let plugin_ui_origins = state
+        .cfg
+        .plugins
+        .ui_ports()
+        .map(|port| format!("http://127.0.0.1:{port}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     let security_headers = OperatorSecurityHeaders {
         csp: format!(
             "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
              img-src 'self' data: https:; connect-src 'self'; \
-             frame-src {preview_origin}; \
+             frame-src {preview_origin} {plugin_ui_origins}; \
              object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
         )
         .parse()
@@ -318,6 +327,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/plugins/{name}", delete(plugins::remove))
         .route("/api/plugins/{name}/logs", get(plugins::logs))
         .route("/api/plugins/{name}/restart", post(plugins::restart))
+        .route("/api/plugins/{name}/ui", post(plugins::ui))
         .route("/api/repos/recent", get(api::recent_repos))
         .route("/api/repos/branches", get(api::repo_branches))
         .route("/api/repos/clone", post(api::clone_repo))

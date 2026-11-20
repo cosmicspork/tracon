@@ -19,7 +19,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::api::{ApiError, ApiResult, AppState, DEFAULT_CHANNELS};
-use super::auth::AdminAction;
+use super::auth::{AdminAction, Local};
+use super::plugin_ui::{self, UiBinding};
 use crate::config::Config;
 use crate::plugin::install::{self, InstallError, Releases, Staged};
 use crate::plugin::{self as plugins, Ask, Offered};
@@ -64,6 +65,7 @@ fn row_view(s: &AppState, row: &PluginRow) -> Value {
             .collect::<Vec<_>>());
         view["formats"] = json!(b.manifest.formats);
         view["ui"] = json!(b.manifest.ui.is_some());
+        view["ui_title"] = json!(b.manifest.ui.as_ref().map(|u| &u.title));
         view
     });
     let instances: Vec<_> = s
@@ -340,6 +342,7 @@ pub async fn remove(
     .await
     .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
     s.manager.plugins().stop_plugin(&name).await;
+    s.manager.plugin_uis().stop(&name);
     if let Some(id) = expired {
         if let Some(row) = s.store().get_approval(&id)? {
             s.manager.approval_decided(&row, EXPIRED).await;
@@ -423,4 +426,96 @@ pub async fn restart(
         Ok(_) => json!({ "instance": status }),
         Err(error) => json!({ "instance": status, "error": error }),
     }))
+}
+
+#[derive(Deserialize, Default)]
+pub struct UiBody {
+    #[serde(default)]
+    channel: Option<String>,
+}
+
+/// `POST /api/plugins/{name}/ui` with `{channel}`: open the plugin's UI for
+/// that channel's instance (`[session] default_channel` when none is named).
+/// Its listener is started on the port the plugin keeps, if it is not
+/// serving already, and a capability token is minted for the frame:
+/// `{url, origin, title, channel, expires_ms}`. Served on loopback only, so
+/// a caller on another machine is refused rather than handed a URL it
+/// cannot open.
+pub async fn ui(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    Local(local): Local,
+    body: Option<Json<UiBody>>,
+) -> ApiResult<Json<Value>> {
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    if !local {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "plugin UIs are served on the node's loopback only: open them on the node's own machine",
+        ));
+    }
+    let channel = card_channel(&s, body.channel.as_deref())?;
+    let build = s
+        .store()
+        .plugin_get(&name)?
+        .filter(|r| r.state != crate::store::plugins::REMOVED)
+        .and_then(|r| r.active)
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::NOT_FOUND,
+                format!("plugin {name} is not installed on this node"),
+            )
+        })?;
+    let Some(ui) = build.manifest.ui.clone() else {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            format!("plugin {name} has no UI"),
+        ));
+    };
+    let offered = {
+        let broker = s.tools.broker.read().unwrap();
+        plugins::offered(&build.manifest, &broker.available_to(&channel, &s.node_id))
+    };
+    if !offered {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            format!(
+                "plugin {name} is not offered on channel {channel}: it needs a credential it declares bound to the channel"
+            ),
+        ));
+    }
+    let live = s.cfg.live();
+    let ports = live.plugins.ui_ports();
+    let Some(port) = s.store().plugin_ui_port(&name, ports.clone())? else {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "every port in plugins.ui_port_first..ui_port_last ({}..{}) is another plugin's; widen the range in node.toml",
+                ports.start(),
+                ports.end()
+            ),
+        ));
+    };
+    s.manager
+        .plugin_uis()
+        .listen(&name, port, || plugin_ui::router(s.clone(), &name, port))
+        .map_err(|e| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("plugin {name}'s UI cannot listen on 127.0.0.1:{port}: {e}"),
+            )
+        })?;
+    let (token, expires_ms) = s.manager.plugin_uis().mint(UiBinding {
+        plugin: name.clone(),
+        channel: channel.clone(),
+    });
+    let origin = format!("http://127.0.0.1:{port}");
+    let entry = ui.entry.trim_start_matches("ui/");
+    Ok(Json(json!({
+        "url": format!("{origin}/t/{token}/{entry}"),
+        "origin": origin,
+        "title": ui.title,
+        "channel": channel,
+        "expires_ms": expires_ms,
+    })))
 }

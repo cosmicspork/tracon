@@ -23,6 +23,7 @@ import type {
   McpServerStatus,
   PluginInstance,
   PluginSummary,
+  PluginUiOpen,
   DocKindInfo,
   Document,
   EnrollStatus,
@@ -478,6 +479,9 @@ export const api = {
       'GET',
       `/api/plugins/${encodeURIComponent(name)}/logs?channel=${encodeURIComponent(channel)}&lines=${lines}`,
     ),
+  /** Open a plugin's UI for `channel` (the node's default when empty): a fresh capability URL to frame. */
+  pluginUi: (name: string, channel: string) =>
+    call<PluginUiOpen>('POST', `/api/plugins/${encodeURIComponent(name)}/ui`, channel ? { channel } : {}),
   /** Start a plugin's instance afresh, its backoff cleared; answered once ready or failed. */
   pluginRestart: (name: string, channel: string) =>
     call<{ instance: PluginInstance; error?: string }>('POST', `/api/plugins/${encodeURIComponent(name)}/restart`, {

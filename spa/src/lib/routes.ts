@@ -67,9 +67,11 @@ export function settingsSection(hash: string): SettingsSection {
  */
 export type Screen =
   | { name: 'doc-preview'; channel: string; slug: string }
-  | { name: 'review' | 'approval' | 'promotion' | 'session' | 'task'; id: string }
+  | { name: 'review' | 'approval' | 'promotion' | 'session' | 'task' | 'plugin'; id: string }
   | { name: 'doc'; channel: string; slug: string; edit: boolean }
-  | { name: 'sessions' | 'enroll' | 'usage' | 'tasks' | 'more' | 'docs' | 'memories' | 'settings' | 'home' }
+  | {
+      name: 'sessions' | 'enroll' | 'usage' | 'tasks' | 'more' | 'docs' | 'memories' | 'plugins' | 'settings' | 'home'
+    }
 
 /** Every screen's name, so a test can hold the screen audit to all of them. */
 export const SCREENS = Object.keys({
@@ -87,6 +89,8 @@ export const SCREENS = Object.keys({
   doc: 1,
   docs: 1,
   memories: 1,
+  plugins: 1,
+  plugin: 1,
   settings: 1,
   home: 1,
 } satisfies Record<Screen['name'], 1>) as Screen['name'][]
@@ -115,6 +119,9 @@ export function screenFor(path: string): Screen {
   if (doc) return { name: 'doc', channel: doc[1], slug: doc[2], edit: Boolean(doc[3]) }
   if (path.startsWith('/docs')) return { name: 'docs' }
   if (path.startsWith('/memories')) return { name: 'memories' }
+  const plugin = path.match(/^\/plugins\/([^/]+)\/?$/)
+  if (plugin) return { name: 'plugin', id: decodeURIComponent(plugin[1]) }
+  if (path === '/plugins') return { name: 'plugins' }
   if (path === '/settings') return { name: 'settings' }
   return { name: 'home' }
 }

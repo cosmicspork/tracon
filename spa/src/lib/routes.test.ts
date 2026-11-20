@@ -90,6 +90,10 @@ test('each address opens its screen, the first match winning', () => {
   expect(screenFor('/docs/personal/guide-x/preview')).toEqual({ name: 'doc-preview', channel: 'personal', slug: 'guide-x' })
   expect(screenFor('/docs')).toEqual({ name: 'docs' })
   expect(screenFor('/memories')).toEqual({ name: 'memories' })
+  expect(screenFor('/plugins')).toEqual({ name: 'plugins' })
+  expect(screenFor('/plugins/hoja')).toEqual({ name: 'plugin', id: 'hoja' })
+  expect(screenFor('/plugins/hoja/')).toEqual({ name: 'plugin', id: 'hoja' })
+  expect(screenFor('/plugins/hoja/x')).toEqual({ name: 'home' })
   // Nothing renders at an address no screen claims but the home.
   expect(screenFor('/sessions/')).toEqual({ name: 'home' })
   expect(screenFor('/nowhere')).toEqual({ name: 'home' })

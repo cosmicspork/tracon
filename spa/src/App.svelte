@@ -5,6 +5,8 @@
   import DocPreview from './routes/DocPreview.svelte'
   import Docs from './routes/Docs.svelte'
   import Memories from './routes/Memories.svelte'
+  import Plugin from './routes/Plugin.svelte'
+  import Plugins from './routes/Plugins.svelte'
   import Metrics from './routes/Metrics.svelte'
   import Work from './routes/Work.svelte'
   import WorkItem from './routes/WorkItem.svelte'
@@ -108,6 +110,8 @@
         ? 'docs'
         : router.path.startsWith('/memories')
           ? 'memories'
+          : router.path.startsWith('/plugins')
+            ? 'plugins'
           : router.path.startsWith('/tasks')
             ? 'tasks'
             : router.path.startsWith('/sessions')
@@ -119,7 +123,7 @@
                   : 'home'
   )
   /** The phone's More tab stands for every entry its bar has no room for. */
-  const more = $derived(['memories', 'usage', 'settings', 'more'].includes(nav))
+  const more = $derived(['memories', 'plugins', 'usage', 'settings', 'more'].includes(nav))
   const cannotRun = $derived(servingBanner(store.nodes))
   const hubDown = $derived(store.mesh?.hub.state === 'unreachable')
   const staleVersion = $derived(
@@ -185,6 +189,10 @@
     <a href="/memories" class:on={nav === 'memories'}>
       <svg viewBox="0 0 24 24"><path d="M12 3c-4 2-7 5-7 9a7 7 0 0 0 14 0c0-4-3-7-7-9z" /><path d="M12 8v8M9 12h6" /></svg>
       <span class="lbl">Memories</span>
+    </a>
+    <a href="/plugins" class:on={nav === 'plugins'}>
+      <svg viewBox="0 0 24 24"><path d="M9 4v4M15 4v4" /><path d="M6 8h12v4a6 6 0 0 1-12 0z" /><path d="M12 18v3" /></svg>
+      <span class="lbl">Plugins</span>
     </a>
     <a href="/usage" class:on={nav === 'usage'}>
       <svg viewBox="0 0 24 24"><path d="M5 19V11M10 19V5M15 19v-6M20 19V8" /></svg>
@@ -272,6 +280,10 @@
       <Docs />
     {:else if screen.name === 'memories'}
       <Memories />
+    {:else if screen.name === 'plugins'}
+      <Plugins />
+    {:else if screen.name === 'plugin'}
+      <Plugin name={screen.id} />
     {:else if screen.name === 'settings'}
       <Settings />
     {:else}

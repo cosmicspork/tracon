@@ -254,6 +254,43 @@ impl Store {
         Ok(n == 1)
     }
 
+    /// The loopback port `name`'s UI is served on: the one it was given,
+    /// while that is still in `ports`, or else the lowest port in `ports` no
+    /// other plugin holds, kept for it from now on. `None` when `name` is not
+    /// a plugin here, or every port in `ports` is held.
+    pub fn plugin_ui_port(
+        &self,
+        name: &str,
+        ports: std::ops::RangeInclusive<u16>,
+    ) -> Result<Option<u16>> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let Some(held) = tx
+            .query_row("SELECT ui_port FROM plugin WHERE name=?1", [name], |r| {
+                r.get::<_, Option<u16>>(0)
+            })
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        if let Some(port) = held.filter(|p| ports.contains(p)) {
+            return Ok(Some(port));
+        }
+        let taken: std::collections::BTreeSet<u16> = tx
+            .prepare("SELECT ui_port FROM plugin WHERE ui_port IS NOT NULL AND name<>?1")?
+            .query_map([name], |r| r.get::<_, u16>(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        let Some(port) = ports.into_iter().find(|p| !taken.contains(p)) else {
+            return Ok(None);
+        };
+        tx.execute(
+            "UPDATE plugin SET ui_port=?2 WHERE name=?1",
+            rusqlite::params![name, port],
+        )?;
+        tx.commit()?;
+        Ok(Some(port))
+    }
+
     /// Every format an installed or pending plugin declares, with its owner.
     pub fn plugin_formats_owned(&self) -> Result<Vec<(String, String)>> {
         let mut owned = Vec::new();
@@ -276,6 +313,30 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_ui_port_is_given_once_and_kept_until_purged() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(store.plugin_ui_port("a", 7440..=7441).unwrap(), None);
+        for (name, card) in [("a", "c1"), ("b", "c2"), ("c", "c3")] {
+            store
+                .plugin_stage_pending(name, "o/r", &pending("1.0.0", card, card))
+                .unwrap();
+        }
+        assert_eq!(store.plugin_ui_port("b", 7440..=7441).unwrap(), Some(7440));
+        assert_eq!(store.plugin_ui_port("a", 7440..=7441).unwrap(), Some(7441));
+        // Every port is held.
+        assert_eq!(store.plugin_ui_port("c", 7440..=7441).unwrap(), None);
+        // Asked again, each keeps its own.
+        assert_eq!(store.plugin_ui_port("b", 7440..=7441).unwrap(), Some(7440));
+        // Removed with its data, it keeps its port; purged, it frees it.
+        store.plugin_remove("a", false).unwrap();
+        assert_eq!(store.plugin_ui_port("c", 7440..=7441).unwrap(), None);
+        store.plugin_remove("a", true).unwrap();
+        assert_eq!(store.plugin_ui_port("c", 7440..=7441).unwrap(), Some(7441));
+        // A range that no longer holds its port gives it another.
+        assert_eq!(store.plugin_ui_port("b", 7500..=7501).unwrap(), Some(7500));
+    }
 
     fn build(version: &str, digest: &str) -> Build {
         let mut manifest = Manifest::parse(crate::plugin::manifest::tests::EXAMPLE).unwrap();
