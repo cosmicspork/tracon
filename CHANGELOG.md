@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.56.0](https://github.com/cosmicspork/tracon/compare/v0.55.0...v0.56.0) (2026-11-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* **node:** remove Jira from the node, consequential tools from the manifest, bundle v26 ([#1012](https://github.com/cosmicspork/tracon/issues/1012))
+* **node:** SQL leaves the node for the sql-review plugin, policy bundle v25 ([#1003](https://github.com/cosmicspork/tracon/issues/1003))
+
+### Features
+
+* **kubernetes:** place sandbox and check pods off the node's machine ([#1010](https://github.com/cosmicspork/tracon/issues/1010)) ([d99d69d](https://github.com/cosmicspork/tracon/commit/d99d69d97f1ecd2bdf3c472f1cb9d938fcec9fcf))
+* **node,spa:** per-plugin UI origin, operator API proxy and a Plugins section ([#1013](https://github.com/cosmicspork/tracon/issues/1013)) ([e3a731e](https://github.com/cosmicspork/tracon/commit/e3a731e61338f3c3861581cd84a07bf4ddaf2409))
+* **node,spa:** preview an operator's edit before it can be allowed ([#1028](https://github.com/cosmicspork/tracon/issues/1028)) ([12a0ede](https://github.com/cosmicspork/tracon/commit/12a0ede56bfc337cfb5a2bcd6fadb95dff178a7f))
+* **node,spa:** show how each plugin tool is answered in plugin ls and Settings ([#1027](https://github.com/cosmicspork/tracon/issues/1027)) ([4c75d0a](https://github.com/cosmicspork/tracon/commit/4c75d0a7d806ffab459a24b37d9e4fc170291e6c))
+* **node:** broker plugin tools under policy ([#997](https://github.com/cosmicspork/tracon/issues/997)) ([eb8ba39](https://github.com/cosmicspork/tracon/commit/eb8ba39bf3b42d24367f8dca90bdd67213624752))
+* **node:** count plugins in the data inventory ([#1022](https://github.com/cosmicspork/tracon/issues/1022)) ([423ec16](https://github.com/cosmicspork/tracon/commit/423ec167ca8f7ba56196c4b8b51010d46da0a43e))
+* **node:** place a review's checks like sessions, DigitalOcean included ([#1011](https://github.com/cosmicspork/tracon/issues/1011)) ([bd1cb29](https://github.com/cosmicspork/tracon/commit/bd1cb2914ec5d9c9d05f2328028ec9c944278527))
+* **node:** plugin previews and formats, staleness enforced at dispatch ([#1006](https://github.com/cosmicspork/tracon/issues/1006)) ([d25ea19](https://github.com/cosmicspork/tracon/commit/d25ea19c0d13873f0fc0d05999610dbd83ddaaba))
+* **node:** plugin-to-node socket for approvals, notify and plugin-to-plugin calls ([#1020](https://github.com/cosmicspork/tracon/issues/1020)) ([9b4ca33](https://github.com/cosmicspork/tracon/commit/9b4ca3387c748484df9b0cc1f4ef65b976b334c4))
+* **node:** queue a review's checks when resources are short, one at a time ([#1004](https://github.com/cosmicspork/tracon/issues/1004)) ([244785a](https://github.com/cosmicspork/tracon/commit/244785ae2415fcd0014a5cf77bee3ca6529e6ae8))
+* **node:** remove Jira from the node, consequential tools from the manifest, bundle v26 ([#1012](https://github.com/cosmicspork/tracon/issues/1012)) ([02b683a](https://github.com/cosmicspork/tracon/commit/02b683a8ea7e57bf372ee0f183a98dd55c8a2858))
+* **node:** search Jira for the workboard through the jira-review plugin ([#1005](https://github.com/cosmicspork/tracon/issues/1005)) ([83ea29f](https://github.com/cosmicspork/tracon/commit/83ea29f65333603e46c768a10d590742b7717116))
+* **node:** SQL leaves the node for the sql-review plugin, policy bundle v25 ([#1003](https://github.com/cosmicspork/tracon/issues/1003)) ([c33603e](https://github.com/cosmicspork/tracon/commit/c33603e813296ebde7e203bb7efe5e2b8562f7ec))
+* **spa:** render word diff cards ([#1025](https://github.com/cosmicspork/tracon/issues/1025)) ([ee32bfb](https://github.com/cosmicspork/tracon/commit/ee32bfb3f3b4883fba7830207b8d9fb359043597))
+
+
+### Bug Fixes
+
+* **attest:** follow bundle_url when an attestation leaves its bundle out ([#1023](https://github.com/cosmicspork/tracon/issues/1023)) ([34d9442](https://github.com/cosmicspork/tracon/commit/34d944294b24a7b5c629d0309b7aa15fac97705a))
+* **node:** accept a *.domain egress entry in a plugin manifest ([#1016](https://github.com/cosmicspork/tracon/issues/1016)) ([3dbf5c1](https://github.com/cosmicspork/tracon/commit/3dbf5c1660c68217b791693c24706320242dd7bc))
+* **node:** end plugin processes a node killed outright left running ([#1024](https://github.com/cosmicspork/tracon/issues/1024)) ([ee1a620](https://github.com/cosmicspork/tracon/commit/ee1a620236809a8b11baeba88e60da864bf2446a))
+* **node:** keep a staged plugin build from being pruned by another add's offer ([#1021](https://github.com/cosmicspork/tracon/issues/1021)) ([6dad2f7](https://github.com/cosmicspork/tracon/commit/6dad2f74b06cd5335bd6fc46ac5c0db2a7cb0c09))
+* **node:** run a review's checks on the snapshot's warm cache, not an empty one ([#1009](https://github.com/cosmicspork/tracon/issues/1009)) ([48b678a](https://github.com/cosmicspork/tracon/commit/48b678ab1447688ecbf9e16d2d22d364297d25a9))
+* **node:** run an approved plugin call only on the build its card showed ([#1026](https://github.com/cosmicspork/tracon/issues/1026)) ([9c6e707](https://github.com/cosmicspork/tracon/commit/9c6e7070e7e2f3713b284077b0dbf71c2e93e5b0))
+
 ## [0.55.0](https://github.com/cosmicspork/tracon/compare/v0.54.0...v0.55.0) (2026-11-19)
 
 
