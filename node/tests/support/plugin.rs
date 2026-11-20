@@ -15,7 +15,8 @@ use tracon::{
     store::{plugins::Pending, Store},
 };
 
-/// The digest every build installed here is recorded under.
+/// The digest every build installed here is recorded under, unless one is
+/// installed with [`install_build`].
 pub const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 /// Install the fake plugin as the plugin `manifest_text` names, active as
@@ -24,11 +25,18 @@ pub const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef012345
 /// written there is left as it is: rewriting it under a running instance
 /// would change what it was checked against.
 pub fn install(store: &Store, state: &Path, manifest_text: &str) {
+    install_build(store, state, manifest_text, DIGEST);
+}
+
+/// [`install`], as the build whose archive digest is `digest`: installing
+/// another over an active one is an approved update.
+#[allow(dead_code)]
+pub fn install_build(store: &Store, state: &Path, manifest_text: &str, digest: &str) {
     static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let manifest = Manifest::parse(manifest_text).unwrap();
     let name = manifest.name.clone();
     let version = manifest.version.clone();
-    let dir = install::build_dir(state, &name, &version, DIGEST);
+    let dir = install::build_dir(state, &name, &version, digest);
     let tree_digest = {
         let _one = WRITING.lock().unwrap_or_else(|p| p.into_inner());
         let file = dir.join("tracon-plugin.toml");
@@ -51,18 +59,18 @@ pub fn install(store: &Store, state: &Path, manifest_text: &str) {
             &Pending {
                 build: tracon::store::plugins::Build {
                     version,
-                    digest: DIGEST.into(),
+                    digest: digest.into(),
                     tree_digest,
                     manifest,
                 },
-                approval_id: format!("card-{name}"),
+                approval_id: format!("card-{name}-{digest}"),
                 tag: None,
                 changelog: None,
             },
         )
         .unwrap();
     store
-        .plugin_activate_pending(&name, &format!("card-{name}"))
+        .plugin_activate_pending(&name, &format!("card-{name}-{digest}"))
         .unwrap()
         .unwrap();
 }
