@@ -260,6 +260,35 @@ struct PluginTool {
     entry: Option<crate::config::PluginEntry>,
 }
 
+/// What [`Tools::plugin_call_parts`] gathers for one request to a plugin.
+struct PluginCallParts {
+    lease: crate::plugin::supervisor::Lease,
+    credentials: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    caller: crate::plugin::context::CallerId,
+    timeout: std::time::Duration,
+}
+
+/// The method a plugin's card asks for what a call would do.
+const PREVIEW_METHOD: &str = "tracon/preview";
+
+/// How long a card's preview may hold up opening it, at most.
+const PREVIEW_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// The largest preview body a card shows.
+const PREVIEW_BODY_MAX: usize = 256 << 10;
+
+/// The largest preview token the node keeps, as the contract bounds it.
+const PREVIEW_TOKEN_MAX: usize = 4096;
+
+/// The method a plugin converts text in a format it owns with.
+const CONVERT_METHOD: &str = "tracon/format/convert";
+
+/// How long a plugin's `tracon/format/convert` may take.
+const CONVERT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The largest text a conversion is taken from or answers.
+const CONVERT_MAX: usize = 1 << 20;
+
 /// How long starting and listing one plugin may hold up a `tools/list`.
 const PLUGIN_LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -724,18 +753,16 @@ impl Tools {
         Ok(())
     }
 
-    /// Call a plugin's tool that is allowed, by policy or by the operator
-    /// (`approval`), holding its instance while the call runs. It is lent
-    /// the credentials its running build declares that the channel binds,
-    /// in its signed caller context; one lent only on approval is lent only
-    /// to an approved call.
-    async fn call_plugin(
+    /// What a request to a plugin's tool for `ctx` is made with: its
+    /// instance, held while the request runs; the credentials its running
+    /// build declares that the channel binds, one lent only on approval
+    /// only when `approved`; who is calling; and how long it may take.
+    async fn plugin_call_parts(
         &self,
         ctx: &CallContext,
         pt: &PluginTool,
-        args: &Value,
-        approval: Option<&str>,
-    ) -> Result<Value, String> {
+        approved: bool,
+    ) -> Result<PluginCallParts, String> {
         use crate::plugin::{context, manifest::Lend};
         let access = self
             .session
@@ -762,7 +789,7 @@ impl Tools {
                 else {
                     continue;
                 };
-                if declared.lend == Lend::Approved && approval.is_none() {
+                if declared.lend == Lend::Approved && !approved {
                     continue;
                 }
                 let env = broker
@@ -799,15 +826,49 @@ impl Tools {
                 .map(crate::config::PluginEntry::timeout_secs)
                 .unwrap_or(crate::config::PluginEntry::DEFAULT_TIMEOUT_SECS),
         );
+        Ok(PluginCallParts {
+            lease,
+            credentials,
+            caller,
+            timeout,
+        })
+    }
+
+    /// Call a plugin's tool that is allowed, by policy or by the operator
+    /// (`approval`), holding its instance while the call runs. It is lent
+    /// the credentials its running build declares that the channel binds,
+    /// in its signed caller context; one lent only on approval is lent only
+    /// to an approved call, which also carries the token of the preview its
+    /// card showed, for the plugin to apply against.
+    async fn call_plugin(
+        &self,
+        ctx: &CallContext,
+        pt: &PluginTool,
+        args: &Value,
+        approval: Option<&str>,
+    ) -> Result<Value, String> {
+        use crate::plugin::context;
+        let access = self
+            .session
+            .get()
+            .ok_or("plugins are not available on this node")?;
+        let parts = self.plugin_call_parts(ctx, pt, approval.is_some()).await?;
+        let preview_token = match approval {
+            Some(id) => access.store.preview_token(id).map_err(|e| e.to_string())?,
+            None => None,
+        };
+        let supervisor = access.manager.plugins();
+        let endpoint = &parts.lease.endpoint;
         let draft = context::Draft {
             plugin: &pt.plugin,
             token: &endpoint.token,
             tool: &pt.tool,
             arguments: args,
-            caller: &caller,
+            caller: &parts.caller,
             channel: &ctx.channel,
             approval_id: approval,
-            credentials: &credentials,
+            preview_token: preview_token.as_deref(),
+            credentials: &parts.credentials,
         };
         self.upstream
             .call_plugin(
@@ -817,7 +878,7 @@ impl Tools {
                 &pt.tool,
                 args,
                 || context::build(&draft, crate::store::now_ms(), |b| supervisor.sign(b)),
-                timeout,
+                parts.timeout,
             )
             .await
     }
@@ -932,6 +993,108 @@ impl Tools {
             .map_err(OperatorCallError::Tool)
     }
 
+    /// What a waiting call to a plugin's tool would do, in the plugin's own
+    /// words: `tracon/preview`, asked when its card opens, as an asked call
+    /// would be made (no approval, nothing lent only on approval). The
+    /// token it returns is kept with the approval for the approved dispatch
+    /// to carry, and only its hash reaches the page. A plugin that has no
+    /// previews leaves the generic card (`None`); one that refuses is shown
+    /// refusing, and the call can still be decided.
+    pub async fn approval_preview(
+        &self,
+        approval: &crate::store::approvals::ApprovalRow,
+        args: &Value,
+    ) -> Option<Value> {
+        use crate::plugin::context;
+        let access = self.session.get()?;
+        if approval.state != crate::store::approvals::PENDING
+            || approval.node_id != access.manager.node_id()
+        {
+            return None;
+        }
+        let pt = self.plugin_tool(&approval.tool)?;
+        let keep = |token: Option<&str>| {
+            if let Err(error) = access.store.set_preview_token(&approval.id, token) {
+                tracing::warn!(approval = %approval.id, %error, "a preview's token was not kept");
+            }
+        };
+        let refused = |error: String| {
+            tracing::info!(approval = %approval.id, plugin = %pt.plugin, %error, "a plugin refused a preview");
+            json!({ "preview": { "status": "refused", "error": error } })
+        };
+        let ctx = self.approval_call_context(access, approval);
+        let parts = match self.plugin_call_parts(&ctx, &pt, false).await {
+            Ok(parts) => parts,
+            Err(error) => {
+                keep(None);
+                return Some(refused(error));
+            }
+        };
+        let supervisor = access.manager.plugins();
+        let endpoint = &parts.lease.endpoint;
+        let draft = context::Draft {
+            plugin: &pt.plugin,
+            token: &endpoint.token,
+            tool: &pt.tool,
+            arguments: args,
+            caller: &parts.caller,
+            channel: &approval.channel,
+            approval_id: None,
+            preview_token: None,
+            credentials: &parts.credentials,
+        };
+        let label = format!("plugin {}", pt.plugin);
+        let answer = self
+            .upstream
+            .plugin_request(
+                endpoint,
+                &pt.plugin,
+                &approval.channel,
+                PREVIEW_METHOD,
+                || {
+                    let meta =
+                        context::build(&draft, crate::store::now_ms(), |b| supervisor.sign(b))
+                            .map_err(upstream::Failure::NotSent)?;
+                    Ok(json!({
+                        "name": pt.tool,
+                        "arguments": args,
+                        "_meta": { "tracon": meta },
+                    }))
+                },
+                parts.timeout.min(PREVIEW_TIMEOUT),
+            )
+            .await;
+        let result = match answer {
+            Ok(result) => result,
+            Err(upstream::Failure::Rpc { code, .. }) if code == upstream::METHOD_NOT_FOUND => {
+                keep(None);
+                return None;
+            }
+            Err(failure) => {
+                keep(None);
+                return Some(refused(failure.describe(&label)));
+            }
+        };
+        match preview_shape(&result) {
+            Ok(preview) => {
+                keep(preview.token);
+                Some(json!({ "preview": {
+                    "status": "shown",
+                    "previewable": preview.previewable,
+                    "summary": preview.summary,
+                    "body": preview.body,
+                    "token_sha256": preview.token.map(preview_hash),
+                }}))
+            }
+            Err(error) => {
+                keep(None);
+                Some(refused(format!(
+                    "{label} answered a preview the contract does not allow: {error}"
+                )))
+            }
+        }
+    }
+
     /// The input schema a plugin's running build gave one of its tools.
     pub fn plugin_schema(&self, name: &str) -> Option<Value> {
         let pt = self.plugin_tool(name)?;
@@ -940,6 +1103,127 @@ impl Tools {
             .then(|| listed.tools.iter().find(|t| t.remote == pt.tool))
             .flatten()
             .map(|t| t.input_schema.clone())
+    }
+
+    /// How a card for one of a plugin's tools is laid out, from the schema
+    /// its running build listed for it ([`schema::plugin_presentation`]).
+    pub fn plugin_presentation(&self, name: &str) -> Option<schema::Presentation> {
+        schema::plugin_presentation(name, &self.plugin_schema(name)?)
+    }
+
+    /// The layout of a held call's card: the node's own for its tools, the
+    /// plugin's marked arguments for a plugin's.
+    pub fn presentation_for(&self, tool: &str, args: &Value) -> schema::Presentation {
+        self.plugin_presentation(tool)
+            .unwrap_or_else(|| schema::presentation_for(tool, args))
+    }
+
+    /// `text` converted by the plugin that owns `format`, on `channel`: to
+    /// Markdown from `format`, or (`to` = `format`) back from Markdown. A pure
+    /// function of the text: no caller context, nothing lent.
+    pub async fn convert(
+        &self,
+        channel: &str,
+        format: &str,
+        to: &str,
+        text: &str,
+    ) -> Result<String, String> {
+        let access = self
+            .session
+            .get()
+            .ok_or("plugins are not available on this node")?;
+        if text.len() > CONVERT_MAX {
+            return Err(format!("the text is larger than {CONVERT_MAX} bytes"));
+        }
+        let owner = access
+            .store
+            .plugins_list()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|row| row.state != crate::store::plugins::REMOVED)
+            .find(|row| {
+                row.active
+                    .as_ref()
+                    .is_some_and(|b| b.manifest.formats.iter().any(|f| f == format))
+            })
+            .map(|row| row.name)
+            .ok_or_else(|| format!("no installed plugin owns the format {format}"))?;
+        let lease = access
+            .manager
+            .plugins()
+            .lease(&owner, channel)
+            .await
+            .map_err(|e| format!("plugin {owner} cannot be reached: {e}"))?;
+        let params = json!({ "format": format, "to": to, "text": text });
+        let result = self
+            .upstream
+            .plugin_request(
+                &lease.endpoint,
+                &owner,
+                channel,
+                CONVERT_METHOD,
+                || Ok(params.clone()),
+                CONVERT_TIMEOUT,
+            )
+            .await
+            .map_err(|f| f.describe(&format!("plugin {owner}")))?;
+        let converted = result["text"]
+            .as_str()
+            .ok_or_else(|| format!("plugin {owner} answered a conversion with no text"))?;
+        if converted.len() > CONVERT_MAX {
+            return Err(format!(
+                "plugin {owner} answered a conversion larger than {CONVERT_MAX} bytes"
+            ));
+        }
+        Ok(converted.to_string())
+    }
+
+    /// A held call's prose, rendered as Markdown by the plugin that owns the
+    /// format it is written in: `rendered` by field, and `rendered_items`,
+    /// by field, for each item of an item list. A failure is `render_error`,
+    /// and the page shows the source, which stays in the arguments either way.
+    pub async fn approval_rendering(
+        &self,
+        channel: &str,
+        shown: &schema::Presentation,
+        args: &Value,
+    ) -> Option<Value> {
+        let format = shown.plugin_format.as_deref()?;
+        let render = |fields: &Value| {
+            let fields = fields.clone();
+            async move {
+                let mut out = serde_json::Map::new();
+                for field in &shown.prose_fields {
+                    if let Some(text) = fields.get(field.as_ref()).and_then(Value::as_str) {
+                        let md = self.convert(channel, format, "markdown", text).await?;
+                        out.insert(field.to_string(), Value::from(md));
+                    }
+                }
+                Ok::<_, String>(Value::Object(out))
+            }
+        };
+        let outcome = async {
+            let rendered = render(args).await?;
+            let items = match shown.item_list.as_deref().and_then(|l| args.get(l)) {
+                Some(Value::Array(items)) => {
+                    let mut out = Vec::with_capacity(items.len());
+                    for item in items {
+                        out.push(render(item).await?);
+                    }
+                    Some(out)
+                }
+                _ => None,
+            };
+            Ok::<_, String>((rendered, items))
+        }
+        .await;
+        Some(match outcome {
+            Ok((rendered, items)) => json!({ "rendered": rendered, "rendered_items": items }),
+            Err(error) => {
+                tracing::info!(%format, %error, "a card's prose was not rendered");
+                json!({ "render_error": error })
+            }
+        })
     }
 
     /// What a card for a plugin's tool shows besides the call: the build,
@@ -2289,33 +2573,35 @@ impl Tools {
         summarize(name, args)
     }
 
-    /// What a held call would change that only a remote service can say, read
-    /// when the page opens, for [`approval_context`]'s fields: a Jira edit is
-    /// shown against the issue as it is now, and marked `stale` when the
-    /// issue changed after the call was asked. A slow or failed read leaves
-    /// the page without it rather than holding the page.
-    pub async fn remote_approval_context(
+    /// Who an approval's call runs as: the session that asked, or the
+    /// channel's external caller. An approval an attached external session
+    /// asked for before calls went session-less runs as the channel's
+    /// external caller now.
+    fn approval_call_context(
         &self,
+        access: &SessionAccess,
         approval: &crate::store::approvals::ApprovalRow,
-        args: &Value,
-    ) -> Option<Value> {
-        if approval.tool != jira::ISSUE_UPDATE {
-            return None;
+    ) -> CallContext {
+        let session = approval.session_id.clone().filter(|id| {
+            !access
+                .store
+                .get_session(id)
+                .ok()
+                .flatten()
+                .is_some_and(|s| s.harness_id == crate::session::external::HARNESS_ID)
+        });
+        let caller = match session {
+            Some(session_id) => Caller::Session(session_id),
+            None => Caller::External {
+                lane: approval.lane.clone(),
+                wait_budget: None,
+            },
+        };
+        CallContext {
+            caller,
+            channel: approval.channel.clone(),
+            node_id: approval.node_id.clone(),
         }
-        let key = args.get("key")?.as_str()?;
-        let read = jira::current_fields(
-            &self.broker,
-            &self.http,
-            &approval.channel,
-            &approval.node_id,
-            key,
-        );
-        let mut issue = tokio::time::timeout(TRANSITION_LOOKUP, read).await.ok()??;
-        let changed = issue["updated"]
-            .as_str()
-            .and_then(crate::session::exhaustion::rfc3339_ms);
-        issue["stale"] = json!(changed.is_some_and(|ms| ms > approval.created_ms));
-        Some(json!({ "issue": issue }))
     }
 
     /// The operator's answer to a plugin's install card (`crate::plugin`):
@@ -2439,6 +2725,20 @@ impl Tools {
                      Open it again to see the call as it stands",
                 ));
             }
+        }
+        // The answer names the plugin preview it was given against. A card
+        // opened again since (another tab) previewed anew, perhaps against a
+        // target that moved: what this operator read is not what would apply.
+        let mut preview_token = None;
+        if let Some(read) = answer.preview_hash.as_deref().map(str::trim) {
+            let kept = access.store.preview_token(id)?;
+            if kept.as_deref().map(preview_hash).as_deref() != Some(read) {
+                return Err(rejected(
+                    "the preview changed since you read it; nothing was decided. \
+                     Open it again",
+                ));
+            }
+            preview_token = kept;
         }
         let by = answer.by.clone();
         let said = |text: &Option<String>| {
@@ -2598,28 +2898,7 @@ impl Tools {
                 return Err(SessionError::Unfit(errors));
             }
         }
-        // An approval an attached external session asked for before calls
-        // went session-less runs as the channel's external caller now.
-        let session = approval.session_id.clone().filter(|id| {
-            !access
-                .store
-                .get_session(id)
-                .ok()
-                .flatten()
-                .is_some_and(|s| s.harness_id == crate::session::external::HARNESS_ID)
-        });
-        let caller = match session {
-            Some(session_id) => Caller::Session(session_id),
-            None => Caller::External {
-                lane: approval.lane.clone(),
-                wait_budget: None,
-            },
-        };
-        let ctx = CallContext {
-            caller,
-            channel: approval.channel.clone(),
-            node_id: approval.node_id.clone(),
-        };
+        let ctx = self.approval_call_context(access, &approval);
         // What runs is the operator's rewrite, and a refusal is final whoever
         // wrote the words.
         let edited = answer.arguments.as_ref().map(Value::to_string);
@@ -2632,6 +2911,7 @@ impl Tools {
             edited_arguments: edited.as_deref(),
             note: notes.as_deref(),
             bound_to: Some(&approval.arguments),
+            preview_token: preview_token.as_deref(),
             ..Default::default()
         };
         if !access.store.decide_approval(id, &decision)? {
@@ -2819,6 +3099,27 @@ impl Tools {
         };
         let (state, result, reason) = match &outcome {
             Ok(value) => (SUCCEEDED, Some(value.to_string()), None),
+            // The plugin applied against what the card showed and found it
+            // moved: nothing was sent, so the call failed, and is called again.
+            Err(error) if error.starts_with(upstream::STALE) => {
+                let tool = access
+                    .store
+                    .get_approval(id)
+                    .ok()
+                    .flatten()
+                    .map(|a| a.tool)
+                    .unwrap_or_else(|| "the tool".into());
+                let said = &error[upstream::STALE.len()..];
+                (
+                    FAILED,
+                    None,
+                    Some(format!(
+                        "{}{said}. What the card showed has changed since; nothing was sent. \
+                         Call {tool} again for a fresh card.",
+                        crate::store::approvals::STALE_REASON
+                    )),
+                )
+            }
             Err(error) if remote_outcome_unknown(error) => (UNCERTAIN, None, Some(error.clone())),
             Err(error) => (FAILED, None, Some(error.clone())),
         };
@@ -3344,6 +3645,47 @@ fn canonical_consequential_payload(name: &str, args: &Value) -> Option<Value> {
 fn request_key(name: &str, args: &Value) -> String {
     let payload = canonical_consequential_payload(name, args).unwrap_or_else(|| args.clone());
     crate::corpus::hash_body(&format!("{name}\u{1f}{payload}"))
+}
+
+/// What a plugin's `tracon/preview` answered, as the contract allows it.
+struct PluginPreview<'a> {
+    previewable: bool,
+    summary: &'a str,
+    body: &'a str,
+    token: Option<&'a str>,
+}
+
+/// `result` read as a preview, or why it is not one.
+fn preview_shape(result: &Value) -> Result<PluginPreview<'_>, String> {
+    let previewable = result["previewable"]
+        .as_bool()
+        .ok_or("previewable is not a boolean")?;
+    let summary = result["summary"]
+        .as_str()
+        .ok_or("summary is not a string")?;
+    let body = result["body"].as_str().ok_or("body is not a string")?;
+    if body.len() > PREVIEW_BODY_MAX {
+        return Err(format!("body is larger than {PREVIEW_BODY_MAX} bytes"));
+    }
+    let token = match &result["token"] {
+        Value::Null => None,
+        Value::String(t) if t.len() <= PREVIEW_TOKEN_MAX => Some(t.as_str()),
+        Value::String(_) => return Err(format!("token is larger than {PREVIEW_TOKEN_MAX} bytes")),
+        _ => return Err("token is neither a string nor null".into()),
+    };
+    Ok(PluginPreview {
+        previewable,
+        summary,
+        body,
+        // A call it cannot preview has nothing to apply against.
+        token: token.filter(|_| previewable),
+    })
+}
+
+/// What a page is shown of a preview's token, and sends back with its
+/// answer to say which preview it read: the token's SHA-256.
+pub fn preview_hash(token: &str) -> String {
+    crate::corpus::hash_body(token)
 }
 
 /// Only a failed mutation transport or server error has an unknown remote

@@ -11,7 +11,8 @@ import {
   pluginRows,
   problemsByField,
   amendsNothing,
-  issueChanges,
+  previewHash,
+  renderedProse,
   replacement,
   resultRows,
   schemaFor,
@@ -109,6 +110,8 @@ test('a settled approval says what became of it', () => {
   expect(outcome('pending')).toBeNull()
   expect(outcome('changes_requested')).toBe('Changes requested · nothing ran')
   expect(outcome('something_new')).toBe('something_new')
+  expect(outcome('failed', 'stale: plugin jira: the issue moved')).toBe('Allowed · failed · stale, nothing was sent')
+  expect(outcome('failed', 'plugin jira: no')).toBe('Allowed · it failed')
 })
 
 test('locked fields lead the form, in schema order', () => {
@@ -215,36 +218,30 @@ test('a memory amendment diffs the draft against the memory as it stands, and sa
   expect(amendsNothing({})).toBe(false)
 })
 
-test('a Jira edit diffs the description and the fields it sets against the issue as it stands', () => {
-  const issue = {
-    key: 'WRK-1',
-    summary: 'Port the feed',
-    description: 'h2. Goal\n* one\n* two',
-    priority: 'High',
-    labels: ['etl'],
-    parent: 'WRK-10',
-    updated: '2026-10-07T07:00:00.000-0500',
-    stale: false,
+test('an answer names the preview it was read with, when there is one', () => {
+  const shown = { status: 'shown', previewable: true, summary: 's', body: 'b', token_sha256: 'h1' } as const
+  expect(previewHash({ preview: shown })).toBe('h1')
+  expect(previewHash({ preview: { ...shown, previewable: false, token_sha256: null } })).toBeUndefined()
+  expect(previewHash({ preview: { status: 'refused', error: 'no' } })).toBeUndefined()
+  expect(previewHash({})).toBeUndefined()
+})
+
+test("prose in a plugin's format is shown as its owner rendered it, while it is the text rendered", () => {
+  const details = {
+    plugin_format: 'jira_wiki',
+    arguments: { description: 'h1. T', issues: [{ description: '*b*' }] },
+    item_list: 'issues',
+    rendered: { description: '# T' },
+    rendered_items: [{ description: '**b**' }],
   }
-  const edit = replacement({ issue }, { key: 'WRK-1', description: 'h2. Goal\n* one\n* three' })!
-  expect(edit).toMatchObject({
-    key: 'description',
-    subject: 'issue',
-    label: 'edit · WRK-1 “Port the feed”',
-    added: 1,
-    removed: 1,
-  })
-  // An edit that leaves the description alone has nothing to diff.
-  expect(replacement({ issue }, { key: 'WRK-1', summary: 'x' })).toBeNull()
-  expect(
-    issueChanges({ issue }, { key: 'WRK-1', summary: 'Port the feeds', priority: 'High', labels: ['etl', 'nead'] }),
-  ).toEqual([
-    { key: 'summary', before: 'Port the feed', after: 'Port the feeds' },
-    { key: 'labels', before: 'etl', after: 'etl, nead' },
-  ])
-  // The same labels in another order are no change: Jira answers them sorted.
-  expect(issueChanges({ issue: { ...issue, labels: ['etl', 'nead'] } }, { labels: ['nead', 'etl'] })).toEqual([])
-  expect(issueChanges({}, { summary: 'x' })).toEqual([])
+  expect(renderedProse(details, 'description', 'h1. T')).toBe('# T')
+  expect(renderedProse(details, 'description', '*b*', 0)).toBe('**b**')
+  // The operator's draft is not what was rendered: the source, until it is.
+  expect(renderedProse(details, 'description', 'h1. U')).toBeNull()
+  // Nothing rendered (the owner is gone): the source.
+  expect(renderedProse({ ...details, rendered: undefined }, 'description', 'h1. T')).toBeNull()
+  // A format the node renders is the text itself.
+  expect(renderedProse({ ...details, plugin_format: null }, 'description', '# x')).toBe('# x')
 })
 
 test('each item of a list argument is a section: its fields in schema order, and its prose to render', () => {

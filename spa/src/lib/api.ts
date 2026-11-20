@@ -269,6 +269,22 @@ async function upload<T>(path: string, body: FormData): Promise<T> {
   return json as T
 }
 
+/** The body of an answer to a card, as the node reads it. */
+export function answerBody(
+  optionId: string,
+  args: Record<string, unknown> | undefined,
+  said: { reason?: string; notes?: string; argumentsHash?: string; previewHash?: string },
+) {
+  return {
+    option_id: optionId,
+    arguments: args,
+    reason: said.reason,
+    notes: said.notes,
+    arguments_hash: said.argumentsHash,
+    preview_hash: said.previewHash,
+  }
+}
+
 export const api = {
   login: (token: string) => call<{ ok: boolean }>('POST', '/api/login', { token }),
   logout: () => call<{ ok: boolean }>('POST', '/api/logout'),
@@ -605,26 +621,25 @@ export const api = {
   /**
    * `reason` goes back with a rejection, `notes` with a request for changes.
    * `argumentsHash` names the call as it was read: an approval that no longer
-   * holds those arguments is not decided (409).
+   * holds those arguments is not decided (409). `previewHash` names the
+   * plugin preview the card showed, so the answer applies only while the
+   * node keeps that preview.
    */
   answer: (
     permissionId: string,
     optionId: string,
     args?: Record<string, unknown>,
-    said: { reason?: string; notes?: string; argumentsHash?: string } = {},
+    said: { reason?: string; notes?: string; argumentsHash?: string; previewHash?: string } = {},
   ) =>
-    call<void>('POST', `/api/permissions/${permissionId}/answer`, {
-      option_id: optionId,
-      arguments: args,
-      reason: said.reason,
-      notes: said.notes,
-      arguments_hash: said.argumentsHash,
-    }),
+    call<void>('POST', `/api/permissions/${permissionId}/answer`, answerBody(optionId, args, said)),
   /** Every call the session made to the node's tools and who decided each. */
   sessionAudit: (id: string) => call<SessionAudit>('GET', `/api/sessions/${id}/audit`),
   /** Reading an approval claims it, as opening a review does. */
   approval: (id: string) => call<ApprovalDetails>('GET', `/api/approvals/${id}`),
   releaseApproval: (id: string) => call<void>('POST', `/api/approvals/${id}/release`),
+  /** `text` in the approval's plugin format, rendered as Markdown by the plugin that owns it. */
+  renderApproval: (id: string, text: string) =>
+    call<{ markdown: string }>('POST', `/api/approvals/${id}/render`, { text }),
   // Documents: read by slug, search by content, edit with the hash last read.
   docs: (channel?: string, kind?: string, archived = false) => {
     const q = new URLSearchParams()

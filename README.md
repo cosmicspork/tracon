@@ -1152,6 +1152,30 @@ is ever in the plugin's environment. The card for a plugin's tool shows its vers
 hint, the hosts it says it reaches, and what an approved run is lent. A call holds its
 process for as long as it runs, so the idle stop counts from the end of the last call.
 
+When the card for a plugin's tool opens, the node asks the plugin what the call would
+do (`tracon/preview`), with a context made as for an asked call: no approval, and
+nothing marked `lend = "approved"`. The card shows the preview's heading and its body
+(a diff, a table, or the statement, as Markdown), marked "not previewable" when the
+plugin cannot show the effect. A plugin that has no previews gets the generic card. One
+that refuses is shown refusing, and you can still decide. The preview's token, the
+version it was taken against, stays with the node; the page is shown only its hash,
+and your answer sends that hash back, so an answer read from an older preview (another
+tab opened since) decides nothing. An approved call carries the token as
+`preview_token` in its signed context. The plugin applies against it and, if what it
+names has moved since, refuses with `data.stale` and sends nothing. The approval then
+fails as stale (not uncertain), and `approval_status` says `stale: true`, so the agent
+calls again for a fresh card. The preview reflects the arguments as asked: an edit is
+applied against the same token but not previewed again.
+
+A tool's string argument may be marked `"x-tracon-format": "<format>"` in its input
+schema, naming `markdown` or a format a plugin owns (manifest `formats`). Marked
+arguments are the card's prose; marked ones inside an array's items make it the card's
+list of items. Prose in a plugin's format is shown as that plugin renders it to Markdown
+(`tracon/format/convert`, a pure function lent nothing), an edit is rendered again as
+you type, and the source is one click away. If the owner is removed or cannot answer,
+the card shows the source. The contract for previews, tokens and formats is the note
+`note-plugins-preview-contract`.
+
 #### SQL
 
 The node runs no SQL of its own: the database tools are the

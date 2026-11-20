@@ -1235,7 +1235,8 @@ async fn opening_an_approval_claims_it_and_leaving_releases_it() {
     assert_eq!(status, StatusCode::OK, "{v}");
     assert_eq!(v["approval"]["id"], id.as_str());
     assert_eq!(v["arguments"]["summary"], "Rotate the keys");
-    assert_eq!(v["format"], "jira_wiki");
+    assert_eq!(v["format"], "markdown");
+    assert_eq!(v["plugin_format"], "jira_wiki");
     assert_eq!(v["prose_fields"], json!(["description"]));
     assert_eq!(
         v["locked_fields"],
@@ -2359,41 +2360,20 @@ async fn a_held_transition_is_titled_by_the_status_it_leads_to() {
     assert_eq!(*seen.lock().unwrap(), ["GET", "GET"]);
 }
 
-/// A held Jira edit is shown against the issue as Jira has it when the page
-/// opens, and marked stale when the issue changed after it was asked.
+/// A held node-native Jira edit gets the generic card: its description is
+/// wiki markup a plugin would render, and with no plugin owning `jira_wiki`
+/// the page is told so and shows it as the node renders it. The live "as it
+/// is now" diff went with the generic plugin preview path. Nothing asks Jira
+/// when the page opens: the plugin's preview is what reads the issue now.
 #[tokio::test]
-async fn a_held_issue_edit_is_shown_against_the_issue_as_it_is_now() {
+async fn a_held_issue_edit_gets_the_generic_card_until_a_plugin_owns_its_format() {
     state::isolate();
     let h = harness_with(enabled()).await;
-    let issue = |key: &str, updated: &str| {
-        json!({ "key": key, "fields": {
-            "summary": "Port the feed", "description": "h2. Goal\n* one\n* two",
-            "priority": { "name": "High" }, "labels": ["etl"],
-            "parent": { "key": "WRK-10", "fields": { "summary": "Epic" } },
-            "updated": updated,
-        } })
-    };
-    let (old, new) = (
-        issue("WRK-1", "2020-01-02T03:04:05.000-0500"),
-        issue("WRK-2", "2099-01-02T03:04:05.000-0500"),
-    );
-    let app = axum::Router::new()
-        .route(
-            "/rest/api/2/issue/WRK-1",
-            axum::routing::get(move || async move { axum::Json(old) }),
-        )
-        .route(
-            "/rest/api/2/issue/WRK-2",
-            axum::routing::get(move || async move { axum::Json(new) }),
-        );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     h.tools.broker.write().unwrap().put(
         "jira",
         tracon::broker::Credential {
             env: [
-                ("JIRA_URL".to_string(), format!("http://{addr}")),
+                ("JIRA_URL".to_string(), "http://127.0.0.1:1".to_string()),
                 ("JIRA_EMAIL".to_string(), "me@example.com".to_string()),
                 ("JIRA_TOKEN".to_string(), "t".to_string()),
             ]
@@ -2403,22 +2383,22 @@ async fn a_held_issue_edit_is_shown_against_the_issue_as_it_is_now() {
             ..Default::default()
         },
     );
-
-    let edit = |key: &str| json!({ "key": key, "description": "h2. Goal\n* one\n* three" });
-    let id = ask(&h, "issue_update", edit("WRK-1")).await;
+    let edit = json!({ "key": "WRK-1", "description": "h2. Goal\n* one\n* three" });
+    let id = ask(&h, "issue_update", edit).await;
     let (status, v) = call(&h.operator, "GET", &format!("/api/approvals/{id}"), None).await;
     assert_eq!(status, StatusCode::OK, "{v}");
-    assert_eq!(
-        v["issue"],
-        json!({ "key": "WRK-1", "summary": "Port the feed",
-                "description": "h2. Goal\n* one\n* two", "priority": "High",
-                "labels": ["etl"], "parent": "WRK-10",
-                "updated": "2020-01-02T03:04:05.000-0500", "stale": false })
+    assert!(v.get("issue").is_none(), "{v}");
+    assert!(v.get("preview").is_none(), "{v}");
+    assert_eq!(v["format"], "markdown");
+    assert_eq!(v["plugin_format"], "jira_wiki");
+    assert!(v.get("rendered").is_none(), "{v}");
+    assert!(
+        v["render_error"]
+            .as_str()
+            .unwrap()
+            .contains("no installed plugin owns the format jira_wiki"),
+        "{v}"
     );
-
-    let id = ask(&h, "issue_update", edit("WRK-2")).await;
-    let (_, v) = call(&h.operator, "GET", &format!("/api/approvals/{id}"), None).await;
-    assert_eq!(v["issue"]["stale"], true, "{v}");
 }
 
 /// Seed an item on `channel` through the operator's API and return its id.

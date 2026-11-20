@@ -393,6 +393,7 @@ impl Node {
                     reason: Some("not on DigitalOcean today".into()),
                     notes: None,
                     arguments_hash: None,
+                    preview_hash: None,
                     by: Some("operator (test)".into()),
                 },
             )
@@ -439,6 +440,7 @@ async fn placement_asks_overflows_and_keeps_client_work_home() {
                 reason: None,
                 notes: None,
                 arguments_hash: None,
+                preview_hash: None,
                 by: None,
             },
         )

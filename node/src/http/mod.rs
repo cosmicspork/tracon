@@ -392,6 +392,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/permissions/{id}/answer", post(api::answer_permission))
         .route("/api/approvals/{id}", get(api::get_approval))
         .route("/api/approvals/{id}/release", post(api::release_approval))
+        .route("/api/approvals/{id}/render", post(api::render_approval))
         .route("/api/operator/questions", get(api::operator_questions))
         .route(
             "/api/operator/questions/{id}/answer",

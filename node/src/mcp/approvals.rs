@@ -7,7 +7,9 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use super::{wait::wait_secs, CallContext, SessionAccess};
-use crate::store::approvals::{ApprovalRow, CHANGES_REQUESTED, PENDING, REJECTED, RUNNING};
+use crate::store::approvals::{
+    ApprovalRow, CHANGES_REQUESTED, FAILED, PENDING, REJECTED, RUNNING, STALE_REASON,
+};
 
 pub const STATUS: &str = "approval_status";
 
@@ -20,8 +22,9 @@ pub fn definitions() -> Vec<Value> {
              when the operator allows it, the node runs it and keeps the result here. Pass \
              `approval_id`, or `approval_ids` to wait on several: the call returns as soon \
              as any of them is decided, with every id's state — `still_waiting`, `running`, \
-             `succeeded` with the tool's result, `failed` or `uncertain` with the reason, \
-             `rejected` with the operator's reason, `changes_requested` with their `notes`, \
+             `succeeded` with the tool's result, `failed` or `uncertain` with the reason \
+             (`failed` with `stale: true` when what the operator saw had moved before it \
+             ran: nothing was sent, so call the tool again for a fresh card), `rejected` with the operator's reason, `changes_requested` with their `notes`, \
              or `expired`. A rejected or changes_requested call did not run: revise it as \
              the operator said and call the tool again, which asks anew. {}",
             super::wait::pointer()
@@ -110,6 +113,13 @@ fn ids(args: &Value) -> Result<Vec<String>, String> {
         .ok_or_else(|| "approval_id or approval_ids is required".into())
 }
 
+/// Failed because the plugin found what the card showed had moved.
+fn is_stale(a: &ApprovalRow) -> bool {
+    a.reason
+        .as_deref()
+        .is_some_and(|r| r.starts_with(STALE_REASON))
+}
+
 /// What `approval_status` says of one approval.
 pub(crate) fn view(a: &ApprovalRow) -> Value {
     let state = if a.state == PENDING {
@@ -142,10 +152,51 @@ pub(crate) fn view(a: &ApprovalRow) -> Value {
              their reason leaves room, revise it and call {} again.",
             a.tool
         )),
+        FAILED if is_stale(a) => {
+            out["stale"] = Value::from(true);
+            Some(format!(
+                "What the operator saw changed before this call ran, and the plugin sent \
+                 nothing. Call {} again for a fresh card.",
+                a.tool
+            ))
+        }
         _ => None,
     };
     if let Some(message) = message {
         out["message"] = Value::from(message);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn failed(reason: &str) -> ApprovalRow {
+        serde_json::from_value(json!({
+            "id": "a1", "channel": "personal", "session_id": null, "node_id": "n1",
+            "lane": null, "tool": "fake__query", "arguments": "{}", "request_key": "k",
+            "title": "t", "state": FAILED, "answer_option_id": "allow_once",
+            "edited_arguments": null, "result": null, "reason": reason,
+            "operator_note": null, "claimed_ms": null, "created_ms": 1, "decided_ms": 2,
+            "finished_ms": 3, "expires_ms": 4,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_call_failed_as_stale_says_to_call_again() {
+        let stale = view(&failed(
+            "stale: plugin fake: the issue moved. Call it again.",
+        ));
+        assert_eq!(stale["state"], "failed");
+        assert_eq!(stale["stale"], true);
+        assert!(stale["message"]
+            .as_str()
+            .unwrap()
+            .contains("Call fake__query again"));
+        let other = view(&failed("plugin fake: no"));
+        assert!(other.get("stale").is_none());
+        assert!(other.get("message").is_none());
+    }
 }

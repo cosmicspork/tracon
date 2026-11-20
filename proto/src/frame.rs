@@ -388,6 +388,11 @@ pub enum Command {
         /// peer sends none and is decided as before.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         arguments_hash: Option<String>,
+        /// The hash of the plugin preview's token the operator's card
+        /// showed, so the owner decides only while it keeps that preview.
+        /// Additive like `arguments_hash`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preview_hash: Option<String>,
     },
     /// Answer an operator question the receiver holds: a choice it offered,
     /// the operator's own words, or both. The owner answers it as a local
@@ -958,6 +963,7 @@ mod tests {
             reason: None,
             notes: None,
             arguments_hash: None,
+            preview_hash: None,
         };
         assert_eq!(serde_json::to_value(&plain).unwrap(), old);
         let said = Command::Answer {
@@ -967,6 +973,7 @@ mod tests {
             reason: None,
             notes: Some("shorter".into()),
             arguments_hash: None,
+            preview_hash: None,
         };
         assert_eq!(serde_json::to_value(&said).unwrap()["notes"], "shorter");
     }

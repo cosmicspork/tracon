@@ -7,6 +7,7 @@
 //! The validator covers the part of JSON Schema the tool definitions use:
 //! `type`, `properties`, `required`, `items`, `enum`, `minimum` and `maximum`.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -41,22 +42,32 @@ impl std::fmt::Display for FieldError {
 /// How a held call is laid out for the operator, per tool.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Presentation {
-    /// `jira_wiki`, `markdown`, or `source`: how the prose fields are
-    /// written. `source` is shown as text and never rendered — what an HTML
-    /// `doc_write` carries, which runs only in the preview origin's sandbox.
+    /// `markdown` or `source`: how the page shows the prose fields. `source`
+    /// is shown as text and never rendered — what an HTML `doc_write`
+    /// carries, which runs only in the preview origin's sandbox.
     pub format: &'static str,
+    /// The format the prose fields are written in when it is one a plugin
+    /// owns, not the node (`jira_wiki`): the page renders them through the
+    /// owner's `tracon/format/convert`, and the source stays one click away.
+    pub plugin_format: Option<String>,
     /// The arguments that carry long prose, to render as a document.
-    pub prose_fields: Vec<&'static str>,
+    pub prose_fields: Vec<Cow<'static, str>>,
     /// The arguments an edit may not change: [`IDENTIFYING`] and the tool's
     /// own.
-    pub locked_fields: Vec<&'static str>,
+    pub locked_fields: Vec<Cow<'static, str>>,
     /// The argument that, when the call carries it, is a list of items each
     /// laid out as its own section, with the prose fields read inside each
     /// item. An edit keeps its items, and what each one acts on.
-    pub item_list: Option<&'static str>,
+    pub item_list: Option<Cow<'static, str>>,
 }
 
-/// `(tool, format, prose fields, locked fields beyond IDENTIFYING)`.
+/// The JSON Schema keyword that names the format a tool's string argument
+/// is written in: `markdown`, or a format a plugin owns.
+pub const FORMAT_KEYWORD: &str = "x-tracon-format";
+
+/// `(tool, format, prose fields, locked fields beyond IDENTIFYING)`. A
+/// format other than `markdown` or `source` is a plugin's
+/// ([`Presentation::plugin_format`]), shown as Markdown once converted.
 const PRESENTATIONS: &[(&str, &str, &[&str], &[&str])] = &[
     (jira::ISSUE_CREATE, "jira_wiki", &["description"], &[]),
     (jira::ISSUE_UPDATE, "jira_wiki", &["description"], &[]),
@@ -150,15 +161,75 @@ pub fn presentation(tool: &str) -> Presentation {
     let (format, prose, locked) = entry
         .map(|(_, format, prose, locked)| (*format, *prose, *locked))
         .unwrap_or(("markdown", &[], &[]));
+    let (format, plugin_format) = match format {
+        "markdown" | "source" => (format, None),
+        owned => ("markdown", Some(owned.to_string())),
+    };
     Presentation {
         format,
-        prose_fields: prose.to_vec(),
-        locked_fields: IDENTIFYING.iter().chain(locked).copied().collect(),
+        plugin_format,
+        prose_fields: prose.iter().copied().map(Cow::Borrowed).collect(),
+        locked_fields: IDENTIFYING
+            .iter()
+            .chain(locked)
+            .copied()
+            .map(Cow::Borrowed)
+            .collect(),
         item_list: ITEM_LISTS
             .iter()
             .find(|(name, _)| *name == tool)
-            .map(|(_, list)| *list),
+            .map(|(_, list)| Cow::Borrowed(*list)),
     }
+}
+
+/// How a plugin's tool is laid out, from the `inputSchema` it listed: its
+/// string properties marked [`FORMAT_KEYWORD`] are the prose fields, and an
+/// array whose items carry them is the item list. `None` for a tool with no
+/// marked property, which gets the generic card. A tool's marked fields name
+/// one format; were they to name several, the first is taken.
+pub fn plugin_presentation(tool: &str, schema: &Value) -> Option<Presentation> {
+    let marked = |properties: &Value| -> Vec<(String, String)> {
+        properties
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter_map(|(name, p)| {
+                let format = p.get(FORMAT_KEYWORD)?.as_str()?;
+                Some((name.clone(), format.to_string()))
+            })
+            .collect()
+    };
+    let properties = &schema["properties"];
+    let mut fields = marked(properties);
+    let mut item_list = None;
+    for (name, p) in properties.as_object().into_iter().flatten() {
+        if p["type"] != "array" {
+            continue;
+        }
+        let inner = marked(&p["items"]["properties"]);
+        if inner.is_empty() || item_list.is_some() {
+            continue;
+        }
+        item_list = Some(Cow::Owned(name.clone()));
+        fields.extend(inner);
+    }
+    let format = fields.first()?.1.clone();
+    if fields.iter().any(|(_, f)| *f != format) {
+        tracing::warn!(%tool, %format, "a plugin tool marks its fields in more than one format; the first is taken");
+    }
+    let mut prose: Vec<Cow<'static, str>> = Vec::new();
+    for (name, _) in fields {
+        if !prose.iter().any(|p| *p == name) {
+            prose.push(Cow::Owned(name));
+        }
+    }
+    Some(Presentation {
+        format: "markdown",
+        plugin_format: (format != "markdown").then_some(format),
+        prose_fields: prose,
+        locked_fields: IDENTIFYING.iter().copied().map(Cow::Borrowed).collect(),
+        item_list,
+    })
 }
 
 /// [`presentation`] for one held call: an HTML `doc_write` body is shown as
@@ -230,12 +301,13 @@ pub fn check_edit(tool: &str, original: &Value, edited: &Value) -> Vec<FieldErro
                   for a new one instead"
             .into(),
     };
+    let locked: Vec<&str> = locked.iter().map(|f| f.as_ref()).collect();
     let mut errors: Vec<FieldError> = locked
         .iter()
         .filter(|name| original.get(**name) != edited_map.get(**name))
         .map(|name| fixed((*name).to_string()))
         .collect();
-    if let Some(list) = shown.item_list {
+    if let Some(list) = shown.item_list.as_deref() {
         errors.extend(item_list_edit(list, original, edited, &locked, fixed));
     }
     if let Some(schema) = input_schema(tool) {
@@ -444,14 +516,22 @@ mod tests {
         for tool in ["retain", "submit_report"] {
             assert!(input_schema(tool).is_some(), "{tool}");
         }
-        assert_eq!(presentation("issue_create").format, "jira_wiki");
+        let create = presentation("issue_create");
+        assert_eq!(create.format, "markdown");
+        assert_eq!(create.plugin_format.as_deref(), Some("jira_wiki"));
+        assert_eq!(presentation("mr_comment").plugin_format, None);
         assert_eq!(presentation("mr_comment").format, "markdown");
         let doc = presentation("doc_write");
         assert_eq!(doc.prose_fields, ["body"]);
-        assert!(doc.locked_fields.contains(&"slug") && doc.locked_fields.contains(&"key"));
-        assert!(doc.locked_fields.contains(&"format"));
-        assert!(presentation("doc_delete").locked_fields.contains(&"slug"));
-        assert!(presentation("doc_edit").locked_fields.contains(&"edits"));
+        assert!(doc.locked_fields.contains(&"slug".into()));
+        assert!(doc.locked_fields.contains(&"key".into()));
+        assert!(doc.locked_fields.contains(&"format".into()));
+        assert!(presentation("doc_delete")
+            .locked_fields
+            .contains(&"slug".into()));
+        assert!(presentation("doc_edit")
+            .locked_fields
+            .contains(&"edits".into()));
         // A held service start has its schema with no catalogue to hand,
         // and the service it starts is what the call acts on.
         let service = input_schema("service_start").unwrap();
@@ -459,15 +539,53 @@ mod tests {
         assert!(service["properties"]["name"].get("enum").is_none());
         assert!(presentation("service_start")
             .locked_fields
-            .contains(&"name"));
+            .contains(&"name".into()));
         // The title names where a transition leads; the id it names is fixed.
         assert!(presentation("issue_transition")
             .locked_fields
-            .contains(&"transition_id"));
+            .contains(&"transition_id".into()));
         let unknown = presentation("pipeline_run");
         assert_eq!(unknown.format, "markdown");
         assert!(unknown.prose_fields.is_empty());
-        assert_eq!(unknown.locked_fields, IDENTIFYING);
+        assert_eq!(
+            unknown.locked_fields,
+            IDENTIFYING
+                .iter()
+                .copied()
+                .map(Cow::Borrowed)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_plugin_tool_is_laid_out_from_its_marked_arguments() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "key": { "type": "string" },
+                "summary": { "type": "string" },
+                "description": { "type": "string", "x-tracon-format": "jira_wiki" },
+                "issues": { "type": "array", "items": { "type": "object", "properties": {
+                    "description": { "type": "string", "x-tracon-format": "jira_wiki" },
+                }}},
+            },
+        });
+        let shown = plugin_presentation("jira__create", &schema).unwrap();
+        assert_eq!(shown.format, "markdown");
+        assert_eq!(shown.plugin_format.as_deref(), Some("jira_wiki"));
+        assert_eq!(shown.prose_fields, ["description"]);
+        assert_eq!(shown.item_list.as_deref(), Some("issues"));
+        assert!(shown.locked_fields.contains(&"key".into()));
+        // Marked Markdown is rendered by the node itself.
+        let markdown = serde_json::json!({ "properties": {
+            "body": { "type": "string", "x-tracon-format": "markdown" },
+        }});
+        let shown = plugin_presentation("x__comment", &markdown).unwrap();
+        assert_eq!(shown.plugin_format, None);
+        assert_eq!(shown.prose_fields, ["body"]);
+        // Nothing marked: the generic card.
+        let plain = serde_json::json!({ "properties": { "sql": { "type": "string" } } });
+        assert!(plugin_presentation("x__query", &plain).is_none());
     }
 
     #[test]
@@ -580,7 +698,10 @@ mod tests {
 
     #[test]
     fn each_item_of_an_issue_set_is_checked_against_the_item_schema() {
-        assert_eq!(presentation("issue_create").item_list, Some("issues"));
+        assert_eq!(
+            presentation("issue_create").item_list.as_deref(),
+            Some("issues")
+        );
         assert_eq!(presentation("issue_update").item_list, None);
         let asked = issue_set();
         let mut edited = issue_set();
