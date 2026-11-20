@@ -148,6 +148,30 @@ fn card_summary(staged: &Staged, from: Option<&Build>) -> String {
     out
 }
 
+/// Drop a staged build that will not be offered, unless the plugin of its
+/// name holds it already.
+pub fn discard(
+    store: &Store,
+    state_dir: &std::path::Path,
+    mut staged: Staged,
+) -> Result<(), InstallError> {
+    let _offering = offering();
+    drop(staged.hold.take());
+    let name = &staged.build.manifest.name;
+    let row = store.plugin_get(name)?;
+    let keep: Vec<&Build> = row
+        .iter()
+        .flat_map(|r| {
+            r.active
+                .iter()
+                .chain(r.previous.iter())
+                .chain(r.pending.iter().map(|p| &p.build))
+        })
+        .collect();
+    install::prune(state_dir, name, &keep)?;
+    Ok(())
+}
+
 /// Put a staged build to the operator: raise its install card, or return
 /// the one already waiting for it, and hold it as the plugin's pending
 /// build. A build waiting before it is superseded, its card expired.
@@ -155,9 +179,12 @@ pub fn offer(
     store: &Store,
     state_dir: &std::path::Path,
     ask: &Ask<'_>,
-    staged: Staged,
+    mut staged: Staged,
 ) -> Result<Offered, InstallError> {
     let _offering = offering();
+    // From here the lock keeps other offers off it, and whatever this one
+    // decides to keep or prune applies to it too.
+    drop(staged.hold.take());
     let name = staged.build.manifest.name.clone();
     let row = store.plugin_get(&name)?;
     let keep = |row: Option<&PluginRow>, extra: Option<&Build>| -> std::io::Result<()> {
@@ -547,6 +574,55 @@ mod tests {
             .unwrap()
             .count();
         assert_eq!(dirs, 2);
+    }
+
+    #[test]
+    fn a_build_staged_before_another_is_offered_is_not_pruned_by_that_offer() {
+        if install::target().is_none() {
+            return;
+        }
+        let state = tempfile::tempdir().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        // Two adds of one plugin, both staged before either is offered.
+        let one = local(state.path(), "a", "1.0.0", &[]);
+        let two = local(state.path(), "a", "1.0.1", &[]);
+        let two_dir = two.dir.clone();
+        let first = asked(offer(&store, state.path(), &ask(), one).unwrap());
+        assert!(
+            two_dir.exists(),
+            "the first offer pruned the second's build"
+        );
+        let second = asked(offer(&store, state.path(), &ask(), two).unwrap());
+        let first = store.get_approval(&first.id).unwrap().unwrap();
+        assert_eq!(first.state, EXPIRED);
+        decide(&store, state.path(), &second, true).unwrap();
+        let active = store.plugin_get("a").unwrap().unwrap().active.unwrap();
+        assert_eq!(active.version, "1.0.1");
+        // Offered, a build is pruned as any other is once nothing holds it.
+        let dirs: Vec<_> = std::fs::read_dir(state.path().join("plugins/bin/a"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(dirs.len(), 1, "{dirs:?}");
+        assert!(dirs[0].starts_with("1.0.1-"), "{dirs:?}");
+    }
+
+    #[test]
+    fn a_staged_build_that_is_not_offered_is_discarded() {
+        if install::target().is_none() {
+            return;
+        }
+        let state = tempfile::tempdir().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let staged = local(state.path(), "a", "1.0.0", &[]);
+        let dir = staged.dir.clone();
+        // Pruning leaves it while it is staged.
+        install::prune(state.path(), "a", &[]).unwrap();
+        assert!(dir.exists());
+        discard(&store, state.path(), staged).unwrap();
+        assert!(!dir.exists());
+        assert!(!state.path().join("plugins/bin/a").exists());
     }
 
     #[test]
