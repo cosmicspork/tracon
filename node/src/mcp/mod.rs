@@ -1503,6 +1503,24 @@ impl Tools {
         })
     }
 
+    /// The plugin's preview of a waiting call as the operator has edited it
+    /// (`edited`, the whole call), asked as [`Self::approval_preview`] asks
+    /// when the card opens: its token replaces the one kept, so an answer
+    /// naming this preview applies against what it showed. An edit an answer
+    /// would refuse is refused here the same way, before the plugin is asked.
+    pub async fn preview_edit(
+        &self,
+        approval: &crate::store::approvals::ApprovalRow,
+        edited: &Value,
+    ) -> Result<Option<Value>, Vec<schema::FieldError>> {
+        let original = serde_json::from_str::<Value>(&approval.arguments).unwrap_or(Value::Null);
+        let errors = schema::check_edit(&approval.tool, &original, edited);
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+        Ok(self.approval_preview(approval, edited).await)
+    }
+
     /// The input schema a plugin's running build gave one of its tools, with
     /// the `operation_id` the node adds when it is consequential.
     pub fn plugin_schema(&self, name: &str) -> Option<Value> {

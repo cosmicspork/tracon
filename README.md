@@ -1181,8 +1181,9 @@ tab opened since) decides nothing. An approved call carries the token as
 `preview_token` in its signed context. The plugin applies against it and, if what it
 names has moved since, refuses with `data.stale` and sends nothing. The approval then
 fails as stale (not uncertain), and `approval_status` says `stale: true`, so the agent
-calls again for a fresh card. The preview reflects the arguments as asked: an edit is
-applied against the same token but not previewed again.
+calls again for a fresh card. When you edit the call, the page asks the plugin to preview
+the edit (`POST /api/approvals/{id}/preview`) once you pause. That preview's token replaces
+the kept one, and Allow waits until the shown preview is of the call as edited.
 
 A tool's string argument may be marked `"x-tracon-format": "<format>"` in its input
 schema, naming `markdown` or a format a plugin owns (manifest `formats`). Marked

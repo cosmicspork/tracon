@@ -187,6 +187,19 @@ export type PluginPreview =
       error: string
     }
 
+/**
+ * Whether the card's plugin preview no longer shows the call as it would
+ * run: the operator edited it since the preview was taken of `previewedFor`.
+ * Only a call a plugin previews has one to go stale.
+ */
+export function previewOutdated(
+  details: Pick<ApprovalDetails, 'preview'> | null,
+  previewedFor: Record<string, unknown> | null,
+  edited: Record<string, unknown>,
+): boolean {
+  return !!details?.preview && previewedFor !== null && diffArguments(previewedFor, edited).length > 0
+}
+
 /** The hash an answer names to say which preview it was read with, if any. */
 export function previewHash(details: Pick<ApprovalDetails, 'preview'>): string | undefined {
   const p = details.preview

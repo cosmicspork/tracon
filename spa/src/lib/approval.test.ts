@@ -9,6 +9,7 @@ import {
   itemSections,
   outcome,
   pluginRows,
+  previewOutdated,
   problemsByField,
   amendsNothing,
   previewHash,
@@ -347,4 +348,18 @@ test("a plugin tool's card says its build, its own word on the tool, and what is
       value: 'open 1.1.0 is active now, so allowing this runs nothing: the agent has to ask again',
     },
   ])
+})
+
+test('a plugin preview goes stale once the call is edited, and only a previewed call has one', () => {
+  const asked = { sql: 'UPDATE t SET a = 1', limit: 5 }
+  const shown = { preview: { status: 'shown' as const, previewable: true, summary: 's', body: 'b', token_sha256: 'h' } }
+  expect(previewOutdated(shown, asked, asked)).toBe(false)
+  // The same call in another key order is the same call.
+  expect(previewOutdated(shown, asked, { limit: 5, sql: 'UPDATE t SET a = 1' })).toBe(false)
+  expect(previewOutdated(shown, asked, { ...asked, sql: 'UPDATE t SET a = 2' })).toBe(true)
+  // A refused preview is redone for an edit too: it may preview now.
+  expect(previewOutdated({ preview: { status: 'refused', error: 'no' } }, asked, { sql: 'x' })).toBe(true)
+  expect(previewOutdated({}, asked, { sql: 'x' })).toBe(false)
+  expect(previewOutdated(null, asked, { sql: 'x' })).toBe(false)
+  expect(previewOutdated(shown, null, { sql: 'x' })).toBe(false)
 })

@@ -2530,6 +2530,48 @@ pub async fn render_approval(
     Ok(Json(json!({ "markdown": markdown })))
 }
 
+#[derive(Deserialize)]
+pub struct PreviewBody {
+    /// The call as the operator has edited it, whole.
+    arguments: Value,
+}
+
+/// `POST /api/approvals/{id}/preview`: the plugin's preview of the call as
+/// the operator has edited it, asked as the card's own preview is when the
+/// page opens. Its token replaces the one kept, so an answer that names this
+/// preview applies against what it showed, and one that names the preview
+/// before the edit is refused as changed. An edit an answer would refuse is
+/// refused here the same way. `{}` for a call no plugin previews.
+pub async fn preview_approval(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<PreviewBody>,
+) -> Response {
+    let a = match s.store().get_approval(&id) {
+        Ok(Some(a)) => a,
+        Ok(None) => {
+            return ApiError(StatusCode::NOT_FOUND, "no such approval".into()).into_response()
+        }
+        Err(e) => return ApiError::from(e).into_response(),
+    };
+    if a.state != crate::store::approvals::PENDING || a.expires_ms <= crate::store::now_ms() {
+        return ApiError(
+            StatusCode::CONFLICT,
+            "this approval is no longer waiting".into(),
+        )
+        .into_response();
+    }
+    match s.tools.preview_edit(&a, &body.arguments).await {
+        Ok(preview) => Json(preview.unwrap_or_else(|| json!({}))).into_response(),
+        Err(fields) => {
+            let code = StatusCode::UNPROCESSABLE_ENTITY;
+            let message = SessionError::Unfit(fields.clone()).to_string();
+            let error = json!({ "code": code.as_u16(), "message": message, "fields": fields });
+            (code, Json(json!({ "error": error }))).into_response()
+        }
+    }
+}
+
 pub async fn release_approval(
     State(s): State<AppState>,
     Path(id): Path<String>,
