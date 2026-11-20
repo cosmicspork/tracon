@@ -141,6 +141,17 @@ only over the lease, and never published unattended by a grant. A new submit
 for a branch that already has an open change is refused with its number rather
 than failing at publication.
 
+**A rejection is final; a request for changes is the way back.** Resubmitting
+with `review_id` revises a review that waits on a verdict, one the operator
+sent back with `changes_requested`, or one already published (to update the
+change it opened). A rejected review is closed: `submit_review` with its id is
+refused at once, before the worktree is captured, quoting the operator's
+reason and saying to submit the work again without `review_id`, which opens a
+new review. `review_status` on a rejected review carries the same next step in
+its `message`. It used to fail only after the capture, with an error saying
+the review was being published, which sent the agent to wait on a verdict
+already given (#999).
+
 **Marking a draft ready was the operator's to do by hand.** A harness asked to
 review draft changes and mark the good ones ready had no tool for the last step,
 and `gh pr ready` from the host is the unbrokered write the working agreement

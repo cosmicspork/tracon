@@ -76,7 +76,7 @@ pub fn definitions() -> Vec<Value> {
                     "provider": { "type": "string", "enum": ["github", "gitlab"], "description": "In a session on a GitHub or GitLab repository, defaults to that repository's forge; required outside a session." },
                     "project": { "type": "string", "description": "owner/name on GitHub, the project path on GitLab. In a session on a GitHub or GitLab repository, defaults to that repository; required outside a session. Give both or neither when publishing somewhere else." },
                     "base": { "type": "string", "description": "Branch to merge into. Defaults to the branch the worktree was created from, or on a resubmission to the base it was last submitted with. Naming another base on a resubmission moves the change's base." },
-                    "review_id": { "type": "string", "description": "Set to resubmit an existing review after changes were requested, or after it was published to update the change it opened." },
+                    "review_id": { "type": "string", "description": "Set to resubmit an existing review after changes were requested, or after it was published to update the change it opened. A rejected review is final: submit the work again without review_id." },
                     "rerun_checks": { "type": "boolean", "description": "Run configured required checks again even when exact immutable evidence exists. This cannot alter which checks are required." },
                     "wait_secs": {
                         "type": "integer",
@@ -346,6 +346,11 @@ async fn submit(
                     "that id is a standalone narrative report; revise it with submit_report, never submit_review"
                         .into(),
                 );
+            }
+            // A decided review is refused here, before the worktree is
+            // captured or any check runs for it.
+            if let Some(refusal) = closed_to_resubmission(&existing) {
+                return Err(refusal);
             }
             if external {
                 let was = stored_target(store, &existing).ok();
@@ -1205,10 +1210,9 @@ impl Submission {
                 )
                 .map_err(|error| error.to_string())?;
             if !revised {
-                return Err(format!(
-                    "review {id} is currently being published and cannot be resubmitted; call \
-                     review_status to wait for the verdict"
-                ));
+                // A decision landed between validation and this update: say
+                // which one, as it stands now.
+                return Err(resubmission_refused(store, &id));
             }
             if let Some(note) = note.as_deref() {
                 // Before the reviewer starts, which reads shown work; a note that
@@ -1575,6 +1579,61 @@ fn pending_duplicate(
                         .as_deref()
                         == Some(worktree))
         }))
+}
+
+/// Why `existing` cannot be resubmitted, or `None` while it can: it waits on
+/// a verdict, changes were requested, or what it opened is already on the
+/// forge and a resubmission updates it. A rejection is final; a review whose
+/// approval is still being published waits for that publication.
+fn closed_to_resubmission(existing: &ReviewRow) -> Option<String> {
+    let id = &existing.id;
+    let published = existing
+        .publish_result
+        .as_deref()
+        .is_some_and(|result| !result.is_empty());
+    match existing.state.as_str() {
+        "new" | "claimed" | "revising" => None,
+        "approved" if published => None,
+        "approved" | "publishing" => Some(format!(
+            "review {id} is currently being published and cannot be resubmitted; call \
+             review_status to wait for the verdict"
+        )),
+        "rejected" => {
+            let reason = existing
+                .verdict_reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|reason| !reason.is_empty())
+                .map(|reason| format!(" (\"{reason}\")"))
+                .unwrap_or_default();
+            Some(format!(
+                "review {id} was rejected{reason}; a rejected review is final and cannot be \
+                 resubmitted. Submit the work again without review_id to open a new review."
+            ))
+        }
+        state => Some(format!(
+            "review {id} is {state} and cannot be resubmitted; call review_status to see where \
+             it stands"
+        )),
+    }
+}
+
+/// What a resubmission the store refused is told, read from the review as it
+/// stands now rather than assumed.
+fn resubmission_refused(store: &Store, id: &str) -> String {
+    match store.get_review(id) {
+        Ok(Some(review)) => closed_to_resubmission(&review).unwrap_or_else(|| {
+            format!(
+                "review {id} changed while this resubmission was recorded; call review_status \
+                 to see where it stands, then submit again"
+            )
+        }),
+        Ok(None) => format!("review {id} is gone and cannot be resubmitted"),
+        Err(error) => format!(
+            "review {id} could not be resubmitted, and its state could not be read ({error}); \
+             call review_status to see where it stands"
+        ),
+    }
 }
 
 fn already_submitted(existing: &ReviewRow) -> Value {
@@ -4547,7 +4606,7 @@ pub(crate) fn decided_review_view(r: &ReviewRow) -> Option<Value> {
                 "message": message,
             }))
         }
-        "approved" | "rejected" => Some(json!({
+        "approved" => Some(json!({
             "review_id": r.id,
             "state": r.state,
             // The approved text, which may not be what was submitted.
@@ -4555,6 +4614,22 @@ pub(crate) fn decided_review_view(r: &ReviewRow) -> Option<Value> {
             "body": r.approved_body(),
             "reason": r.verdict_reason,
             "published": r.publish_result,
+        })),
+        // A rejection is final, and says so in the words `submit_review`
+        // refuses a resubmission of it with.
+        "rejected" => Some(json!({
+            "review_id": r.id,
+            "state": r.state,
+            "title": r.approved_title(),
+            "body": r.approved_body(),
+            "reason": r.verdict_reason,
+            "published": r.publish_result,
+            "message": format!(
+                "Rejected: {}. This review is closed; submit a new review without review_id \
+                 if the work continues.",
+                r.verdict_reason.as_deref().map(str::trim).filter(|reason| !reason.is_empty())
+                    .unwrap_or("no reason given")
+            ),
         })),
         _ => None,
     }
@@ -5015,6 +5090,130 @@ mod tests {
             lane: None,
             publication_failed: None,
         }
+    }
+
+    /// A rejection is final: the store will not revise a rejected review,
+    /// and what a refused resubmission is told is the rejection, read from
+    /// the row, never that it is being published (#999).
+    #[test]
+    fn a_rejected_review_is_not_revised_and_the_refusal_says_it_was_rejected() {
+        let store = Store::open_in_memory().unwrap();
+        store.insert_review(&review_at("sha1")).unwrap();
+        assert!(store
+            .resolve_review(
+                "r1",
+                "rejected",
+                Some("retargeting consumers"),
+                None,
+                None,
+                None,
+                0,
+                None
+            )
+            .unwrap());
+        let revision = ReviewRevisionRow {
+            id: "rev2".into(),
+            review_id: "r1".into(),
+            candidate_id: "c2".into(),
+            title: "t".into(),
+            body: "changed prose".into(),
+            diff: "d2".into(),
+            files: "[]".into(),
+            head_sha: "sha2".into(),
+            context_json: "[]".into(),
+            requirements_work_item_id: None,
+            requirements_title: None,
+            requirements_body: None,
+            requirements_hash: None,
+            created_ms: 2,
+            intent_json: None,
+        };
+        let revised = store
+            .revise_review_with_revision(
+                "r1",
+                "t",
+                "changed prose",
+                "{}",
+                "main",
+                1,
+                0,
+                None,
+                &revision,
+            )
+            .unwrap();
+        assert!(!revised);
+        assert!(store.review_revisions("r1").unwrap().is_empty());
+        let row = store.get_review("r1").unwrap().unwrap();
+        assert_eq!(row.state, "rejected");
+        assert_eq!(row.body, "b");
+
+        let refused = resubmission_refused(&store, "r1");
+        assert_eq!(
+            refused,
+            "review r1 was rejected (\"retargeting consumers\"); a rejected review is final and \
+             cannot be resubmitted. Submit the work again without review_id to open a new review."
+        );
+        assert!(!refused.contains("being published"), "{refused}");
+    }
+
+    /// Only a review still waiting, sent back for changes, or already on the
+    /// forge takes a resubmission; one whose approval is being published
+    /// waits for it, and anything else says what it is rather than guessing.
+    #[test]
+    fn only_an_open_or_published_review_takes_a_resubmission() {
+        let at = |state: &str, published: Option<&str>, reason: Option<&str>| {
+            let mut r = review_at("sha1");
+            r.state = state.into();
+            r.publish_result = published.map(str::to_string);
+            r.verdict_reason = reason.map(str::to_string);
+            closed_to_resubmission(&r)
+        };
+        for state in ["new", "claimed", "revising"] {
+            assert_eq!(at(state, None, None), None, "{state}");
+        }
+        assert_eq!(at("approved", Some("https://x/pull/1"), None), None);
+        for (state, published) in [
+            ("approved", None),
+            ("approved", Some("")),
+            ("publishing", None),
+        ] {
+            let refused = at(state, published, None).unwrap();
+            assert!(
+                refused.contains("currently being published"),
+                "{state}: {refused}"
+            );
+        }
+        let rejected = at("rejected", None, Some("not this")).unwrap();
+        assert!(
+            rejected.starts_with("review r1 was rejected (\"not this\"); "),
+            "{rejected}"
+        );
+        assert!(!rejected.contains("being published"), "{rejected}");
+        let unexplained = at("rejected", None, None).unwrap();
+        assert!(
+            unexplained.starts_with("review r1 was rejected; "),
+            "{unexplained}"
+        );
+        let gone = at("gone", None, None).unwrap();
+        assert!(gone.contains("is gone and cannot be resubmitted"), "{gone}");
+        assert!(!gone.contains("being published"), "{gone}");
+    }
+
+    /// `review_status` on a rejected review says what `submit_review` would:
+    /// it is closed, and the work continues as a new review.
+    #[test]
+    fn a_rejected_reviews_status_says_to_submit_a_new_review() {
+        let mut r = review_at("sha1");
+        r.state = "rejected".into();
+        r.verdict_reason = Some("retargeting consumers".into());
+        let view = decided_review_view(&r).unwrap();
+        assert_eq!(view["state"], "rejected");
+        assert_eq!(view["reason"], "retargeting consumers");
+        assert_eq!(
+            view["message"],
+            "Rejected: retargeting consumers. This review is closed; submit a new review \
+             without review_id if the work continues."
+        );
     }
 
     /// A publication that failed because the change it updates merged or
