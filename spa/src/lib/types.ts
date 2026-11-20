@@ -2245,8 +2245,24 @@ export interface PluginSummary {
   name: string
   repo: string
   state: string
-  active: { version: string; tools: string[] } | null
+  active: {
+    version: string
+    tools: string[]
+    /** Whether its manifest has `[ui]`, and the title its navigation entry takes. */
+    ui?: boolean
+    ui_title?: string | null
+  } | null
   instances: PluginInstance[]
+}
+
+/** A plugin's UI opened for one channel (`POST /api/plugins/{name}/ui`): the
+    frame's address on the plugin's own loopback origin, with its capability token. */
+export interface PluginUiOpen {
+  url: string
+  origin: string
+  title: string
+  channel: string
+  expires_ms: number
 }
 
 /** One `[[mcp_server]]` as the node sees it now. */

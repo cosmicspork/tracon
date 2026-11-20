@@ -298,6 +298,8 @@ pub const KEYS: &[KeySpec] = &[
     live("mcp_server.timeout_secs"),
     // [plugins], [[plugin]]
     live("plugins.owners").host_only(),
+    restart("plugins.ui_port_first"),
+    restart("plugins.ui_port_last"),
     live("plugin.name"),
     live("plugin.idle_timeout_secs"),
     live("plugin.timeout_secs"),

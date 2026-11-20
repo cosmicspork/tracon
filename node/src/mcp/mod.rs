@@ -200,6 +200,44 @@ impl CallContext {
     }
 }
 
+/// The tool a UI request's caller context names: no plugin's tool can be
+/// called this, since a tool's name holds no `/`.
+pub const UI_TOOL: &str = "tracon/ui";
+
+/// What policy and the `[[plugin]]` entry call a plugin's UI: requests
+/// from it are decided as calls to `<plugin>__ui`.
+pub const UI_ACTION: &str = "ui";
+
+/// The header a UI request carries its signed caller context in, as
+/// base64url (no padding) of its JSON.
+pub const UI_CONTEXT_HEADER: &str = "tracon-context";
+
+/// The headers of a plugin's answer that reach its UI; the node sets the
+/// rest itself.
+pub const UI_ANSWER_HEADERS: &[&str] = &["content-type", "content-disposition", "etag"];
+
+/// The largest answer a plugin may give its UI.
+pub const UI_ANSWER_MAX: usize = 32 * 1024 * 1024;
+
+/// A request from a plugin's UI, as the plugin is to receive it.
+#[derive(Debug)]
+pub struct UiRequest {
+    pub method: reqwest::Method,
+    /// `/api/...`, with `?` and the query when there is one.
+    pub path: String,
+    /// The request headers passed on, by lowercase name.
+    pub headers: Vec<(String, String)>,
+    pub body: axum::body::Bytes,
+}
+
+/// The plugin's answer to a [`UiRequest`].
+#[derive(Debug)]
+pub struct UiAnswer {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: axum::body::Bytes,
+}
+
 /// Why a call through [`Tools::call_for_operator`] did not run.
 #[derive(Debug)]
 pub enum OperatorCallError {
@@ -818,7 +856,7 @@ impl Tools {
         pt: &PluginTool,
         approved: bool,
     ) -> Result<PluginCallParts, String> {
-        use crate::plugin::{context, manifest::Lend};
+        use crate::plugin::context;
         let access = self
             .session
             .get()
@@ -832,27 +870,7 @@ impl Tools {
         if !endpoint.tools.iter().any(|t| t.remote == pt.tool) {
             return Err(format!("plugin {} lists no tool {}", pt.plugin, pt.tool));
         }
-        let mut credentials = std::collections::BTreeMap::new();
-        {
-            let broker = self.broker.read().unwrap();
-            for binding in broker.available_to(&ctx.channel, &ctx.node_id) {
-                let Some(declared) = endpoint
-                    .manifest
-                    .credentials
-                    .iter()
-                    .find(|c| c.matches(binding))
-                else {
-                    continue;
-                };
-                if declared.lend == Lend::Approved && !approved {
-                    continue;
-                }
-                let env = broker
-                    .env_for(binding, &ctx.channel, &ctx.node_id)
-                    .map_err(|e| e.to_string())?;
-                credentials.insert(binding.to_string(), env);
-            }
-        }
+        let credentials = self.lent(ctx, &endpoint.manifest, approved)?;
         let caller = match &ctx.caller {
             Caller::Session(id) => context::CallerId {
                 kind: "agent",
@@ -938,6 +956,36 @@ impl Tools {
                 parts.timeout,
             )
             .await
+    }
+
+    /// What a call to a build with `manifest` is lent, by binding: each
+    /// credential it declares that the channel binds, less those lent only
+    /// to an approved call unless this one is.
+    fn lent(
+        &self,
+        ctx: &CallContext,
+        manifest: &crate::plugin::manifest::Manifest,
+        approved: bool,
+    ) -> Result<
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+        String,
+    > {
+        use crate::plugin::manifest::Lend;
+        let mut credentials = std::collections::BTreeMap::new();
+        let broker = self.broker.read().unwrap();
+        for binding in broker.available_to(&ctx.channel, &ctx.node_id) {
+            let Some(declared) = manifest.credentials.iter().find(|c| c.matches(binding)) else {
+                continue;
+            };
+            if declared.lend == Lend::Approved && !approved {
+                continue;
+            }
+            let env = broker
+                .env_for(binding, &ctx.channel, &ctx.node_id)
+                .map_err(|e| e.to_string())?;
+            credentials.insert(binding.to_string(), env);
+        }
+        Ok(credentials)
     }
 
     /// Call a plugin's tool for the operator API ([`Caller::Operator`]):
@@ -1152,6 +1200,235 @@ impl Tools {
                 )))
             }
         }
+    }
+
+    /// A request from a plugin's UI (`crate::http::plugin_ui`), sent to the
+    /// plugin's instance for `ctx`'s channel as the operator's, with a signed
+    /// caller context in its `tracon-context` header ([`UI_TOOL`]).
+    ///
+    /// It is decided as a call to `<plugin>__ui`: a signed policy rule or
+    /// the operator's `[[plugin]]` entry denying `ui` refuses it, and
+    /// otherwise it runs, since the operator opened the UI through the
+    /// operator API and is the one asking. It is never held. A request that
+    /// changes something (any method but GET and HEAD) is logged to the
+    /// channel's external log under `ctx`'s lane, as is any refusal; a read
+    /// is not, so a page's polling does not fill the log.
+    pub async fn ui_for_operator(
+        &self,
+        ctx: &CallContext,
+        plugin: &str,
+        request: UiRequest,
+    ) -> Result<UiAnswer, OperatorCallError> {
+        let access = self.session.get().ok_or(OperatorCallError::Unavailable)?;
+        access
+            .manager
+            .channel_usable(&ctx.channel)
+            .map_err(|e| OperatorCallError::Request(e.to_string()))?;
+        let name = format!("{plugin}{}{UI_ACTION}", upstream::SEPARATOR);
+        let args = json!({
+            "method": request.method.as_str(),
+            "path": request.path,
+            "body_sha256": hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&request.body)),
+        });
+        let changes = !matches!(request.method, reqwest::Method::GET | reqwest::Method::HEAD);
+        let mut gate = audit::Gate::default();
+        let result = self.ui_gated(ctx, plugin, &args, request, &mut gate).await;
+        let refused = matches!(gate.decision, audit::DENIED | audit::REFUSED);
+        if changes || refused {
+            if gate.decision == audit::REFUSED && gate.reason.is_none() {
+                gate.reason = result.as_ref().err().map(ToString::to_string);
+            }
+            access.manager.record_for(
+                ctx,
+                crate::session::state::event_kind::TOOL_CALL,
+                None,
+                json!({ "title": summarize(&name, &args), "kind": TOOL_KIND }),
+            );
+            let outcome = match &result {
+                Ok(answer) => Ok(json!({ "status": answer.status })),
+                Err(e) => Err(e.to_string()),
+            };
+            access.manager.record_for(
+                ctx,
+                crate::session::state::event_kind::TOOL_DECIDED,
+                None,
+                audit::record(&name, &args, &gate, &outcome),
+            );
+        }
+        result
+    }
+
+    async fn ui_gated(
+        &self,
+        ctx: &CallContext,
+        plugin: &str,
+        args: &Value,
+        request: UiRequest,
+        gate: &mut audit::Gate,
+    ) -> Result<UiAnswer, OperatorCallError> {
+        use crate::plugin::context;
+        let access = self.session.get().ok_or(OperatorCallError::Unavailable)?;
+        let refuse = |gate: &mut audit::Gate, e: OperatorCallError| {
+            gate.decision = audit::REFUSED;
+            gate.decided_by = "node";
+            Err(e)
+        };
+        let build = access
+            .store
+            .plugin_get(plugin)
+            .ok()
+            .flatten()
+            .filter(|r| r.state != crate::store::plugins::REMOVED)
+            .and_then(|r| r.active)
+            .filter(|b| b.manifest.ui.is_some());
+        let Some(build) = build else {
+            return refuse(
+                gate,
+                OperatorCallError::NotInstalled {
+                    plugin: plugin.to_string(),
+                },
+            );
+        };
+        if let Err(e) = self.plugin_offered(ctx, plugin, &build.manifest) {
+            return refuse(gate, OperatorCallError::NotOffered(e));
+        }
+        let name = format!("{plugin}{}{UI_ACTION}", upstream::SEPARATOR);
+        let live = self.cfg.live();
+        let decision = self.policy.read().decide(&Request {
+            channel: &ctx.channel,
+            action: &name,
+            kind: Some(TOOL_KIND),
+            resource: None,
+            command: None,
+            arguments: Some(args),
+            doc_kinds: Some(&live.docs.kind),
+        });
+        let decided_by = self.decided_by(&decision);
+        let entry = live.plugin.iter().find(|p| p.name == plugin);
+        let denied_by_entry = entry.is_some_and(|e| {
+            e.deny
+                .iter()
+                .any(|pattern| crate::policy::glob(pattern, UI_ACTION))
+        });
+        if decision.verdict == Verdict::Deny {
+            *gate = audit::Gate {
+                decision: audit::DENIED,
+                decided_by,
+                rule: decision.rule_id.clone(),
+                reason: decision.reason.clone(),
+                approval_id: None,
+            };
+            return Err(OperatorCallError::Denied(refusal(decision)));
+        }
+        if denied_by_entry {
+            let reason =
+                format!("the operator does not allow the UI of plugin {plugin} ([[plugin]] deny)");
+            *gate = audit::Gate {
+                decision: audit::DENIED,
+                decided_by: "operator",
+                rule: Some(format!("plugin.{plugin}.deny")),
+                reason: Some(reason.clone()),
+                approval_id: None,
+            };
+            return Err(OperatorCallError::Denied(reason));
+        }
+        *gate = audit::Gate {
+            decision: audit::POLICY_ALLOWED,
+            decided_by,
+            rule: decision.rule_id.clone(),
+            reason: decision.reason.clone(),
+            approval_id: None,
+        };
+        let supervisor = access.manager.plugins();
+        let lease = match supervisor.lease(plugin, &ctx.channel).await {
+            Ok(lease) => lease,
+            Err(e) => {
+                return Err(OperatorCallError::Unreachable(format!(
+                    "plugin {plugin} cannot be reached: {e}"
+                )))
+            }
+        };
+        let endpoint = &lease.endpoint;
+        let credentials = self
+            .lent(ctx, &endpoint.manifest, false)
+            .map_err(OperatorCallError::Unreachable)?;
+        let caller = context::CallerId {
+            kind: "operator",
+            session: None,
+            harness: None,
+        };
+        let draft = context::Draft {
+            plugin,
+            token: &endpoint.token,
+            tool: UI_TOOL,
+            arguments: args,
+            caller: &caller,
+            channel: &ctx.channel,
+            approval_id: None,
+            credentials: &credentials,
+            preview_token: None,
+        };
+        let signed = context::build(&draft, crate::store::now_ms(), |b| supervisor.sign(b))
+            .map_err(OperatorCallError::Unreachable)?;
+        let header = base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            signed.to_string(),
+        );
+        let timeout = std::time::Duration::from_secs(
+            entry
+                .map(crate::config::PluginEntry::timeout_secs)
+                .unwrap_or(crate::config::PluginEntry::DEFAULT_TIMEOUT_SECS),
+        );
+        let http = upstream::unix_client(&endpoint.socket);
+        let url = format!(
+            "{}{}",
+            upstream::PLUGIN_URL.trim_end_matches('/'),
+            request.path
+        );
+        let mut outgoing = http
+            .request(request.method, url)
+            .timeout(timeout)
+            .header(UI_CONTEXT_HEADER, header);
+        for (key, value) in &request.headers {
+            outgoing = outgoing.header(key.as_str(), value.as_str());
+        }
+        let response =
+            outgoing.body(request.body).send().await.map_err(|e| {
+                OperatorCallError::Tool(format!("plugin {plugin} did not answer: {e}"))
+            })?;
+        let status = response.status().as_u16();
+        let headers = response
+            .headers()
+            .iter()
+            .filter(|(k, _)| UI_ANSWER_HEADERS.contains(&k.as_str()))
+            .filter_map(|(k, v)| Some((k.as_str().to_string(), v.to_str().ok()?.to_string())))
+            .collect();
+        if response
+            .content_length()
+            .is_some_and(|n| n > UI_ANSWER_MAX as u64)
+        {
+            return Err(OperatorCallError::Tool(format!(
+                "plugin {plugin} answered more than {UI_ANSWER_MAX} bytes"
+            )));
+        }
+        let mut body = Vec::new();
+        let mut stream = response;
+        while let Some(chunk) = stream.chunk().await.map_err(|e| {
+            OperatorCallError::Tool(format!("plugin {plugin}'s answer broke off: {e}"))
+        })? {
+            if body.len() + chunk.len() > UI_ANSWER_MAX {
+                return Err(OperatorCallError::Tool(format!(
+                    "plugin {plugin} answered more than {UI_ANSWER_MAX} bytes"
+                )));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        drop(lease);
+        Ok(UiAnswer {
+            status,
+            headers,
+            body: body.into(),
+        })
     }
 
     /// The input schema a plugin's running build gave one of its tools, with

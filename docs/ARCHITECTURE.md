@@ -1079,6 +1079,31 @@ was sent. Staleness is enforced by the plugin at dispatch. The page's display is
 display. Prose in a format a plugin owns is rendered by that plugin's
 `tracon/format/convert`, a pure function given no context and no credentials.
 
+**A plugin's UI runs on an origin of its own, and speaks to its plugin as the
+operator.** `http::plugin_ui` gives each plugin whose manifest has `[ui]` a loopback
+listener on a port it keeps (`[plugins] ui_port_first..ui_port_last`, recorded on its
+`plugin` row), so its pages have an origin no other plugin and not the operator's
+interface shares, and what they keep in the browser survives a restart. As with the
+document preview listener, nothing is served without a capability token in the path
+(`/t/<token>/`), minted by `POST /api/plugins/{name}/ui` for one plugin and channel, held
+in memory and forgotten after an hour unused; the mint answers only a caller on the
+node's machine, since the listener is loopback only. A listener answers only its own
+plugin's tokens and only a loopback `Host` naming its port. It serves the active build's
+`ui/` files itself, under a CSP whose `connect-src` and `script-src` are `'self'`, and
+forwards `api/...` to the plugin's instance for the token's channel
+(`Tools::ui_for_operator`): a request that changes something must come from a page of
+the same origin, only a few request headers pass (never a cookie, `Origin` or
+`Referer`), and the caller context rides in a `tracon-context` header, kind `operator`,
+tool `tracon/ui`, with `arguments_sha256` binding the method, the path as sent and the
+body's hash. Policy decides it as `<plugin>__ui`: a signed denial or the entry's `deny`
+refuses it, and otherwise it runs, never held, since the operator is the one asking.
+Changes and refusals are logged to the channel's external log under the lane
+`/plugins/<name>/ui`; reads are not, so a page that polls does not fill the log. The
+interface frames the page in `sandbox="allow-scripts allow-same-origin allow-forms
+allow-downloads allow-modals"`: same-origin is the plugin's own, never the interface's,
+and popups and top-level navigation stay off. Access from the phone through the hub
+waits with the rest of the mesh work.
+
 ### Authority grants
 
 A grant is a local operator decision layered under signed policy, not a

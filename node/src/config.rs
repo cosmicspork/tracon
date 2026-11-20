@@ -225,6 +225,17 @@ pub fn validate_metrics(config: &Config) -> Result<(), String> {
     let Some(listen) = config.metrics.listen else {
         return Ok(());
     };
+    let taken = node_ports(config);
+    match taken.iter().find(|(_, port)| *port == listen.port()) {
+        Some((what, port)) => Err(format!(
+            "metrics.listen: port {port} is {what}'s; give the metrics listener a port of its own (7425 is free)"
+        )),
+        None => Ok(()),
+    }
+}
+
+/// The ports the node's own fixed listeners take, by the key that sets each.
+fn node_ports(config: &Config) -> Vec<(&'static str, u16)> {
     let gateway = &config.gateway;
     let mut taken = vec![
         ("the operator listener", OPERATOR_PORT),
@@ -243,9 +254,30 @@ pub fn validate_metrics(config: &Config) -> Result<(), String> {
             config.runtime.kubernetes.sandbox_port,
         ));
     }
-    match taken.iter().find(|(_, port)| *port == listen.port()) {
+    taken
+}
+
+/// Refuse a plugin UI port range that is empty, starts at 0, or holds a
+/// port another of the node's listeners has.
+pub fn validate_plugin_ui_ports(config: &Config) -> Result<(), String> {
+    let plugins = &config.plugins;
+    if plugins.ui_port_first == 0 || plugins.ui_port_first > plugins.ui_port_last {
+        return Err(format!(
+            "plugins.ui_port_first..ui_port_last: {}..{} is not a range of ports",
+            plugins.ui_port_first, plugins.ui_port_last
+        ));
+    }
+    let mut taken = node_ports(config);
+    if let Some(listen) = config.metrics.listen {
+        taken.push(("metrics.listen", listen.port()));
+    }
+    match taken
+        .iter()
+        .find(|(_, port)| plugins.ui_ports().contains(port))
+    {
         Some((what, port)) => Err(format!(
-            "metrics.listen: port {port} is {what}'s; give the metrics listener a port of its own (7425 is free)"
+            "plugins.ui_port_first..ui_port_last: {}..{} holds port {port}, which is {what}'s",
+            plugins.ui_port_first, plugins.ui_port_last
         )),
         None => Ok(()),
     }
@@ -487,13 +519,31 @@ pub struct Plugins {
     /// install. A local archive the operator hands the node is not held to
     /// it.
     pub owners: Vec<String>,
+    /// The loopback ports plugin UIs are served on, first to last: each
+    /// plugin with a UI is given one the first time it is opened and keeps
+    /// it, so its origin, and what its pages keep in the browser, stays the
+    /// same across restarts.
+    pub ui_port_first: u16,
+    pub ui_port_last: u16,
 }
 
 impl Default for Plugins {
     fn default() -> Self {
         Self {
             owners: vec!["cosmicspork".into()],
+            ui_port_first: Self::DEFAULT_UI_PORT_FIRST,
+            ui_port_last: Self::DEFAULT_UI_PORT_LAST,
         }
+    }
+}
+
+impl Plugins {
+    pub const DEFAULT_UI_PORT_FIRST: u16 = 7440;
+    pub const DEFAULT_UI_PORT_LAST: u16 = 7459;
+
+    /// The ports `ui_port_first..=ui_port_last` name.
+    pub fn ui_ports(&self) -> std::ops::RangeInclusive<u16> {
+        self.ui_port_first..=self.ui_port_last
     }
 }
 
@@ -3820,6 +3870,8 @@ impl Config {
         validate_doc_kinds(&config.docs.kind)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_metrics(&config).map_err(|error| format!("{}: {error}", path.display()))?;
+        validate_plugin_ui_ports(&config)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_sandbox(&config).map_err(|error| format!("{}: {error}", path.display()))?;
         validate_priorities(&config.work.priority)
             .map_err(|error| format!("{}: {error}", path.display()))?;
@@ -4021,6 +4073,40 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("harness_listen"), "{error}");
+    }
+
+    /// Plugin UIs are served on a range of loopback ports of their own,
+    /// clear of the node's other listeners.
+    #[test]
+    fn plugin_ui_ports_are_a_range_clear_of_the_nodes_listeners() {
+        let load = |text: &str| Config::from_toml(text, Path::new("node.toml"));
+        let cfg = load("").unwrap();
+        assert_eq!(cfg.plugins.ui_ports(), 7440..=7459);
+        let cfg = load("[plugins]\nui_port_first = 7600\nui_port_last = 7600\n").unwrap();
+        assert_eq!(cfg.plugins.ui_ports(), 7600..=7600);
+        for (text, says) in [
+            (
+                "[plugins]\nui_port_first = 7450\nui_port_last = 7449\n",
+                "not a range",
+            ),
+            (
+                "[plugins]\nui_port_first = 0\nui_port_last = 9\n",
+                "not a range",
+            ),
+            (
+                "[plugins]\nui_port_first = 7410\nui_port_last = 7430\n",
+                "operator",
+            ),
+            (
+                "[plugins]\nui_port_first = 7422\nui_port_last = 7422\n",
+                "preview_listen",
+            ),
+            ("[metrics]\nlisten = \"127.0.0.1:7445\"\n", "metrics.listen"),
+        ] {
+            let error = load(text).unwrap_err();
+            assert!(error.contains("plugins.ui_port_first"), "{text}: {error}");
+            assert!(error.contains(says), "{text}: {error}");
+        }
     }
 
     #[test]
@@ -4568,6 +4654,7 @@ mod tests {
         ] {
             let plugins = Plugins {
                 owners: owners.into_iter().map(String::from).collect(),
+                ..Plugins::default()
             };
             let error = validate_plugins(&plugins, &entries).unwrap_err();
             assert!(error.contains(says), "{error}");

@@ -679,6 +679,8 @@ pub struct Manager {
     /// harness's, once startup has probed it.
     default_adapter: Arc<std::sync::OnceLock<Arc<dyn HarnessAdapter>>>,
     previews: Arc<crate::http::preview::PreviewTokens>,
+    /// Plugin UIs' capability tokens and listeners (`crate::http::plugin_ui`).
+    plugin_uis: Arc<crate::http::plugin_ui::PluginUis>,
     /// The grants whose refusals this node turns into asks, and which an
     /// operator's answer widens. The backend's own, once startup watches it.
     egress: Arc<parking_lot::RwLock<Option<crate::gateway::proxy::Grants>>>,
@@ -757,6 +759,7 @@ impl Manager {
             adapters: Arc::new(std::sync::Mutex::new(HashMap::new())),
             default_adapter: Arc::new(std::sync::OnceLock::new()),
             previews: Arc::new(crate::http::preview::PreviewTokens::default()),
+            plugin_uis: Arc::default(),
             egress: Arc::default(),
             checking: Arc::default(),
             review_starts: Arc::default(),
@@ -873,6 +876,10 @@ impl Manager {
 
     pub fn previews(&self) -> &Arc<crate::http::preview::PreviewTokens> {
         &self.previews
+    }
+
+    pub fn plugin_uis(&self) -> &Arc<crate::http::plugin_ui::PluginUis> {
+        &self.plugin_uis
     }
 
     /// Create a session on this node with the node's own adapter, for

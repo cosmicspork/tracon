@@ -37,6 +37,13 @@
 //! `tracon/format/convert` converts `fake_wiki` (`h1. X` is `# X`, `*b*` is
 //! `**b**`) to `markdown` and back; anything else is `-32602`.
 //!
+//! - `/api/...`, any method: a plugin UI's API (`tracon::http::plugin_ui`).
+//!   It appends one JSON line to `ui.jsonl` and answers with
+//!   `{method, uri, headers, context, body, own_instance, node_key}`, where
+//!   `context` is the `tracon-context` header decoded. It also sends a
+//!   `set-cookie`, an `x-extra` and a `content-disposition` header, so a test
+//!   can see which of them reach the page. `/api/fail` answers 500.
+//!
 //! Each start writes `env.json` (its whole environment), `pid`, `cwd`, and a line
 //! to `started` (when, in milliseconds, and the mode it read), and says on
 //! stdout and stderr that it started.
@@ -137,8 +144,71 @@ async fn main() {
     let app = Router::new()
         .route("/", post(mcp))
         .route("/mcp", post(mcp))
+        .route("/api/{*rest}", axum::routing::any(api))
         .with_state(fake);
     axum::serve(listener, app).await.unwrap();
+}
+
+async fn api(
+    State(fake): State<Fake>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use base64::Engine;
+    let context = headers
+        .get("tracon-context")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(v)
+                .ok()
+        })
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .unwrap_or(Value::Null);
+    let seen: serde_json::Map<String, Value> = headers
+        .iter()
+        .filter(|(k, _)| k.as_str() != "tracon-context")
+        .map(|(k, v)| {
+            (
+                k.as_str().to_string(),
+                Value::String(v.to_str().unwrap_or_default().to_string()),
+            )
+        })
+        .collect();
+    let echo = json!({
+        "method": method.as_str(),
+        "uri": uri.to_string(),
+        "headers": seen,
+        "context": context,
+        "body": String::from_utf8_lossy(&body),
+        "own_instance": fake.own_instance,
+        "node_key": fake.node_key,
+    });
+    {
+        let mut calls = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(fake.data.join("ui.jsonl"))
+            .unwrap();
+        writeln!(calls, "{echo}").unwrap();
+    }
+    let status = match uri.path() {
+        "/api/fail" => StatusCode::INTERNAL_SERVER_ERROR,
+        _ => StatusCode::OK,
+    };
+    (
+        status,
+        [
+            ("content-type", "application/json"),
+            ("set-cookie", "sid=plugin; Path=/"),
+            ("x-extra", "dropped"),
+            ("content-disposition", "inline; filename=\"echo.json\""),
+        ],
+        echo.to_string(),
+    )
+        .into_response()
 }
 
 fn answer(request: &Value, result: Value) -> axum::response::Response {
