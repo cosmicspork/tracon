@@ -142,7 +142,16 @@ limits, `[notify] contact`, `[memory] promote_at`, provider prices,
 the boundary and runtime, the mesh, providers' credentials and upstreams, the harness,
 `[auth]`, `[ui]`) holds until a restart. The node remembers the file it started from and
 reports the restart-only keys that differ from it now (`GET /api/restart`, and a
-`restart` stream frame), which the interface shows as one banner on every screen.
+`restart` stream frame), which the interface shows as one banner on every screen. The
+same status is Settings › System › Restart on every node, changed file or not, with the
+same single Restart control: a click reads the status again, restarts at once
+(`when_idle`) when nothing runs and no session is live, and otherwise names what is
+running and offers to wait for it or end it now. The frame follows running work too:
+`restart::publish` compares `busy` and `closing` with what it last sent, and
+`restart::watch` publishes again (at most once a second) whenever a session of this
+node or one of its events changes, so a turn starting or ending updates the banner and
+card within about two seconds; checks, review submissions and plugin instances, which
+have no frame of their own, are caught by the 15-second tick.
 
 **Restart over HTTP.** `POST /api/admin/restart {mode, expected_hash}` restarts the node
 into the file the caller read; a file that changed since, or that would not load, is
@@ -307,8 +316,12 @@ escapes (any other character a prompt could not show is refused); starting, join
 or leaving a mesh names the hub, quoted. What stays at the machine (`auth::Loopback`) is
 what acts on the host itself rather than on configuration: importing a skill package
 (it reads a host directory the caller names), the policy signing key and bundle
-installation, the service lifecycle (install, uninstall, restart), the storage sweep and
-the boundary re-check.
+installation, the service lifecycle (install, uninstall), the storage sweep and
+the boundary re-check. Restarting is not among them: it is `POST /api/admin/restart`
+(above), which drains first and works under every supervisor. The desktop app's own
+"Restart node" (General › Version & updates) runs `tracon service restart` through the
+app and is shown only while the node does not answer or keeps exiting under its unit,
+as the recovery path.
 
 Two keys deserve a word, since a confirmed edit can set them. `[auth] trusted_proxies`
 decides only whose `X-Forwarded-For` the node believes when it tells callers apart: set
@@ -1122,6 +1135,9 @@ call it was actually sent. `approval/status` waits as an agent's status call doe
 plugin's own cards only. `tools/call` runs through the operator API's unheld path
 (`Tools::call_for_operator`) with a `Caller::Plugin`, so the signed policy and the
 callee's entry decide it, the channel's external log records it, and an ask is a refusal.
+
+The contract as a plugin's author meets it (manifest, release, start, caller context,
+previews and formats, the node socket and plugin pages) is [reference/plugins.md](reference/plugins.md).
 
 ### Authority grants
 

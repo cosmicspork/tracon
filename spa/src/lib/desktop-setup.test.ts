@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { blocked, canRestartNode, nodeOwnerSummary, setupSteps, type SetupStatus } from './desktop-setup'
+import { blocked, canRestartNode, nodeOwnerSummary, offersRecoveryRestart, setupSteps, type SetupStatus } from './desktop-setup'
 
 const fresh: SetupStatus = {
   platform: 'macos',
@@ -121,4 +121,16 @@ test('restart is offered whenever the unit is installed, and only then', () => {
   expect(nodeOwnerSummary(running)).toBe('runs under the service')
   // Not a failure reason when nothing is failing, even if one was sent.
   expect(byId({ ...running, service_error: 'stale' }).service.reason).toBeUndefined()
+})
+
+test('Settings offers the app restart only while the node does not answer', () => {
+  // A healthy node under its unit is restarted from Settings › System › Restart.
+  const healthy: SetupStatus = { ...fresh, owner: 'service', service_installed: true, service_running: true }
+  expect(offersRecoveryRestart(healthy)).toBe(false)
+  // No unit: nothing for the app to restart.
+  expect(offersRecoveryRestart(fresh)).toBe(false)
+  expect(offersRecoveryRestart({ ...fresh, owner: 'none', service_installed: false })).toBe(false)
+  // Installed and not answering, or keeps exiting.
+  expect(offersRecoveryRestart({ ...fresh, owner: 'none', service_installed: true })).toBe(true)
+  expect(offersRecoveryRestart({ ...healthy, service_failing: true })).toBe(true)
 })

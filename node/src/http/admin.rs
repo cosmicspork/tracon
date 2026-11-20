@@ -5,9 +5,9 @@
 //! bounded invitation, admission, removal, and selected-key handoff flows work
 //! for an authenticated remote PWA, each confirmed there by a passkey
 //! ([`AdminAction`]). Host lifecycle and fixed boundary checks additionally
-//! require [`Loopback`], except the restart that applies a configuration
-//! change (`restart_node`), which drains work first and is confirmed like
-//! any other admin action.
+//! require [`Loopback`], except restarting the node (`restart_node`), which
+//! drains work first, works under every supervisor (systemd, launchd, a
+//! container restarted on exit) and is confirmed like any other admin action.
 
 use axum::{
     extract::{Path, State},
@@ -586,11 +586,7 @@ pub async fn maintenance(
     let active_sessions = open_sessions(&s)?;
     let mut service = crate::service::diagnostics();
     if active_sessions > 0 {
-        for capability in [
-            &mut service.install,
-            &mut service.uninstall,
-            &mut service.restart,
-        ] {
+        for capability in [&mut service.install, &mut service.uninstall] {
             if capability.available {
                 capability.available = false;
                 capability.reason = format!(
@@ -736,10 +732,9 @@ fn schedule_lifecycle(
             "uninstall",
             "the fixed user service removal was scheduled after this response; this interface disconnects, while node state and credentials remain",
         ),
-        crate::service::LifecycleAction::Restart => (
-            "restart",
-            "the fixed user-service restart was scheduled after this response; reconnect and read diagnostics for the observed result",
-        ),
+        // Restarting is `POST /api/admin/restart`, which drains work first
+        // and covers every supervisor; no route schedules this one.
+        crate::service::LifecycleAction::Restart => unreachable!(),
     };
     Ok(Json(json!({
         "scheduled": true,
@@ -769,17 +764,6 @@ pub async fn uninstall(
     Json(body): Json<Confirmation>,
 ) -> ApiResult<Json<Value>> {
     schedule_lifecycle(&s, body.confirm, crate::service::LifecycleAction::Uninstall)
-}
-
-/// `POST /api/admin/maintenance/restart`: schedule exactly the fixed
-/// user-service restart. The result names a schedule, not a successful restart.
-pub async fn restart(
-    _admin: Administrator,
-    _local: Loopback,
-    State(s): State<AppState>,
-    Json(body): Json<Confirmation>,
-) -> ApiResult<Json<Value>> {
-    schedule_lifecycle(&s, body.confirm, crate::service::LifecycleAction::Restart)
 }
 
 /// `GET /api/restart`: what a restart of this node would change, whether one

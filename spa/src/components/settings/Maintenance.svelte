@@ -1,13 +1,10 @@
 <script lang="ts">
   import { onMount, type Snippet } from 'svelte'
   import Card from './Card.svelte'
+  import NodeRestart from './NodeRestart.svelte'
   import StorageSweep from './StorageSweep.svelte'
   import { desktopUpdatesAvailable } from '../../lib/desktop-update'
-  import {
-    inDesktopApp,
-    installService,
-    restartNode,
-  } from '../../lib/desktop-setup'
+  import { inDesktopApp, installService } from '../../lib/desktop-setup'
   import { admin, type Maintenance as MaintenanceState } from '../../lib/admin'
   import { store } from '../../lib/store.svelte'
   import type { BoundaryResult } from '../../lib/types'
@@ -20,7 +17,6 @@
   let note = $state('')
   let confirmInstall = $state(false)
   let confirmUninstall = $state(false)
-  let confirmRestart = $state(false)
   const desktop = inDesktopApp()
   const desktopLocal = desktop && desktopUpdatesAvailable()
 
@@ -57,24 +53,6 @@
     })
   }
 
-  function requestRestart() {
-    if (!confirmRestart) {
-      confirmRestart = true
-      return
-    }
-    void act('restart', async () => {
-      if (desktopLocal && data?.local) {
-        const status = await restartNode()
-        await load()
-        return status.service_running
-          ? 'The desktop controller observed the restarted service answering.'
-          : 'The desktop restart command returned, but its service status is not running.'
-      }
-      const result = await admin.restart()
-      return result.effect
-    })
-  }
-
   function requestInstall() {
     if (!confirmInstall) {
       confirmInstall = true
@@ -108,7 +86,6 @@
   const local = $derived(data?.local ?? false)
   const install = $derived(data?.service.install)
   const uninstall = $derived(data?.service.uninstall)
-  const restart = $derived(data?.service.restart)
 
   onMount(() => {
     void load()
@@ -129,6 +106,8 @@
     </div>
   {/if}
 </Card>
+
+<NodeRestart />
 
 <Card title="Service &amp; recovery" note="The user service that keeps this node running.">
   {#snippet actions()}
@@ -163,25 +142,6 @@
           </div>
         {:else}
           <button class="btn" onclick={requestInstall} disabled={busy !== '' || !local || !install.available}>{desktopLocal ? 'Install or repair desktop service…' : 'Install user service…'}</button>
-        {/if}
-      </div>
-    {/if}
-
-    {#if restart}
-      <div class="cap">
-        <details class="capability" class:unavailable={!restart.available}>
-          <summary>{restart.available ? 'Restart available' : 'Restart unavailable'}</summary>
-          <p>{restart.reason}</p>
-          <small>{restart.recovery}</small>
-        </details>
-        {#if confirmRestart}
-          <div class="restart-confirm">
-            <p>Restart the {data.service.supervisor} service now?</p>
-            <button class="btn d" onclick={requestRestart} disabled={busy !== '' || !local || !restart.available}>{busy === 'restart' ? (desktopLocal ? 'Restarting and waiting…' : 'Scheduling restart…') : 'Confirm restart of this node'}</button>
-            <button class="lnk" onclick={() => (confirmRestart = false)} disabled={busy !== ''}>Cancel</button>
-          </div>
-        {:else}
-          <button class="btn" onclick={requestRestart} disabled={busy !== '' || !local || !restart.available}>Restart this serving node…</button>
         {/if}
       </div>
     {/if}

@@ -1045,7 +1045,6 @@ async fn a_request_relayed_by_a_same_host_proxy_is_not_local() {
             "/api/admin/maintenance/boundary-check",
             Some(json!({})),
         ),
-        ("POST", "/api/admin/maintenance/restart", Some(json!({}))),
         ("POST", "/api/admin/maintenance/install", Some(json!({}))),
         ("POST", "/api/admin/maintenance/uninstall", Some(json!({}))),
         ("POST", "/api/maintenance/storage", Some(json!({}))),
