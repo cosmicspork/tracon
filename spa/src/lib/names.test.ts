@@ -3,7 +3,20 @@ import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
 import vectors from '../../../spec/vectors/names.json'
-import { DOMAIN, generatedName, nameHash, nameWords, nodeDisplayName, type NameKind } from './names'
+import {
+  applyOperatorName,
+  DOMAIN,
+  generatedName,
+  looksLikeId,
+  nameHash,
+  nameOf,
+  nameProblem,
+  nameWords,
+  nodeDisplayName,
+  operatorName,
+  setOperatorNames,
+  type NameKind,
+} from './names'
 
 test('matches the spec vectors the node is pinned by', () => {
   expect(vectors.domain).toBe(DOMAIN)
@@ -71,4 +84,38 @@ test('no id prefix is rendered outside the out-of-scope rows', () => {
       })
   }
   expect(offenders).toEqual([])
+})
+
+test("an operator's name reads in place of the generated one, and a revert puts it back", () => {
+  const id = '019a9e5c-7f20-7a3b-8c1d-2e3f4a5b6c7d'
+  setOperatorNames([{ kind: 'session', id, name: 'Login flow' }])
+  expect(nameOf('session', id)).toBe('Login flow')
+  // Another kind of the same id is not named by it.
+  expect(nameOf('approval', id)).toBe(generatedName('approval', id))
+  applyOperatorName('session', id, null)
+  expect(operatorName('session', id)).toBeUndefined()
+  expect(nameOf('session', id)).toBe(generatedName('session', id))
+  // A review and a report share a page: a report's name is found either way.
+  applyOperatorName('report', id, 'Weekly notes')
+  expect(nameOf('review', id)).toBe('Weekly notes')
+  // A fresh list drops names the node no longer has.
+  setOperatorNames([])
+  expect(operatorName('report', id)).toBeUndefined()
+})
+
+test('a name is checked as the node checks it', () => {
+  expect(nameProblem('Login flow')).toBeNull()
+  expect(nameProblem('cafe')).toBeNull()
+  expect(nameProblem('  ')).not.toBeNull()
+  expect(nameProblem('x'.repeat(65))).not.toBeNull()
+  expect(nameProblem('two\nlines')).not.toBeNull()
+  expect(nameProblem('deadbeef')).not.toBeNull()
+  expect(nameProblem('019a9e5c-7f20-7a3b-8c1d-2e3f4a5b6c7d')).not.toBeNull()
+})
+
+test('an id reads as an id, and a name or a prefix does not', () => {
+  expect(looksLikeId('019a9e5c-7f20-7a3b-8c1d-2e3f4a5b6c7d')).toBe(true)
+  expect(looksLikeId('ab'.repeat(32))).toBe(true)
+  expect(looksLikeId('019a9e5c')).toBe(false)
+  expect(looksLikeId('session-loving-bubble-21')).toBe(false)
 })

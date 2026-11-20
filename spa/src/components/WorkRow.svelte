@@ -4,7 +4,7 @@
   import { nodeLabel } from '../lib/nodes'
   import { store } from '../lib/store.svelte'
   import type { PriorityLevel, WorkView } from '../lib/types'
-  import { generatedName } from '../lib/names'
+  import { nameOf } from '../lib/names'
   import { blockersLine, isTopPriority, priorityLabel, taskName, workLabel, workState } from '../lib/work'
 
   let {
@@ -28,7 +28,7 @@
     if (state === 'blocked' && item.readiness.state === 'blocked') bits.push(blockersLine(item.readiness.by, titles))
     if (state === 'ready') bits.push(item.phase_plan_slug ? 'plan written' : 'no plan yet')
     if (state === 'insession' && holder) bits.push(`${holder.phase} on ${nodeLabel(store.nodes, holder.node_id)}`)
-    if (state === 'closed' && item.closed_by_session) bits.push(`closed by ${generatedName('session', item.closed_by_session)}`)
+    if (state === 'closed' && item.closed_by_session) bits.push(`closed by ${nameOf('session', item.closed_by_session)}`)
     if (item.discovered_from) bits.push(`discovered from ${taskName(item.discovered_from)}`)
     return bits.join(' · ')
   })

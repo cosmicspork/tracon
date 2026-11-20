@@ -2492,9 +2492,11 @@ async fn an_agent_reads_rewrites_and_deletes_items_on_its_own_channel() {
         .into_iter()
         .find(|p| p.id == id)
         .expect("a card for it");
+    // The prefix is resolved before the operator is asked, so the card
+    // names the task the call will change.
     assert!(
         card.title
-            .starts_with(&format!("work_update {}", &plain[..8])),
+            .starts_with(&format!("work_update {}", tracon::names::task(&plain))),
         "{}",
         card.title
     );

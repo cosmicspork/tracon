@@ -51,18 +51,23 @@ export function isTopPriority(value: number, levels: readonly PriorityLevel[]): 
 
 /**
  * Whether an item answers a search, as the node's `q` does: every word is in
- * its title or body, ignoring case, or starts its id.
+ * its title or body, ignoring case, starts its id, or is its name or part of
+ * it (`task-quiet-otter-07`, `quiet-otter`, `otter`).
  */
 export function matches(item: Pick<WorkItem, 'id' | 'title' | 'body'>, query: string): boolean {
   const title = item.title.toLowerCase()
   const body = item.body.toLowerCase()
-  return query
-    .split(/\s+/)
-    .filter(Boolean)
-    .every((w) => {
-      const word = w.toLowerCase()
-      return title.includes(word) || body.includes(word) || item.id.startsWith(word)
-    })
+  const words = query.split(/\s+/).filter(Boolean)
+  const name = words.length ? taskName(item.id) : ''
+  return words.every((w) => {
+    const word = w.toLowerCase()
+    return title.includes(word) || body.includes(word) || item.id.startsWith(word) || nameMatches(name, word)
+  })
+}
+
+/** A whole name, or three or more characters of the words after `task-`: the bare kind would match all. */
+function nameMatches(name: string, word: string): boolean {
+  return name === word || (word.length >= 3 && name.slice('task-'.length).includes(word))
 }
 
 /** `all`, `none` (items with no project), or a project's id. */

@@ -900,7 +900,7 @@
       <em>{closed ? CLOSED_LABEL[review.state] : stale.length > 0 ? 'Changed since submit' : 'Review'}</em>
       {title || review.title}
       <small
-        ><Name kind="review" id={review.id} /> · {files.length} files · +{review.added} −{review.removed} · {review.channel}{!closed && review.claimed_ms
+        ><Name kind={review.kind === 'report' ? 'report' : 'review'} id={review.id} renamable /> · {files.length} files · +{review.added} −{review.removed} · {review.channel}{!closed && review.claimed_ms
           ? ' · claimed'
           : ''}</small
       >

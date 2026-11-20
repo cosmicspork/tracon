@@ -17,6 +17,7 @@ pub mod egress;
 pub mod github;
 pub mod gitlab;
 pub mod memory;
+mod names;
 pub mod operator;
 pub mod parity;
 pub mod plugin_host;
@@ -1887,6 +1888,16 @@ impl Tools {
 
     pub async fn call(&self, ctx: &CallContext, name: &str, args: &Value) -> Result<Value, String> {
         let mut gate = audit::Gate::default();
+        // This node's own tools take a record's name where they take its id,
+        // and say each record's name beside its id. Another server's tools
+        // are passed through as they are.
+        let own = self.upstream_tool(name).is_none() && self.plugin_tool(name).is_none();
+        let store = self.session.get().map(|access| access.store.clone());
+        let named = match (&store, own) {
+            (Some(store), true) => names::resolve_args(store, &ctx.channel, name, args)?,
+            _ => None,
+        };
+        let args = named.as_ref().unwrap_or(args);
         let result = self.call_gated(ctx, name, args, &mut gate).await;
         // A session's calls are its audit; a session-less caller's channel
         // log already records each call it makes.
@@ -1900,7 +1911,13 @@ impl Tools {
                 audit::record(name, args, &gate, &result),
             );
         }
-        result
+        match (store, own) {
+            (Some(store), true) => result.map(|mut v| {
+                names::annotate(&store, &mut v);
+                v
+            }),
+            _ => result,
+        }
     }
 
     /// [`Self::call`], saying in `gate` how it was decided.

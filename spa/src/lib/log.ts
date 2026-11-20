@@ -7,7 +7,7 @@
 // break a run: every Claude Code call now carries a policy record, and letting
 // those through left no two calls side by side.
 
-import { generatedName } from './names'
+import { nameOf } from './names'
 import { roomWords } from './capabilities'
 import { exhaustionNote } from './exhaustion'
 import { formatBytes } from './data'
@@ -694,7 +694,7 @@ export function eventLine(e: Event): EventLine | null {
       // or sent back for changes; the link is that attempt.
       const from = str(p.from_session)
       const what = str(p.state) === 'revising' ? 'review sent back for changes taken over' : 'open review taken over'
-      const name = from ? generatedName('session', from) : ''
+      const name = from ? nameOf('session', from) : ''
       return line('mark', [what, from ? `from ${name}` : ''], from ? `/sessions/${from}` : undefined, name || undefined, from || undefined)
     }
     case 'provider_exhausted': {
@@ -714,7 +714,7 @@ export function eventLine(e: Event): EventLine | null {
           return line('mark', ["the provider's limit reset", 'resumed', note])
         case 'continued': {
           const next = str(p.continued_by)
-          return line('mark', ['continued in a new session', str(p.model) ? `on ${str(p.model)}` : '', note], next ? `/sessions/${next}` : undefined, next ? generatedName('session', next) : undefined, next || undefined)
+          return line('mark', ['continued in a new session', str(p.model) ? `on ${str(p.model)}` : '', note], next ? `/sessions/${next}` : undefined, next ? nameOf('session', next) : undefined, next || undefined)
         }
         case 'held':
           return line('wait', ['held for you', note])

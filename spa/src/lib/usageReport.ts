@@ -1,7 +1,7 @@
 // The Usage page's breakdown: the query it sends, the rows it shows, the
 // file it offers. Pure, so it tests flat.
 
-import { generatedName } from './names'
+import { nameOf } from './names'
 import { localDate, type UsageView, usageWindow } from './routes'
 import type { InfraSpend, InfraTotal, UsageTotal } from './types'
 
@@ -34,7 +34,7 @@ export function usageKey(row: UsageTotal, view: UsageView): string {
   if (view.group === 'day') return row.day ?? '—'
   if (view.group === 'session') {
     if (!row.session_id) return 'outside a session'
-    return row.title ? `${row.title}${row.review ? ` · ${row.review}` : ''}` : generatedName('session', row.session_id)
+    return row.title ? `${row.title}${row.review ? ` · ${row.review}` : ''}` : nameOf('session', row.session_id)
   }
   return row.model ?? 'unknown model'
 }
@@ -91,7 +91,7 @@ export function infraKey(row: InfraTotal, group: InfraGroup): string {
   if (group === 'day') return row.day ?? '—'
   if (group === 'channel') return row.channel || 'no channel'
   if (group === 'size') return row.size || 'default size'
-  if (row.session_id) return generatedName('session', row.session_id)
+  if (row.session_id) return nameOf('session', row.session_id)
   return row.kind ? `${row.kind} run` : 'outside a session'
 }
 

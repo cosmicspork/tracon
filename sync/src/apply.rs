@@ -840,4 +840,169 @@ mod tests {
             );
         }
     }
+
+    fn name_row(name: &str) -> Value {
+        json!({"channel": "personal", "kind": "session", "entity_id": "s1", "name": name,
+               "created_ms": 1, "updated_ms": 1})
+    }
+
+    fn name_of(c: &Connection) -> (String, i64) {
+        c.query_row(
+            "SELECT name, deleted FROM entity_name WHERE id = 'session:s1'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn entity_names_replicate_by_last_writer_and_a_revert_is_a_tombstone() {
+        let mut a = db();
+        let mut b = db();
+        let first = write_change(
+            &mut a,
+            "A",
+            "personal",
+            "entity_name",
+            ChangeOp::Upsert,
+            "session:s1",
+            name_row("Login flow"),
+            1000,
+        )
+        .unwrap();
+        let later = write_change(
+            &mut b,
+            "B",
+            "personal",
+            "entity_name",
+            ChangeOp::Upsert,
+            "session:s1",
+            name_row("Login rework"),
+            2000,
+        )
+        .unwrap();
+        // Concurrent renames: the later clock wins on both sides, in either order.
+        assert_eq!(
+            apply_changes(&mut b, "A", "personal", std::slice::from_ref(&first), 3000).unwrap(),
+            vec![Applied::Lost]
+        );
+        assert_eq!(
+            apply_changes(&mut a, "B", "personal", std::slice::from_ref(&later), 3000).unwrap(),
+            vec![Applied::Stored]
+        );
+        assert_eq!(name_of(&a), ("Login rework".into(), 0));
+        assert_eq!(name_of(&b), ("Login rework".into(), 0));
+
+        // A revert on A is a tombstone that clears the name everywhere, and the
+        // older rename arriving late does not bring it back.
+        let revert = write_change(
+            &mut a,
+            "A",
+            "personal",
+            "entity_name",
+            ChangeOp::Delete,
+            "session:s1",
+            Value::Null,
+            4000,
+        )
+        .unwrap();
+        assert_eq!(
+            apply_changes(&mut b, "A", "personal", &[revert], 5000).unwrap(),
+            vec![Applied::Stored]
+        );
+        assert_eq!(name_of(&a), (String::new(), 1));
+        assert_eq!(name_of(&b), (String::new(), 1));
+        let mut stale = later.clone();
+        stale.site_seq = 99;
+        assert_eq!(
+            apply_changes(&mut a, "B", "personal", &[stale], 6000).unwrap(),
+            vec![Applied::Lost]
+        );
+        assert_eq!(name_of(&a), (String::new(), 1));
+    }
+
+    /// What a replica that predates `entity_name` does with one: the change
+    /// names a table it does not know, so it is dropped as malformed, and
+    /// the same site's changes before and after it still apply. Simulated by
+    /// renaming the table to one this build does not know either, which takes
+    /// exactly the path an older build takes for `entity_name`.
+    #[test]
+    fn a_change_for_an_unknown_table_is_dropped_without_stalling_its_site() {
+        let mut a = db();
+        let mut old = db();
+        let task = |title: &str| json!({"channel": "personal", "title": title, "body": "", "state": "open", "priority": 0, "deps_json": "[]", "created_ms": 1, "updated_ms": 1});
+        let before = write_change(
+            &mut a,
+            "A",
+            "personal",
+            "work_item",
+            ChangeOp::Upsert,
+            "w1",
+            task("one"),
+            1000,
+        )
+        .unwrap();
+        let mut named = write_change(
+            &mut a,
+            "A",
+            "personal",
+            "entity_name",
+            ChangeOp::Upsert,
+            "session:s1",
+            name_row("Login flow"),
+            1001,
+        )
+        .unwrap();
+        named.table = "entity_name_from_the_future".into();
+        let after = write_change(
+            &mut a,
+            "A",
+            "personal",
+            "work_item",
+            ChangeOp::Upsert,
+            "w2",
+            task("two"),
+            1002,
+        )
+        .unwrap();
+        assert_eq!(
+            apply_changes(
+                &mut old,
+                "A",
+                "personal",
+                &[before, named.clone(), after],
+                2000
+            )
+            .unwrap(),
+            vec![Applied::Stored, Applied::Malformed, Applied::Stored]
+        );
+        // The site's sequence is not held at the dropped change: what it
+        // writes next applies, and asking again after the dropped one finds
+        // nothing missing.
+        let next = write_change(
+            &mut a,
+            "A",
+            "personal",
+            "work_item",
+            ChangeOp::Upsert,
+            "w3",
+            task("three"),
+            1003,
+        )
+        .unwrap();
+        assert_eq!(
+            apply_changes(&mut old, "A", "personal", &[next], 3000).unwrap(),
+            vec![Applied::Stored]
+        );
+        assert_eq!(change_log_max(&old, "A", "personal").unwrap(), 4);
+        // Resent (a backfill), it is dropped again and harms nothing.
+        assert_eq!(
+            apply_changes(&mut old, "A", "personal", &[named], 4000).unwrap(),
+            vec![Applied::Malformed]
+        );
+        let n: i64 = old
+            .query_row("SELECT count(*) FROM work_item", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 3);
+    }
 }

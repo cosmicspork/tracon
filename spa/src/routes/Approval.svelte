@@ -295,7 +295,7 @@
       <em>Approval</em>
       {a.title}
       <small
-        ><Name kind="approval" id={a.id} /> · {a.tool} · {a.channel} · {pending
+        ><Name kind="approval" id={a.id} renamable /> · {a.tool} · {a.channel} · {pending
           ? lapsed
             ? 'expired · nothing ran'
             : `${formatExpiry(a.expires_ms, clock.now)} · ${grant ? 'allowing grants it' : 'allowing runs it'}`

@@ -406,7 +406,7 @@
 {:else}
   <header class="sess">
     <a class="lnk" href="/">‹ Queue</a>
-    <Name kind="session" id={session.id} />
+    <Name kind="session" id={session.id} renamable />
     <!-- The harness and its protocol are the node's business: on hover only. -->
     <span
       class="model"

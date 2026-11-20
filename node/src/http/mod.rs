@@ -8,6 +8,7 @@ pub mod environments;
 pub mod evidence;
 mod mcp;
 pub mod metrics;
+pub mod names;
 pub mod passkey;
 mod peer_admin;
 pub mod plugin_ui;
@@ -206,6 +207,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/promotions/{id}/verdict", post(api::decide_promotion))
         .route("/api/work", get(api::list_work).post(api::add_work))
         .route("/api/work/ready", get(api::ready_work))
+        // Operator names for records, replicated; and what a name resolves to.
+        .route("/api/names", get(names::list))
+        .route(
+            "/api/names/{kind}/{id}",
+            put(names::put).delete(names::delete),
+        )
+        .route("/api/resolve", get(names::resolve))
         .route("/api/projects", get(api::list_projects))
         .route(
             "/api/work/{id}",

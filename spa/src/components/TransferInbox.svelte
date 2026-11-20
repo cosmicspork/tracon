@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { store } from '../lib/store.svelte'
-  import { generatedName, nodeDisplayName } from '../lib/names'
+  import { nameOf, nodeDisplayName } from '../lib/names'
   import Name from './Name.svelte'
   import { api } from '../lib/api'
   import type { CandidateTransfer, TransferInboxItem } from '../lib/types'
@@ -41,7 +41,7 @@
     try {
       const transfer = JSON.parse(await file.text()) as CandidateTransfer
       const staged = await api.stageTransfer(transfer)
-      notice = `Staged ${generatedName('transfer', staged.candidate_id)}. Review it below, then explicitly start an isolated continuation session.`
+      notice = `Staged ${nameOf('transfer', staged.candidate_id)}. Review it below, then explicitly start an isolated continuation session.`
       await refresh()
     } catch (caught) {
       error = caught instanceof Error ? caught.message : String(caught)
@@ -58,7 +58,7 @@
     try {
       const body = model ? { confirm: true as const, model } : { confirm: true as const }
       const imported = await api.importTransfer(transfer.id, body)
-      notice = `Started isolated continuation ${generatedName('session', imported.session.id)} from immutable candidate ${generatedName('transfer', transfer.candidate_id)}.`
+      notice = `Started isolated continuation ${nameOf('session', imported.session.id)} from immutable candidate ${nameOf('transfer', transfer.candidate_id)}.`
       await refresh()
     } catch (caught) {
       error = caught instanceof Error ? caught.message : String(caught)

@@ -5,7 +5,7 @@
 // the retired OpenCode harness ran. Another MCP server's tools keep their server's name
 // in view, since that is what the operator needs to know about them.
 
-import { generatedName, type NameKind } from './names'
+import { nameOf, type NameKind } from './names'
 
 /// Every tool the node offers a session, by the name it is offered under.
 /// An archived OpenCode session's `tracon_<tool>` is read as the node's only
@@ -119,7 +119,7 @@ function clip(text: string, max = 72): string {
 /// wrote it, after the kind.
 function named(kind: NameKind, id: string): string {
   const full = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$|^[0-9a-f]{64}$/.test(id)
-  return full ? generatedName(kind, id) : `${kind} ${id}`
+  return full ? nameOf(kind, id) : `${kind} ${id}`
 }
 
 /// "review status" for `review_status`: what an unmapped tool reads as.

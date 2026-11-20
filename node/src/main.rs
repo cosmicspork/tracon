@@ -72,6 +72,11 @@ enum Command {
     /// The work ledger: items, dependencies, ready work.
     #[command(subcommand)]
     Work(WorkCommand),
+    /// Names for records: what the interface and every node show in place of
+    /// an id. A record with no name of the operator's reads by its generated
+    /// one (`session-loving-bubble-21`).
+    #[command(subcommand)]
+    Name(NameCommand),
     /// Who may reach this node's API from off this machine.
     #[command(subcommand)]
     Auth(AuthCommand),
@@ -594,6 +599,31 @@ enum WorkCommand {
 }
 
 #[derive(Subcommand)]
+enum NameCommand {
+    /// Name a record (a session, review, report, approval, manifest,
+    /// transfer or check); every node in the mesh shows it.
+    Set {
+        /// session, review, report, approval, manifest, transfer or check.
+        kind: String,
+        /// The record: its id, a prefix of six or more characters, or a name.
+        record: String,
+        /// The new name: one line, at most 64 characters.
+        name: String,
+    },
+    /// Put a record back to its generated name.
+    Rm {
+        kind: String,
+        /// The record: its id, a prefix of six or more characters, or a name.
+        record: String,
+    },
+    /// What an id, a prefix or a name refers to, of any kind.
+    Show {
+        /// An id, a prefix of six or more characters, or a name.
+        record: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum MemoryCommand {
     /// List memories on a channel.
     Ls {
@@ -842,6 +872,7 @@ async fn main() -> Result<()> {
         Command::Session(cmd) => session_command(cmd).await,
         Command::Memory(cmd) => memory_command(cmd).await,
         Command::Work(cmd) => work_command(cmd).await,
+        Command::Name(cmd) => name_command(cmd).await,
         Command::Auth(cmd) => auth_command(cmd).await,
         Command::External(cmd) => external_command(cmd).await,
         Command::Push(cmd) => push_command(cmd).await,
@@ -2638,6 +2669,7 @@ async fn session_command(cmd: SessionCommand) -> Result<()> {
             Ok(())
         }
         SessionCommand::Reopen { id, harness, model } => {
+            let id = session_resolve(&id).await?;
             let v = node_call(
                 Method::POST,
                 &format!("/api/sessions/{id}/reopen"),
@@ -2664,6 +2696,7 @@ async fn session_command(cmd: SessionCommand) -> Result<()> {
             Ok(())
         }
         SessionCommand::Continue { id } => {
+            let id = session_resolve(&id).await?;
             let v = node_call(
                 Method::POST,
                 &format!("/api/sessions/{id}/continue"),
@@ -3326,6 +3359,11 @@ async fn work_resolve(channel: &str, prefix: &str) -> Result<String> {
     if prefix.len() == 64 {
         return Ok(prefix.to_string());
     }
+    if let Some(hit) = node_resolve(Some("task"), prefix, Some(channel)).await? {
+        return Ok(hit.id);
+    }
+    // A node that predates `/api/resolve`, or a prefix shorter than it
+    // resolves: the ledger, read here.
     let v = node_call(
         Method::GET,
         &format!("/api/work?channel={channel}"),
@@ -3363,8 +3401,126 @@ fn resolve_task<'a>(
     }
 }
 
+/// A record the node resolved from what the operator typed.
+struct ResolvedRecord {
+    kind: String,
+    id: String,
+    name: String,
+    channel: String,
+}
+
+/// What `q` names on the node: an operator name, a generated name, a full id,
+/// or an id prefix of six or more characters, of `kind` (any kind when
+/// `None`). `None` when nothing does, or the node predates resolution; an
+/// error listing the candidates when several records answer.
+async fn node_resolve(
+    kind: Option<&str>,
+    q: &str,
+    channel: Option<&str>,
+) -> Result<Option<ResolvedRecord>> {
+    use reqwest::Method;
+    let mut path = format!("/api/resolve?q={}", urlencoding(q.trim()));
+    if let Some(kind) = kind {
+        path.push_str(&format!("&kind={}", urlencoding(kind)));
+    }
+    if let Some(channel) = channel {
+        path.push_str(&format!("&channel={}", urlencoding(channel)));
+    }
+    match node_call(Method::GET, &path, None, None).await {
+        Ok(v) => Ok(v["id"].as_str().map(|id| ResolvedRecord {
+            kind: v["kind"].as_str().unwrap_or_default().to_string(),
+            id: id.to_string(),
+            name: v["name"].as_str().unwrap_or_default().to_string(),
+            channel: v["channel"].as_str().unwrap_or_default().to_string(),
+        })),
+        Err(e) => match e.downcast_ref::<NodeRefusal>() {
+            Some(r) if r.status == reqwest::StatusCode::NOT_FOUND => Ok(None),
+            _ => Err(e),
+        },
+    }
+}
+
+/// A session by id, prefix or name.
+async fn session_resolve(given: &str) -> Result<String> {
+    if uuid::Uuid::try_parse(given).is_ok() {
+        return Ok(given.to_string());
+    }
+    match node_resolve(Some("session"), given, None).await? {
+        Some(hit) => Ok(hit.id),
+        None => anyhow::bail!("no session is named {given}"),
+    }
+}
+
+async fn name_command(cmd: NameCommand) -> Result<()> {
+    use reqwest::Method;
+    match cmd {
+        NameCommand::Set { kind, record, name } => {
+            let Some(hit) = node_resolve(Some(&kind), &record, None).await? else {
+                anyhow::bail!("no {kind} is named {record}");
+            };
+            let v = node_call(
+                Method::PUT,
+                &format!(
+                    "/api/names/{}/{}",
+                    urlencoding(&hit.kind),
+                    urlencoding(&hit.id)
+                ),
+                Some(serde_json::json!({ "name": name })),
+                None,
+            )
+            .await?;
+            println!(
+                "{} {} is now {} (was {})",
+                hit.kind,
+                hit.id,
+                v["name"].as_str().unwrap_or(""),
+                hit.name
+            );
+            Ok(())
+        }
+        NameCommand::Rm { kind, record } => {
+            let Some(hit) = node_resolve(Some(&kind), &record, None).await? else {
+                anyhow::bail!("no {kind} is named {record}");
+            };
+            let v = node_call(
+                Method::DELETE,
+                &format!(
+                    "/api/names/{}/{}",
+                    urlencoding(&hit.kind),
+                    urlencoding(&hit.id)
+                ),
+                None,
+                None,
+            )
+            .await?;
+            println!(
+                "{} {} is {} again",
+                hit.kind,
+                hit.id,
+                v["name"].as_str().unwrap_or("")
+            );
+            Ok(())
+        }
+        NameCommand::Show { record } => {
+            let Some(hit) = node_resolve(None, &record, None).await? else {
+                anyhow::bail!("nothing here is named {record}");
+            };
+            let generated = tracon::names::generated(&hit.kind, &hit.id);
+            println!("{:<10} {}", "kind", hit.kind);
+            println!("{:<10} {}", "id", hit.id);
+            println!("{:<10} {}", "name", hit.name);
+            if hit.name != generated {
+                println!("{:<10} {}", "generated", generated);
+            }
+            println!("{:<10} {}", "channel", hit.channel);
+            Ok(())
+        }
+    }
+}
+
 /// Resolve a memory id prefix against the channel's newest memories; an older
-/// one needs its full id.
+/// one needs its full id. Memories have no names, generated or the
+/// operator's, so there is no name to accept here.
 async fn memory_resolve(channel: &str, prefix: &str) -> Result<String> {
     use reqwest::Method;
     if uuid::Uuid::try_parse(prefix).is_ok() {

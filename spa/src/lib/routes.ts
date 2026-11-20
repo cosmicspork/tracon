@@ -3,6 +3,8 @@
 // delivered keep working after a screen moves; the router swaps the address in
 // place rather than adding a step to history. Pure, so it tests flat.
 
+import { looksLikeId } from './names'
+
 /**
  * Settings sections that were folded into others when Settings was regrouped,
  * by the anchor they had. Maintenance was a catch-all; most of it is System.
@@ -124,6 +126,46 @@ export function screenFor(path: string): Screen {
   if (path === '/plugins') return { name: 'plugins' }
   if (path === '/settings') return { name: 'settings' }
   return { name: 'home' }
+}
+
+/** The record screens whose address can carry a name in place of an id. */
+const NAMED_SCREENS = [
+  ['sessions', 'session'],
+  ['reviews', 'review'],
+  ['approvals', 'approval'],
+  ['tasks', 'task'],
+] as const
+
+/** A record address that carries a name (or a prefix) to resolve, rather than an id. */
+export interface NameLookup {
+  kind: 'session' | 'review' | 'approval' | 'task'
+  /** What was typed, decoded. */
+  q: string
+  /** The address with `{id}` where the name was, for the redirect. */
+  canonical: (id: string) => string
+}
+
+/**
+ * The lookup an address needs, or null when it names its record by id (a
+ * UUID, or 64 hex characters for a task) or is no record's address.
+ * `/sessions/session-loving-bubble-21` resolves, then the router replaces it
+ * with the session's id address.
+ */
+export function nameLookup(path: string, search = '', hash = ''): NameLookup | null {
+  for (const [prefix, kind] of NAMED_SCREENS) {
+    const m = path.match(new RegExp(`^/${prefix}/([^/]+)(.*)$`))
+    if (!m) continue
+    const [, segment, rest] = m
+    let q: string
+    try {
+      q = decodeURIComponent(segment)
+    } catch {
+      q = segment
+    }
+    if (looksLikeId(q)) return null
+    return { kind, q, canonical: (id) => `/${prefix}/${id}${rest}${search}${hash}` }
+  }
+  return null
 }
 
 /** How the Usage page's breakdown keys its rows, past channel and provider. */

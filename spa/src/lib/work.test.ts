@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 
 import type { Project, WorkView } from './types'
-import { inProject, isTopPriority, matches, pickableProjects, priorityLabel, projectLabel, projectName, projectTabs } from './work'
+import { inProject, isTopPriority, matches, taskName, pickableProjects, priorityLabel, projectLabel, projectName, projectTabs } from './work'
 
 const levels = [
   { name: 'Urgent', value: 4 },
@@ -50,6 +50,13 @@ test('a search wants every word, in the title or body, or the start of the id', 
   expect(matches(item, 'machine authored')).toBe(false)
   expect(matches(item, '0b0e29')).toBe(true)
   expect(matches(item, 'e29c')).toBe(false)
+  const name = taskName(item.id)
+  const [, adjective, noun] = name.split('-')
+  expect(matches(item, name)).toBe(true)
+  expect(matches(item, name.toUpperCase())).toBe(true)
+  expect(matches(item, `${adjective}-${noun}`)).toBe(true)
+  expect(matches(item, `machine ${noun}`)).toBe(true)
+  expect(matches(item, 'task-')).toBe(false)
 })
 
 test('tabs are All, each project that holds an item, an unnamed one by id, then No project', () => {
