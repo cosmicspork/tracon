@@ -1651,11 +1651,8 @@ async fn plugin_command(command: PluginCommand) -> Result<()> {
                     row["name"].as_str().unwrap_or("?"),
                     row["repo"].as_str().unwrap_or("?"),
                 );
-                if let Some(tools) = row["active"]["tools"].as_array() {
-                    let tools: Vec<&str> = tools.iter().filter_map(|t| t.as_str()).collect();
-                    if !tools.is_empty() {
-                        println!("  tools: {}", tools.join(", "));
-                    }
+                for tool in row["tools"].as_array().into_iter().flatten() {
+                    println!("  {}", plugin_tool_line(tool));
                 }
                 if let Some(previous) = version(&row["previous"]) {
                     println!("  previous: {previous}");
@@ -1784,6 +1781,32 @@ async fn plugin_command(command: PluginCommand) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// One of a plugin's tools in `tracon plugin ls`: how a call to it is
+/// answered now, and by which rule:
+/// `tool <plugin>__<tool>: <runs|asked|refused> (rule <id>); says it <hint>s`.
+fn plugin_tool_line(tool: &serde_json::Value) -> String {
+    let answer = match tool["decision"].as_str().unwrap_or("?") {
+        "allow" => "runs",
+        "ask" => "asked",
+        "deny" => "refused",
+        other => other,
+    };
+    let rule = tool["rule_id"]
+        .as_str()
+        .map(|r| format!(" (rule {r})"))
+        .unwrap_or_default();
+    let consequential = if tool["consequential"] == true {
+        ", consequential"
+    } else {
+        ""
+    };
+    format!(
+        "tool {}: {answer}{rule}; says it {}s{consequential}",
+        tool["name"].as_str().unwrap_or("?"),
+        tool["hint"].as_str().unwrap_or("?"),
+    )
 }
 
 /// One plugin instance, as `tracon plugin ls` shows it:
@@ -4399,9 +4422,30 @@ fn shell_quote(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::plugin_tool_line;
     use super::resolve_prefix;
     use super::{awaited_build, build_started, AwaitedBuild};
     use serde_json::json;
+
+    /// Each of a plugin's tools says how a call to it is answered, and by
+    /// which rule when one decides it.
+    #[test]
+    fn a_plugin_tool_says_how_it_is_answered() {
+        assert_eq!(
+            plugin_tool_line(&json!({
+                "name": "sql-review__query", "hint": "read", "consequential": false,
+                "decision": "allow", "rule_id": "brokered-reads",
+            })),
+            "tool sql-review__query: runs (rule brokered-reads); says it reads"
+        );
+        assert_eq!(
+            plugin_tool_line(&json!({
+                "name": "sql-review__write", "hint": "write", "consequential": true,
+                "decision": "ask", "rule_id": null,
+            })),
+            "tool sql-review__write: asked; says it writes, consequential"
+        );
+    }
 
     /// The build's first line names the commit it reads, and says when the
     /// repository has none rather than printing empty fields (#937).

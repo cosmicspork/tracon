@@ -1125,7 +1125,7 @@ async fn rpc(
     }
 }
 
-fn verdict_name(verdict: Verdict) -> &'static str {
+pub(crate) fn verdict_name(verdict: Verdict) -> &'static str {
     match verdict {
         Verdict::Allow => "allow",
         Verdict::Ask => "ask",

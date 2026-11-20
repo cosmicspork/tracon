@@ -2240,6 +2240,21 @@ export interface PluginInstance {
   digest: string | null
 }
 
+/** One tool an active plugin build declares, as `GET /api/plugins` reports it. */
+export interface PluginTool {
+  /** As agents call it, `<plugin>__<tool>`. */
+  name: string
+  tool: string
+  /** What the plugin says the tool does. It decides nothing. */
+  hint: 'read' | 'write'
+  consequential: boolean
+  /** What the operator's `[[plugin]]` entry says of it, by its allow, ask and deny lists. */
+  setting: 'allow' | 'ask' | 'deny' | null
+  /** How a call to it is answered now, policy included, on a channel no rule is scoped to. */
+  decision: 'allow' | 'ask' | 'deny'
+  rule_id: string | null
+}
+
 /** An installed plugin (`GET /api/plugins`), only what Settings shows. */
 export interface PluginSummary {
   name: string
@@ -2253,6 +2268,8 @@ export interface PluginSummary {
     ui_title?: string | null
   } | null
   instances: PluginInstance[]
+  /** The active build's tools; empty while none is active, and from an older node. */
+  tools?: PluginTool[]
 }
 
 /** A plugin's UI opened for one channel (`POST /api/plugins/{name}/ui`): the

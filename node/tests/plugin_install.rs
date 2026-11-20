@@ -297,6 +297,16 @@ async fn the_api_stages_an_archive_and_the_card_installs_it() {
     assert_eq!(row["state"], "active", "{listed}");
     assert_eq!(row["active"]["version"], "0.1.0");
     assert_eq!(row["active"]["tools"], json!(["by-api__query"]));
+    // Each tool says how a call to it is answered now.
+    let tools = row["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 1, "{row}");
+    assert_eq!(tools[0]["name"], "by-api__query");
+    assert_eq!(tools[0]["hint"], "read");
+    assert_eq!(tools[0]["setting"], Value::Null);
+    assert!(
+        ["allow", "ask"].contains(&tools[0]["decision"].as_str().unwrap()),
+        "{row}"
+    );
 
     // Nothing before it to go back to.
     let (s, v) = send(

@@ -1,6 +1,7 @@
 <script lang="ts">
-  // Each installed plugin and the processes the node runs of it, one per
-  // channel that used it: their state, and the last lines each wrote.
+  // Each installed plugin: how a call to each of its tools is answered now,
+  // and the processes the node runs of it, one per channel that used it,
+  // with their state and the last lines each wrote.
   // Installing, updating and removing stay with `tracon plugin`.
   import { onMount } from 'svelte'
   import Card from './Card.svelte'
@@ -69,12 +70,14 @@
     stopped: 'Stopped',
   } as const
 
+  const answer = { allow: 'Runs', ask: 'Asked', deny: 'Refused' } as const
+
   onMount(() => void load())
 </script>
 
 <Card
   title="Plugins"
-  note="Plugins installed on this node, and a process for each channel whose sessions used one. A process stops after its idle timeout, and an unhealthy one stays down until it is used again or restarted. Install, update and remove with tracon plugin."
+  note="Plugins installed on this node, how each tool is answered by the signed policy and its [[plugin]] entry, and a process for each channel whose sessions used one. A process stops after its idle timeout, and an unhealthy one stays down until it is used again or restarted. Install, update and remove with tracon plugin."
 >
   {#snippet actions()}
     <button class="btn" onclick={() => void load()} disabled={busy}>{busy ? 'Loading…' : 'Refresh'}</button>
@@ -94,6 +97,16 @@
             <span class="name">{plugin.name}</span>
             <span class="where">{plugin.active ? plugin.active.version : 'not active'} · {plugin.repo}</span>
           </div>
+          {#if plugin.tools?.length}
+            <ul class="tools">
+              {#each plugin.tools as tool (tool.name)}
+                <li>
+                  <code>{tool.name}</code>
+                  <span class="chip {tool.decision}" title={tool.rule_id ?? 'no rule names it'}>{answer[tool.decision]}</span>
+                </li>
+              {/each}
+            </ul>
+          {/if}
           {#if plugin.instances.length === 0}
             <p class="meta">Not running on any channel.</p>
           {:else}
@@ -187,11 +200,28 @@
     background: var(--s2);
     white-space: nowrap;
   }
-  .chip.ready {
+  .chip.ready,
+  .chip.allow {
     color: var(--ok);
   }
-  .chip.unhealthy {
+  .chip.unhealthy,
+  .chip.deny {
     color: var(--crit);
+  }
+  .tools {
+    display: grid;
+    gap: 4px;
+    margin-top: 6px;
+  }
+  .tools li {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    min-width: 0;
+  }
+  .tools code {
+    overflow-wrap: anywhere;
+    min-width: 0;
   }
   pre {
     margin: 6px 0 0;
