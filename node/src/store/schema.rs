@@ -1815,7 +1815,20 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE approval ADD COLUMN preview_token TEXT;
     "#,
-    // 81: the id the caller gave a session's create, so a create retried
+    // 81: the loopback port a plugin's UI is served on, given the first time
+    // it is opened and kept, so its origin stays the same; kept while the
+    // plugin is removed with its data, and freed when it is purged.
+    r#"
+    ALTER TABLE plugin ADD COLUMN ui_port INTEGER;
+    CREATE UNIQUE INDEX plugin_ui_port ON plugin(ui_port) WHERE ui_port IS NOT NULL;
+    "#,
+    // 82: the archive digest of the plugin build a plugin tool's call was
+    // asked on. The card shows that build, and an approved call is refused
+    // if another build would run it.
+    r#"
+    ALTER TABLE approval ADD COLUMN plugin_digest TEXT;
+    "#,
+    // 83: the id the caller gave a session's create, so a create retried
     // after an answer that never arrived (a peer's late ack, a proxy's 504)
     // finds the session the first one made instead of making a second. One
     // per owner and channel; NULL for every session made without one.

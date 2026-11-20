@@ -416,7 +416,7 @@ pub struct Request<'a> {
 /// production incident has to be able to say so. The fields that say where it
 /// goes (a key, a project, a slug) are still matched.
 fn prose_fields(action: &str) -> &'static [&'static str] {
-    use crate::mcp::{docs, github, gitlab, jira, review, work};
+    use crate::mcp::{docs, github, gitlab, review, work};
     match action {
         // The note and the commit message are the agent's account of the
         // work, which may well say what it did not push.
@@ -432,15 +432,9 @@ fn prose_fields(action: &str) -> &'static [&'static str] {
         review::SUBMIT_REPORT => &["title", "body"],
         // A work item describes work, which may well be a push or a merge.
         work::WORK_DISCOVER | work::WORK_UPDATE => &["title", "body"],
-        jira::ISSUE_UPDATE => &["summary", "description"],
-        jira::ISSUE_CREATE => &[
-            "summary",
-            "description",
-            "issues.summary",
-            "issues.description",
-        ],
-        jira::ISSUE_COMMENT
-        | github::PR_COMMENT
+        // A plugin's tool has the prose its schema marks stripped by the node
+        // (`mcp::Tools::policy_arguments`) before it gets here.
+        github::PR_COMMENT
         | github::ISSUE_COMMENT
         | github::PR_REPLY
         | gitlab::MR_COMMENT
@@ -874,8 +868,8 @@ mod tests {
         assert_eq!(
             (policy().version, sha.as_str()),
             (
-                25,
-                "5d02b69966a8c2db107eddb47f36a8636fd66ddf433a5ff5874a84e34eb0b908"
+                26,
+                "f7988ea1f56e46ebac8f5e321952edb7a73b1b6cbdcd0674f4ebe6a75c9167e7"
             ),
             "working-agreements.toml changed: raise its version and pin the new hash"
         );
@@ -1043,25 +1037,6 @@ mod tests {
         let body = "Deployed to QA; PROD is webapp-prd after gh pr merge and git push.";
         for (name, args) in [
             (
-                "issue_comment",
-                serde_json::json!({ "key": "WRK-236", "body": body }),
-            ),
-            (
-                "issue_update",
-                serde_json::json!({ "key": "WRK-264", "summary": "gh pr merge", "description": body }),
-            ),
-            (
-                "issue_create",
-                serde_json::json!({ "project": "WRK", "type": "Task", "summary": "x", "description": body }),
-            ),
-            (
-                "issue_create",
-                serde_json::json!({ "issues": [
-                    { "project": "WRK", "type": "Epic", "summary": "gh pr merge" },
-                    { "project": "WRK", "type": "Task", "summary": "x", "description": body },
-                ] }),
-            ),
-            (
                 "pr_comment",
                 serde_json::json!({ "repo": "o/r", "number": 1, "body": body }),
             ),
@@ -1092,19 +1067,8 @@ mod tests {
         // Where the call goes is still matched.
         for (name, args) in [
             (
-                "issue_comment",
-                serde_json::json!({ "key": "git push", "body": "x" }),
-            ),
-            (
-                "issue_create",
-                serde_json::json!({ "project": "git push", "summary": "x" }),
-            ),
-            (
-                "issue_create",
-                serde_json::json!({ "issues": [
-                    { "project": "WRK", "summary": "x" },
-                    { "project": "git push", "summary": "x" },
-                ] }),
+                "pr_comment",
+                serde_json::json!({ "repo": "git push", "number": 1, "body": "x" }),
             ),
             (
                 "mr_comment",
@@ -1122,8 +1086,9 @@ mod tests {
     fn the_new_reads_run_unattended_and_every_write_is_asked() {
         let none = serde_json::json!({});
         let allowed = [
-            "issue_search",
-            "issue_transitions",
+            "jira-review__search",
+            "jira-review__issue",
+            "jira-review__transitions",
             "pipeline_status",
             "pipeline_wait",
             "pipeline_list_by_sha",
@@ -1150,10 +1115,11 @@ mod tests {
             "mr_comment",
             "pr_reply",
             "mr_reply",
-            "issue_comment",
-            "issue_update",
-            "issue_create",
-            "issue_link",
+            "jira-review__comment",
+            "jira-review__update",
+            "jira-review__create",
+            "jira-review__link",
+            "jira-review__transition",
             "pr_ready",
             "mr_ready",
             "pr_merge",

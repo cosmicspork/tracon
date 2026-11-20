@@ -14,7 +14,7 @@ use std::sync::OnceLock;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{docs, github, gitlab, jira, memory, review, work};
+use super::{docs, github, gitlab, memory, review, work};
 
 /// Arguments that name the issue, project, repository or change a call acts
 /// on, for every tool. Changing one is a different call, which the agent
@@ -69,9 +69,11 @@ pub const FORMAT_KEYWORD: &str = "x-tracon-format";
 /// format other than `markdown` or `source` is a plugin's
 /// ([`Presentation::plugin_format`]), shown as Markdown once converted.
 const PRESENTATIONS: &[(&str, &str, &[&str], &[&str])] = &[
-    (jira::ISSUE_CREATE, "jira_wiki", &["description"], &[]),
-    (jira::ISSUE_UPDATE, "jira_wiki", &["description"], &[]),
-    (jira::ISSUE_COMMENT, "jira_wiki", &["body"], &[]),
+    // The node's own Jira tools, gone to the jira-review plugin: their past
+    // calls are shown, their wiki markup as the source it is.
+    ("issue_create", "source", &["description"], &[]),
+    ("issue_update", "source", &["description"], &[]),
+    ("issue_comment", "source", &["body"], &[]),
     (github::PR_COMMENT, "markdown", &["body"], &[]),
     (github::ISSUE_COMMENT, "markdown", &["body"], &[]),
     (github::PR_REPLY, "markdown", &["body"], &["thread_id"]),
@@ -131,6 +133,21 @@ const PRESENTATIONS: &[(&str, &str, &[&str], &[&str])] = &[
             "summary",
         ],
     ),
+    // A plugin's card is its own account of what it will do, decided as it
+    // stands: allowing it runs nothing here, so there is nothing to edit.
+    (
+        crate::store::approvals::PLUGIN_CARD_TOOL,
+        "markdown",
+        &["summary"],
+        &[
+            "plugin",
+            "version",
+            "title",
+            "summary",
+            "content",
+            "requested_for",
+        ],
+    ),
     // A trial held to build its Dockerfile builds what the card shows.
     (
         super::setup::TRY,
@@ -144,17 +161,13 @@ const PRESENTATIONS: &[(&str, &str, &[&str], &[&str])] = &[
             "build_recipe",
         ],
     ),
-    // The title names the status this id leads to, read when it was asked.
-    (jira::ISSUE_TRANSITION, "markdown", &[], &["transition_id"]),
-    // So does a link, in its type's wording between these two issues.
-    (jira::ISSUE_LINK, "markdown", &[], &["from", "to", "type"]),
     // The title says which way the call turns it, ready or back to draft.
     (github::PR_READY, "markdown", &[], &["ready"]),
     (gitlab::MR_READY, "markdown", &[], &["ready"]),
 ];
 
 /// `(tool, argument)`: the tools that take a list of items in one call.
-const ITEM_LISTS: &[(&str, &str)] = &[(jira::ISSUE_CREATE, "issues")];
+const ITEM_LISTS: &[(&str, &str)] = &[("issue_create", "issues")];
 
 pub fn presentation(tool: &str) -> Presentation {
     let entry = PRESENTATIONS.iter().find(|(name, ..)| *name == tool);
@@ -259,7 +272,6 @@ fn registry() -> &'static HashMap<String, Value> {
     static REGISTRY: OnceLock<HashMap<String, Value>> = OnceLock::new();
     REGISTRY.get_or_init(|| {
         [
-            jira::definitions(),
             github::definitions(),
             gitlab::definitions(),
             // Edits are checked against the default kinds: no asked
@@ -320,21 +332,6 @@ pub fn check_edit(tool: &str, original: &Value, edited: &Value) -> Vec<FieldErro
                 .into_iter()
                 .filter(|e| touched(&e.field) && !locked.contains(&e.field.as_str())),
         );
-    }
-    // What the schema cannot say: how the items of a set fit together. An
-    // edit that breaks a call that fitted is refused here, not when it runs.
-    if tool == jira::ISSUE_CREATE && errors.is_empty() && jira::create_plan(original).is_ok() {
-        if let Err(message) = jira::create_plan(edited) {
-            let field = if edited.get("issues").is_some() {
-                "issues"
-            } else {
-                ""
-            };
-            errors.push(FieldError {
-                field: field.into(),
-                message,
-            });
-        }
     }
     errors
 }
@@ -503,9 +500,6 @@ mod tests {
     #[test]
     fn every_prose_tool_has_a_schema_without_its_credential() {
         for tool in [
-            "issue_create",
-            "issue_update",
-            "issue_comment",
             "pr_comment",
             "github_issue_comment",
             "mr_comment",
@@ -516,9 +510,15 @@ mod tests {
         for tool in ["retain", "submit_report"] {
             assert!(input_schema(tool).is_some(), "{tool}");
         }
+        // A past call of the node's own Jira tools shows its wiki markup as
+        // source: no plugin renders a tool the node no longer has.
         let create = presentation("issue_create");
-        assert_eq!(create.format, "markdown");
-        assert_eq!(create.plugin_format.as_deref(), Some("jira_wiki"));
+        assert_eq!(create.format, "source");
+        assert_eq!(create.plugin_format, None);
+        assert_eq!(create.prose_fields, ["description"]);
+        assert_eq!(create.item_list.as_deref(), Some("issues"));
+        assert_eq!(presentation("issue_comment").format, "source");
+        assert!(input_schema("issue_create").is_none());
         assert_eq!(presentation("mr_comment").plugin_format, None);
         assert_eq!(presentation("mr_comment").format, "markdown");
         let doc = presentation("doc_write");
@@ -540,10 +540,6 @@ mod tests {
         assert!(presentation("service_start")
             .locked_fields
             .contains(&"name".into()));
-        // The title names where a transition leads; the id it names is fixed.
-        assert!(presentation("issue_transition")
-            .locked_fields
-            .contains(&"transition_id".into()));
         let unknown = presentation("pipeline_run");
         assert_eq!(unknown.format, "markdown");
         assert!(unknown.prose_fields.is_empty());
@@ -611,11 +607,18 @@ mod tests {
 
     #[test]
     fn the_subset_in_use_is_checked_with_a_path_to_each_fault() {
-        let schema = input_schema("issue_create").unwrap();
-        let ok = json!({ "project": "WRK", "type": "Task", "summary": "s", "labels": ["a"] });
+        let schema = json!({ "type": "object", "properties": {
+            "issues": { "type": "array", "items": { "type": "object", "properties": {
+                "summary": { "type": "string" },
+                "priority": { "type": "string" },
+                "labels": { "type": "array", "items": { "type": "string" } },
+            }, "required": ["project", "summary"] } },
+        } });
+        let schema = &schema;
+        let ok = json!({ "issues": [{ "project": "WRK", "summary": "s", "labels": ["a"] }] });
         assert!(validate(schema, &ok).is_empty());
         let bad = json!({ "issues": [
-            { "project": "WRK", "type": "Task", "labels": ["a", 2], "priority": 3 },
+            { "project": "WRK", "labels": ["a", 2], "priority": 3 },
         ] });
         let fields: Vec<String> = validate(schema, &bad)
             .into_iter()
@@ -648,30 +651,27 @@ mod tests {
 
     #[test]
     fn an_edit_is_held_only_to_what_the_operator_changed() {
-        let asked = json!({ "key": "WRK-1", "summary": 7 });
-        let fixed = json!({ "key": "WRK-1", "summary": 7, "description": "d" });
-        assert!(check_edit("issue_update", &asked, &fixed).is_empty());
-        let broke = json!({ "key": "WRK-1", "summary": 7, "labels": "x" });
-        assert_eq!(
-            check_edit("issue_update", &asked, &broke)[0].field,
-            "labels"
-        );
+        let asked = json!({ "kind": "fact", "body": 7 });
+        let fixed = json!({ "kind": "fact", "body": 7, "confidence": 0.5 });
+        assert!(check_edit("retain", &asked, &fixed).is_empty());
+        let broke = json!({ "kind": "fact", "body": 7, "confidence": 2 });
+        assert_eq!(check_edit("retain", &asked, &broke)[0].field, "confidence");
     }
 
     #[test]
     fn an_edit_may_not_change_what_the_call_acts_on() {
-        let asked = json!({ "key": "WRK-1", "body": "b" });
-        let moved = json!({ "key": "WRK-2", "body": "b" });
-        let errors = check_edit("issue_comment", &asked, &moved);
+        let asked = json!({ "repo": "o/n", "number": 1, "body": "b" });
+        let moved = json!({ "repo": "o/n", "number": 2, "body": "b" });
+        let errors = check_edit("github_issue_comment", &asked, &moved);
         assert_eq!(errors.len(), 1, "{errors:?}");
-        assert_eq!(errors[0].field, "key");
+        assert_eq!(errors[0].field, "number");
         let dropped = json!({ "body": "b" });
         assert_eq!(
-            check_edit("issue_comment", &asked, &dropped)[0].field,
-            "key"
+            check_edit("github_issue_comment", &asked, &dropped)[0].field,
+            "repo"
         );
         assert_eq!(
-            check_edit("issue_comment", &asked, &json!("b"))[0].field,
+            check_edit("github_issue_comment", &asked, &json!("b"))[0].field,
             ""
         );
         let fact = json!({ "kind": "fact", "body": "b" });
@@ -697,29 +697,6 @@ mod tests {
     }
 
     #[test]
-    fn each_item_of_an_issue_set_is_checked_against_the_item_schema() {
-        assert_eq!(
-            presentation("issue_create").item_list.as_deref(),
-            Some("issues")
-        );
-        assert_eq!(presentation("issue_update").item_list, None);
-        let asked = issue_set();
-        let mut edited = issue_set();
-        edited["issues"][1]["description"] = json!("h2. Why");
-        assert!(check_edit("issue_create", &asked, &edited).is_empty());
-        edited["issues"][1]["labels"] = json!(["a", 2]);
-        edited["issues"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("summary");
-        let fields: Vec<String> = check_edit("issue_create", &asked, &edited)
-            .into_iter()
-            .map(|e| e.field)
-            .collect();
-        assert_eq!(fields, ["issues[0].summary", "issues[1].labels[1]"]);
-    }
-
-    #[test]
     fn an_edit_keeps_the_items_of_a_set_and_what_each_acts_on() {
         let asked = issue_set();
         let mut moved = issue_set();
@@ -732,25 +709,5 @@ mod tests {
         let errors = check_edit("issue_create", &asked, &dropped);
         assert_eq!(errors[0].field, "issues");
         assert!(errors[0].message.contains("added or dropped"), "{errors:?}");
-    }
-
-    #[test]
-    fn an_edit_that_breaks_how_the_set_fits_together_is_refused() {
-        let asked = issue_set();
-        let mut forward = issue_set();
-        forward["issues"][0]["parent"] = json!("#1");
-        let errors = check_edit("issue_create", &asked, &forward);
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        assert_eq!(errors[0].field, "issues");
-        assert!(errors[0].message.contains("comes later"), "{errors:?}");
-        // A single issue whose summary the operator clears is refused too,
-        // though the schema cannot require it of both forms.
-        let single = json!({ "project": "WRK", "type": "Task", "summary": "s" });
-        let cleared = json!({ "project": "WRK", "type": "Task" });
-        let errors = check_edit("issue_create", &single, &cleared);
-        assert!(
-            errors[0].message.contains("summary is required"),
-            "{errors:?}"
-        );
     }
 }

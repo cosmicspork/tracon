@@ -229,6 +229,47 @@ pub struct Staged {
     pub source: String,
     pub tag: Option<String>,
     pub changelog: Option<String>,
+    /// Keeps [`prune`] off `dir` until the build is offered or dropped.
+    pub hold: Option<std::sync::Arc<Hold>>,
+}
+
+/// Builds staged and not yet offered, by directory, with how many stagings
+/// hold each. Staging and offering are separate steps, so without this a
+/// concurrent offer of another build of the same plugin would prune one
+/// staged in between, as no row names it yet.
+static STAGING: std::sync::Mutex<std::collections::BTreeMap<PathBuf, usize>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+fn staging() -> std::sync::MutexGuard<'static, std::collections::BTreeMap<PathBuf, usize>> {
+    STAGING.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// A staged build's claim on its directory: [`prune`] leaves the directory
+/// alone while one is held. Released when dropped.
+#[derive(Debug)]
+pub struct Hold(PathBuf);
+
+impl Hold {
+    fn new(dir: &Path) -> Self {
+        *staging().entry(dir.to_path_buf()).or_default() += 1;
+        Self(dir.to_path_buf())
+    }
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        let mut staging = staging();
+        if let Some(count) = staging.get_mut(&self.0) {
+            *count -= 1;
+            if *count == 0 {
+                staging.remove(&self.0);
+            }
+        }
+    }
+}
+
+fn held(dir: &Path) -> bool {
+    staging().contains_key(dir)
 }
 
 /// The incoming area under the plugins directory, made private first.
@@ -297,7 +338,7 @@ pub async fn fetch(
     bundle::download(&releases.client, &sums_url, &sums).await?;
     bundle::download(&releases.client, &url, &tarball).await?;
     let state = state_dir.to_path_buf();
-    let (build, dir) = tokio::task::spawn_blocking(move || {
+    let (build, dir, hold) = tokio::task::spawn_blocking(move || {
         let expected = bundle::digest_in_checksums(&std::fs::read_to_string(&sums)?, &asset)?;
         let got = bundle::sha256_file(&tarball)?;
         if got != expected {
@@ -319,6 +360,7 @@ pub async fn fetch(
         source: format!("{owner}/{repo}"),
         tag: Some(release.tag),
         changelog: Some(release.body).filter(|b| !b.trim().is_empty()),
+        hold: Some(std::sync::Arc::new(hold)),
     })
 }
 
@@ -341,18 +383,21 @@ pub fn stage_local(
     let tarball = incoming.path().join("archive.tar.gz");
     std::fs::write(&tarball, bytes)?;
     let digest = bundle::sha256_file(&tarball)?;
-    let (build, dir) = stage_tarball(state_dir, incoming.path(), &tarball, &digest, &name, target)?;
+    let (build, dir, hold) =
+        stage_tarball(state_dir, incoming.path(), &tarball, &digest, &name, target)?;
     Ok(Staged {
         build,
         dir,
         source: format!("local:{name}"),
         tag: None,
         changelog: None,
+        hold: Some(std::sync::Arc::new(hold)),
     })
 }
 
 /// Unpack and check `tarball` (whose digest is `digest`, published as
-/// `asset`) in `incoming`, then move it to where its build is kept.
+/// `asset`) in `incoming`, then move it to where its build is kept, held
+/// there until it is offered.
 fn stage_tarball(
     state_dir: &Path,
     incoming: &Path,
@@ -360,7 +405,7 @@ fn stage_tarball(
     digest: &str,
     asset: &str,
     target: &str,
-) -> Result<(Build, PathBuf), InstallError> {
+) -> Result<(Build, PathBuf, Hold), InstallError> {
     let unpacked = incoming.join("unpacked");
     std::fs::create_dir(&unpacked)?;
     bundle::unpack_tree(
@@ -397,6 +442,8 @@ fn stage_tarball(
     }
     let tree_digest = tree_digest(&unpacked).map_err(InstallError::Refused)?;
     let dest = build_dir(state_dir, &manifest.name, &manifest.version, digest);
+    // Held before it is there, so no prune falls between.
+    let hold = Hold::new(&dest);
     if dest.exists() {
         // The same archive, staged before: kept as it is if it still is
         // what was checked, and replaced if not.
@@ -409,6 +456,7 @@ fn stage_tarball(
                     manifest,
                 },
                 dest,
+                hold,
             ));
         }
         std::fs::remove_dir_all(&dest)?;
@@ -425,6 +473,7 @@ fn stage_tarball(
             manifest,
         },
         dest,
+        hold,
     ))
 }
 
@@ -484,8 +533,8 @@ pub fn verify(state_dir: &Path, name: &str, build: &Build) -> Result<(), String>
     }
 }
 
-/// Remove every build of `name` but those in `keep`, and the plugin's
-/// directory when none is kept.
+/// Remove every build of `name` but those in `keep` and those staged and
+/// not yet offered ([`Hold`]), and the plugin's directory when none is left.
 pub fn prune(state_dir: &Path, name: &str, keep: &[&Build]) -> std::io::Result<()> {
     let dir = bin_dir(state_dir).join(name);
     let kept: Vec<PathBuf> = keep
@@ -495,16 +544,19 @@ pub fn prune(state_dir: &Path, name: &str, keep: &[&Build]) -> std::io::Result<(
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Ok(());
     };
+    let mut left = !kept.is_empty();
     for entry in entries.flatten() {
         let path = entry.path();
-        if !kept.contains(&path) {
+        if held(&path) {
+            left = true;
+        } else if !kept.contains(&path) {
             match entry.file_type()?.is_dir() {
                 true => std::fs::remove_dir_all(&path)?,
                 false => std::fs::remove_file(&path)?,
             }
         }
     }
-    if kept.is_empty() {
+    if !left {
         std::fs::remove_dir(&dir).or_else(|e| match e.kind() {
             std::io::ErrorKind::NotFound => Ok(()),
             _ => Err(e),
@@ -932,7 +984,13 @@ pub(crate) mod tests {
             )
             .unwrap()
         };
-        let (one, two, three) = (stage("1.0.0"), stage("1.1.0"), stage("1.2.0"));
+        let (mut one, mut two, mut three) = (stage("1.0.0"), stage("1.1.0"), stage("1.2.0"));
+        // Staged and not yet offered, each is held.
+        prune(state.path(), "a", &[]).unwrap();
+        assert!(one.dir.exists() && two.dir.exists() && three.dir.exists());
+        for staged in [&mut one, &mut two, &mut three] {
+            staged.hold = None;
+        }
         prune(state.path(), "a", &[&one.build, &three.build]).unwrap();
         assert!(one.dir.exists() && three.dir.exists());
         assert!(!two.dir.exists());

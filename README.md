@@ -895,7 +895,7 @@ review threads (file, line, resolved or outdated) and conversation with
 `mr_for_branch`, and sees each reviewer's latest verdict in `pr_status`, all
 unattended. Replying to a thread, and resolving it, is `pr_reply` / `mr_reply`,
 which you are asked about like any other comment. So is a comment on a GitHub issue,
-`github_issue_comment`, named apart from Jira's `issue_comment`. So is marking a draft
+`github_issue_comment`. So is marking a draft
 ready for review, or turning it back into a draft with `ready: false` (`pr_ready` /
 `mr_ready`): one already in that state is left alone, and a closed or merged one is refused. CI reads the same on either
 forge: a run's jobs and the step that failed (`run_status` with `run_id` /
@@ -1058,7 +1058,8 @@ session. Each GitHub release carries one `<name>-<version>-<target>.tar.gz` per 
 `checksums.txt` that lists them. An archive holds `tracon-plugin.toml`, `bin/`, and
 optionally `ui/`, and nothing else. The manifest (contract 1) gives the plugin's name,
 version, the program it runs under `bin/`, the broker credentials it may be lent, the
-tools it offers, its UI, the hosts it says it reaches, and the document formats it owns.
+tools it offers, its UI, the hosts it says it reaches, the document formats it owns, and
+the node methods it calls (see "A plugin calling the node" below).
 An unknown key is refused.
 
 `tracon plugin add owner/repo` fetches the latest release for this node's target and
@@ -1085,14 +1086,18 @@ it was installed, so no card is raised. `tracon plugin rm <name>` removes its bu
 keeps its data under `<state dir>/plugins/data/<name>/`; `--purge` deletes that too.
 Rolling back and removing are admin actions, as is restarting a plugin's process.
 `tracon plugin ls` lists what is installed, the version before it, and any build waiting
-on a card.
+on a card. It also lists each tool of the active build and how a call to it is answered
+now (runs, asked or refused) and by which rule. That answer is the signed policy's on a
+channel no rule is scoped to, with the plugin's `[[plugin]]` entry applied. Settings ›
+Plugins shows the same.
 
 The node runs a plugin as one process per channel, started when a session on a channel
 it is offered to first lists its tools. A process stops once it has gone unused for its
 `[[plugin]]` entry's `idle_timeout_secs` (15 minutes by default). It also stops when the
 plugin is updated, rolled back or removed, and when the node shuts down; the next use
 starts the version active then. The node checks the build's digest again and runs its
-`exec` with `--socket <path> --data <dir>` appended. The environment is empty except for
+`exec` with `--socket <path> --data <dir>` appended (and `--node-socket <path>` for a
+plugin that calls the node). The environment is empty except for
 `TRACON_PLUGIN_TOKEN` (fresh for each start and held only in the node's memory),
 `TRACON_NODE_KEY` (the node id) and `TRACON_CONTRACT=1`. Credentials are never in it:
 they are lent per call. The socket is in a 0700 directory of the node's runtime
@@ -1117,13 +1122,22 @@ node restart waits for running plugin processes as it waits for turns.
 A plugin's tools are offered to execute sessions and external harnesses as
 `<plugin>__<tool>`, beside the node's own, on a channel that binds a credential the
 manifest declares (by its `name`, or a binding its `pattern` matches), or on every
-channel when it declares none. Plan and review sessions are offered none. A call is
+channel when it declares none. A plan session is offered only jira-review's reads
+(`search`, `issue`, `transitions`), as it was the node's own Jira reads, and a review
+session none. A call is
 decided as an `[[mcp_server]]` tool's is: the signed policy first, under the `tool` kind
 and the namespaced name, then the lists in the plugin's `[[plugin]]` entry, by the
 plugin's own name for the tool. A signed denial wins, then the entry's `deny`, then its
 `ask`; its `allow` runs a tool without asking only while the signed bundle is trusted. A
 tool that neither names is asked. The manifest's `read`/`write` hint is shown on the card
-and never decides anything:
+and never decides anything. A tool the manifest marks `consequential = true` is never
+run because something allows it by name, neither the bundle nor the entry's `allow`: the
+node adds a required `operation_id` to its schema (at least 8 letters, digits or dashes,
+kept by the node and never sent to the plugin), asks every call, and runs one
+unattended only under a `plugin_call` [grant](#granting-authority) naming that exact
+call, which its card shows. An allowed call is recorded under its `operation_id`, so
+the same id and arguments again return the recorded outcome rather than running twice.
+The entry's `deny` and `ask` still apply:
 
 ```toml
 [[plugin]]
@@ -1148,8 +1162,11 @@ The same context lends the call, in `credentials`, each credential the channel b
 the running build declares, as its environment fields. One the manifest marks
 `lend = "approved"` is lent only to a call run from a card you approved, never to one the
 policy or the entry allowed outright. An undeclared credential is never lent, and none
-is ever in the plugin's environment. The card for a plugin's tool shows its version, its
-hint, the hosts it says it reaches, and what an approved run is lent. A call holds its
+is ever in the plugin's environment. The card for a plugin's tool shows the version the
+call was asked on, its hint, the hosts it says it reaches, and what an approved run is
+lent. An approved call runs only on that build: if the plugin was updated or rolled back
+while the card waited, the card says so and allowing it runs nothing, and the same call
+asked again is a new card on the build active then. A call holds its
 process for as long as it runs, so the idle stop counts from the end of the last call.
 
 When the card for a plugin's tool opens, the node asks the plugin what the call would
@@ -1164,8 +1181,9 @@ tab opened since) decides nothing. An approved call carries the token as
 `preview_token` in its signed context. The plugin applies against it and, if what it
 names has moved since, refuses with `data.stale` and sends nothing. The approval then
 fails as stale (not uncertain), and `approval_status` says `stale: true`, so the agent
-calls again for a fresh card. The preview reflects the arguments as asked: an edit is
-applied against the same token but not previewed again.
+calls again for a fresh card. When you edit the call, the page asks the plugin to preview
+the edit (`POST /api/approvals/{id}/preview`) once you pause. That preview's token replaces
+the kept one, and Allow waits until the shown preview is of the call as edited.
 
 A tool's string argument may be marked `"x-tracon-format": "<format>"` in its input
 schema, naming `markdown` or a format a plugin owns (manifest `formats`). Marked
@@ -1175,6 +1193,77 @@ list of items. Prose in a plugin's format is shown as that plugin renders it to 
 you type, and the source is one click away. If the owner is removed or cannot answer,
 the card shows the source. The contract for previews, tokens and formats is the note
 `note-plugins-preview-contract`.
+
+#### Plugin pages
+
+A plugin whose manifest has `[ui]` (an `entry` under `ui/` and a `title`) gets a page in
+the interface's **Plugins** section. Opening it frames the plugin's `ui/` files, which
+the node serves itself, on a loopback port of the plugin's own: the first free one in
+`[plugins] ui_port_first..ui_port_last` (7440 to 7459 by default), kept for the plugin
+so its origin stays the same. The frame's address carries a capability token minted for
+that plugin and channel; the page's scripts run on the plugin's origin, never the
+interface's, and its CSP lets them talk only to that origin. What the page asks of
+`api/...` reaches the plugin's process for the channel as your request: the node passes
+the method, path, body and a few headers, and adds a `tracon-context` header holding the
+same signed caller context a tool call carries, with kind `operator`, tool `tracon/ui`,
+and `arguments_sha256` the hash of `{"body_sha256", "method", "path"}` for that request.
+A page's changes must come from its own origin, and they are logged to the channel's
+external log under `/plugins/<name>/ui`; reads are not logged. `deny = ["ui"]` in the
+plugin's `[[plugin]]` entry (or a signed policy rule denying `<name>__ui`) turns its
+API off; its files are still served. Pages are opened on the node's own machine only:
+the listener is loopback, and reaching it from the phone through the hub comes later.
+Every URL a plugin's page uses must be relative (Vite's `base: './'`, `fetch('api/x')`),
+since it is served under `/t/<token>/`.
+
+#### A plugin calling the node
+
+A plugin can call the node back, as itself, for what it cannot do alone: put a card in
+front of you, push you a notification, or use another plugin's tool. It names the
+methods it calls in its manifest, and the install card lists them under **Calls the
+node**:
+
+```toml
+node_methods = ["approval/request", "approval/status", "notify", "tools/call"]
+```
+
+A plugin that names any is started with `--node-socket <path>` as well: a socket the node
+serves for that one start, in the same 0700 directory as the plugin's own, gone when the
+start ends. Each request is a JSON-RPC 2.0 call, `POST /` with a JSON body and
+`Authorization: Bearer <TRACON_PLUGIN_TOKEN>`. Any other token, an earlier start's
+included, is refused with HTTP 401 (`-32001`), and a method the manifest does not name
+with `-32601`. The node knows which plugin and channel a request is from by the socket it
+arrived on, never by what the request says. Errors: `-32602` for params the method does
+not take, `-32003` for a refusal (`data.decision` is `denied` or `asked` for a tool call),
+`-32000` for a failure.
+
+- **`approval/request`** puts a card in your queue: `title` (one line, up to 200
+  characters), an optional Markdown `summary`, and `content`, a list of 1 to 64 blocks
+  (512 KiB in all), each in a format the node renders: `{format: "markdown", text}`,
+  `{format: "diff", text}` (a unified diff), `{format: "word_diff", before, after}` (a
+  text before and after, which the page diffs by word itself: words taken out struck
+  through, words put in highlighted, both texts a click away), `{format: "table", rows:
+  [{key, value}]}` and `{format: "source", text, language?}`, each with an optional
+  `title`. `request_key` makes a repeat while the card waits return that card (otherwise
+  identical content does), and `expires_secs` shortens its wait. It returns
+  `{approval_id, state: "pending", new}`. The card names the plugin as who asked. A plugin
+  raising one while it serves an agent's call passes that call's `_meta.tracon` as
+  `on_behalf`: once the node has checked the signature is its own, for this instance and
+  channel, issued in the last ten minutes, and from an agent, the card is that agent's
+  session's as well, so the session waits on it and hears your decision. A card takes no
+  edit: allow it, reject it, or ask for changes.
+- **`approval/status`** takes `approval_id` (or `approval_ids`) of cards this plugin
+  raised on this channel and waits up to `wait_secs` (at most 45, the default) for a
+  decision, as an agent's status call does: `still_waiting`, `approved`, `rejected`,
+  `changes_requested` (with your `notes`) or `expired`. Allowing a card runs nothing on
+  the node; the plugin does what it asked to once it reads `approved`.
+- **`notify`** takes `title`, `message` and an optional `path`, and pushes to your
+  devices as `notify_operator` does, its title led by the plugin's name.
+- **`tools/call`** takes `name` (`<plugin>__<tool>`, another plugin's) and `arguments`,
+  and calls it as the plugin: its caller context names kind `plugin` with
+  `caller.plugin` set. It is decided as the operator API's calls are, by the signed
+  policy and the callee's `[[plugin]]` entry, logged on the channel's external log under
+  `plugin:<name>`, and never held: one that would be asked is refused, naming the allow
+  that would let it run.
 
 #### SQL
 
@@ -1196,6 +1285,27 @@ loads and is ignored, with a warning naming the plugin. On its first start the n
 renames credentials `consulta` and `consulta-<profile>` to `sql-read` and
 `sql-read-<profile>`, bindings and all, and logs each one; one whose new name is already
 taken is left as it is, with a warning, so you can remove whichever is stale.
+
+#### Jira
+
+The node talks to no Jira of its own either: the tracker tools are the
+[`jira-review`](https://github.com/cosmicspork/jira-review) plugin's. Install it with
+`tracon plugin add cosmicspork/jira-review`. It is lent the channel's `jira` credential
+(or `jira-<profile>`, for a call's `profile`), the same one the node's own Jira tools
+used, with the same fields: `JIRA_URL` with `JIRA_EMAIL` and `JIRA_TOKEN` for Jira
+Cloud, or `JIRA_PAT` for Data Center. A channel that bound `jira` before needs nothing
+more. The shipped working agreements (from bundle v26) run its reads unattended
+(`jira-review__search`, `jira-review__issue`, `jira-review__transitions`); its writes
+(`update`, `comment`, `create`, `link`) are asked, each card showing the plugin's preview
+of the change, and an approved write fails as stale if the issue moved since the card
+was read. `jira-review__transition` is consequential: asked every call unless a grant
+names it. A description or comment written in Jira wiki markup is shown on the card as
+jira-review renders it, since it owns the `jira_wiki` format.
+
+This replaces the node's own `issue`, `issue_search`, `issue_transitions`,
+`issue_comment`, `issue_update`, `issue_create`, `issue_link` and `issue_transition`. A
+call to one of those names is refused with the name that replaced it, and nothing is
+asked. Past approvals of them still open, their wiki markup shown as source.
 
 ### Asking, pinging, and complaining
 
@@ -1313,8 +1423,8 @@ field while the card keeps waiting. Reject with a reason, or request changes wit
 `approval_status` returns `rejected` with that reason or `changes_requested`
 with the notes. Neither runs anything; the agent revises and calls the tool
 again, which asks anew. `GET /api/approvals/{id}` returns one card with the
-tool's schema, which arguments are prose and how it is written (`jira_wiki` or
-`markdown`), and which are locked, and claims it while it is open; `POST /api/approvals/{id}/release` lets it go.
+tool's schema, which arguments are prose and how it is written (`markdown`, or a
+format a plugin owns, such as jira-review's `jira_wiki`), and which are locked, and claims it while it is open; `POST /api/approvals/{id}/release` lets it go.
 
 For an investigation or handoff with no code to publish, use **`submit_report`**.
 It puts a narrative report in the operator queue and requests a notification,
@@ -1336,8 +1446,9 @@ channel's Jira credential: the call is decided by policy and logged to the
 channel's external log under the lane `/api/jira/search`. It answers 503 until
 `tracon plugin add cosmicspork/jira-review` installs the plugin, 422 on a channel
 that binds no `jira` (or `jira-*`) credential, and 403 unless the call is allowed,
-since the operator API never holds a call for approval: until the policy bundle
-allows it (v26), add to `node.toml`:
+since the operator API never holds a call for approval. The shipped policy bundle
+allows it from version 26; a node still on an older signed bundle needs, until you
+sign and install the new one:
 
 ```toml
 [[plugin]]
@@ -1949,6 +2060,8 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
 # [plugins]
 # owners = ["cosmicspork"]          # GitHub owners whose releases `tracon plugin add` may install;
                                     # changed at the node only. A local archive is not held to it
+# ui_port_first = 7440              # loopback ports plugin pages are served on, one per plugin with
+# ui_port_last = 7459               # a UI, kept for it once given; needs a restart
 
 # [[plugin]]                        # your settings for an installed plugin, by name; may come before
                                     # the install
@@ -2246,12 +2359,14 @@ neither reaches past a signed deny.
 
 ### Granting authority
 
-Merging, publishing, transitioning a ticket, and deploying are not something a
-policy rule's argument text matches unattended — they are scoped grants, made and
-revoked one at a time in **Settings → Permissions & policies**, beside the signed rules
-they sit under. A grant names one target (a pull request, a merge request, an
-issue's exact transition, a deployment job) and, for merge, publish, and deploy,
-the one commit it covers; the branch moving to a later sha makes the grant no
+Merging, publishing, deploying, and calling a plugin tool its manifest marks
+`consequential` (jira-review's `transition`) are not something a policy rule's
+argument text matches unattended — they are scoped grants, made and revoked one at
+a time in **Settings → Permissions & policies**, beside the signed rules they sit
+under. A grant names one target (a pull request, a merge request, a deployment job,
+or one plugin call, `plugin_call` on `plugin:<plugin>__<tool>:<sha256 of its
+arguments>`, which the call's card names) and, for merge, publish, and deploy, the
+one commit it covers; the branch moving to a later sha makes the grant no
 longer apply, rather than carrying it forward. A publish grant also binds what the
 forge will show: an update's target names the change (`…:change:<n>:prose:<hash>`),
 and the hash covers any separate description or comment. A publish that rewrites

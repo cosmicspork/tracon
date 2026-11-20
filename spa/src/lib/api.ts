@@ -23,6 +23,7 @@ import type {
   McpServerStatus,
   PluginInstance,
   PluginSummary,
+  PluginUiOpen,
   DocKindInfo,
   Document,
   EnrollStatus,
@@ -482,6 +483,9 @@ export const api = {
       'GET',
       `/api/plugins/${encodeURIComponent(name)}/logs?channel=${encodeURIComponent(channel)}&lines=${lines}`,
     ),
+  /** Open a plugin's UI for `channel` (the node's default when empty): a fresh capability URL to frame. */
+  pluginUi: (name: string, channel: string) =>
+    call<PluginUiOpen>('POST', `/api/plugins/${encodeURIComponent(name)}/ui`, channel ? { channel } : {}),
   /** Start a plugin's instance afresh, its backoff cleared; answered once ready or failed. */
   pluginRestart: (name: string, channel: string) =>
     call<{ instance: PluginInstance; error?: string }>('POST', `/api/plugins/${encodeURIComponent(name)}/restart`, {
@@ -644,6 +648,13 @@ export const api = {
   /** `text` in the approval's plugin format, rendered as Markdown by the plugin that owns it. */
   renderApproval: (id: string, text: string) =>
     call<{ markdown: string }>('POST', `/api/approvals/${id}/render`, { text }),
+  /**
+   * The plugin's preview of the call as the operator edited it, which an
+   * answer is then bound to in place of the card's first. Empty for a call
+   * no plugin previews.
+   */
+  previewApproval: (id: string, args: Record<string, unknown>) =>
+    call<Pick<ApprovalDetails, 'preview'>>('POST', `/api/approvals/${id}/preview`, { arguments: args }),
   // Documents: read by slug, search by content, edit with the hash last read.
   docs: (channel?: string, kind?: string, archived = false) => {
     const q = new URLSearchParams()

@@ -17,7 +17,22 @@ pub const FILE: &str = "tracon-plugin.toml";
 pub const CONTRACT: u32 = 1;
 
 /// Arguments the node appends to `exec` itself.
-const NODE_ARGS: &[&str] = &["--socket", "--data"];
+const NODE_ARGS: &[&str] = &["--socket", "--data", "--node-socket"];
+
+/// The methods a plugin may call on the node, on the socket the node serves
+/// for each of its instances (`super::host`).
+pub const NODE_METHODS: &[(&str, &str)] = &[
+    (
+        "approval/request",
+        "raises approval cards for the operator, as itself",
+    ),
+    ("approval/status", "waits on the cards it raised"),
+    ("notify", "sends the operator a push notification"),
+    (
+        "tools/call",
+        "calls other plugins' tools, as itself, under policy",
+    ),
+];
 
 /// Formats the node renders itself, which no plugin may own.
 const RESERVED_FORMATS: &[&str] = &["markdown", "source"];
@@ -43,6 +58,11 @@ pub struct Manifest {
     /// Document formats it owns; each format has one owner on a node.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub formats: Vec<String>,
+    /// The node's methods it calls (`NODE_METHODS`). One that names any is
+    /// started with `--node-socket <path>` as well, and the node answers
+    /// only these there.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub node_methods: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,6 +194,14 @@ fn egress_ok(entry: &str) -> bool {
             && p.bytes().all(|b| b.is_ascii_digit())
             && p.parse::<u32>().is_ok_and(|n| (1..=65535).contains(&n))
     });
+    // A leading `*.` names every host under a domain (a Jira Cloud site, say).
+    // Egress is shown on cards, never enforced, so a pattern is enough; it
+    // must still leave a domain of at least two labels.
+    let host = match host.strip_prefix("*.") {
+        Some(domain) if domain.contains('.') => domain,
+        Some(_) => return false,
+        None => host,
+    };
     let host_ok = !host.is_empty()
         && host.len() <= 253
         && host.split('.').all(|label| {
@@ -203,7 +231,7 @@ impl Manifest {
             let table = text.parse::<toml::Table>().ok();
             let misplaced = table.as_ref().and_then(|t| {
                 let ui = t.get("ui")?.as_table()?;
-                ["egress", "formats"]
+                ["egress", "formats", "node_methods"]
                     .into_iter()
                     .find(|key| ui.contains_key(*key))
             });
@@ -374,7 +402,25 @@ impl Manifest {
                 return bad("formats", format!("{format:?} is listed twice"));
             }
         }
+        let mut seen = BTreeSet::new();
+        for method in &self.node_methods {
+            if !NODE_METHODS.iter().any(|(known, _)| known == method) {
+                let known: Vec<&str> = NODE_METHODS.iter().map(|(m, _)| *m).collect();
+                return bad(
+                    "node_methods",
+                    format!("{method:?} is not a node method ({})", known.join(", ")),
+                );
+            }
+            if !seen.insert(method.as_str()) {
+                return bad("node_methods", format!("{method:?} is listed twice"));
+            }
+        }
         Ok(())
+    }
+
+    /// Whether it may call the node's `method`.
+    pub fn calls_node(&self, method: &str) -> bool {
+        self.node_methods.iter().any(|m| m == method)
     }
 
     /// What the unpacked tree at `root` must hold for this manifest: the
@@ -458,6 +504,17 @@ impl Manifest {
         }
         for format in &self.formats {
             out.push_str(&format!("- `{format}`\n"));
+        }
+        out.push_str("\n**Calls the node**\n\n");
+        if self.node_methods.is_empty() {
+            out.push_str("- never\n");
+        }
+        for method in &self.node_methods {
+            let what = NODE_METHODS
+                .iter()
+                .find(|(m, _)| m == method)
+                .map_or("", |(_, what)| *what);
+            out.push_str(&format!("- `{method}`: {what}\n"));
         }
         out
     }
@@ -547,6 +604,7 @@ pub fn diff(old: &Manifest, new: &Manifest) -> Vec<String> {
     for (what, old, new) in [
         ("egress", &old.egress, &new.egress),
         ("format", &old.formats, &new.formats),
+        ("node method", &old.node_methods, &new.node_methods),
     ] {
         for item in new.iter().filter(|i| !old.contains(i)) {
             lines.push(format!("{what} `{item}` added"));
@@ -561,6 +619,31 @@ pub fn diff(old: &Manifest, new: &Manifest) -> Vec<String> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn egress_takes_a_host_a_port_or_a_domain_wildcard() {
+        for ok in [
+            "db.internal",
+            "db.internal:1521",
+            "*.atlassian.net:443",
+            "*.atlassian.net",
+        ] {
+            assert!(egress_ok(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "*",
+            "*.net",
+            "*.*.atlassian.net",
+            "a*.atlassian.net",
+            "jira.*.net",
+            "db.internal:0",
+            "db.internal:99999",
+            "-db.internal",
+        ] {
+            assert!(!egress_ok(bad), "{bad}");
+        }
+    }
 
     /// The contract's own example, with `egress` where TOML keeps it
     /// top-level.
@@ -715,6 +798,21 @@ title = "SQL"
                 "contract = 1\ncolour = \"red\"",
                 "unknown field",
             ),
+            (
+                "exec = [\"bin/sql-review\", \"serve\"]",
+                "exec = [\"bin/sql-review\", \"--node-socket\", \"/x\"]",
+                "the node's own",
+            ),
+            (
+                "contract = 1",
+                "contract = 1\nnode_methods = [\"approval/grant\"]",
+                "node_methods: \"approval/grant\" is not a node method",
+            ),
+            (
+                "contract = 1",
+                "contract = 1\nnode_methods = [\"notify\", \"notify\"]",
+                "node_methods: \"notify\" is listed twice",
+            ),
         ];
         for (from, to, says) in cases {
             let error = refused(|text| text.replacen(from, to, 1));
@@ -793,6 +891,41 @@ title = "SQL"
             assert!(lines.iter().any(|l| l == expected), "{expected}: {lines:?}");
         }
         assert!(diff(&old, &old).is_empty());
+    }
+
+    #[test]
+    fn node_methods_are_shown_and_their_changes_diffed() {
+        let old = Manifest::parse(EXAMPLE).unwrap();
+        assert!(old.node_methods.is_empty());
+        assert!(old.summary().contains("**Calls the node**\n\n- never\n"));
+        let text = EXAMPLE.replace(
+            "contract = 1",
+            "contract = 1\nnode_methods = [\"approval/request\", \"tools/call\"]",
+        );
+        let new = Manifest::parse(&text).unwrap();
+        assert!(new.calls_node("tools/call"));
+        assert!(!new.calls_node("notify"));
+        let summary = new.summary();
+        assert!(
+            summary.contains("- `approval/request`: raises approval cards for the operator"),
+            "{summary}"
+        );
+        assert!(summary.contains("- `tools/call`: calls other plugins' tools"));
+        let lines = diff(&old, &new);
+        assert!(
+            lines.iter().any(|l| l == "node method `tools/call` added"),
+            "{lines:?}"
+        );
+        assert!(diff(&new, &old)
+            .iter()
+            .any(|l| l == "node method `approval/request` removed"));
+        // The store's round trip keeps them, and an older row without the
+        // key reads as calling nothing.
+        let json = serde_json::to_string(&new).unwrap();
+        assert_eq!(serde_json::from_str::<Manifest>(&json).unwrap(), new);
+        assert!(!serde_json::to_string(&old)
+            .unwrap()
+            .contains("node_methods"));
     }
 
     #[test]

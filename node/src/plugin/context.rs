@@ -9,7 +9,8 @@
 //!   "instance": "<hex sha256 of TRACON_PLUGIN_TOKEN>",
 //!   "tool": "<tool name, unprefixed>",
 //!   "arguments_sha256": "<hex sha256 of the canonical JSON of params.arguments>",
-//!   "caller": { "kind": "operator" | "agent" | "plugin", "session": "<id>" | null, "harness": "<id>" | null },
+//!   "caller": { "kind": "operator" | "agent" | "plugin", "session": "<id>" | null, "harness": "<id>" | null,
+//!               "plugin": "<calling plugin's name>" (kind "plugin" only) },
 //!   "channel": "<channel>",
 //!   "approval_id": "<id>" | null,
 //!   "preview_token": "<token>",
@@ -146,6 +147,9 @@ pub struct CallerId {
     pub kind: &'static str,
     pub session: Option<String>,
     pub harness: Option<String>,
+    /// The calling plugin, for kind `plugin`: written into the context only
+    /// then, so the other kinds keep the shape the shared vectors sign.
+    pub plugin: Option<String>,
 }
 
 /// One call's context before it is issued and signed.
@@ -171,17 +175,21 @@ pub fn build(
     now_ms: i64,
     sign: impl FnOnce(&[u8]) -> Result<Signature, String>,
 ) -> Result<Value, String> {
+    let mut caller = json!({
+        "kind": draft.caller.kind,
+        "session": draft.caller.session,
+        "harness": draft.caller.harness,
+    });
+    if let Some(plugin) = &draft.caller.plugin {
+        caller["plugin"] = json!(plugin);
+    }
     let mut context = json!({
         "v": VERSION,
         "plugin": draft.plugin,
         "instance": instance_of(draft.token),
         "tool": draft.tool,
         "arguments_sha256": arguments_sha256(draft.arguments).map_err(|e| e.to_string())?,
-        "caller": {
-            "kind": draft.caller.kind,
-            "session": draft.caller.session,
-            "harness": draft.caller.harness,
-        },
+        "caller": caller,
         "channel": draft.channel,
         "approval_id": draft.approval_id,
         "issued_ms": now_ms,
@@ -195,6 +203,22 @@ pub fn build(
     let bytes = signing_bytes(&context).map_err(|e| e.to_string())?;
     context["signature"] = json!(hex::encode(sign(&bytes)?.to_bytes()));
     Ok(context)
+}
+
+/// Whether `context` is one the node signed with `key`, as received: its
+/// signature verifies over its canonical bytes. Nothing else is checked.
+pub fn signed_by(context: &Value, key: &ed25519_dalek::VerifyingKey) -> bool {
+    let Some(signature) = context["signature"]
+        .as_str()
+        .and_then(|s| hex::decode(s).ok())
+        .and_then(|b| <[u8; 64]>::try_from(b).ok())
+    else {
+        return false;
+    };
+    signing_bytes(context).is_ok_and(|bytes| {
+        key.verify_strict(&bytes, &Signature::from_bytes(&signature))
+            .is_ok()
+    })
 }
 
 #[cfg(test)]
@@ -237,6 +261,7 @@ mod tests {
             kind: "agent",
             session: Some("s1".into()),
             harness: Some("claude".into()),
+            plugin: None,
         };
         let credentials = BTreeMap::from([(
             "sql-read".to_string(),
@@ -274,6 +299,11 @@ mod tests {
                 &Signature::from_bytes(&signature),
             )
             .unwrap();
+        assert!(signed_by(&ctx, &identity.verifying_key()));
+        assert!(ctx["caller"].get("plugin").is_none());
+        let mut forged = ctx.clone();
+        forged["caller"]["session"] = json!("s2");
+        assert!(!signed_by(&forged, &identity.verifying_key()));
         // Each context has its own nonce.
         let again = build(&draft, 1_000, |b| Ok(identity.sign(b))).unwrap();
         assert_ne!(again["nonce"], ctx["nonce"]);
@@ -288,6 +318,28 @@ mod tests {
             |_| panic!("not signed"),
         );
         assert!(refused.unwrap_err().contains("float"));
+
+        // A plugin calling names itself.
+        let plugin = CallerId {
+            kind: "plugin",
+            session: None,
+            harness: None,
+            plugin: Some("hoja".into()),
+        };
+        let ctx = build(
+            &Draft {
+                caller: &plugin,
+                ..draft
+            },
+            1_000,
+            |b| Ok(identity.sign(b)),
+        )
+        .unwrap();
+        assert_eq!(
+            ctx["caller"],
+            json!({"kind": "plugin", "session": null, "harness": null, "plugin": "hoja"})
+        );
+        assert!(signed_by(&ctx, &identity.verifying_key()));
     }
 
     #[test]
@@ -297,6 +349,7 @@ mod tests {
             kind: "agent",
             session: None,
             harness: None,
+            plugin: None,
         };
         let credentials = BTreeMap::new();
         let args = json!({"key": "WRK-1"});

@@ -1,6 +1,6 @@
-//! The GitLab and Jira tools against stubs of both APIs: the token reaches
-//! only the stub and only on the endpoints the tools use; the verbs that
-//! would merge or transition are never called because they do not exist.
+//! The GitLab tools against a stub of its API: the token reaches only the
+//! stub and only on the endpoints the tools use. Jira is the jira-review
+//! plugin's, tested in its own repository and through `plugin_tools`.
 
 #[path = "support/mod.rs"]
 mod support;
@@ -42,114 +42,6 @@ async fn stub(
         path.to_string(),
         serde_json::from_str(&body).unwrap_or(Value::Null),
     ));
-    // An edit answers 204 with no body; a rejected one carries `errors`.
-    if path == "/rest/api/2/issue/WRK-1" && method == "PUT" {
-        return (axum::http::StatusCode::NO_CONTENT, Json(Value::Null));
-    }
-    // An issue whose labels are read before a removal is sent.
-    if path == "/rest/api/2/issue/WRK-4" {
-        return match method.as_str() {
-            "GET" => (
-                axum::http::StatusCode::OK,
-                Json(json!({ "key": "WRK-4", "fields": { "labels": ["Stale", "etl"] } })),
-            ),
-            _ => (axum::http::StatusCode::NO_CONTENT, Json(Value::Null)),
-        };
-    }
-    if path == "/rest/api/2/issue/WRK-9" && method == "PUT" {
-        return (
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(json!({ "errorMessages": [], "errors": { "priority": "Specify a valid value" } })),
-        );
-    }
-    // New issues are numbered from WRK-9 in the order they arrive; one
-    // titled "Refused" is turned away as Jira turns away a bad field.
-    if path == "/rest/api/2/issue" && method == "POST" {
-        let bodies = bodies.0.lock().unwrap();
-        let (_, _, sent) = bodies.last().unwrap();
-        if sent["fields"]["summary"] == "Refused" {
-            return (
-                axum::http::StatusCode::BAD_REQUEST,
-                Json(json!({ "errorMessages": [], "errors": { "summary": "Not this one" } })),
-            );
-        }
-        let n = bodies
-            .iter()
-            .filter(|(m, p, _)| m == "POST" && p == "/rest/api/2/issue")
-            .count();
-        return (
-            axum::http::StatusCode::CREATED,
-            Json(json!({ "id": format!("{}", 1041 + n), "key": format!("WRK-{}", 8 + n) })),
-        );
-    }
-    if path == "/rest/api/2/issueLinkType" {
-        return (
-            axum::http::StatusCode::OK,
-            Json(json!({ "issueLinkTypes": [
-                { "id": "10000", "name": "Blocks", "inward": "is blocked by", "outward": "blocks" },
-                { "id": "10003", "name": "Relates", "inward": "relates to", "outward": "relates to" },
-            ] })),
-        );
-    }
-    if path == "/rest/api/2/issueLink" && method == "POST" {
-        return (axum::http::StatusCode::CREATED, Json(Value::Null));
-    }
-    // The read-back after a link: WRK-2 shows the last link the way the tool
-    // expects Jira to; WRK-3 plays a Jira that names the sides the other way.
-    if (path == "/rest/api/2/issue/WRK-2" || path == "/rest/api/2/issue/WRK-3") && method == "GET" {
-        let link = bodies
-            .0
-            .lock()
-            .unwrap()
-            .iter()
-            .rev()
-            .find(|(m, p, _)| m == "POST" && p == "/rest/api/2/issueLink")
-            .map(|(_, _, b)| b.clone())
-            .unwrap_or(Value::Null);
-        let (side, other) = if path.ends_with("WRK-2") {
-            ("outwardIssue", &link["outwardIssue"])
-        } else {
-            ("inwardIssue", &link["outwardIssue"])
-        };
-        return (
-            axum::http::StatusCode::OK,
-            Json(json!({ "key": "WRK-2", "fields": { "issuelinks": [{
-                "id": "1",
-                "type": { "name": "Blocks", "inward": "is blocked by", "outward": "blocks" },
-                side: { "key": other["key"], "fields": { "summary": "Next" } },
-            }] } })),
-        );
-    }
-    if path == "/rest/api/2/issue/WRK-1/transitions" && method == "GET" {
-        return (
-            axum::http::StatusCode::OK,
-            Json(json!({ "expand": "transitions", "transitions": [
-                { "id": "21", "name": "Start progress", "hasScreen": false,
-                  "to": { "name": "In Progress", "id": "3",
-                          "statusCategory": { "key": "indeterminate", "name": "In Progress" } } },
-                { "id": "31", "name": "Done",
-                  "to": { "name": "Done", "id": "10001",
-                          "statusCategory": { "key": "done", "name": "Done" } } },
-            ] })),
-        );
-    }
-    // Cloud's search; a query marked `legacy` plays a Data Center that lacks it.
-    if path == "/rest/api/3/search/jql" && uri.query().unwrap_or("").contains("legacy") {
-        return (
-            axum::http::StatusCode::NOT_FOUND,
-            Json(json!({ "errorMessages": ["not here"] })),
-        );
-    }
-    if path == "/rest/api/3/search/jql" || path == "/rest/api/2/search" {
-        return (
-            axum::http::StatusCode::OK,
-            Json(json!({ "issues": [{ "key": "WRK-1", "fields": {
-                "summary": "Do the thing", "status": { "name": "In Progress" },
-                "priority": { "name": "Medium" }, "issuetype": { "name": "Task" },
-                "assignee": { "displayName": "J" }, "parent": { "key": "WRK-100" },
-                "labels": ["etl"] } }] })),
-        );
-    }
     // A draft by its title, as GitLab reads one: the last title written wins.
     if path.ends_with("/merge_requests/8") {
         let title = bodies
@@ -279,13 +171,6 @@ async fn stub(
         } else if path.ends_with("/notes") && method == "POST" {
             let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
             json!({ "id": 99, "created_at": "now", "body": v["body"] })
-        } else if path.ends_with("/issue/WRK-1") {
-            json!({ "key": "WRK-1", "fields": { "summary": "Do the thing", "status": { "name": "In Progress" },
-                "assignee": { "displayName": "J" }, "description": "…", "issuetype": { "name": "Task" },
-                "priority": { "name": "Medium" },
-                "comment": { "comments": [{ "author": { "displayName": "A" }, "created": "t", "body": "hi" }] } } })
-        } else if path.ends_with("/issue/WRK-1/comment") && method == "POST" {
-            json!({ "id": "5", "created": "now" })
         } else {
             json!({ "message": "unexpected" })
         }),
@@ -321,14 +206,6 @@ async fn rig_with_bodies() -> (Tools, Seen, Bodies, String) {
         [credentials.glab.env]
         GITLAB_HOST = "{base}"
         GITLAB_TOKEN = "glpat-secret"
-
-        [credentials.jira]
-        channels = ["work"]
-        nodes = ["n1"]
-        [credentials.jira.env]
-        JIRA_URL = "{base}"
-        JIRA_EMAIL = "me@example.com"
-        JIRA_TOKEN = "jira-secret"
         "#
     );
     let tools = Tools {
@@ -343,9 +220,8 @@ async fn rig_with_bodies() -> (Tools, Seen, Bodies, String) {
 }
 
 /// The shipped bundle asks for every write, and these tests have no session to
-/// ask on. They are about what reaches Jira, so they run under a policy that
-/// allows the verbs outright; that comments and edits *do* ask is asserted
-/// separately, below.
+/// ask on. They are about what reaches the forge, so they run under a policy
+/// that allows the verbs outright.
 fn allowing(names: &str) -> std::sync::Arc<parking_lot::RwLock<tracon::policy::Policy>> {
     std::sync::Arc::new(parking_lot::RwLock::new(
         toml::from_str(&format!(
@@ -361,6 +237,15 @@ fn allowing(names: &str) -> std::sync::Arc<parking_lot::RwLock<tracon::policy::P
         ))
         .unwrap(),
     ))
+}
+
+fn paths(seen: &Seen) -> Vec<String> {
+    seen.0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(m, p, _)| format!("{m} {p}"))
+        .collect()
 }
 
 fn ctx(channel: &str, node: &str) -> CallContext {
@@ -403,17 +288,13 @@ async fn the_forge_and_tracker_tools_are_offered_to_the_bound_channel_and_node()
         "pipeline_status",
         "job_trace",
         "pipeline_run",
-        "issue",
-        "issue_search",
-        "issue_transitions",
-        "issue_comment",
     ] {
         assert!(work.contains(&n.to_string()), "{n} missing from {work:?}");
     }
-    // jira is pinned to n1; glab is not.
+    // The node offers no Jira tool of its own, whatever the channel binds.
+    assert!(!work.iter().any(|n| n.starts_with("issue")), "{work:?}");
     let elsewhere = names("work", "n2");
     assert!(elsewhere.contains(&"mr_status".to_string()));
-    assert!(!elsewhere.contains(&"issue".to_string()));
     assert!(names("personal", "n1").is_empty());
 }
 
@@ -535,7 +416,7 @@ async fn mr_ready_is_an_error_when_gitlab_still_reads_a_draft_after_the_retitle(
 async fn the_token_reaches_only_the_stub_and_only_on_the_read_and_comment_endpoints() {
     state::isolate();
     let (mut t, seen, _) = rig().await;
-    t.policy = allowing(r#""mr_status", "mr_comment", "issue", "issue_comment""#);
+    t.policy = allowing(r#""mr_status", "mr_comment""#);
     let c = ctx("work", "n1");
     let (err, v) = call(&t, &c, "mr_status", json!({"project": "g/p", "iid": 7})).await;
     assert!(!err, "{v}");
@@ -551,18 +432,6 @@ async fn the_token_reaches_only_the_stub_and_only_on_the_read_and_comment_endpoi
     .await;
     assert!(!err, "{v}");
     assert_eq!(v["id"], 99);
-    let (err, v) = call(&t, &c, "issue", json!({"key": "WRK-1"})).await;
-    assert!(!err, "{v}");
-    assert_eq!(v["status"], "In Progress");
-    assert_eq!(v["comments"][0]["body"], "hi");
-    let (err, v) = call(
-        &t,
-        &c,
-        "issue_comment",
-        json!({"key": "WRK-1", "body": "on it"}),
-    )
-    .await;
-    assert!(!err, "{v}");
 
     let seen = seen.0.lock().unwrap().clone();
     let paths: Vec<String> = seen.iter().map(|(m, p, _)| format!("{m} {p}")).collect();
@@ -573,18 +442,14 @@ async fn the_token_reaches_only_the_stub_and_only_on_the_read_and_comment_endpoi
             "GET /api/v4/projects/g%2Fp/merge_requests/7/approvals",
             "GET /api/v4/projects/g%2Fp/merge_requests/7/notes",
             "POST /api/v4/projects/g%2Fp/merge_requests/7/notes",
-            "GET /rest/api/2/issue/WRK-1",
-            "POST /rest/api/2/issue/WRK-1/comment",
         ]
     );
-    // Every GitLab call carried the token as a header; every Jira call basic auth.
-    assert!(seen.iter().take(4).all(|(_, _, a)| a == "glpat-secret"));
-    assert!(seen.iter().skip(4).all(|(_, _, a)| a.starts_with("Basic ")));
-    // And nothing in the surface can merge or transition.
+    // Every GitLab call carried the token as a header.
+    assert!(seen.iter().all(|(_, _, a)| a == "glpat-secret"));
+    // And nothing in the surface can merge.
     assert!(!paths
         .iter()
         .any(|p| p.contains("/merge") && !p.contains("merge_requests")));
-    assert!(!paths.iter().any(|p| p.contains("/transitions")));
 }
 
 #[tokio::test]
@@ -600,431 +465,7 @@ async fn an_unbound_channel_or_node_is_refused_before_any_request() {
     .await;
     assert!(err);
     assert!(v.as_str().unwrap().contains("not bound"), "{v}");
-    let (err, v) = call(&t, &ctx("work", "n2"), "issue", json!({"key": "WRK-1"})).await;
-    assert!(err);
-    assert!(v.as_str().unwrap().contains("this node"), "{v}");
     assert!(seen.0.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn a_write_to_the_tracker_waits_on_the_operator() {
-    state::isolate();
-    // The shipped bundle names the reads and nothing else, so a comment, an
-    // edit, and a new issue all reach the queue. With no session to ask on,
-    // that shows up as the call refusing to run unattended.
-    let (t, seen, _) = rig().await;
-    let c = ctx("work", "n1");
-    for (name, args) in [
-        ("issue_comment", json!({"key": "WRK-1", "body": "on it"})),
-        ("issue_update", json!({"key": "WRK-1", "summary": "New"})),
-        (
-            "issue_create",
-            json!({"project": "WRK", "type": "Task", "summary": "New"}),
-        ),
-    ] {
-        let (err, v) = call(&t, &c, name, args).await;
-        assert!(err, "{name} should have asked: {v}");
-        assert!(
-            v.as_str().unwrap_or_default().contains("approval"),
-            "{name}: {v}"
-        );
-    }
-    assert!(seen.0.lock().unwrap().is_empty(), "nothing reached Jira");
-}
-
-#[tokio::test]
-async fn an_edit_sends_only_the_fields_it_names_and_never_a_transition() {
-    state::isolate();
-    let (mut t, seen, bodies, _) = rig_with_bodies().await;
-    t.policy = allowing(r#""issue_update""#);
-    let (err, v) = call(
-        &t,
-        &ctx("work", "n1"),
-        "issue_update",
-        json!({
-            "key": "WRK-1",
-            "summary": "Rewritten",
-            "priority": "High",
-            "labels": ["needs-review", "exchange"],
-            "parent": "WRK-100",
-        }),
-    )
-    .await;
-    assert!(!err, "{v}");
-    assert_eq!(v["key"], "WRK-1");
-
-    let bodies = bodies.0.lock().unwrap().clone();
-    let (method, path, body) = bodies.last().unwrap();
-    assert_eq!(method, "PUT");
-    assert_eq!(path, "/rest/api/2/issue/WRK-1");
-    let f = &body["fields"];
-    assert_eq!(f["summary"], "Rewritten");
-    assert_eq!(f["priority"], json!({ "name": "High" }));
-    assert_eq!(f["parent"], json!({ "key": "WRK-100" }));
-    assert_eq!(f["labels"], json!(["needs-review", "exchange"]));
-    assert!(f.get("status").is_none());
-    assert!(f.get("key").is_none());
-
-    let paths: Vec<String> = seen
-        .0
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|(m, p, _)| format!("{m} {p}"))
-        .collect();
-    assert!(
-        !paths.iter().any(|p| p.contains("/transitions")),
-        "{paths:?}"
-    );
-}
-
-#[tokio::test]
-async fn a_relative_label_edit_is_sent_as_jiras_update_verbs_not_a_replacement() {
-    state::isolate();
-    let (mut t, _, bodies, _) = rig_with_bodies().await;
-    t.policy = allowing(r#""issue_update""#);
-    let (err, v) = call(
-        &t,
-        &ctx("work", "n1"),
-        "issue_update",
-        json!({ "key": "WRK-1", "add_labels": ["nead"], "remove_labels": ["stale"] }),
-    )
-    .await;
-    assert!(!err, "{v}");
-    assert_eq!(v["updated"], json!(["labels"]));
-
-    let bodies = bodies.0.lock().unwrap().clone();
-    let (method, _, body) = bodies.last().unwrap();
-    assert_eq!(method, "PUT");
-    assert_eq!(
-        body["update"]["labels"],
-        json!([{ "add": "nead" }, { "remove": "stale" }])
-    );
-    assert!(body["fields"].get("labels").is_none(), "{body}");
-}
-
-#[tokio::test]
-async fn a_label_removal_matches_the_issues_spelling_and_reports_one_it_lacks() {
-    state::isolate();
-    let (mut t, _, bodies, _) = rig_with_bodies().await;
-    t.policy = allowing(r#""issue_update""#);
-    let c = ctx("work", "n1");
-    let (err, v) = call(
-        &t,
-        &c,
-        "issue_update",
-        json!({ "key": "WRK-4", "remove_labels": ["stale", "gone"] }),
-    )
-    .await;
-    assert!(!err, "{v}");
-    assert_eq!(v["updated"], json!(["labels"]));
-    assert_eq!(v["not_on_issue"], json!(["gone"]));
-    let sent = bodies.0.lock().unwrap().clone();
-    let (method, _, body) = sent.last().unwrap();
-    assert_eq!(method, "PUT");
-    assert_eq!(body["update"]["labels"], json!([{ "remove": "Stale" }]));
-
-    // Nothing left to remove: no PUT, and the answer says so.
-    let before = bodies.0.lock().unwrap().len();
-    let (err, v) = call(
-        &t,
-        &c,
-        "issue_update",
-        json!({ "key": "WRK-4", "remove_labels": ["gone"] }),
-    )
-    .await;
-    assert!(!err, "{v}");
-    assert_eq!(v["updated"], json!([]));
-    assert_eq!(v["not_on_issue"], json!(["gone"]));
-    let sent = bodies.0.lock().unwrap().clone();
-    assert!(
-        sent[before..].iter().all(|(m, _, _)| m == "GET"),
-        "{sent:?}"
-    );
-}
-
-#[tokio::test]
-async fn an_edit_refuses_a_field_it_does_not_write_before_anything_is_sent() {
-    state::isolate();
-    let (mut t, seen, _) = rig().await;
-    t.policy = allowing(r#""issue_update""#);
-    let c = ctx("work", "n1");
-
-    let (err, v) = call(
-        &t,
-        &c,
-        "issue_update",
-        json!({"key": "WRK-1", "status": "Done"}),
-    )
-    .await;
-    assert!(err);
-    let text = v.as_str().unwrap();
-    assert!(text.contains("status"), "{text}");
-    assert!(text.contains("issue_comment"), "{text}");
-
-    let (err, v) = call(
-        &t,
-        &c,
-        "issue_update",
-        json!({"key": "WRK-1", "labels": ["needs review"]}),
-    )
-    .await;
-    assert!(err);
-    assert!(v.as_str().unwrap().contains("whitespace"), "{v}");
-
-    let (err, v) = call(&t, &c, "issue_update", json!({"key": "WRK-1"})).await;
-    assert!(err);
-    assert!(v.as_str().unwrap().contains("at least one"), "{v}");
-
-    assert!(seen.0.lock().unwrap().is_empty(), "nothing reached Jira");
-}
-
-#[tokio::test]
-async fn a_new_issue_carries_its_project_and_type_and_comes_back_with_a_link() {
-    state::isolate();
-    let (mut t, _, bodies, base) = rig_with_bodies().await;
-    t.policy = allowing(r#""issue_create""#);
-    let (err, v) = call(
-        &t,
-        &ctx("work", "n1"),
-        "issue_create",
-        json!({"project": "WRK", "type": "Task", "summary": "Do the thing"}),
-    )
-    .await;
-    assert!(!err, "{v}");
-    assert_eq!(v["key"], "WRK-9");
-    assert_eq!(v["url"], json!(format!("{base}/browse/WRK-9")));
-
-    let bodies = bodies.0.lock().unwrap().clone();
-    let (method, path, body) = bodies.last().unwrap();
-    assert_eq!(method, "POST");
-    assert_eq!(path, "/rest/api/2/issue");
-    assert_eq!(body["fields"]["project"], json!({ "key": "WRK" }));
-    assert_eq!(body["fields"]["issuetype"], json!({ "name": "Task" }));
-}
-
-#[tokio::test]
-async fn a_link_is_created_from_the_blocking_side_and_read_back_from_it() {
-    state::isolate();
-    let (mut t, seen, bodies, _) = rig_with_bodies().await;
-    t.policy = allowing(r#""issue_link""#);
-    let c = ctx("work", "n1");
-    let (err, v) = call(
-        &t,
-        &c,
-        "issue_link",
-        json!({ "from": "WRK-2", "to": "WRK-5", "type": "blocks" }),
-    )
-    .await;
-    assert!(!err, "{v}");
-    assert_eq!(
-        v,
-        json!({ "from": "WRK-2", "to": "WRK-5", "type": "Blocks", "label": "blocks" })
-    );
-
-    // The sides are an unverified reading of Jira's create; the read-back
-    // above is what holds it to "WRK-2 blocks WRK-5" on a real instance.
-    let sent = bodies.0.lock().unwrap().clone();
-    let (_, _, body) = sent
-        .iter()
-        .find(|(m, p, _)| m == "POST" && p == "/rest/api/2/issueLink")
-        .unwrap();
-    assert_eq!(
-        *body,
-        json!({ "type": { "name": "Blocks" },
-                "inwardIssue": { "key": "WRK-2" }, "outwardIssue": { "key": "WRK-5" } })
-    );
-    assert_eq!(
-        paths(&seen),
-        vec![
-            "GET /rest/api/2/issueLinkType",
-            "POST /rest/api/2/issueLink",
-            "GET /rest/api/2/issue/WRK-2",
-        ]
-    );
-}
-
-#[tokio::test]
-async fn a_link_that_reads_back_reversed_is_an_error_not_a_success() {
-    state::isolate();
-    let (mut t, _, _) = rig().await;
-    t.policy = allowing(r#""issue_link""#);
-    let (err, v) = call(
-        &t,
-        &ctx("work", "n1"),
-        "issue_link",
-        json!({ "from": "WRK-3", "to": "WRK-5", "type": "Blocks" }),
-    )
-    .await;
-    assert!(err, "{v}");
-    let text = v.as_str().unwrap();
-    assert!(text.contains("reversed"), "{text}");
-    assert!(text.contains("WRK-3 is blocked by WRK-5"), "{text}");
-}
-
-#[tokio::test]
-async fn an_unknown_link_type_is_refused_with_the_known_ones_before_asking() {
-    state::isolate();
-    // The shipped bundle asks for a link; this rig has no session to ask on.
-    let (t, seen, _) = rig().await;
-    let c = ctx("work", "n1");
-    let (err, v) = call(
-        &t,
-        &c,
-        "issue_link",
-        json!({ "from": "WRK-2", "to": "WRK-5", "type": "Precedes" }),
-    )
-    .await;
-    assert!(err);
-    let text = v.as_str().unwrap();
-    assert!(text.contains("Blocks, Relates"), "{text}");
-    assert!(!text.contains("approval"), "{text}");
-
-    let (err, v) = call(
-        &t,
-        &c,
-        "issue_link",
-        json!({ "from": "WRK-2", "to": "WRK-5", "type": "Blocks" }),
-    )
-    .await;
-    assert!(err);
-    assert!(v.as_str().unwrap().contains("approval"), "{v}");
-    // Only the link types were read, once, and nothing was linked.
-    assert_eq!(paths(&seen), vec!["GET /rest/api/2/issueLinkType"]);
-}
-
-#[tokio::test]
-async fn a_set_of_issues_is_created_in_order_under_the_parents_it_names() {
-    state::isolate();
-    let (mut t, _, bodies, base) = rig_with_bodies().await;
-    t.policy = allowing(r#""issue_create""#);
-    let (err, v) = call(
-        &t,
-        &ctx("work", "n1"),
-        "issue_create",
-        json!({ "issues": [
-            { "project": "WRK", "type": "Epic", "summary": "Port the feed" },
-            { "project": "WRK", "type": "Story", "summary": "Read it", "parent": "#0" },
-            { "project": "WRK", "type": "Story", "summary": "Refused", "parent": "#0" },
-            { "project": "WRK", "type": "Story", "summary": "Write it", "parent": "#1" },
-        ] }),
-    )
-    .await;
-    assert!(!err, "{v}");
-    assert_eq!(
-        v["created"],
-        json!([
-            { "index": 0, "key": "WRK-9", "url": format!("{base}/browse/WRK-9") },
-            { "index": 1, "key": "WRK-10", "url": format!("{base}/browse/WRK-10") },
-        ])
-    );
-    assert_eq!(v["failed"]["index"], 2);
-    assert!(
-        v["failed"]["error"]
-            .as_str()
-            .unwrap()
-            .contains("Not this one"),
-        "{v}"
-    );
-    assert_eq!(v["skipped"], json!([3]));
-
-    let bodies = bodies.0.lock().unwrap().clone();
-    let posted: Vec<&Value> = bodies
-        .iter()
-        .filter(|(m, p, _)| m == "POST" && p == "/rest/api/2/issue")
-        .map(|(_, _, b)| b)
-        .collect();
-    assert_eq!(posted.len(), 3, "nothing is sent after a refusal");
-    assert!(posted[0]["fields"].get("parent").is_none());
-    assert_eq!(posted[1]["fields"]["parent"], json!({ "key": "WRK-9" }));
-}
-
-#[tokio::test]
-async fn a_set_that_names_a_later_parent_is_refused_before_it_is_asked() {
-    state::isolate();
-    let (t, seen, _, _) = rig_with_bodies().await;
-    let (err, v) = call(
-        &t,
-        &ctx("work", "n1"),
-        "issue_create",
-        json!({ "issues": [
-            { "project": "WRK", "type": "Story", "summary": "Read it", "parent": "#1" },
-            { "project": "WRK", "type": "Epic", "summary": "Port the feed" },
-        ] }),
-    )
-    .await;
-    assert!(err, "{v}");
-    let text = v.as_str().unwrap_or_default();
-    assert!(
-        text.contains("issues[0]") && text.contains("comes later"),
-        "{v}"
-    );
-    assert!(seen.0.lock().unwrap().is_empty(), "nothing reached Jira");
-}
-
-fn paths(seen: &Seen) -> Vec<String> {
-    seen.0
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|(m, p, _)| format!("{m} {p}"))
-        .collect()
-}
-
-#[tokio::test]
-async fn a_search_returns_one_compact_row_per_issue() {
-    state::isolate();
-    let (mut t, seen, _) = rig().await;
-    t.policy = allowing(r#""issue_search""#);
-    let c = ctx("work", "n1");
-    let (err, v) = call(
-        &t,
-        &c,
-        "issue_search",
-        json!({ "jql": "project = WRK AND statusCategory != Done" }),
-    )
-    .await;
-    assert!(!err, "{v}");
-    assert_eq!(
-        v["issues"][0],
-        json!({ "key": "WRK-1", "type": "Task", "summary": "Do the thing",
-                "status": "In Progress", "priority": "Medium", "assignee": "J",
-                "parent": "WRK-100", "labels": ["etl"] })
-    );
-    assert_eq!(paths(&seen), vec!["GET /rest/api/3/search/jql"]);
-
-    // A Data Center without the newer endpoint gets the older one.
-    let (err, v) = call(&t, &c, "issue_search", json!({ "jql": "legacy" })).await;
-    assert!(!err, "{v}");
-    assert_eq!(v["issues"][0]["key"], "WRK-1");
-    assert_eq!(
-        paths(&seen)[1..],
-        ["GET /rest/api/3/search/jql", "GET /rest/api/2/search"]
-    );
-}
-
-#[tokio::test]
-async fn an_issues_transitions_are_read_without_asking_and_change_nothing() {
-    state::isolate();
-    let (mut t, seen, _) = rig().await;
-    t.policy = tracon::policy::Policy::shipped_shared();
-    let c = ctx("work", "n1");
-    let (err, v) = call(&t, &c, "issue_transitions", json!({ "key": "WRK-1" })).await;
-    assert!(!err, "{v}");
-    assert_eq!(
-        v,
-        json!({ "key": "WRK-1", "transitions": [
-            { "id": "21", "name": "Start progress", "to": "In Progress", "category": "In Progress" },
-            { "id": "31", "name": "Done", "to": "Done", "category": "Done" },
-        ] })
-    );
-    assert_eq!(
-        paths(&seen),
-        vec!["GET /rest/api/2/issue/WRK-1/transitions"]
-    );
-    let (err, v) = call(&t, &c, "issue_transitions", json!({ "key": "WRK 1/../x" })).await;
-    assert!(err, "{v}");
-    assert_eq!(paths(&seen).len(), 1, "a bad key reaches no URL");
 }
 
 #[tokio::test]
@@ -1135,26 +576,6 @@ async fn running_a_pipeline_waits_on_the_operator() {
     assert!(err);
     assert!(v.as_str().unwrap_or_default().contains("approval"), "{v}");
     assert!(seen.0.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn a_refusal_from_jira_carries_the_field_it_names() {
-    state::isolate();
-    let (mut t, _, _) = rig().await;
-    t.policy = allowing(r#""issue_update""#);
-    // WRK-9's stub rejects the edit with a per-field message, which is where
-    // Jira puts a bad priority or a parent it will not accept.
-    let (err, v) = call(
-        &t,
-        &ctx("work", "n1"),
-        "issue_update",
-        json!({"key": "WRK-9", "priority": "Nope"}),
-    )
-    .await;
-    assert!(err);
-    let text = v.as_str().unwrap();
-    assert!(text.contains("priority"), "{text}");
-    assert!(text.contains("Specify a valid value"), "{text}");
 }
 
 #[tokio::test]

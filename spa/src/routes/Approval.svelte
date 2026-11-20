@@ -1,6 +1,8 @@
 <script lang="ts">
   import { api, ApiError } from '../lib/api'
   import Name from '../components/Name.svelte'
+  import PluginCardContent from '../components/PluginCardContent.svelte'
+  import { askedBy, pluginCard } from '../lib/plugin-card'
   import {
     approvalArguments,
     approvalFields,
@@ -13,6 +15,7 @@
     outcome,
     pluginRows,
     previewHash,
+    previewOutdated,
     problemsByField,
     amendsNothing,
     renderedProse,
@@ -25,7 +28,6 @@
   import { clock } from '../lib/clock.svelte'
   import { formatAge, formatExpiry } from '../lib/format'
   import { isNotFound } from '../lib/load'
-  import { renderJiraWiki } from '../lib/jira-wiki'
   import { codeSpans, render } from '../lib/markdown'
   import { router } from '../lib/router.svelte'
   import { formValues, type Field, type FieldValue } from '../lib/schema-form'
@@ -50,6 +52,10 @@
   /** The node said there is no such approval, as opposed to failing to say. */
   let missing = $state(false)
   let decided = $state(false)
+  /** The arguments the plugin's preview was last taken of. */
+  let previewedFor = $state.raw<Record<string, unknown> | null>(null)
+  /** Why the edit's preview could not be asked for. */
+  let previewError = $state<string | null>(null)
   /** The route this approval was opened from; a verdict goes back to it. */
   let openedFrom: string | null = null
 
@@ -61,6 +67,7 @@
         details = d
         fields = approvalFields(schemaFor(d.input_schema, args), args, d.prose_fields, d.locked_fields)
         values = formValues(fields, args)
+        previewedFor = args
         loaded = true
       })
       .catch((e) => {
@@ -84,6 +91,8 @@
     missing = false
     refused = {}
     drafts = {}
+    previewedFor = null
+    previewError = null
     said = ''
     decided = false
     openedFrom = router.previous
@@ -96,6 +105,8 @@
   })
 
   const original = $derived(asArguments(details?.arguments))
+  /** A card a plugin raised: its content is shown as it is, and takes no edit. */
+  const card = $derived(details ? pluginCard(details.approval.tool, original) : null)
   const schema = $derived(schemaFor(details?.input_schema ?? null, original))
   const pending = $derived(details?.approval.state === 'pending')
   const lapsed = $derived(pending && details !== null && details.approval.expires_ms <= clock.now)
@@ -109,6 +120,8 @@
     ),
   )
   const blocked = $derived(Object.keys(problems).length > 0)
+  /** The preview shows the call as asked, not as edited: Allow waits for the edit's. */
+  const outdated = $derived(pending && previewOutdated(details, previewedFor, edited))
   /** What the document shows: the operator's draft while it waits, what ran once it is decided. */
   const shown = $derived(
     pending ? edited : details?.edited_arguments ? asArguments(details.edited_arguments) : original,
@@ -154,14 +167,13 @@
 
   /**
    * A prose field as HTML, or null to show its source. Prose in a plugin's
-   * format is shown as that plugin rendered it; the node-native Jira tools'
-   * wiki markup is rendered here until they move to the jira-review plugin.
+   * format is shown as that plugin rendered it, and as source when it could
+   * not be.
    */
   function html(key: string, text: string, item?: number): string | null {
     if (!details) return null
     const md = renderedProse(details, key, text, item) ?? drafts[text]
     if (md !== undefined) return render(md)
-    if (details.plugin_format === 'jira_wiki' && details.render_error) return renderJiraWiki(text)
     return null
   }
 
@@ -189,6 +201,29 @@
           .catch(() => {})
       }
     }, 300)
+    return () => clearTimeout(timer)
+  })
+
+  // Preview the operator's edit through the plugin once they pause, so
+  // what Allow is bound to is the edit's effect, not the call as asked.
+  $effect(() => {
+    if (!outdated || blocked) return
+    const args = edited
+    // An answer that arrives after a later edit is not that edit's preview.
+    const current = () => diffArguments(args, edited).length === 0
+    const timer = setTimeout(() => {
+      api
+        .previewApproval(id, args)
+        .then((r) => {
+          if (!details || !current()) return
+          previewError = null
+          if (r.preview) details.preview = r.preview
+          previewedFor = args
+        })
+        .catch((e) => {
+          if (current()) previewError = e instanceof Error ? e.message : String(e)
+        })
+    }, 400)
     return () => clearTimeout(timer)
   })
 
@@ -270,10 +305,14 @@
   </div>
 
   <dl class="kv">
+    {#if card}
+      <dt>Asked by</dt>
+      <dd class="m">{askedBy(card)}</dd>
+    {/if}
     {#if a.session_id}
       <dt>Session</dt>
       <dd class="m"><Name kind="session" id={a.session_id} href="/sessions/{a.session_id}" /></dd>
-    {:else}
+    {:else if !card}
       <dt>Asked by</dt>
       <dd class="m">{details.lane ?? 'an external agent'}</dd>
     {/if}
@@ -335,13 +374,25 @@
     </div>
   {/if}
 
+  {#if outdated && !blocked}
+    <div class="banner dim" role="status">
+      {#if previewError}
+        your edit could not be previewed <b>· {previewError} · Allow waits for a preview of it</b>
+      {:else}
+        previewing your edit <b>· Allow waits for it</b>
+      {/if}
+    </div>
+  {/if}
+
   {#if pending && details.preview?.status === 'refused'}
     <div class="banner crit" role="alert">
       the plugin refused the preview <b>· {details.preview.error} · you can still decide</b>
     </div>
   {:else if pending && details.preview?.status === 'shown'}
     {@const p = details.preview}
-    <div class="h4">Preview <b>{p.summary}{p.previewable ? '' : ' · not previewable'}</b></div>
+    <div class="h4">
+      Preview <b>{p.summary}{p.previewable ? '' : ' · not previewable'}{outdated ? ' · of the call before your edit' : ''}</b>
+    </div>
     <section class="doc">
       <article class="md">{@html render(p.body)}</article>
     </section>
@@ -406,6 +457,10 @@
     </section>
   {/each}
 
+  {#if card}
+    <PluginCardContent blocks={card.content} />
+  {/if}
+
   {#each sections as item (item.index)}
     {@const list = details.item_list ?? ''}
     <section class="doc item">
@@ -450,7 +505,7 @@
         <dd class:m={typeof original[key] !== 'string' || !String(original[key]).includes(' ')}>{display(original[key])}</dd>
       {/each}
     </dl>
-  {:else if open}
+  {:else if open && !card}
     <div class="h4">Arguments <b>edit before allowing if you want to</b></div>
     <div class="form">
       {#each fields as f (f.key)}
@@ -575,7 +630,7 @@
   {#if open}
     <div class="decide">
       {#if can.has('allow_once')}
-        <button class="btn p" disabled={busy || blocked} onclick={() => answer('allow_once')}>
+        <button class="btn p" disabled={busy || blocked || outdated} onclick={() => answer('allow_once')}>
           {can.has('allow_repo') ? 'Allow once' : changes.length ? 'Allow with edits' : 'Allow'}
         </button>
       {/if}

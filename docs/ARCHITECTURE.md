@@ -934,15 +934,27 @@ read-only account is the boundary. `sql-review` parses a statement only to class
 as a read or a write, which is not a security control, so a misclassified write still
 runs on the read-only account and fails there. Credentials named for consulta (`consulta`,
 `consulta-<profile>`) are renamed once as `serve` starts (`Broker::rename_retired`),
-never over a credential already holding the new name.
+never over a credential already holding the new name. Jira is the `jira-review`
+plugin's the same way: the node has no Jira client, and the channel's `jira` credential
+is what the plugin's manifest declares, so it binds with no rename. The node's old Jira
+tool names (`mcp::RETIRED_JIRA`) are refused with the plugin's name for each, and their
+past approvals are presented as source (`schema::PRESENTATIONS`).
 
-**Consequential verbs are scoped grants, not open tools.** Merge, publish, ticket
-transition, and deploy exist as narrow tools (`mr_merge`/`pr_merge`, `deploy`, a
-ticket transition) rather than being absent, but each dispatch is decided twice:
-the signed policy first — a trusted deny always wins — then a scoped [authority
-grant](#authority-grants) naming that one target and, for merge, publish, and
-deploy, the one revision it covers. A grant that does not exist, or whose target
-moved, is asked, never assumed.
+**Consequential verbs are scoped grants, not open tools.** Merge, publish, deploy, and
+a plugin tool its manifest marks `consequential` (jira-review's `transition`) exist as
+narrow tools rather than being absent, but each dispatch is decided twice: the signed
+policy first — a trusted deny always wins — then a scoped [authority
+grant](#authority-grants) naming that one target and, for merge, publish, and deploy,
+the one revision it covers. A grant that does not exist, or whose target moved, is
+asked, never assumed. A consequential plugin tool is never allowed by name: the bundle
+naming it and the `[[plugin]]` entry's `allow` are both passed over, and only an
+`authority::PLUGIN_CALL` grant decides it unattended. The node cannot read what a
+plugin's arguments act on, so that grant's target is the one call,
+`plugin:<plugin>__<tool>:<sha256 of the canonical arguments without operation_id>`
+(`mcp::plugin_consequential`). As for the node's own verbs, the call needs an
+`operation_id`, which the node adds to the listed schema, strips before the plugin sees
+the arguments, and records the outcome under (`authority_action`), so a retry replays
+it.
 
 **Policy decides every tool call before the broker is touched.** An allow rule names
 the tool exactly; a deny returns its reason to the agent; a tool the bundle does not
@@ -1035,7 +1047,11 @@ declares, and a call is decided by `upstream::decide` under an `Entry` for the p
 the signed policy by the namespaced name, a signed denial dominating, then the
 `[[plugin]]` entry's deny, ask and allow, whose allow widens nothing without a trusted
 bundle; a tool neither names is asked. The manifest's hint is shown and never read by
-the decision, since it is the plugin's own word. Every call carries `_meta.tracon`, a
+the decision, since it is the plugin's own word; its `consequential` mark is read, and
+only ever makes a call harder to run. The policy matches a plugin call's arguments
+without the prose its schema marks (`x-tracon-format`), as it matches the node's own
+comment tools without theirs (`Tools::policy_arguments`), so a comment may name what a
+denial names and is put to the operator instead. Every call carries `_meta.tracon`, a
 caller context signed with the node's identity key (`plugin::context`): it binds the
 call to its tool and canonical arguments, to the instance by the hash of its start
 token, so a process left from an earlier start cannot answer for the new one, and to a
@@ -1063,6 +1079,50 @@ was sent. Staleness is enforced by the plugin at dispatch. The page's display is
 display. Prose in a format a plugin owns is rendered by that plugin's
 `tracon/format/convert`, a pure function given no context and no credentials.
 
+**A plugin's UI runs on an origin of its own, and speaks to its plugin as the
+operator.** `http::plugin_ui` gives each plugin whose manifest has `[ui]` a loopback
+listener on a port it keeps (`[plugins] ui_port_first..ui_port_last`, recorded on its
+`plugin` row), so its pages have an origin no other plugin and not the operator's
+interface shares, and what they keep in the browser survives a restart. As with the
+document preview listener, nothing is served without a capability token in the path
+(`/t/<token>/`), minted by `POST /api/plugins/{name}/ui` for one plugin and channel, held
+in memory and forgotten after an hour unused; the mint answers only a caller on the
+node's machine, since the listener is loopback only. A listener answers only its own
+plugin's tokens and only a loopback `Host` naming its port. It serves the active build's
+`ui/` files itself, under a CSP whose `connect-src` and `script-src` are `'self'`, and
+forwards `api/...` to the plugin's instance for the token's channel
+(`Tools::ui_for_operator`): a request that changes something must come from a page of
+the same origin, only a few request headers pass (never a cookie, `Origin` or
+`Referer`), and the caller context rides in a `tracon-context` header, kind `operator`,
+tool `tracon/ui`, with `arguments_sha256` binding the method, the path as sent and the
+body's hash. Policy decides it as `<plugin>__ui`: a signed denial or the entry's `deny`
+refuses it, and otherwise it runs, never held, since the operator is the one asking.
+Changes and refusals are logged to the channel's external log under the lane
+`/plugins/<name>/ui`; reads are not, so a page that polls does not fill the log. The
+interface frames the page in `sandbox="allow-scripts allow-same-origin allow-forms
+allow-downloads allow-modals"`: same-origin is the plugin's own, never the interface's,
+and popups and top-level navigation stay off. Access from the phone through the hub
+waits with the rest of the mesh work.
+
+**A plugin calls the node back as itself, on a socket that knows which instance it is.**
+A plugin whose manifest names `node_methods` is started with `--node-socket`, a socket
+`plugin::host` serves for that start alone; the supervisor binds it before the spawn and
+drops it when the start ends. A request carries the instance's start token as a bearer
+token, compared by its hash, and is answered only for a method the manifest names, which
+the install card showed. Who is asking is the socket's, never the request's word. The
+methods are `mcp::plugin_host`'s, reached through a weak reference the session manager
+sets, since the tools own the supervisor. `approval/request` holds a `plugin_card`
+approval whose arguments are the plugin's content in node formats (Markdown, unified
+diff, word diff as before and after, key-value table, source); the page renders it and
+allows no edit, and allowing it settles the card as approved without running anything,
+for the plugin to act on. A card raised `on_behalf` of the agent call being served is
+that session's once the node has verified the context is its own signature for this
+instance and channel, so the session's wait covers it: the plugin can attribute only a
+call it was actually sent. `approval/status` waits as an agent's status call does, on the
+plugin's own cards only. `tools/call` runs through the operator API's unheld path
+(`Tools::call_for_operator`) with a `Caller::Plugin`, so the signed policy and the
+callee's entry decide it, the channel's external log records it, and an ask is a refusal.
+
 ### Authority grants
 
 A grant is a local operator decision layered under signed policy, not a
@@ -1072,7 +1132,7 @@ asking), then the store's live grants for that channel, action, and target — a
 grant's own `deny` or `ask` outranks a broader policy `allow`, and no matching
 grant asks. Every dispatch reads grants at that instant, so expiry and revocation
 take effect immediately, never at the next poll. A grant is scoped to one target
-(a pull request, a merge request, an issue's exact transition, a deployment job)
+(a pull request, a merge request, a deployment job, one consequential plugin call)
 and, for merge, publish, and deploy, the one revision it covers; the target
 moving to a later sha drops the grant rather than carrying it forward silently.
 Grants are made and revoked one at a time in Settings → Permissions & policies.

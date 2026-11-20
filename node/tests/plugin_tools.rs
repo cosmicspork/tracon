@@ -4,7 +4,7 @@
 //! disagrees with its manifest, decided under `[[plugin]]` as an
 //! `[[mcp_server]]` is, and called with a signed caller context that lends
 //! only what the manifest declares and, for `lend = "approved"`, only to an
-//! approved call.
+//! approved call, which runs only on the build its card showed.
 
 #[path = "support/mod.rs"]
 mod support;
@@ -465,7 +465,10 @@ async fn plugin_entries_decide_as_mcp_server_entries_do() {
     // Its ask holds over the policy's allow.
     asked(&rig.call("fake__sleep", json!({ "ms": 1 })).await);
     // A tool neither names is asked.
-    asked(&rig.call("fake__fail", json!({})).await);
+    asked(
+        &rig.call("fake__fail", json!({ "operation_id": "entries-fail-1" }))
+            .await,
+    );
     assert_eq!(rig.lines("fake", "entries", "calls.jsonl"), 1);
     // The signed policy alone allows a tool of a plugin with no entry.
     echo(&rig.call("open__query", json!({})).await);
@@ -491,6 +494,50 @@ async fn plugin_entries_decide_as_mcp_server_entries_do() {
         Some((Verdict::Deny, Some("plugin.fake.deny".into())))
     );
     assert_eq!(standing("fake__fail").map(|s| s.0), Some(Verdict::Ask));
+    // And so does what the operator is shown of each tool.
+    let build = rig
+        .store
+        .plugin_get("fake")
+        .unwrap()
+        .unwrap()
+        .active
+        .unwrap();
+    let shown: Vec<Value> = rig.tools.plugin_tool_status(&build.manifest);
+    let shown = |name: &str| {
+        let tool = shown.iter().find(|t| t["name"] == name).unwrap();
+        (
+            tool["setting"].clone(),
+            tool["decision"].clone(),
+            tool["rule_id"].clone(),
+        )
+    };
+    assert_eq!(
+        shown("fake__query"),
+        (json!("allow"), json!("allow"), json!("plugin.fake.allow"))
+    );
+    assert_eq!(
+        shown("fake__describe"),
+        (json!("deny"), json!("deny"), json!("plugin.fake.deny"))
+    );
+    assert_eq!(
+        shown("fake__sleep"),
+        (json!("ask"), json!("ask"), json!("plugin.fake.ask"))
+    );
+    assert_eq!(
+        shown("fake__fail"),
+        (Value::Null, json!("ask"), Value::Null)
+    );
+    let open = rig
+        .store
+        .plugin_get("open")
+        .unwrap()
+        .unwrap()
+        .active
+        .unwrap();
+    let open = rig.tools.plugin_tool_status(&open.manifest);
+    assert_eq!(open[0]["decision"], "allow");
+    assert_eq!(open[0]["rule_id"], "test-allow");
+    assert_eq!(open[0]["hint"], "read");
     rig.manager.plugins().shutdown().await;
 }
 
@@ -817,6 +864,92 @@ async fn an_answer_bound_to_an_older_preview_is_refused() {
 }
 
 #[tokio::test]
+async fn an_operators_edit_is_previewed_and_its_preview_is_what_allow_binds() {
+    let rig = rig("edited", vec![allow("fake", &["query"])], Policy::shipped());
+    rig.listed(&rig.ctx).await;
+    rig.knob("edited", "preview", "on");
+    let id = asked(
+        &rig.call("fake__describe", json!({ "sql": "UPDATE a" }))
+            .await,
+    );
+    let first = rig.open(&id).await.unwrap();
+    let h1 = first["preview"]["token_sha256"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // The operator edits the call; the plugin previews the edit, against a
+    // target that has moved since the card opened.
+    rig.knob("edited", "version", "v2");
+    let row = rig.store.get_approval(&id).unwrap().unwrap();
+    let edit = json!({ "sql": "UPDATE b" });
+    let second = rig.tools.preview_edit(&row, &edit).await.unwrap().unwrap();
+    assert!(
+        second["preview"]["body"]
+            .as_str()
+            .unwrap()
+            .contains("+ UPDATE b"),
+        "{second}"
+    );
+    let h2 = second["preview"]["token_sha256"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(h1, h2);
+    let previews = rig.records("edited", "previews.jsonl");
+    assert_eq!(previews.len(), 2);
+    assert_eq!(
+        previews[1]["arguments_sha256"],
+        sha256(r#"{"sql":"UPDATE b"}"#),
+        "the edit is what was previewed"
+    );
+    // An answer read against the preview before the edit is refused.
+    let answer = |hash: &str| OperatorAnswer {
+        option_id: tracon::adapter::types::OPTION_ALLOW_ONCE.into(),
+        arguments: Some(edit.clone()),
+        preview_hash: Some(hash.to_string()),
+        ..Default::default()
+    };
+    let refused = rig
+        .tools
+        .answer_approval(&id, answer(&h1))
+        .await
+        .unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains("the preview changed since you read it"),
+        "{refused}"
+    );
+    // Read against the edit's preview, the edit runs against its token.
+    rig.tools.answer_approval(&id, answer(&h2)).await.unwrap();
+    let seen = approved_echo(&rig.settled(&id).await);
+    assert_eq!(seen["meta"]["preview_token"], "v2");
+    assert_eq!(seen["arguments"], edit);
+    rig.manager.plugins().shutdown().await;
+}
+
+#[tokio::test]
+async fn an_edit_an_answer_would_refuse_is_not_previewed() {
+    let rig = rig(
+        "badedit",
+        vec![allow("fake", &["query"])],
+        Policy::shipped(),
+    );
+    rig.listed(&rig.ctx).await;
+    rig.knob("badedit", "preview", "on");
+    let id = asked(&rig.call("fake__describe", json!({ "sql": "x" })).await);
+    let row = rig.store.get_approval(&id).unwrap().unwrap();
+    let errors = rig
+        .tools
+        .preview_edit(&row, &json!("not an object"))
+        .await
+        .unwrap_err();
+    assert!(!errors.is_empty());
+    assert!(rig.records("badedit", "previews.jsonl").is_empty());
+    rig.manager.plugins().shutdown().await;
+}
+
+#[tokio::test]
 async fn prose_in_a_plugin_format_is_rendered_by_its_owner() {
     let rig = rig(
         "formats",
@@ -865,5 +998,225 @@ async fn prose_in_a_plugin_format_is_rendered_by_its_owner() {
         .unwrap();
     assert!(rendered.get("rendered").is_none());
     assert!(rendered["render_error"].is_string(), "{rendered}");
+    rig.manager.plugins().shutdown().await;
+}
+
+/// A plugin that declares no credential, with a consequential tool and a
+/// tool that carries prose.
+const MOVE: &str = r#"name = "move"
+version = "1.0.0"
+contract = 1
+exec = ["bin/move"]
+
+[[tool]]
+name = "transition"
+hint = "write"
+consequential = true
+
+[[tool]]
+name = "note"
+hint = "write"
+"#;
+
+fn install_move(rig: &Rig, channel: &str) {
+    support::plugin::install(&rig.store, &rig.state, MOVE);
+    let data = rig.data("move", channel);
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("tools"), "transition\nnote\n").unwrap();
+}
+
+/// What a `plugin_call` grant allowing exactly this call names.
+fn plugin_call_target(tool: &str, args: &Value) -> String {
+    format!("plugin:{tool}:{}", sha256(&args.to_string()))
+}
+
+/// A tool its manifest marks `consequential` takes an `operation_id` the node
+/// keeps and never sends on, is asked however it is allowed by name, runs
+/// unattended only under a grant naming that one call, and is replayed, not
+/// repeated, under the same id.
+#[tokio::test]
+async fn a_consequential_plugin_tool_needs_a_grant_naming_the_call() {
+    let channel = "consequential";
+    let rig = rig(
+        channel,
+        vec![allow("move", &["*"])],
+        allowing(&["move__transition", "move__note"]),
+    );
+    install_move(&rig, channel);
+    // Listed with the node's operation_id, required.
+    let listed = rig.rpc(&rig.ctx, "tools/list", json!({})).await;
+    let transition = listed["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "move__transition")
+        .cloned()
+        .expect("move__transition listed");
+    assert_eq!(
+        transition["inputSchema"]["properties"]["operation_id"]["type"],
+        "string"
+    );
+    assert!(transition["inputSchema"]["required"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("operation_id")));
+    let note = listed["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "move__note")
+        .cloned()
+        .unwrap();
+    assert!(note["inputSchema"]["properties"]
+        .get("operation_id")
+        .is_none());
+
+    // No operation id: refused before anything is asked.
+    let out = rig
+        .call("move__transition", json!({ "sql": "WRK-1 to Done" }))
+        .await;
+    assert_eq!(out["isError"], true, "{out}");
+    assert!(text(&out).contains("operation_id"), "{out}");
+    // The bundle and the entry both allow it by name: it is asked anyway.
+    let call = json!({ "sql": "WRK-1 to Done", "operation_id": "move-wrk-1-done" });
+    let id = asked(&rig.call("move__transition", call.clone()).await);
+    assert_eq!(rig.lines("move", channel, "calls.jsonl"), 0);
+    // Approved, it runs once, without the node's operation_id.
+    let seen = approved_echo(&rig.approve(&id).await);
+    assert_eq!(seen["arguments"], json!({ "sql": "WRK-1 to Done" }));
+    assert_eq!(rig.lines("move", channel, "calls.jsonl"), 1);
+    // The same operation again is asked, and once allowed is the recorded
+    // outcome, not another call.
+    let again = asked(&rig.call("move__transition", call.clone()).await);
+    let replayed = approved_echo(&rig.approve(&again).await);
+    assert_eq!(replayed["arguments"], json!({ "sql": "WRK-1 to Done" }));
+    assert_eq!(rig.lines("move", channel, "calls.jsonl"), 1);
+
+    // A grant naming one call allows that call, under a new id, unattended.
+    let granted = json!({ "sql": "WRK-2 to Done" });
+    let now = tracon::store::now_ms();
+    rig.store
+        .authority_grant_insert(&tracon::store::AuthorityGrantRow {
+            id: "g-move".into(),
+            action: tracon::authority::PLUGIN_CALL.into(),
+            verdict: "allow".into(),
+            target: plugin_call_target("move__transition", &granted),
+            channel: channel.into(),
+            session_id: None,
+            revision: None,
+            expires_ms: None,
+            revoked_ms: None,
+            reason: "under test".into(),
+            created_ms: now,
+        })
+        .unwrap();
+    let mut with_id = granted.clone();
+    with_id["operation_id"] = json!("move-wrk-2-done");
+    let ran = rig.call("move__transition", with_id).await;
+    assert_eq!(echo(&ran)["arguments"], granted);
+    assert_eq!(rig.lines("move", channel, "calls.jsonl"), 2);
+    // Any other call of the tool is not the one granted.
+    asked(
+        &rig.call(
+            "move__transition",
+            json!({ "sql": "WRK-3 to Done", "operation_id": "move-wrk-3-done" }),
+        )
+        .await,
+    );
+    // An ordinary tool of the same plugin runs as its entry allows.
+    echo(&rig.call("move__note", json!({ "sql": "hello" })).await);
+    rig.manager.plugins().shutdown().await;
+}
+
+/// A plugin tool's prose, the arguments its schema marks with a format, is
+/// what the call says rather than what it does: a comment may name what a
+/// denial names and is asked instead. What the call acts on is still matched.
+#[tokio::test]
+async fn a_plugin_tools_marked_prose_is_not_matched_against_a_denial() {
+    let channel = "prose";
+    let mut policy: Policy = toml::from_str(
+        r#"
+        version = 9
+        [[rule]]
+        id = "no-push"
+        verdict = "deny"
+        reason = "Under test."
+        matches = ["git push"]
+        "#,
+    )
+    .unwrap();
+    policy.trusted = true;
+    let rig = rig(channel, vec![], policy);
+    install_move(&rig, channel);
+    std::fs::write(rig.data("move", channel).join("marked"), "").unwrap();
+    rig.listed(&rig.ctx).await;
+    asked(
+        &rig.call(
+            "move__note",
+            json!({ "sql": "Deployed after git push.", "ms": 1 }),
+        )
+        .await,
+    );
+    // Unmarked, the same words are matched.
+    let out = rig
+        .call("move__note", json!({ "sql": "fine", "where": "git push" }))
+        .await;
+    assert_eq!(out["isError"], true, "{out}");
+    assert!(text(&out).contains("no-push"), "{out}");
+    rig.manager.plugins().shutdown().await;
+}
+
+#[tokio::test]
+async fn an_approved_call_runs_only_on_the_build_its_card_showed() {
+    let rig = rig("rebuilt", vec![], Policy::shipped());
+    rig.listed(&rig.ctx).await;
+    let first = asked(&rig.call("fake__describe", json!({ "table": "apps" })).await);
+    let waiting = asked(
+        &rig.call("fake__describe", json!({ "table": "users" }))
+            .await,
+    );
+    let card = |id: &str| {
+        let row = rig.store.get_approval(id).unwrap().unwrap();
+        rig.tools.plugin_approval_context(&row).unwrap()
+    };
+    assert_eq!(card(&first)["version"], "1.0.0");
+    assert_eq!(card(&first)["replaced_by"], Value::Null);
+
+    // Updated while both wait: each card still shows the build it was asked
+    // on, and says another is active now.
+    support::plugin::install_build(
+        &rig.store,
+        &rig.state,
+        &FAKE.replace("version = \"1.0.0\"", "version = \"1.1.0\""),
+        &"fe".repeat(32),
+    );
+    // As an approved update card does.
+    rig.manager.plugins().stop_plugin("fake").await;
+    assert_eq!(card(&first)["version"], "1.0.0");
+    assert_eq!(card(&first)["replaced_by"], "1.1.0");
+
+    // Allowing it runs nothing on the new build.
+    let calls = rig.lines("fake", "rebuilt", "calls.jsonl");
+    let refused = rig.approve(&first).await;
+    assert_eq!(refused.state, approvals::FAILED);
+    let reason = refused.reason.unwrap_or_default();
+    assert!(reason.contains("changed build"), "{reason}");
+    assert!(reason.contains("fake 1.1.0"), "{reason}");
+    assert_eq!(rig.lines("fake", "rebuilt", "calls.jsonl"), calls);
+
+    // The same call asked again is a new card on the new build, and the one
+    // waiting on the old build is expired rather than reused.
+    let again = asked(
+        &rig.call("fake__describe", json!({ "table": "users" }))
+            .await,
+    );
+    assert_ne!(again, waiting);
+    let expired = rig.store.get_approval(&waiting).unwrap().unwrap();
+    assert_eq!(expired.state, approvals::EXPIRED);
+    assert_eq!(card(&again)["version"], "1.1.0");
+    assert_eq!(card(&again)["replaced_by"], Value::Null);
+    let settled = rig.approve(&again).await;
+    assert_eq!(settled.state, approvals::SUCCEEDED, "{:?}", settled.reason);
+    assert_eq!(rig.lines("fake", "rebuilt", "calls.jsonl"), calls + 1);
     rig.manager.plugins().shutdown().await;
 }
