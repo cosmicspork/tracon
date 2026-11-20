@@ -1086,7 +1086,10 @@ it was installed, so no card is raised. `tracon plugin rm <name>` removes its bu
 keeps its data under `<state dir>/plugins/data/<name>/`; `--purge` deletes that too.
 Rolling back and removing are admin actions, as is restarting a plugin's process.
 `tracon plugin ls` lists what is installed, the version before it, and any build waiting
-on a card.
+on a card. It also lists each tool of the active build and how a call to it is answered
+now (runs, asked or refused) and by which rule. That answer is the signed policy's on a
+channel no rule is scoped to, with the plugin's `[[plugin]]` entry applied. Settings ›
+Plugins shows the same.
 
 The node runs a plugin as one process per channel, started when a session on a channel
 it is offered to first lists its tools. A process stops once it has gone unused for its

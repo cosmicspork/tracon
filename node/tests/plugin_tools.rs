@@ -494,6 +494,50 @@ async fn plugin_entries_decide_as_mcp_server_entries_do() {
         Some((Verdict::Deny, Some("plugin.fake.deny".into())))
     );
     assert_eq!(standing("fake__fail").map(|s| s.0), Some(Verdict::Ask));
+    // And so does what the operator is shown of each tool.
+    let build = rig
+        .store
+        .plugin_get("fake")
+        .unwrap()
+        .unwrap()
+        .active
+        .unwrap();
+    let shown: Vec<Value> = rig.tools.plugin_tool_status(&build.manifest);
+    let shown = |name: &str| {
+        let tool = shown.iter().find(|t| t["name"] == name).unwrap();
+        (
+            tool["setting"].clone(),
+            tool["decision"].clone(),
+            tool["rule_id"].clone(),
+        )
+    };
+    assert_eq!(
+        shown("fake__query"),
+        (json!("allow"), json!("allow"), json!("plugin.fake.allow"))
+    );
+    assert_eq!(
+        shown("fake__describe"),
+        (json!("deny"), json!("deny"), json!("plugin.fake.deny"))
+    );
+    assert_eq!(
+        shown("fake__sleep"),
+        (json!("ask"), json!("ask"), json!("plugin.fake.ask"))
+    );
+    assert_eq!(
+        shown("fake__fail"),
+        (Value::Null, json!("ask"), Value::Null)
+    );
+    let open = rig
+        .store
+        .plugin_get("open")
+        .unwrap()
+        .unwrap()
+        .active
+        .unwrap();
+    let open = rig.tools.plugin_tool_status(&open.manifest);
+    assert_eq!(open[0]["decision"], "allow");
+    assert_eq!(open[0]["rule_id"], "test-allow");
+    assert_eq!(open[0]["hint"], "read");
     rig.manager.plugins().shutdown().await;
 }
 

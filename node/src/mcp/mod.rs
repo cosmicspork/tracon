@@ -1768,6 +1768,45 @@ impl Tools {
         self.upstream.input_schema(server, name)
     }
 
+    /// How a call to each tool a plugin's build declares is answered now,
+    /// for the operator, as [`Self::upstream_status`] says it of an
+    /// `[[mcp_server]]`'s: `setting` is what the operator's `[[plugin]]`
+    /// entry says of it, and `decision` and `rule_id` are the answer with
+    /// the signed policy. Decided on no particular channel, so a rule scoped
+    /// to a channel can answer otherwise there.
+    pub fn plugin_tool_status(&self, manifest: &crate::plugin::manifest::Manifest) -> Vec<Value> {
+        let live = self.cfg.live();
+        let entry = live.plugin.iter().find(|p| p.name == manifest.name);
+        let entry = upstream::Entry::plugin(&manifest.name, entry);
+        let policy = self.policy.read();
+        manifest
+            .tools
+            .iter()
+            .map(|tool| {
+                let name = format!("{}{}{}", manifest.name, upstream::SEPARATOR, tool.name);
+                let policy_decision = policy.decide(&Request {
+                    channel: "",
+                    action: &name,
+                    kind: Some(TOOL_KIND),
+                    resource: None,
+                    command: None,
+                    arguments: None,
+                    doc_kinds: None,
+                });
+                let decision = upstream::decide(&entry, &tool.name, &policy, policy_decision);
+                json!({
+                    "name": name,
+                    "tool": tool.name,
+                    "hint": tool.hint.as_str(),
+                    "consequential": tool.consequential,
+                    "setting": entry.setting(&tool.name).map(upstream::verdict_name),
+                    "decision": upstream::verdict_name(decision.verdict),
+                    "rule_id": decision.rule_id,
+                })
+            })
+            .collect()
+    }
+
     /// Every `[[mcp_server]]` as the node sees it now, for the operator.
     pub fn upstream_status(&self) -> Vec<Value> {
         self.upstream

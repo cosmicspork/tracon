@@ -84,6 +84,11 @@ fn row_view(s: &AppState, row: &PluginRow) -> Value {
         "pending": pending,
         "updated_ms": row.updated_ms,
         "instances": instances,
+        "tools": row
+            .active
+            .as_ref()
+            .map(|b| s.tools.plugin_tool_status(&b.manifest))
+            .unwrap_or_default(),
     })
 }
 
