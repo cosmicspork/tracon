@@ -1427,6 +1427,7 @@ fn session_on(id: &str, channel: &str, state: &str) -> tracon::store::SessionRow
         continued_from: None,
         manifest_digest: None,
         open_turn_tokens: 0,
+        request_id: None,
     }
 }
 

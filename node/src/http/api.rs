@@ -80,7 +80,9 @@ impl From<SessionError> for ApiError {
             SessionError::Ceiling(_) => StatusCode::TOO_MANY_REQUESTS,
             SessionError::ChannelArchived(_) => StatusCode::CONFLICT,
             SessionError::NotFound => StatusCode::NOT_FOUND,
-            SessionError::PeerUnreachable(_) => StatusCode::GATEWAY_TIMEOUT,
+            SessionError::PeerUnreachable(_) | SessionError::OutcomeUnknown { .. } => {
+                StatusCode::GATEWAY_TIMEOUT
+            }
             SessionError::Remote(..) | SessionError::NoMesh => StatusCode::CONFLICT,
             // The node refusing to run harnesses, a version mismatch, or a
             // session that will not take the command are all state conflicts.
@@ -846,6 +848,7 @@ pub async fn import_transfer(
         harness: None,
         on_exhaustion: None,
         told_reviews: Vec::new(),
+        request_id: None,
     };
     if let Err(error) = s.manager.preflight(&preflight_spec) {
         let detail = error.to_string();
@@ -917,6 +920,7 @@ pub async fn import_transfer(
         harness: None,
         on_exhaustion: None,
         told_reviews: Vec::new(),
+        request_id: None,
     };
     let session = match s.manager.create(spec).await {
         Ok(session) => session,
@@ -1479,12 +1483,39 @@ fn zip_workspace(root: &std::path::Path) -> Result<Vec<u8>, String> {
 /// field for is refused by name, where serde would drop it and the request
 /// fail later for want of what it did send. A peer's forwarded spec is read
 /// leniently, so an older node still takes a newer one's.
+///
+/// A create sent to another node that did not answer in time is a 504 whose
+/// error says so in its own terms: `kind` is `outcome_unknown` (the session
+/// may exist; send the same body again with `request_id`, which is safe) or
+/// `unreachable` (nothing was sent).
 pub async fn create_session(
     State(s): State<AppState>,
     super::strict::StrictJson(spec): super::strict::StrictJson<NewSession>,
-) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
-    let row = s.manager.create(spec).await?;
-    Ok((StatusCode::CREATED, Json(json!(row))))
+) -> Response {
+    match s.manager.create(spec).await {
+        Ok(row) => (StatusCode::CREATED, Json(json!(row))).into_response(),
+        Err(e) => {
+            let (kind, node, request_id) = match &e {
+                SessionError::OutcomeUnknown { node, request_id } => {
+                    ("outcome_unknown", node.clone(), request_id.clone())
+                }
+                SessionError::PeerUnreachable(node) => ("unreachable", node.clone(), None),
+                _ => return ApiError::from(e).into_response(),
+            };
+            let message = e.to_string();
+            (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(json!({ "error": {
+                    "code": StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                    "kind": kind,
+                    "message": message,
+                    "node_id": node,
+                    "request_id": request_id,
+                } })),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// One prompt: the work item and the session that starts on it.
@@ -1575,6 +1606,7 @@ async fn compose_inner(s: AppState, c: ComposeBody) -> ApiResult<Response> {
         harness: c.harness,
         on_exhaustion: None,
         told_reviews: Vec::new(),
+        request_id: None,
         branch: c.branch,
         base: c.base,
         work_item_id: Some(item.id.clone()),

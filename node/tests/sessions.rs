@@ -240,6 +240,7 @@ async fn an_explicit_model_the_channel_cannot_authenticate_is_refused_by_create_
             harness: None,
             on_exhaustion: None,
             told_reviews: Vec::new(),
+            request_id: None,
         })
         .expect_err("preflight refuses an unauthenticatable model")
         .to_string();
@@ -1026,6 +1027,7 @@ fn insert_session_for_item(store: &Arc<Store>, budget: i64, item: Option<&str>) 
             continued_from: None,
             manifest_digest: None,
             open_turn_tokens: 0,
+            request_id: None,
         })
         .unwrap();
     id
@@ -2052,6 +2054,7 @@ async fn reconcile_after_restart_closes_paused_sessions_and_keeps_an_external_fe
             continued_from: None,
             manifest_digest: None,
             open_turn_tokens: 0,
+            request_id: None,
         })
         .unwrap();
 
@@ -3427,6 +3430,7 @@ async fn orientation_setup(
                 harness: None,
                 on_exhaustion: None,
                 told_reviews: Vec::new(),
+                request_id: None,
             },
             launch_with.unwrap_or_else(|| adapter.clone()),
         )
@@ -3580,6 +3584,7 @@ async fn an_execute_session_starts_on_its_plan_without_a_nudge() {
                 harness: None,
                 on_exhaustion: None,
                 told_reviews: Vec::new(),
+                request_id: None,
             },
             adapter.clone(),
         )
@@ -4449,6 +4454,7 @@ async fn a_review_sent_back_while_its_continuation_is_made_is_told_once() {
         harness: None,
         on_exhaustion: None,
         told_reviews: tracon::session::told_reviews(&carried),
+        request_id: None,
     };
 
     // Then, before the continuation exists, the operator sends it back.
@@ -4834,6 +4840,7 @@ async fn a_harness_that_never_starts_fails_the_session_visibly_and_removes_the_h
                 harness: None,
                 on_exhaustion: None,
                 told_reviews: Vec::new(),
+                request_id: None,
             },
             Arc::new(StallingAdapter),
         )

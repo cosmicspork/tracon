@@ -50,6 +50,7 @@ fn session_at(id: &str, repo: &str, created_ms: i64) -> SessionRow {
         continued_from: None,
         manifest_digest: None,
         open_turn_tokens: 0,
+        request_id: None,
     }
 }
 

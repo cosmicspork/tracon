@@ -38,6 +38,9 @@ struct Served {
     state: AppState,
     posted: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
     answer_sessions: Arc<std::sync::atomic::AtomicBool>,
+    /// How many more posts to `/api/sessions` to answer as a node whose
+    /// peer did not answer in time: a 504 whose outcome is unknown.
+    unknown: Arc<AtomicUsize>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -85,7 +88,9 @@ async fn serve_node(node_id: &str) -> Served {
     let counted = hits.clone();
     let posted = Arc::new(std::sync::Mutex::new(Vec::new()));
     let answer_sessions = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let unknown = Arc::new(AtomicUsize::new(0));
     let (keep, answer, self_id) = (posted.clone(), answer_sessions.clone(), node_id.to_string());
+    let unknowing = unknown.clone();
     let app = tracon::http::router(state.clone())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -95,6 +100,7 @@ async fn serve_node(node_id: &str) -> Served {
             move |req: axum::extract::Request, next: axum::middleware::Next| {
                 let counted = counted.clone();
                 let (keep, answer, self_id) = (keep.clone(), answer.clone(), self_id.clone());
+                let unknowing = unknowing.clone();
                 async move {
                     use axum::response::IntoResponse;
                     counted.fetch_add(1, Ordering::SeqCst);
@@ -107,6 +113,23 @@ async fn serve_node(node_id: &str) -> Served {
                     let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
                     let spec: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
                     keep.lock().unwrap().push(spec.clone());
+                    let unanswered = unknowing
+                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                        .is_ok();
+                    if unanswered {
+                        let error = serde_json::json!({ "error": {
+                            "code": 504,
+                            "kind": "outcome_unknown",
+                            "message": format!(
+                                "node {} did not answer in time, so it is not known whether it \
+                                 created the session",
+                                spec["node_id"].as_str().unwrap_or("?")
+                            ),
+                            "request_id": spec["request_id"],
+                        } });
+                        return (axum::http::StatusCode::GATEWAY_TIMEOUT, axum::Json(error))
+                            .into_response();
+                    }
                     if !answer.load(Ordering::SeqCst) {
                         let req = axum::extract::Request::from_parts(parts, bytes.into());
                         return next.run(req).await;
@@ -144,6 +167,7 @@ async fn serve_node(node_id: &str) -> Served {
         state,
         posted,
         answer_sessions,
+        unknown,
         task,
     }
 }
@@ -738,5 +762,68 @@ async fn work_start_prints_the_nodes_refusal_and_fails() {
         stderr.contains("execute needs a plan: run a plan session for this task first"),
         "{stderr}"
     );
+    assert!(!stdout.contains("started"), "{stdout}");
+}
+
+/// A start whose node could not say whether its peer made the session is
+/// sent once more with the same request id, which cannot make a second one;
+/// every start carries one, a given `--request-id` as given.
+#[tokio::test]
+async fn work_start_retries_an_unknown_outcome_with_the_same_request_id() {
+    let (node, dir) = work_node("work-start-unknown-once").await;
+    node.answer_sessions.store(true, Ordering::SeqCst);
+    let id = task(&node, "supervise plugins", Some("proj-widgets")).await;
+    node.unknown.store(1, Ordering::SeqCst);
+
+    let (ok, stdout, stderr) = work_start(&node, &dir, &[&id[..8], "--node", "bazzite"]).await;
+    assert!(ok, "{stderr}");
+    let sent = posted(&node);
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    let request_id = sent[0]["request_id"].as_str().unwrap().to_string();
+    assert!(!request_id.is_empty());
+    assert_eq!(sent[1]["request_id"], request_id.as_str());
+    assert_eq!(sent[1]["node_id"], PEER_B);
+    assert!(stderr.contains(&request_id), "{stderr}");
+    assert!(stdout.contains("started 0190aaaa"), "{stdout}");
+
+    // A fresh start is a fresh request; a given id is sent as given.
+    let (ok, _, stderr) = work_start(&node, &dir, &[&id[..8], "--node", "bazzite"]).await;
+    assert!(ok, "{stderr}");
+    assert_ne!(posted(&node)[2]["request_id"], request_id.as_str());
+    let (ok, _, stderr) = work_start(
+        &node,
+        &dir,
+        &[&id[..8], "--node", "bazzite", "--request-id", "given-1"],
+    )
+    .await;
+    assert!(ok, "{stderr}");
+    assert_eq!(posted(&node)[3]["request_id"], "given-1");
+}
+
+/// Still unknown after the retry: the start fails, and says how to check
+/// and how to retry without starting a second session.
+#[tokio::test]
+async fn work_start_that_stays_unknown_names_the_check_and_the_safe_retry() {
+    let (node, dir) = work_node("work-start-unknown").await;
+    node.answer_sessions.store(true, Ordering::SeqCst);
+    let id = task(&node, "supervise plugins", Some("proj-widgets")).await;
+    node.unknown.store(usize::MAX, Ordering::SeqCst);
+
+    let (ok, stdout, stderr) = work_start(&node, &dir, &[&id[..8], "--node", "bazzite"]).await;
+    assert!(!ok, "{stdout}");
+    let sent = posted(&node);
+    assert_eq!(sent.len(), 2, "one retry, no more: {sent:?}");
+    let request_id = sent[0]["request_id"].as_str().unwrap();
+    assert_eq!(sent[1]["request_id"], request_id);
+    let task_name = tracon::names::task(&id);
+    assert!(
+        stderr.contains(&format!("tracon work show {task_name} --channel personal")),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("--request-id {request_id}")),
+        "{stderr}"
+    );
+    assert!(stderr.contains("may still be created"), "{stderr}");
     assert!(!stdout.contains("started"), "{stdout}");
 }

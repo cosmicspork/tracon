@@ -415,6 +415,8 @@ export interface Session {
   /** The launch manifest this session was staged from. Written once, at
    * launch: a later revision is for the next session, not this one. */
   manifest_digest?: string | null
+  /** The id the create that made this session was sent with, if any. */
+  request_id?: string | null
 }
 
 export interface Event {

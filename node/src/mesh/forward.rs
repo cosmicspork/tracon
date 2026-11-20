@@ -28,6 +28,28 @@ pub trait CommandExecutor: Send + Sync {
 /// it to the millisecond across two machines' clocks would refuse fresh ones.
 pub const DEADLINE_SKEW_MS: i64 = 30_000;
 
+/// How long a command this node stopped waiting on is remembered, for its
+/// answer to be reconciled if it comes after all.
+const LATE_ACK_KEPT: Duration = Duration::from_secs(15 * 60);
+
+/// A command this node sent and stopped waiting on.
+pub struct Late {
+    node_id: String,
+    /// A create, whose answer is the session row the owner made.
+    create: bool,
+    since: std::time::Instant,
+}
+
+impl Late {
+    fn of(node_id: &str, command: &Command) -> Self {
+        Self {
+            node_id: node_id.to_string(),
+            create: matches!(command, Command::Create { .. }),
+            since: std::time::Instant::now(),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CommandError {
     #[error("the owner did not answer in time (unreachable, or on an older build)")]
@@ -65,9 +87,17 @@ impl MeshClient {
         Ok(cmd_id)
     }
 
-    /// Send a command and wait for the owner's ack. The owner refuses it once
-    /// `timeout` has passed, so a command this node reported as failed never
-    /// runs later from the outbox.
+    /// Send a command and wait up to `timeout` for the owner's ack.
+    ///
+    /// What the deadline guarantees is narrow. The owner refuses a command
+    /// that *arrives* later than `timeout` after it was sent (give or take
+    /// [`DEADLINE_SKEW_MS`] of clock difference), so one that sat in the
+    /// outbox or the hub never runs long after. It does not stop one that
+    /// arrived in time and *finishes* late, nor one whose ack is lost or
+    /// slow on the way back: [`CommandError::Timeout`] means the outcome is
+    /// unknown, not that the command did not run. A mutating command's
+    /// caller says so, and a late ack is reconciled when it comes (see
+    /// [`late_ack`](Self::late_ack)).
     pub async fn command(
         &self,
         node_id: &str,
@@ -89,7 +119,8 @@ impl MeshClient {
         timeout: Duration,
         not_after_ms: Option<i64>,
     ) -> Result<Value, CommandError> {
-        self.await_ack(node_id, timeout, |cmd_id| {
+        let late = Late::of(node_id, &command);
+        self.await_ack(node_id, timeout, late, |cmd_id| {
             serde_json::to_vec(&Payload::Command {
                 cmd_id,
                 command,
@@ -109,7 +140,12 @@ impl MeshClient {
         command: Value,
         timeout: Duration,
     ) -> Result<Value, CommandError> {
-        self.await_ack(node_id, timeout, |cmd_id| {
+        let late = Late {
+            node_id: node_id.to_string(),
+            create: false,
+            since: std::time::Instant::now(),
+        };
+        self.await_ack(node_id, timeout, late, |cmd_id| {
             serde_json::to_vec(&serde_json::json!({
                 "kind": "command",
                 "cmd_id": cmd_id,
@@ -124,6 +160,7 @@ impl MeshClient {
         &self,
         node_id: &str,
         timeout: Duration,
+        late: Late,
         payload: impl FnOnce(String) -> Result<Vec<u8>, String>,
     ) -> Result<Value, CommandError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -143,7 +180,65 @@ impl MeshClient {
             Ok(Err(_)) => Err(CommandError::Local("client shut down".into())),
             Err(_) => {
                 self.pending.lock().unwrap().remove(&cmd_id);
+                let mut waiting = self.late.lock().unwrap();
+                waiting.retain(|_, l| l.since.elapsed() < LATE_ACK_KEPT);
+                waiting.insert(
+                    cmd_id,
+                    Late {
+                        since: std::time::Instant::now(),
+                        ..late
+                    },
+                );
+                drop(waiting);
                 Err(self.timed_out(node_id))
+            }
+        }
+    }
+
+    /// An ack for a command this node no longer waits on: one it reported
+    /// as timed out, whose owner answered after all. A create's answer is
+    /// the session the owner made, so it is stored as the mirror it would
+    /// have been, where a retry with the same request id, or `work show`,
+    /// finds it. Anything else is logged: the owner's own record of what it
+    /// did reaches this node the way it always does.
+    pub(super) fn late_ack(
+        &self,
+        sender: &str,
+        cmd_id: &str,
+        ok: Option<&Value>,
+        err: Option<&str>,
+    ) {
+        let Some(late) = self.late.lock().unwrap().remove(cmd_id) else {
+            tracing::debug!(from = %sender, cmd = %cmd_id, "ack for no command this node sent");
+            return;
+        };
+        if late.node_id != sender {
+            tracing::warn!(from = %sender, cmd = %cmd_id, "late ack from a node the command was not sent to");
+            return;
+        }
+        let waited_ms = late.since.elapsed().as_millis() as u64;
+        if let Some(refusal) = err {
+            tracing::info!(from = %sender, cmd = %cmd_id, waited_ms, refusal, "late answer: the owner refused the command");
+            return;
+        }
+        if !late.create {
+            tracing::info!(from = %sender, cmd = %cmd_id, waited_ms, "late answer: the owner ran the command");
+            return;
+        }
+        let row =
+            ok.and_then(|v| serde_json::from_value::<crate::store::SessionRow>(v.clone()).ok());
+        match row {
+            Some(row) if row.node_id == sender => {
+                tracing::info!(from = %sender, session = %row.id, waited_ms, "late answer: the owner created the session");
+                let _ = self.store.ensure_peer_node(sender);
+                if let Err(e) = self.store.upsert_session_mirror(&row) {
+                    tracing::warn!(error = %e, "late-created session not stored");
+                    return;
+                }
+                self.bus.publish_untapped(Frame::Session(Box::new(row)));
+            }
+            _ => {
+                tracing::warn!(from = %sender, cmd = %cmd_id, "late answer to a create is not a session of its sender's");
             }
         }
     }
@@ -169,8 +264,10 @@ impl MeshClient {
     }
 
     /// Execute a command a peer sent us and ack it. Runs off the pull path so a
-    /// slow command does not stall ingestion. A command past its sender's
-    /// deadline is refused unrun: the sender has already reported it failed.
+    /// slow command does not stall ingestion. A command that arrives past its
+    /// sender's deadline is refused unrun: the sender has stopped waiting.
+    /// One that arrived in time runs to the end however long it takes, and
+    /// its ack goes back even if the sender has stopped waiting by then.
     pub(super) fn run_command(
         &self,
         sender: String,

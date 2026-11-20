@@ -1815,6 +1815,15 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE approval ADD COLUMN preview_token TEXT;
     "#,
+    // 81: the id the caller gave a session's create, so a create retried
+    // after an answer that never arrived (a peer's late ack, a proxy's 504)
+    // finds the session the first one made instead of making a second. One
+    // per owner and channel; NULL for every session made without one.
+    r#"
+    ALTER TABLE session ADD COLUMN request_id TEXT;
+    CREATE UNIQUE INDEX session_request ON session(node_id, channel, request_id)
+        WHERE request_id IS NOT NULL;
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

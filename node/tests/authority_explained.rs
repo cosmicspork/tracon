@@ -57,6 +57,7 @@ fn session_row(id: &str) -> SessionRow {
         continued_from: None,
         manifest_digest: None,
         open_turn_tokens: 0,
+        request_id: None,
     }
 }
 

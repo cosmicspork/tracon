@@ -263,6 +263,7 @@ fn spec(model: &str, harness: Option<&str>) -> NewSession {
         harness: harness.map(str::to_string),
         on_exhaustion: None,
         told_reviews: Vec::new(),
+        request_id: None,
     }
 }
 

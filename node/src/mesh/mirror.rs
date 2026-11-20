@@ -467,6 +467,7 @@ mod tests {
             policy_version: None,
             manifest_digest: None,
             open_turn_tokens: 0,
+            request_id: None,
             review_id: None,
             budget_tokens: 0,
             tokens_used: 0,
@@ -585,6 +586,7 @@ mod tests {
             turn_active: 1,
             tokens_used: 1_000,
             open_turn_tokens: 184_000,
+            request_id: None,
             ..terminal_session()
         };
         let payload = Payload::Session(serde_json::json!(row));

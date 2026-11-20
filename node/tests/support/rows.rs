@@ -75,6 +75,7 @@ pub fn session_row(id: &str, node: &str, channel: &str) -> SessionRow {
         continued_from: None,
         manifest_digest: None,
         open_turn_tokens: 0,
+        request_id: None,
     }
 }
 
