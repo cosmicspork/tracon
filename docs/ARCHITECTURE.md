@@ -1147,7 +1147,10 @@ egress grant for exactly the hosts the entry names, revoked again before any che
 starts; every check then runs on its own copy of the prepared tree with the cache
 read-only (uv, which cannot start on a read-only cache, is given a temporary one). That
 cache is the run's own, copied from the repository's base cache and removed with the
-run. The base is written by one thing only — a preparation of the default branch, made
+run; from a prepared snapshot on a pod or an Apple VM, whose image carries the base
+cache at `/cache`, it starts empty and is sent over that `/cache`, never onto storage
+that would hide it, so preparation starts warm and only what it added comes back
+(`Exclusions::Unchanged`, by change time) to be sent over the same image to each check. The base is written by one thing only — a preparation of the default branch, made
 when the repository's image is built — so a candidate's install, which may run the
 candidate's own scripts, can reach its own evidence and nobody else's.
 That warm-up is also the only preparation lent a registry credential: the entry's

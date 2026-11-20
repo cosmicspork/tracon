@@ -26,9 +26,11 @@
 //!   volume, so the snapshot holds what `prepare` left in `/work` as well as
 //!   `/cache`; the default branch's tracked files are removed before the
 //!   commit, so a run's own tree, sent over it, is never mixed with another
-//!   commit's files. On Podman the cache volumes sessions mount are seeded
-//!   from the snapshot's `/cache`; on Apple a session uses the snapshot's
-//!   own.
+//!   commit's files. On Podman the cache volumes sessions and candidates'
+//!   preparations mount are seeded from the snapshot's `/cache`; on a pod or
+//!   an Apple VM they use the snapshot's own, a preparation's run cache sent
+//!   over it and only what that preparation added taken back
+//!   (`runner::sandbox_files::Mode::Changed`).
 //! - **At the snapshot's commit, nothing to prepare.** The snapshot records
 //!   the default-branch commit it was prepared from ([`COMMIT_LABEL`] and the
 //!   store row's `source_commit`). A session that starts from the current

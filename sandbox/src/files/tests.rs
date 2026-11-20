@@ -548,3 +548,77 @@ async fn a_kept_staging_directory_stays() {
     assert!(path.join("a").exists() && path.join("b").exists());
     assert!(!in_flight(&path));
 }
+
+/// `Unchanged` carries only what was made or changed since the sandbox
+/// started: a tree written over what its image held comes back as what was
+/// added to it, and the directories that hold it are made again on the way
+/// in. With nothing to read it against, everything has changed.
+#[test]
+fn only_what_changed_since_the_start_is_packed() {
+    let source = tempfile::tempdir().unwrap();
+    let root = source.path();
+    // What the image held.
+    std::fs::create_dir_all(root.join("cargo/registry/index")).unwrap();
+    std::fs::write(root.join("cargo/registry/index/x"), "index").unwrap();
+    std::fs::write(root.join("cargo/registry/old.crate"), "old").unwrap();
+    std::fs::create_dir_all(root.join("npm")).unwrap();
+    std::fs::write(root.join("npm/blob"), "before").unwrap();
+    // A file's change time is read from a coarser clock than this one.
+    let pause = || std::thread::sleep(std::time::Duration::from_millis(50));
+    pause();
+    let started = SystemTime::now();
+    pause();
+    // What the sandbox did.
+    std::fs::write(root.join("cargo/registry/new.crate"), "new").unwrap();
+    std::os::unix::fs::symlink("new.crate", root.join("cargo/registry/latest")).unwrap();
+    std::fs::write(root.join("npm/blob"), "after").unwrap();
+    std::fs::create_dir_all(root.join("bun")).unwrap();
+    std::fs::write(root.join("bun/pkg"), "pkg").unwrap();
+
+    let names = |bytes: &[u8]| {
+        let mut names: Vec<String> = tar::Archive::new(bytes)
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap().path().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    let mut bytes = Vec::new();
+    let packed = pack_since(root, Exclusions::Unchanged, started, &mut bytes).unwrap();
+    assert_eq!(
+        names(&bytes),
+        [
+            "bun",
+            "bun/pkg",
+            "cargo/registry",
+            "cargo/registry/latest",
+            "cargo/registry/new.crate",
+            "npm/blob",
+        ]
+    );
+    assert_eq!((packed.files, packed.links, packed.dirs), (3, 1, 2));
+
+    // Unpacked over the image's own tree, it is the tree the sandbox left.
+    let image = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(image.path().join("cargo/registry/index")).unwrap();
+    std::fs::write(image.path().join("cargo/registry/old.crate"), "old").unwrap();
+    std::fs::create_dir_all(image.path().join("npm")).unwrap();
+    std::fs::write(image.path().join("npm/blob"), "before").unwrap();
+    let limits = Limits {
+        inert_links: true,
+        ..Limits::default()
+    };
+    unpack(&bytes[..], image.path(), None, &limits).unwrap();
+    let read = |path: &str| std::fs::read_to_string(image.path().join(path)).unwrap();
+    assert_eq!(read("cargo/registry/old.crate"), "old");
+    assert_eq!(read("cargo/registry/new.crate"), "new");
+    assert_eq!(read("cargo/registry/latest"), "new");
+    assert_eq!(read("npm/blob"), "after");
+    assert_eq!(read("bun/pkg"), "pkg");
+
+    let mut whole = Vec::new();
+    pack(root, Exclusions::Unchanged, &mut whole).unwrap();
+    assert!(names(&whole).contains(&"cargo/registry/old.crate".to_string()));
+    assert_eq!(names(&whole).len(), 11);
+}

@@ -507,11 +507,13 @@ pub trait Backend: Send + Sync {
             self.kind()
         )))
     }
-    /// Whether a new session cache starts as a copy of the repository's base
-    /// cache `base`. Podman's does, from the snapshot's cache when there is
-    /// one (`sandbox_images::seed_for`); a runtime whose snapshot carries the
-    /// cache inside it, or which holds no base cache, has nothing to copy.
-    async fn seeds_session_cache(&self, base: &str, from_snapshot: bool) -> bool {
+    /// Whether a new session cache, or a candidate preparation's run cache,
+    /// starts as a copy of the repository's base cache `base`. Podman's does,
+    /// from the snapshot's cache when there is one
+    /// (`sandbox_images::seed_for`); a runtime whose snapshot carries the
+    /// cache inside it, or which holds no base cache, has nothing to copy, and
+    /// its run cache starts empty, over the image's own `/cache`.
+    async fn seeds_cache(&self, base: &str, from_snapshot: bool) -> bool {
         let _ = (base, from_snapshot);
         true
     }

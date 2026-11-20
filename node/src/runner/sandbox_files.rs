@@ -27,7 +27,12 @@
 //!   subtree by construction, and it is written only under that session's
 //!   volume, under the session's state fence;
 //! - a preparation's tree whole when it ends, since its install is the point:
-//!   a preparation whose tree does not come back has failed.
+//!   a preparation whose tree does not come back has failed;
+//! - a preparation's cache as what it made or changed there
+//!   ([`Mode::Changed`]): from a prepared snapshot, the run's cache is sent
+//!   onto the image's own `/cache`, never storage that masks it, so what comes
+//!   back is what the preparation added to the snapshot's warm cache, and a
+//!   check is sent that same addition over the same image.
 //!
 //! **What a lost sandbox costs.** Each sync replaces the node's copy only
 //! once the whole archive has been received and checked, so a sandbox that
@@ -167,6 +172,9 @@ pub enum Mode {
     Checkout,
     /// The whole tree replaces the node's.
     Whole,
+    /// What the sandbox made or changed in the tree since it started
+    /// replaces the node's: over an image's own tree, what was added to it.
+    Changed,
 }
 
 impl Mode {
@@ -174,6 +182,7 @@ impl Mode {
         match self {
             Mode::Checkout => Exclusions::Checkout,
             Mode::Whole => Exclusions::None,
+            Mode::Changed => Exclusions::Unchanged,
         }
     }
 }
@@ -190,6 +199,9 @@ pub fn sync_mode(volume: &str, kind: RunKind) -> Option<(Mode, Limits)> {
         RunKind::Session if is_cache(volume) => None,
         RunKind::Session if is_workspace(volume) => Some((Mode::Checkout, checkout_limits())),
         RunKind::Session => Some((Mode::Whole, checkout_limits())),
+        // What it fetched, not the snapshot's cache it was sent over: the
+        // check it is for is sent this over the same image.
+        RunKind::Prepare if is_cache(volume) => Some((Mode::Changed, PREPARED_LIMITS)),
         RunKind::Prepare => Some((Mode::Whole, PREPARED_LIMITS)),
         // A fetch moves a ref in a session's workspace: the checkout comes
         // back, held to a checkout's limits, as the session's own does.
@@ -541,8 +553,11 @@ impl FilesStore {
     /// the default branch's tracked files; and a session is not sent the
     /// node's copy of a cache, since the snapshot's `/cache` is what its
     /// preparation filled and the node's copy would be sent whole at every
-    /// start only to lie over it. A session's workspace is sent as the node
-    /// holds it: the checkout alone, unless its own `prepare` ran.
+    /// start only to lie over it. A preparation's or a check's cache is sent
+    /// over the snapshot's `/cache` too, never onto storage that would hide
+    /// it: the node's copy is only what a candidate's preparation added
+    /// ([`Mode::Changed`]). A session's workspace is sent as the node holds
+    /// it: the checkout alone, unless its own `prepare` ran.
     pub fn plan_from(
         &self,
         mounts: &[Mount],
@@ -604,12 +619,18 @@ impl FilesStore {
                 local.push(target.clone());
             }
         }
-        // A snapshot's `/work` is its preparation's tree, made by the
-        // sandbox's own user: a tree sent there lands on it in place, where
-        // storage of the sandbox's own would first be filled with a copy of
-        // it (Podman copies what the image holds into a new volume).
+        // A snapshot's `/work` and `/cache` are its preparation's trees,
+        // made by the sandbox's own user: a tree sent there lands on them in
+        // place, where storage of the sandbox's own would hide them, or first
+        // be filled with a copy (Podman copies what the image holds into a
+        // new volume).
         if from_snapshot {
-            local.retain(|target| target != crate::sandbox_images::PREPARED_TREE);
+            local.retain(|target| {
+                target != crate::sandbox_images::PREPARED_TREE
+                    && !placed
+                        .iter()
+                        .any(|p| &p.target == target && is_cache(&p.volume))
+            });
         }
         provided.extend(local.into_iter().map(Mount::local));
         Ok((

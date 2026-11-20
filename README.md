@@ -2372,7 +2372,9 @@ and an emptyDir at `/tmp` that `TMPDIR` names.
   protocol and, for a session's workspace and own harness state, taken back at each
   turn end, every 60 s in a turn and at exit, as on Podman. A
   session's harness state is its own; the state every session once shared is never
-  sent. Caches are sent in and come back only from a preparation.
+  sent. Caches are sent in and come back only from a preparation: from a prepared
+  snapshot, a candidate's run cache is sent over the image's own warm `/cache` and
+  only what its preparation added comes back.
   How the take-backs go is the session's to see, on every runtime: the first that
   fails or times out (120 s), the one that ends a run of failures and the last one
   are `workspace_sync` events in its log; its page says how old the node's copy is

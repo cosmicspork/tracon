@@ -1,7 +1,8 @@
 //! Trees in and out of a sandbox, as tar.
 //!
 //! [`pack`] writes a directory as an archive, applying the checkout
-//! exclusions when asked. [`unpack`] is the one way an archive becomes files,
+//! exclusions when asked, or only what changed since a sandbox started
+//! ([`pack_since`]). [`unpack`] is the one way an archive becomes files,
 //! on either side, and it holds an archive to the rules the node holds any
 //! tree from a runtime to (`workspace::validate_tree`): only regular files,
 //! directories and symbolic links; every path relative and inside the
@@ -24,6 +25,7 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Component, Path, PathBuf};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -151,19 +153,34 @@ fn file_mode(mode: u32) -> u32 {
 }
 
 /// Write `root` as a tar archive to `out`. Links are archived as links and
-/// never followed; sockets, FIFOs and devices are left out.
+/// never followed; sockets, FIFOs and devices are left out. With nothing to
+/// read [`Exclusions::Unchanged`] against, everything has changed: see
+/// [`pack_since`].
 pub fn pack<W: Write>(
     root: &Path,
     exclusions: Exclusions,
+    out: W,
+) -> Result<TreeSummary, FilesError> {
+    pack_since(root, exclusions, SystemTime::UNIX_EPOCH, out)
+}
+
+/// [`pack`], with [`Exclusions::Unchanged`] leaving out every entry whose
+/// change time is before `started`. A directory is archived when it changed
+/// itself; one that holds a changed entry is made again by [`unpack`] anyway.
+pub fn pack_since<W: Write>(
+    root: &Path,
+    exclusions: Exclusions,
+    started: SystemTime,
     out: W,
 ) -> Result<TreeSummary, FilesError> {
     let metadata = std::fs::symlink_metadata(root)?;
     if !metadata.is_dir() {
         return Err(FilesError::NotADirectory(root.into()));
     }
-    let keep = match exclusions {
-        Exclusions::None => None,
-        Exclusions::Checkout => kept_paths(root)?,
+    let (keep, since) = match exclusions {
+        Exclusions::None => (None, None),
+        Exclusions::Checkout => (kept_paths(root)?, None),
+        Exclusions::Unchanged => (None, Some(started)),
     };
     // Fused, so the end-of-archive blocks a dropped builder writes never
     // follow an error: a failed pack must not end like a complete one.
@@ -179,6 +196,7 @@ pub fn pack<W: Write>(
         root,
         Path::new(""),
         keep.as_ref(),
+        since,
         &mut summary,
     ) {
         Ok(()) => {
@@ -197,6 +215,7 @@ fn pack_dir<W: Write>(
     dir: &Path,
     relative: &Path,
     keep: Option<&HashSet<PathBuf>>,
+    since: Option<SystemTime>,
     summary: &mut TreeSummary,
 ) -> Result<(), FilesError> {
     let mut names: Vec<_> = match std::fs::read_dir(dir) {
@@ -224,6 +243,10 @@ fn pack_dir<W: Write>(
             Err(error) => return Err(error.into()),
         };
         let file_type = metadata.file_type();
+        let unchanged = since.is_some_and(|since| changed_at(&metadata) < since);
+        if unchanged && !file_type.is_dir() {
+            continue;
+        }
         let mut header = tar::Header::new_gnu();
         if file_type.is_symlink() {
             let target = match std::fs::read_link(&path) {
@@ -237,12 +260,14 @@ fn pack_dir<W: Write>(
             builder.append_link(&mut header, &rel, &target)?;
             summary.links += 1;
         } else if file_type.is_dir() {
-            header.set_entry_type(tar::EntryType::Directory);
-            header.set_mode(0o755);
-            header.set_size(0);
-            builder.append_data(&mut header, &rel, io::empty())?;
-            summary.dirs += 1;
-            pack_dir(builder, &path, &rel, keep_below, summary)?;
+            if !unchanged {
+                header.set_entry_type(tar::EntryType::Directory);
+                header.set_mode(0o755);
+                header.set_size(0);
+                builder.append_data(&mut header, &rel, io::empty())?;
+                summary.dirs += 1;
+            }
+            pack_dir(builder, &path, &rel, keep_below, since, summary)?;
         } else if file_type.is_file() {
             // Opened without following a link and checked on the descriptor,
             // so a link swapped in after the stat above is never read through.
@@ -272,6 +297,19 @@ fn pack_dir<W: Write>(
         // Sockets, FIFOs and devices have no bytes to carry.
     }
     Ok(())
+}
+
+/// When an entry was last made or changed: its change time, which, unlike
+/// its modification time, nothing but the kernel sets.
+fn changed_at(metadata: &std::fs::Metadata) -> SystemTime {
+    use std::os::unix::fs::MetadataExt as _;
+    let (secs, nanos) = (metadata.ctime(), metadata.ctime_nsec());
+    match (u64::try_from(secs), u32::try_from(nanos)) {
+        (Ok(secs), Ok(nanos)) => {
+            SystemTime::UNIX_EPOCH + std::time::Duration::new(secs, nanos.min(999_999_999))
+        }
+        _ => SystemTime::UNIX_EPOCH,
+    }
 }
 
 /// The relative path of an archive entry, or `None` if it is absolute,
@@ -485,9 +523,22 @@ pub async fn pack_async<W>(
 where
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    pack_since_async(root, exclusions, SystemTime::UNIX_EPOCH, writer).await
+}
+
+/// [`pack_since`] onto an async writer, as [`pack_async`].
+pub async fn pack_since_async<W>(
+    root: PathBuf,
+    exclusions: Exclusions,
+    started: SystemTime,
+    writer: W,
+) -> (Result<TreeSummary, FilesError>, W)
+where
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     let mut bridge = SyncIoBridge::new(writer);
     let joined = tokio::task::spawn_blocking(move || {
-        let result = pack(&root, exclusions, &mut bridge).and_then(|summary| {
+        let result = pack_since(&root, exclusions, started, &mut bridge).and_then(|summary| {
             bridge.flush()?;
             Ok(summary)
         });

@@ -443,13 +443,20 @@ fn what_comes_back_from_which_run() {
     assert_eq!(mode("tracon-check-a", RunKind::Session), None);
     assert_eq!(mode("tracon-check-a", RunKind::Prepare), None);
     // A cache a session is sent never comes back from it; a preparation's
-    // does, since filling it is what the preparation is for.
+    // does, since filling it is what the preparation is for, as what it
+    // changed: over a snapshot's own cache, what it added to it.
     assert_eq!(mode("tracon-cache-r-a", RunKind::Session), None);
     assert_eq!(mode("tracon-prep-cache-a", RunKind::Session), None);
+    assert_eq!(mode("tracon-prep-cache-a", RunKind::Check), None);
     assert_eq!(
-        mode("tracon-prep-cache-a", RunKind::Prepare),
-        Some(Mode::Whole)
+        sync_mode("tracon-prep-cache-a", RunKind::Prepare),
+        Some((Mode::Changed, PREPARED_LIMITS))
     );
+    assert_eq!(
+        mode("tracon-cache-base-a", RunKind::Prepare),
+        Some(Mode::Changed)
+    );
+    assert_eq!(Mode::Changed.exclusions(), Exclusions::Unchanged);
 
     assert!(backs("tracon-workspace-a"));
     assert!(backs("tracon-scratch-a"));
@@ -624,8 +631,9 @@ fn a_store_keeping_every_volume_makes_what_it_does_not_hold_yet() {
 /// A session's sandbox from a prepared snapshot is sent its workspace and
 /// state but not the node's copy of its cache: the snapshot's own `/cache` is
 /// under it. Anything else from a snapshot (a check, a preparation, which
-/// read or carry a cache between steps), and a session from any other
-/// image, is sent the cache as before.
+/// read or carry a cache between steps) is sent the cache over the
+/// snapshot's own, never onto storage that would hide it; and a run from any
+/// other image is sent it onto storage of its own, as before.
 #[test]
 fn a_session_from_a_snapshot_is_not_sent_the_cache() {
     let dir = tempfile::tempdir().unwrap();
@@ -668,7 +676,16 @@ fn a_session_from_a_snapshot_is_not_sent_the_cache() {
     ] {
         let (provided, targets) = sent(image, kind, &session);
         assert_eq!(targets, ["/work", "/cache"], "{image} {kind:?}");
-        assert_eq!(provided, vec![Mount::local("/cache")], "{image} {kind:?}");
+        assert_eq!(provided, vec![], "{image} {kind:?}");
+    }
+    for kind in [Some(RunKind::Prepare), Some(RunKind::Check), None] {
+        let (provided, targets) = sent("localhost/tracon-repo-app:1", kind, &session);
+        assert_eq!(targets, ["/work", "/cache"], "{kind:?}");
+        assert_eq!(
+            provided,
+            vec![Mount::local("/work"), Mount::local("/cache")],
+            "{kind:?}"
+        );
     }
     let (provided, targets) = sent(
         "localhost/tracon-repo-app:1",
@@ -687,8 +704,9 @@ fn a_session_from_a_snapshot_is_not_sent_the_cache() {
     store
         .import(&crate::config::resource_name("check-1"), &seed)
         .unwrap();
-    let (_, targets) = sent(&snapshot, Some(RunKind::Check), &check);
+    let (provided, targets) = sent(&snapshot, Some(RunKind::Check), &check);
     assert_eq!(targets, ["/work", "/cache"]);
+    assert_eq!(provided, vec![], "nothing masks the snapshot's `/cache`");
 
     // A cache the node does not keep is the runtime's volume, mounted as
     // ever (Podman's, seeded from the snapshot).

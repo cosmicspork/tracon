@@ -697,7 +697,7 @@ impl Backend for KubeBackend {
     }
 
     /// A snapshot carries the cache its preparation filled in its image.
-    async fn seeds_session_cache(&self, base: &str, from_snapshot: bool) -> bool {
+    async fn seeds_cache(&self, base: &str, from_snapshot: bool) -> bool {
         !from_snapshot && self.files_store().holds(base)
     }
 
@@ -772,11 +772,7 @@ mod tests {
             crate::sandbox_images::base_image(&cfg)
         );
         assert!(protocol.preparer().is_none());
-        assert!(
-            !protocol
-                .seeds_session_cache("tracon-cache-base-x", true)
-                .await
-        );
+        assert!(!protocol.seeds_cache("tracon-cache-base-x", true).await);
     }
 
     /// A node that builds DigitalOcean's templates fetches the release's

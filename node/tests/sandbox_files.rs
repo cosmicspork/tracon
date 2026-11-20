@@ -362,6 +362,7 @@ async fn files_over_the_protocol_with_a_loopback_sandbox() {
     support::state::isolate();
     a_sessions_trees_go_in_come_back_and_resume().await;
     a_preparation_comes_back_whole_and_a_check_not_at_all().await;
+    a_snapshots_cache_is_read_and_only_what_was_added_comes_back().await;
 }
 
 async fn a_sessions_trees_go_in_come_back_and_resume() {
@@ -705,6 +706,92 @@ async fn a_preparation_comes_back_whole_and_a_check_not_at_all() {
     assert_eq!(read(tree.join("a.txt")), "one\n");
 
     l.store.remove("tracon-check-p3loop").unwrap();
+    l.store.remove(WORKSPACE).unwrap();
+    l.store.remove(SCRATCH).unwrap();
+    provider.settle().await;
+}
+
+/// From a prepared snapshot, a preparation's cache is sent over the image's
+/// own `/cache` and comes back as what the preparation added to it, not the
+/// image's cache whole; a check is sent that addition over the same image,
+/// so it reads both, and what it writes there never comes back.
+async fn a_snapshots_cache_is_read_and_only_what_was_added_comes_back() {
+    const RUN_CACHE: &str = "tracon-prep-cache-p3loop";
+    let l = layout();
+    let provider = Loopback::new();
+    let runner = ProtocolRunner::new(provider.clone(), "img")
+        .with_server(support::sandbox_server())
+        .with_files(l.store.clone())
+        .with_connect_within(Duration::from_secs(10));
+    let snapshot = format!(
+        "{}-app-0123456789ab@sha256:{}",
+        tracon::sandbox_images::snapshot_repo(),
+        "a".repeat(64)
+    );
+    let (w, c) = (
+        l.work.display().to_string(),
+        l.inside.join("cache").display().to_string(),
+    );
+    let empty = tempfile::tempdir().unwrap();
+    l.store.import(RUN_CACHE, empty.path()).unwrap();
+    // The cache the snapshot's image holds, there before its sandbox starts.
+    let image_cache = || {
+        l.fresh();
+        std::fs::create_dir_all(l.inside.join("cache/cargo/registry")).unwrap();
+        std::fs::write(
+            l.inside.join("cache/cargo/registry/old.crate"),
+            "old
+",
+        )
+        .unwrap();
+    };
+    let capture = |script: String, kind: RunKind, cache_read_only: bool| RunnerCommand {
+        argv: vec!["sh".into(), "-c".into(), script],
+        name: "tracon-p-p3loop".into(),
+        mounts: vec![
+            Mount::volume(WORKSPACE, &w, false),
+            Mount::volume(RUN_CACHE, &c, cache_read_only),
+        ],
+        image: Some(snapshot.clone()),
+        labels: RunLabels::of(kind),
+        ..Default::default()
+    };
+
+    image_cache();
+    // Older than the sandbox by more than the slack it counts changes with.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    let out = runner
+        .run_capture(capture(
+            format!("cat {c}/cargo/registry/old.crate && echo new > {c}/cargo/registry/new.crate"),
+            RunKind::Prepare,
+            false,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "old\n");
+    let kept = l.store.tree(RUN_CACHE).unwrap();
+    assert_eq!(read(kept.join("cargo/registry/new.crate")), "new\n");
+    assert!(
+        !kept.join("cargo/registry/old.crate").exists(),
+        "the image's own cache never comes back"
+    );
+
+    image_cache();
+    let out = runner
+        .run_capture(capture(
+            format!(
+                "cat {c}/cargo/registry/old.crate {c}/cargo/registry/new.crate && \
+                 echo scribbled > {c}/cargo/registry/new.crate"
+            ),
+            RunKind::Check,
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "old\nnew\n");
+    assert_eq!(read(kept.join("cargo/registry/new.crate")), "new\n");
+
+    l.store.remove(RUN_CACHE).unwrap();
     l.store.remove(WORKSPACE).unwrap();
     l.store.remove(SCRATCH).unwrap();
     provider.settle().await;

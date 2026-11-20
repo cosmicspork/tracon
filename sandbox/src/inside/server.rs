@@ -29,7 +29,16 @@ pub struct State {
     pub services: Supervisor,
     /// Cancelled when the node asks the sandbox to shut down.
     pub shutdown: CancellationToken,
+    /// What an export of [`protocol::Exclusions::Unchanged`] is read
+    /// against: when this sandbox started, less [`CHANGED_SLACK`].
+    pub started: std::time::SystemTime,
 }
+
+/// How far before its start a sandbox counts an entry as changed. A file's
+/// change time comes from a coarser clock than the one the start is read
+/// from, and an entry the image held that is counted is only carried, where
+/// one the sandbox wrote that is not would be lost.
+pub const CHANGED_SLACK: std::time::Duration = std::time::Duration::from_secs(1);
 
 struct Failure(StatusCode, String);
 
@@ -337,7 +346,7 @@ async fn route(
                 return Ok(());
             };
             let (packed, mut writer) =
-                files::pack_async(export.dir, export.exclusions, writer).await;
+                files::pack_since_async(export.dir, export.exclusions, state.started, writer).await;
             match packed {
                 Ok(_) => {
                     let _ = writer.shutdown().await;
