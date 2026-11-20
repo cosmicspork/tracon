@@ -403,6 +403,12 @@ const CONVERT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// The largest text a conversion is taken from or answers.
 const CONVERT_MAX: usize = 1 << 20;
 
+/// A plugin build's archive digest, shortened as its install directory
+/// names it.
+fn short_digest(digest: &str) -> &str {
+    digest.get(..16).unwrap_or(digest)
+}
+
 /// How long starting and listing one plugin may hold up a `tools/list`.
 const PLUGIN_LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -878,12 +884,14 @@ impl Tools {
     /// What a request to a plugin's tool for `ctx` is made with: its
     /// instance, held while the request runs; the credentials its running
     /// build declares that the channel binds, one lent only on approval
-    /// only when `approved`; who is calling; and how long it may take.
+    /// only to a call run from `approval`; who is calling; and how long it
+    /// may take. A call run from an approval is refused if the build it
+    /// was asked on is no longer the one running.
     async fn plugin_call_parts(
         &self,
         ctx: &CallContext,
         pt: &PluginTool,
-        approved: bool,
+        approval: Option<&str>,
     ) -> Result<PluginCallParts, String> {
         use crate::plugin::context;
         let access = self
@@ -899,7 +907,27 @@ impl Tools {
         if !endpoint.tools.iter().any(|t| t.remote == pt.tool) {
             return Err(format!("plugin {} lists no tool {}", pt.plugin, pt.tool));
         }
-        let credentials = self.lent(ctx, &endpoint.manifest, approved)?;
+        // An approved call runs only on the build its card showed: an update
+        // or rollback since may do something else and be lent other
+        // credentials. A call asked before builds were recorded has none.
+        if let Some(id) = approval {
+            let asked_on = access
+                .store
+                .approval_plugin_digest(id)
+                .map_err(|e| e.to_string())?;
+            if let Some(asked_on) = asked_on.filter(|d| *d != endpoint.digest) {
+                return Err(format!(
+                    "nothing ran: plugin {} changed build after this call was asked (the card \
+                     showed build {}, and {} {} is active now); make the call again to be asked \
+                     about it on this build",
+                    pt.plugin,
+                    short_digest(&asked_on),
+                    pt.plugin,
+                    endpoint.manifest.version,
+                ));
+            }
+        }
+        let credentials = self.lent(ctx, &endpoint.manifest, approval.is_some())?;
         let caller = match &ctx.caller {
             Caller::Session(id) => context::CallerId {
                 kind: "agent",
@@ -963,7 +991,7 @@ impl Tools {
             .session
             .get()
             .ok_or("plugins are not available on this node")?;
-        let parts = self.plugin_call_parts(ctx, pt, approval.is_some()).await?;
+        let parts = self.plugin_call_parts(ctx, pt, approval).await?;
         let preview_token = match approval {
             Some(id) => access.store.preview_token(id).map_err(|e| e.to_string())?,
             None => None,
@@ -1171,7 +1199,7 @@ impl Tools {
             json!({ "preview": { "status": "refused", "error": error } })
         };
         let ctx = self.approval_call_context(access, approval);
-        let parts = match self.plugin_call_parts(&ctx, &pt, false).await {
+        let parts = match self.plugin_call_parts(&ctx, &pt, None).await {
             Ok(parts) => parts,
             Err(error) => {
                 keep(None);
@@ -1610,19 +1638,48 @@ impl Tools {
         })
     }
 
-    /// What a card for a plugin's tool shows besides the call: the build,
-    /// what the plugin says the tool does and reaches, which it never
-    /// decides anything by, and what the call is lent once approved.
+    /// What a card for a plugin's tool shows besides the call: the build it
+    /// was asked on, what the plugin says the tool does and reaches, which it
+    /// never decides anything by, and what the call is lent once approved.
+    /// `replaced_by` names the build active now when that is another, which
+    /// an approved run is refused on.
     pub fn plugin_approval_context(
         &self,
         approval: &crate::store::approvals::ApprovalRow,
     ) -> Option<Value> {
         let pt = self.plugin_tool(&approval.tool)?;
-        let tool = pt.manifest.tools.iter().find(|t| t.name == pt.tool)?;
+        let access = self.session.get()?;
+        let asked_on = access
+            .store
+            .approval_plugin_digest(&approval.id)
+            .ok()
+            .flatten()
+            .filter(|d| *d != pt.digest);
+        // The build asked on, when the node still keeps it for rollback.
+        let kept = asked_on.as_ref().and_then(|d| {
+            access
+                .store
+                .plugin_get(&pt.plugin)
+                .ok()
+                .flatten()
+                .and_then(|row| row.previous)
+                .filter(|b| b.digest == *d)
+        });
+        let (version, manifest) = match (&asked_on, &kept) {
+            (None, _) => (pt.manifest.version.clone(), &pt.manifest),
+            (Some(_), Some(build)) => (build.manifest.version.clone(), &build.manifest),
+            // Gone from the node: what it declared is not known any more.
+            (Some(digest), None) => (format!("build {}", short_digest(digest)), &pt.manifest),
+        };
+        let replaced_by = asked_on.as_ref().map(|_| pt.manifest.version.clone());
+        let tool = manifest
+            .tools
+            .iter()
+            .find(|t| t.name == pt.tool)
+            .or_else(|| pt.manifest.tools.iter().find(|t| t.name == pt.tool))?;
         let broker = self.broker.read().unwrap();
         let available = broker.available_to(&approval.channel, &approval.node_id);
-        let credentials: Vec<Value> = pt
-            .manifest
+        let credentials: Vec<Value> = manifest
             .credentials
             .iter()
             .map(|c| {
@@ -1641,12 +1698,13 @@ impl Tools {
             .map(|(_, target, _)| target);
         Some(json!({
             "name": pt.plugin,
-            "version": pt.manifest.version,
+            "version": version,
+            "replaced_by": replaced_by,
             "tool": pt.tool,
             "hint": tool.hint.as_str(),
             "consequential": tool.consequential,
             "grant_target": grant_target,
-            "egress": pt.manifest.egress,
+            "egress": manifest.egress,
             "credentials": credentials,
         }))
     }
@@ -2864,10 +2922,38 @@ impl Tools {
             .get()
             .ok_or("this call needs the operator's approval and this node cannot hold one")?;
         let request_key = request_key(name, args);
-        let existing = access
+        // A plugin's tool is asked about on the build active now, which its
+        // card shows and an approved run must still be.
+        let build = self.plugin_tool(name).map(|pt| pt.digest);
+        let mut existing = access
             .store
             .pending_approval(&ctx.channel, &request_key)
             .map_err(|e| e.to_string())?;
+        if let (Some(waiting), Some(build)) = (&existing, &build) {
+            let asked_on = access
+                .store
+                .approval_plugin_digest(&waiting.id)
+                .map_err(|e| e.to_string())?;
+            if asked_on.as_ref() != Some(build) {
+                let reason = format!(
+                    "the plugin behind {name} changed build while this waited; the same call \
+                     was asked again on the build active now"
+                );
+                if access
+                    .store
+                    .expire_approval(&waiting.id, &reason)
+                    .map_err(|e| e.to_string())?
+                {
+                    if let Ok(Some(expired)) = access.store.get_approval(&waiting.id) {
+                        access
+                            .manager
+                            .approval_decided(&expired, crate::store::approvals::EXPIRED)
+                            .await;
+                    }
+                }
+                existing = None;
+            }
+        }
         let approval = match existing {
             Some(approval) => approval,
             None => {
@@ -2900,6 +2986,13 @@ impl Tools {
                     .store
                     .insert_approval(&row)
                     .map_err(|e| e.to_string())?;
+                if let Some(build) = &build {
+                    if let Err(e) = access.store.set_approval_plugin_digest(&row.id, build) {
+                        // Unrecorded, the card could not be held to its build.
+                        let _ = access.store.expire_approval(&row.id, &e.to_string());
+                        return Err(e.to_string());
+                    }
+                }
                 access.manager.approval_requested(&row).await;
                 row
             }

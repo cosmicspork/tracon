@@ -1159,8 +1159,11 @@ The same context lends the call, in `credentials`, each credential the channel b
 the running build declares, as its environment fields. One the manifest marks
 `lend = "approved"` is lent only to a call run from a card you approved, never to one the
 policy or the entry allowed outright. An undeclared credential is never lent, and none
-is ever in the plugin's environment. The card for a plugin's tool shows its version, its
-hint, the hosts it says it reaches, and what an approved run is lent. A call holds its
+is ever in the plugin's environment. The card for a plugin's tool shows the version the
+call was asked on, its hint, the hosts it says it reaches, and what an approved run is
+lent. An approved call runs only on that build: if the plugin was updated or rolled back
+while the card waited, the card says so and allowing it runs nothing, and the same call
+asked again is a new card on the build active then. A call holds its
 process for as long as it runs, so the idle stop counts from the end of the last call.
 
 When the card for a plugin's tool opens, the node asks the plugin what the call would

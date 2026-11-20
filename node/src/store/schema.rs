@@ -1822,6 +1822,12 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE plugin ADD COLUMN ui_port INTEGER;
     CREATE UNIQUE INDEX plugin_ui_port ON plugin(ui_port) WHERE ui_port IS NOT NULL;
     "#,
+    // 82: the archive digest of the plugin build a plugin tool's call was
+    // asked on. The card shows that build, and an approved call is refused
+    // if another build would run it.
+    r#"
+    ALTER TABLE approval ADD COLUMN plugin_digest TEXT;
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

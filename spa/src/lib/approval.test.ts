@@ -327,4 +327,24 @@ test("a plugin tool's card says its build, its own word on the tool, and what is
     { key: 'Reaches', value: 'declares none' },
     { key: 'Lent on allow', value: 'nothing' },
   ])
+
+  const replaced = pluginRows({
+    plugin: {
+      name: 'open',
+      version: '1.0.0',
+      replaced_by: '1.1.0',
+      tool: 'query',
+      hint: 'read',
+      consequential: false,
+      egress: [],
+      credentials: [],
+    },
+  })
+  expect(replaced.slice(0, 2)).toEqual([
+    { key: 'Plugin', value: 'open 1.0.0' },
+    {
+      key: 'Build changed',
+      value: 'open 1.1.0 is active now, so allowing this runs nothing: the agent has to ask again',
+    },
+  ])
 })

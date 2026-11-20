@@ -106,7 +106,13 @@ export interface ApprovalDetails {
 
 export interface PluginContext {
   name: string
+  /** The build the call was asked on. */
   version: string
+  /**
+   * The build active now, when the plugin was updated or rolled back after
+   * the call was asked: allowing it then runs nothing.
+   */
+  replaced_by?: string | null
   tool: string
   /** What the plugin says the tool does. It decides nothing. */
   hint: 'read' | 'write'
@@ -141,8 +147,17 @@ export function pluginRows(details: Pick<ApprovalDetails, 'plugin'>): { key: str
   const lent = p.credentials.flatMap((c) =>
     c.bindings.map((b) => (c.lend === 'approved' ? `${b} (only because you approve this card)` : b)),
   )
+  const replaced = p.replaced_by
+    ? [
+        {
+          key: 'Build changed',
+          value: `${p.name} ${p.replaced_by} is active now, so allowing this runs nothing: the agent has to ask again`,
+        },
+      ]
+    : []
   return [
     { key: 'Plugin', value: `${p.name} ${p.version}` },
+    ...replaced,
     { key: 'Says it', value: p.consequential ? `${p.hint}s, consequential` : `${p.hint}s` },
     { key: 'Reaches', value: p.egress.length > 0 ? p.egress.join(', ') : 'declares none' },
     { key: 'Lent on allow', value: lent.length > 0 ? lent.join(', ') : 'nothing' },

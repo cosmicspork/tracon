@@ -4,7 +4,7 @@
 //! disagrees with its manifest, decided under `[[plugin]]` as an
 //! `[[mcp_server]]` is, and called with a signed caller context that lends
 //! only what the manifest declares and, for `lend = "approved"`, only to an
-//! approved call.
+//! approved call, which runs only on the build its card showed.
 
 #[path = "support/mod.rs"]
 mod support;
@@ -1033,5 +1033,60 @@ async fn a_plugin_tools_marked_prose_is_not_matched_against_a_denial() {
         .await;
     assert_eq!(out["isError"], true, "{out}");
     assert!(text(&out).contains("no-push"), "{out}");
+    rig.manager.plugins().shutdown().await;
+}
+
+#[tokio::test]
+async fn an_approved_call_runs_only_on_the_build_its_card_showed() {
+    let rig = rig("rebuilt", vec![], Policy::shipped());
+    rig.listed(&rig.ctx).await;
+    let first = asked(&rig.call("fake__describe", json!({ "table": "apps" })).await);
+    let waiting = asked(
+        &rig.call("fake__describe", json!({ "table": "users" }))
+            .await,
+    );
+    let card = |id: &str| {
+        let row = rig.store.get_approval(id).unwrap().unwrap();
+        rig.tools.plugin_approval_context(&row).unwrap()
+    };
+    assert_eq!(card(&first)["version"], "1.0.0");
+    assert_eq!(card(&first)["replaced_by"], Value::Null);
+
+    // Updated while both wait: each card still shows the build it was asked
+    // on, and says another is active now.
+    support::plugin::install_build(
+        &rig.store,
+        &rig.state,
+        &FAKE.replace("version = \"1.0.0\"", "version = \"1.1.0\""),
+        &"fe".repeat(32),
+    );
+    // As an approved update card does.
+    rig.manager.plugins().stop_plugin("fake").await;
+    assert_eq!(card(&first)["version"], "1.0.0");
+    assert_eq!(card(&first)["replaced_by"], "1.1.0");
+
+    // Allowing it runs nothing on the new build.
+    let calls = rig.lines("fake", "rebuilt", "calls.jsonl");
+    let refused = rig.approve(&first).await;
+    assert_eq!(refused.state, approvals::FAILED);
+    let reason = refused.reason.unwrap_or_default();
+    assert!(reason.contains("changed build"), "{reason}");
+    assert!(reason.contains("fake 1.1.0"), "{reason}");
+    assert_eq!(rig.lines("fake", "rebuilt", "calls.jsonl"), calls);
+
+    // The same call asked again is a new card on the new build, and the one
+    // waiting on the old build is expired rather than reused.
+    let again = asked(
+        &rig.call("fake__describe", json!({ "table": "users" }))
+            .await,
+    );
+    assert_ne!(again, waiting);
+    let expired = rig.store.get_approval(&waiting).unwrap().unwrap();
+    assert_eq!(expired.state, approvals::EXPIRED);
+    assert_eq!(card(&again)["version"], "1.1.0");
+    assert_eq!(card(&again)["replaced_by"], Value::Null);
+    let settled = rig.approve(&again).await;
+    assert_eq!(settled.state, approvals::SUCCEEDED, "{:?}", settled.reason);
+    assert_eq!(rig.lines("fake", "rebuilt", "calls.jsonl"), calls + 1);
     rig.manager.plugins().shutdown().await;
 }

@@ -471,6 +471,31 @@ impl Store {
         )?)
     }
 
+    /// Record the plugin build a plugin tool's call is asked on, by its
+    /// archive digest.
+    pub fn set_approval_plugin_digest(&self, id: &str, digest: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE approval SET plugin_digest=?2 WHERE id=?1",
+            rusqlite::params![id, digest],
+        )?;
+        Ok(())
+    }
+
+    /// The plugin build a call was asked on; `None` for a call to anything
+    /// but a plugin's tool, and for one asked before builds were recorded.
+    pub fn approval_plugin_digest(&self, id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .query_row(
+                "SELECT plugin_digest FROM approval WHERE id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
     /// Expire one pending approval before its time, with why: what it asked
     /// for was superseded. False when it was no longer pending.
     pub fn expire_approval(&self, id: &str, reason: &str) -> Result<bool> {
@@ -617,6 +642,21 @@ mod tests {
             .finish_approval("a1", SUCCEEDED, Some("{}"), None)
             .unwrap();
         assert!(store.get_approval("a1").unwrap().unwrap().is_settled());
+    }
+
+    #[test]
+    fn the_plugin_build_a_call_was_asked_on_is_kept_with_it() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .insert_approval(&row("a1", "k", now_ms() + 60_000))
+            .unwrap();
+        assert_eq!(store.approval_plugin_digest("a1").unwrap(), None);
+        store.set_approval_plugin_digest("a1", "d1").unwrap();
+        assert_eq!(
+            store.approval_plugin_digest("a1").unwrap().as_deref(),
+            Some("d1")
+        );
+        assert_eq!(store.approval_plugin_digest("gone").unwrap(), None);
     }
 
     #[test]
