@@ -341,6 +341,23 @@ pub struct Notifier {
 }
 
 impl Notifier {
+    /// Whether `approval` is a plugin tool's call whose `[[plugin]]` entry
+    /// requires a shown preview before it may be allowed (the default).
+    fn needs_preview(&self, approval: &crate::store::approvals::ApprovalRow) -> bool {
+        let Ok(Some(_)) = self.store.approval_plugin_digest(&approval.id) else {
+            return false;
+        };
+        let Some((plugin, _)) = approval.tool.split_once(crate::mcp::upstream::SEPARATOR) else {
+            return false;
+        };
+        self.cfg
+            .live()
+            .plugin
+            .iter()
+            .find(|e| e.name == plugin)
+            .is_none_or(|e| e.require_preview)
+    }
+
     pub fn new(store: Arc<Store>, cfg: Arc<Config>, opts: Options) -> Self {
         Self {
             gate: Gate {
@@ -457,21 +474,33 @@ impl Notifier {
             if matches!(held_here, Ok(None)) && allowed_only_on_owner(p.raw_input.as_deref()) {
                 continue;
             }
+            // A plugin call that needs a preview before it is allowed is
+            // allowed on its card, where the preview is shown: the push
+            // opens it and says so.
+            let needs_preview = match &held_here {
+                Ok(Some(a)) => self.needs_preview(a),
+                _ => false,
+            };
             let path = match held_here {
                 Ok(Some(a))
-                    if !crate::mcp::schema::presentation(&a.tool)
-                        .prose_fields
-                        .is_empty() =>
+                    if needs_preview
+                        || !crate::mcp::schema::presentation(&a.tool)
+                            .prose_fields
+                            .is_empty() =>
                 {
                     format!("/approvals/{}", p.id)
                 }
                 _ => path,
             };
+            let body = match needs_preview {
+                true => format!("{} · open the card to allow", p.title),
+                false => p.title.clone(),
+            };
             if self.gate.pushes(&channel) {
                 self.pending.push(Notification {
                     kind: Kind::Permission,
                     title,
-                    body: p.title.clone(),
+                    body,
                     path,
                     tag: format!("tracon-perm-{}", p.id),
                 });

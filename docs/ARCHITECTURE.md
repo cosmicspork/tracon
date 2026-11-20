@@ -367,7 +367,12 @@ runs. `config::path_guard` holds each such key to rules for what it names
   which makes the whole volume group-writable.) A bare name skips a `PATH` entry that
   fails these rules and runs the next one that passes, and every guarded program is given
   the node's `PATH` less every such entry, and less empty and relative ones, so a program
-  that runs another (git its helpers, uv its tools) does not find a planted one.
+  that runs another (git its helpers, uv its tools) does not find a planted one. The
+  node image (`Dockerfile.node`) installs `gh`, `glab` and `buildctl` as pinned,
+  sha256-checked releases in `/usr/local/bin`, a trusted prefix owned by root, so the
+  bare defaults resolve there; its `gh` is new enough (2.49 or later) for
+  `gh attestation verify`. A node on a host runs whichever its service's `PATH` finds
+  (Homebrew's, typically), at whatever version that is.
 - **Secret files and directories** (`embed.api_key_file`,
   `runtime.kubernetes.builder.do_token_file`, `.tls_dir`, `.docker_config`): only inside
   a directory set aside for the node's secrets, `<config dir>/secrets` (on macOS inside
@@ -1091,6 +1096,19 @@ target has moved. The node settles that as failed, stale, not uncertain, since n
 was sent. Staleness is enforced by the plugin at dispatch. The page's display is only
 display. Prose in a format a plugin owns is rendered by that plugin's
 `tracon/format/convert`, a pure function given no context and no credentials.
+
+**Allow is held until a preview was shown.** Each preview also records, as
+`preview_shown_for`, the arguments hash of the call it was shown for: set when the
+plugin answered (`previewable: false` included), cleared when it refused, errored,
+timed out or answered `-32601`. Unless the plugin's `[[plugin]]` entry says
+`require_preview = false`, `Tools::answer_approval` refuses Allow when that hash is not
+the call that would run (the operator's edit included), and `decide_approval` binds it
+as it binds the preview token, so a preview that failed in another tab since is not
+decided past. The check sits in the decide path, not the page, so an API, peer or
+inline-card answer meets it and is told to open the card; the card itself is told why
+(`allow_blocked`) and names the setting. Reject and Request changes never need a
+preview, and calls that make no card (allowed outright, node tools, `[[mcp_server]]`
+tools) never meet it.
 
 **A plugin's UI runs on an origin of its own, and speaks to its plugin as the
 operator.** `http::plugin_ui` gives each plugin whose manifest has `[ui]` a loopback

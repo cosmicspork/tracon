@@ -114,7 +114,7 @@
     <div class="rev">
       {#if view.next}
         <span class="chip">next launch r{view.next.revision}</span>
-        <span class="mono"><Name kind="manifest" id={view.next.digest} /></span>
+        <span class="mono"><Name kind="manifest" id={view.next.digest} channel={current} renamable /></span>
       {:else}
         <span class="chip bad">will not build</span>
       {/if}

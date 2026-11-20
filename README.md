@@ -841,7 +841,10 @@ its cache: the snapshot's `/cache` is the warm one. A candidate's preparation be
 checks always runs, since it prepares a tree under review rather than a commit the
 snapshot was made from.
 You approve, reject with a reason, or — on a desktop — edit the diff and send it back as
-a request for changes. Approval publishes exactly the reviewed tree with the brokered
+a request for changes. A request for changes is how a review comes back: the agent
+resubmits with the same `review_id`. A rejection is final: `submit_review` refuses a
+rejected review's id, quoting your reason, and the agent submits the work again as a new
+review if it continues. Approval publishes exactly the reviewed tree with the brokered
 credential; if the branch moved since submit, approval is refused and the changed files
 are named. The tree is what was reviewed; the commit message and branch it ships with are
 prose you edit beside the diff, where the agent's own commits are listed. By default the
@@ -1023,8 +1026,9 @@ something blocking, so nobody merges it in the meantime.
 A pull request that should not be merged right now is kept a draft. The session
 that owns a review and its reviewer turn that review's change back into a draft
 with `pr_ready` or `mr_ready` (`ready: false`) without being asked, once a
-publication of the review has pushed to it or opened it. Marking it ready, and
-anything on another change, is still yours to allow.
+publication of the review has pushed to it or opened it. An external harness may
+do the same, unasked, for a review submitted through it on its channel.
+Marking it ready, and anything on another change, is still yours to allow.
 Submitting a new revision of a review whose change is open drafts it at once,
 and approving a revision marks it ready again. A change an authority grant
 publishes without you opens as a draft, and `pr_merge` and `mr_merge` refuse a
@@ -1150,6 +1154,7 @@ ask = ["explain"]
 deny = ["drop_*"]
 timeout_secs = 120              # one call; 0 or unset is 60
 idle_timeout_secs = 900
+# require_preview = false       # allow its cards without a shown preview (default true)
 ```
 
 Each call carries a caller context in `params._meta.tracon`: the plugin and tool, a hash
@@ -1177,7 +1182,18 @@ do (`tracon/preview`), with a context made as for an asked call: no approval, an
 nothing marked `lend = "approved"`. The card shows the preview's heading and its body
 (a diff, a table, or the statement, as Markdown), marked "not previewable" when the
 plugin cannot show the effect. A plugin that has no previews gets the generic card. One
-that refuses is shown refusing, and you can still decide. The preview's token, the
+that refuses is shown refusing.
+
+Allow needs a preview by default. It is refused unless the card was shown the plugin's
+preview of the call exactly as it would run, your edit included; a "not previewable"
+answer counts as shown. A plugin that has no previews, or whose preview refuses, fails or
+times out, can't be allowed until you opt it out with `require_preview = false` in its
+`[[plugin]]` entry. The card disables Allow and names that setting. Reject and Request
+changes always stay open. The node enforces this when it records the answer, so an answer
+from the API, a peer or the queue's inline card is held to the same rule; one that showed
+no preview is told to open the card, and a push for such a card opens it. Calls the
+policy or the entry allow outright never make a card, so they are unaffected, as are
+node tools and `[[mcp_server]]` tools. The preview's token, the
 version it was taken against, stays with the node; the page is shown only its hash,
 and your answer sends that hash back, so an answer read from an older preview (another
 tab opened since) decides nothing. An approved call carries the token as
@@ -2080,6 +2096,9 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
 # allow = ["query"]                 # by the plugin's own tool names, as [[mcp_server]]'s lists
 # ask = []
 # deny = ["drop_*"]
+# require_preview = true            # Allow on its cards needs the plugin's preview of the call as it
+                                    # would run to have been shown; false allows without one
+                                    # (for a plugin with no previews). Reject is always open
 
 [providers.anthropic]               # anthropic, openai and openai-codex are built in; add others the same way
 credential = "anthropic"
@@ -2100,9 +2119,9 @@ shape = "anthropic"                 # or "openai", "openai-codex"; the shape als
 # output_per_mtok = 15.0
 
 [publish]                           # the binaries the node runs to publish an approved review
-gh = "gh"
-glab = "glab"
-git = "git"
+gh = "gh"                           # the node image carries pinned gh and glab releases on PATH
+glab = "glab"                       # (gh 2.49 or later, as `gh attestation verify` needs); a node
+git = "git"                         # on a host runs whichever its service's PATH finds
 forge_timeout_secs = 15             # how long one gh or glab call may run
 commits = "squash"                  # one commit of the reviewed tree; "keep" pushes the agent's commits
 warn_direct = true                  # warn when a review pushes straight to its base, no change opened
@@ -2495,7 +2514,10 @@ interface (the banner, or Settings › System › Restart), or `POST /api/admin/
 the node drains, exits 0, and the kubelet starts the
 container again on the same volume and pod IP, so a phone with a passkey restarts it
 without `kubectl`. That needs `TRACON_RESTART_BY_EXIT=1` in the pod's environment, as
-`deploy/kubernetes/base/deployment.yaml` sets it; without it the restart is refused. Every sandbox pod
+`deploy/kubernetes/base/deployment.yaml` sets it; without it the restart is refused. The
+image carries pinned, checksum-verified releases of `gh`, `glab` and `buildctl` on its
+`PATH`, so publishing to GitHub or GitLab and building repository images need no binary
+mounted, and the `[publish]` and builder defaults find them. Every sandbox pod
 names its own requests and memory limit (`[runtime.kubernetes.resources]`, sized by
 default for one shared 4 vCPU / 8 GB node), so a namespace's LimitRange never
 substitutes its defaults. Each pod also gets a memory-backed `/dev/shm` for browsers

@@ -1,6 +1,7 @@
 // Typed wrappers over the node's API. Errors surface the node's message so the
 // interface can say what the node said, not "request failed".
 
+import type { NameKind } from './names'
 import type {
   ChangeDraft,
   Askable,
@@ -104,6 +105,38 @@ export class ReviewDraftConflict extends Error {
   constructor(public current: ReviewDraft | null) {
     super('this draft was changed on another device since you loaded it')
   }
+}
+
+/** A name the operator gave a record. */
+export interface OperatorName {
+  channel: string
+  kind: NameKind
+  id: string
+  name: string
+  generated: string
+}
+
+/** A record after a rename or a revert: `name` is what it reads as now. */
+export interface Renamed {
+  kind: NameKind
+  id: string
+  channel: string
+  name: string
+  generated: string
+}
+
+export interface ResolvedRecord {
+  kind: NameKind
+  id: string
+  name: string
+  channel: string
+  created_ms: number
+}
+
+/** One record, several to choose from, or neither. */
+export interface Resolution {
+  found?: ResolvedRecord
+  candidates?: ResolvedRecord[]
 }
 
 export class ApiError extends Error {
@@ -321,6 +354,8 @@ export const api = {
     context?: { documents?: string[]; memories?: string[]; note?: string }
     destination_node?: string
     delivery?: 'portable' | 'mesh'
+    /** `move` takes the candidate's session over and closes it once the receiver imports. */
+    intent?: 'handoff' | 'move'
   }) =>
     call<{ delivery: 'portable' | 'mesh_queued'; transfer: CandidateTransfer; note: string }>(
       'POST',
@@ -654,7 +689,7 @@ export const api = {
    * no plugin previews.
    */
   previewApproval: (id: string, args: Record<string, unknown>) =>
-    call<Pick<ApprovalDetails, 'preview'>>('POST', `/api/approvals/${id}/preview`, { arguments: args }),
+    call<Pick<ApprovalDetails, 'preview' | 'allow_blocked'>>('POST', `/api/approvals/${id}/preview`, { arguments: args }),
   // Documents: read by slug, search by content, edit with the hash last read.
   docs: (channel?: string, kind?: string, archived = false) => {
     const q = new URLSearchParams()
@@ -997,6 +1032,28 @@ export const api = {
     if (opts.state) q.set('state', opts.state)
     if (opts.q) q.set('q', opts.q)
     return call<{ items: WorkView[] }>('GET', `/api/work?${q}`)
+  },
+  /** Every operator name, on one channel or all. */
+  names: (channel?: string) =>
+    call<{ names: OperatorName[] }>('GET', `/api/names${channel ? `?${new URLSearchParams({ channel })}` : ''}`),
+  /** Name a record; an empty name reverts it. 409 names the holder of a name taken. `channel`
+      names a launch manifest no session has launched with yet. */
+  rename: (kind: NameKind, id: string, name: string, channel?: string) =>
+    call<Renamed>('PUT', `/api/names/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`, channel ? { name, channel } : { name }),
+  /** Back to the generated name. */
+  unname: (kind: NameKind, id: string, channel?: string) =>
+    call<Renamed>(
+      'DELETE',
+      `/api/names/${encodeURIComponent(kind)}/${encodeURIComponent(id)}${channel ? `?${new URLSearchParams({ channel })}` : ''}`,
+    ),
+  /** What a name, a generated name, an id or a long enough prefix names. */
+  resolve: async (kind: NameKind, q: string): Promise<Resolution> => {
+    const res = await fetch(`/api/resolve?${new URLSearchParams({ kind, q })}`)
+    const body = await res.json().catch(() => null)
+    if (res.ok && body?.id) return { found: body as ResolvedRecord }
+    if (res.status === 409 && Array.isArray(body?.candidates)) return { candidates: body.candidates as ResolvedRecord[] }
+    if (res.status === 404 || res.ok) return {}
+    throw new ApiError(res.status, body?.error?.message ?? failureText(res.status, res.statusText, ''))
   },
   /** The channel's projects by name, and how many items have none. */
   projects: (channel: string) =>

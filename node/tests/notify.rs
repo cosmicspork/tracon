@@ -392,6 +392,65 @@ async fn an_approval_card_links_to_its_own_page() {
     assert_eq!(sent[0].payload["body"], "issue_comment WRK-1: hello");
 }
 
+/// A plugin's call whose entry requires a preview is allowed on its card,
+/// where the preview is shown: the push opens it and says so. One whose entry
+/// opts out is pushed as any other call.
+#[tokio::test]
+async fn a_plugin_call_that_needs_a_preview_opens_its_card() {
+    state::isolate();
+    for (require_preview, path, body) in [
+        (
+            true,
+            "/approvals/a1",
+            "jira-review__update WRK-1 · open the card to allow",
+        ),
+        (false, "/sessions/s1", "jira-review__update WRK-1"),
+    ] {
+        let (svc, base) = push_service(StatusCode::CREATED).await;
+        let store = store_with_channel("{}");
+        session(&store, "s1");
+        svc.subscribe(&store, &base, "phone", None);
+        let mut cfg = Config::default();
+        cfg.notify.contact = Some("mailto:ops@tracon.example".into());
+        cfg.plugin = vec![tracon::config::PluginEntry {
+            name: "jira-review".into(),
+            require_preview,
+            ..Default::default()
+        }];
+        let bus = notifier_with(store.clone(), cfg).await;
+        let approval = tracon::store::approvals::ApprovalRow {
+            id: "a1".into(),
+            channel: "personal".into(),
+            session_id: Some("s1".into()),
+            node_id: "n1".into(),
+            lane: None,
+            tool: "jira-review__update".into(),
+            arguments: r#"{"key":"WRK-1"}"#.into(),
+            request_key: "k".into(),
+            title: "jira-review__update WRK-1".into(),
+            state: tracon::store::approvals::PENDING.into(),
+            answer_option_id: None,
+            edited_arguments: None,
+            result: None,
+            reason: None,
+            operator_note: None,
+            claimed_ms: None,
+            created_ms: now_ms(),
+            decided_ms: None,
+            finished_ms: None,
+            expires_ms: now_ms() + 60_000,
+        };
+        store.insert_approval(&approval).unwrap();
+        store.set_approval_plugin_digest("a1", "d1").unwrap();
+        bus.publish(Frame::Queue {
+            waiting: store.open_permission_views().unwrap(),
+        });
+        let sent = svc.wait(1, 2_000).await;
+        assert_eq!(sent[0].payload["path"], path, "{require_preview}");
+        assert_eq!(sent[0].payload["body"], body, "{require_preview}");
+    }
+}
+
 /// Opening a review and walking away returns it to `new`. That is not a new
 /// review, and paging for it would train the operator to ignore pages.
 #[tokio::test]

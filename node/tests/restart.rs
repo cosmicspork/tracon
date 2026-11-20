@@ -187,6 +187,7 @@ fn spec() -> NewSession {
         on_exhaustion: None,
         told_reviews: Vec::new(),
         request_id: None,
+        project_id: None,
     }
 }
 

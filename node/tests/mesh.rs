@@ -489,6 +489,7 @@ async fn a_meshed_node_refuses_sessions_on_channels_without_keys() {
         on_exhaustion: None,
         told_reviews: Vec::new(),
         request_id: None,
+        project_id: None,
     };
     let adapter: Arc<dyn tracon::adapter::HarnessAdapter> = Arc::new(
         tracon::adapter::claude::ClaudeAdapter::new(String::from("1")),

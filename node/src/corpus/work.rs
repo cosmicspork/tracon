@@ -146,14 +146,29 @@ pub fn update(
 }
 
 /// Whether an item answers a search: every word of `query` appears in its
-/// title or body, ignoring case, or is the start of its id.
+/// title or body, ignoring case, is the start of its id, or is its name or
+/// part of it (`task-quiet-otter-07`, `quiet-otter`, `otter`).
 pub fn matches(item: &WorkItem, query: &str) -> bool {
     let title = item.title.to_lowercase();
     let body = item.body.to_lowercase();
+    let name = crate::names::task(&item.id);
     query.split_whitespace().all(|word| {
         let word = word.to_lowercase();
-        title.contains(&word) || body.contains(&word) || item.id.starts_with(&word)
+        title.contains(&word)
+            || body.contains(&word)
+            || item.id.starts_with(&word)
+            || name_matches(&name, &word)
     })
+}
+
+/// Whether a search word names a task: its whole name, or three or more
+/// characters of the words after `task-` (the bare kind would match all).
+fn name_matches(name: &str, word: &str) -> bool {
+    name == word
+        || (word.chars().count() >= 3
+            && name
+                .strip_prefix("task-")
+                .is_some_and(|rest| rest.contains(word)))
 }
 
 /// The ledger in ready order, narrowed: `project` is a project id or `none`
@@ -329,4 +344,41 @@ fn put(store: &Store, bus: &Bus, site: &str, item: &WorkItem) -> Result<(), Stor
         work_change_row(item),
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    #[test]
+    fn a_search_finds_a_task_by_its_name_or_part_of_it() {
+        let id = "ab".repeat(32);
+        let item = WorkItem {
+            id: id.clone(),
+            channel: "personal".into(),
+            project_id: None,
+            title: "Ship the login page".into(),
+            body: String::new(),
+            state: "open".into(),
+            priority: 0,
+            deps: vec![],
+            discovered_from: None,
+            discovered_by_session: None,
+            discovered_by_lane: None,
+            phase_plan_slug: None,
+            closed_by_session: None,
+            created_ms: 0,
+            updated_ms: 0,
+        };
+        let name = crate::names::task(&id);
+        let words: Vec<&str> = name.split('-').collect();
+        assert!(matches(&item, &name));
+        assert!(matches(&item, &name.to_uppercase()));
+        assert!(matches(&item, &format!("{}-{}", words[1], words[2])));
+        assert!(matches(&item, &format!("login {}", words[2])));
+        assert!(matches(&item, "abab"), "an id prefix still finds it");
+        // The bare kind is in every task's name, so it is not a match.
+        assert!(!matches(&item, "task-"));
+        assert!(!matches(&item, "zzzz-nothing"));
+    }
 }

@@ -17,6 +17,7 @@ pub mod egress;
 pub mod github;
 pub mod gitlab;
 pub mod memory;
+mod names;
 pub mod operator;
 pub mod parity;
 pub mod plugin_host;
@@ -323,6 +324,13 @@ struct PluginTool {
 }
 
 impl PluginTool {
+    /// Whether the operator's Allow on its card needs a preview of the call
+    /// to have been shown: unless its `[[plugin]]` entry says
+    /// `require_preview = false`, and when there is no entry.
+    fn requires_preview(&self) -> bool {
+        self.entry.as_ref().is_none_or(|e| e.require_preview)
+    }
+
     /// Whether its manifest marks it `consequential`: asked unless a grant
     /// scoped to the one call allows it, and called with an `operation_id`
     /// the node keeps the outcome under.
@@ -1189,20 +1197,32 @@ impl Tools {
             return None;
         }
         let pt = self.plugin_tool(&approval.tool)?;
-        let keep = |token: Option<&str>| {
-            if let Err(error) = access.store.set_preview_token(&approval.id, token) {
+        // What Allow is held to: a preview shown of exactly this call.
+        let shown_for = crate::store::approvals::arguments_hash(&args.to_string());
+        let keep = |token: Option<&str>, shown: bool| {
+            let shown = shown.then_some(shown_for.as_str());
+            if let Err(error) = access.store.set_preview(&approval.id, token, shown) {
                 tracing::warn!(approval = %approval.id, %error, "a preview's token was not kept");
             }
         };
+        // Unless the operator opted the plugin out, a call it offered no
+        // preview of cannot be allowed, and the card says why.
+        let blocked = pt
+            .requires_preview()
+            .then(|| no_preview_offered(&pt.plugin));
         let refused = |error: String| {
             tracing::info!(approval = %approval.id, plugin = %pt.plugin, %error, "a plugin refused a preview");
-            json!({ "preview": { "status": "refused", "error": error } })
+            let mut out = json!({ "preview": { "status": "refused", "error": error } });
+            if let Some(why) = &blocked {
+                out["allow_blocked"] = json!(why);
+            }
+            out
         };
         let ctx = self.approval_call_context(access, approval);
         let parts = match self.plugin_call_parts(&ctx, &pt, None).await {
             Ok(parts) => parts,
             Err(error) => {
-                keep(None);
+                keep(None, false);
                 return Some(refused(error));
             }
         };
@@ -1245,17 +1265,17 @@ impl Tools {
         let result = match answer {
             Ok(result) => result,
             Err(upstream::Failure::Rpc { code, .. }) if code == upstream::METHOD_NOT_FOUND => {
-                keep(None);
-                return None;
+                keep(None, false);
+                return blocked.map(|why| json!({ "allow_blocked": why }));
             }
             Err(failure) => {
-                keep(None);
+                keep(None, false);
                 return Some(refused(failure.describe(&label)));
             }
         };
         match preview_shape(&result) {
             Ok(preview) => {
-                keep(preview.token);
+                keep(preview.token, true);
                 Some(json!({ "preview": {
                     "status": "shown",
                     "previewable": preview.previewable,
@@ -1265,7 +1285,7 @@ impl Tools {
                 }}))
             }
             Err(error) => {
-                keep(None);
+                keep(None, false);
                 Some(refused(format!(
                     "{label} answered a preview the contract does not allow: {error}"
                 )))
@@ -1887,6 +1907,16 @@ impl Tools {
 
     pub async fn call(&self, ctx: &CallContext, name: &str, args: &Value) -> Result<Value, String> {
         let mut gate = audit::Gate::default();
+        // This node's own tools take a record's name where they take its id,
+        // and say each record's name beside its id. Another server's tools
+        // are passed through as they are.
+        let own = self.upstream_tool(name).is_none() && self.plugin_tool(name).is_none();
+        let store = self.session.get().map(|access| access.store.clone());
+        let named = match (&store, own) {
+            (Some(store), true) => names::resolve_args(store, &ctx.channel, name, args)?,
+            _ => None,
+        };
+        let args = named.as_ref().unwrap_or(args);
         let result = self.call_gated(ctx, name, args, &mut gate).await;
         // A session's calls are its audit; a session-less caller's channel
         // log already records each call it makes.
@@ -1899,8 +1929,27 @@ impl Tools {
                 crate::session::state::event_kind::TOOL_DECIDED,
                 audit::record(name, args, &gate, &result),
             );
+        } else if gate.rule.as_deref() == Some("own-change") {
+            // That log says what was called, not who let it run. A forge
+            // write the node let an external caller make without asking
+            // anyone has no approval to say so, so its decision is logged
+            // beside the call.
+            if let Some(access) = self.session.get() {
+                access.manager.record_for(
+                    ctx,
+                    crate::session::state::event_kind::TOOL_DECIDED,
+                    None,
+                    audit::record(name, args, &gate, &result),
+                );
+            }
         }
-        result
+        match (store, own) {
+            (Some(store), true) => result.map(|mut v| {
+                names::annotate(&store, &mut v);
+                v
+            }),
+            _ => result,
+        }
     }
 
     /// [`Self::call`], saying in `gate` how it was decided.
@@ -2052,7 +2101,8 @@ impl Tools {
             return Err(refusal);
         }
         // Drafting the change of a review this session submitted or is
-        // reviewing, and pushed to or opened, is not asked: drafting blocks
+        // reviewing, or an external caller's harness submitted, and pushed to
+        // or opened, is not asked: drafting blocks
         // nothing that cannot be undone, and the agent is the first to know
         // another revision is coming. Marking it ready is asked like any
         // other call: a ready change can be merged at a revision nobody
@@ -2150,9 +2200,11 @@ impl Tools {
     }
 
     /// The review whose change a `pr_ready` or `mr_ready` call names, when
-    /// the caller owns it: the execute session that submitted it, or the
-    /// review session reviewing it. With who that is, as the review page
-    /// says it (`agent` or `reviewer`).
+    /// the caller owns it: the execute session that submitted it, the
+    /// review session reviewing it, or an external caller on the channel of
+    /// a review [`review::caller_owns`] gives it (one an external harness
+    /// submitted). With who that is, as the review page says it (`agent` or
+    /// `reviewer`).
     ///
     /// Naming the change is not enough: `submit_review` adopts any open
     /// change of the repository it is pointed at, so a review owns one only
@@ -2165,7 +2217,6 @@ impl Tools {
         args: &Value,
     ) -> Option<(crate::store::ReviewRow, &'static str)> {
         let access = self.session.get()?;
-        let session = access.store.get_session(ctx.session_id()?).ok()??;
         let (provider, project, number) = match name {
             github::PR_READY => ("github", args["repo"].as_str()?, args["number"].as_u64()?),
             _ => ("gitlab", args["project"].as_str()?, args["iid"].as_u64()?),
@@ -2183,6 +2234,25 @@ impl Tools {
                         .any(|row| row.pushed_sha.is_some() || row.state == "opened")
                 })
         };
+        let Some(session_id) = ctx.session_id() else {
+            // An external caller has no session: it owns what the channel's
+            // external harnesses submitted, the most recent first.
+            if !ctx.is_external() {
+                return None;
+            }
+            return access
+                .store
+                .reviews_naming_change(&ctx.channel, provider, project, number)
+                .ok()?
+                .into_iter()
+                .rev()
+                .find(|r| {
+                    review::caller_owns(&access.store, ctx, &r.channel, r.session_id.as_deref())
+                        && names(r)
+                })
+                .map(|review| (review, "agent"));
+        };
+        let session = access.store.get_session(session_id).ok()??;
         if session.phase == crate::session::Phase::Review.as_str() {
             let review = access
                 .store
@@ -3462,6 +3532,21 @@ impl Tools {
                 return Err(SessionError::Unfit(errors));
             }
         }
+        // A plugin's tool whose entry requires it is allowed only once a
+        // preview of the call as it would run, the edit included, has been
+        // shown. Held here, not only on the page, so an answer from anywhere
+        // meets it; refusing or asking for changes never needs one.
+        let needs_preview = match self.plugin_tool(&approval.tool) {
+            Some(pt) if pt.requires_preview() => {
+                let runs = answer.arguments.as_ref().unwrap_or(&original);
+                let want = crate::store::approvals::arguments_hash(&runs.to_string());
+                if access.store.preview_shown_for(id)?.as_deref() != Some(want.as_str()) {
+                    return Err(rejected(&no_preview_shown(&pt.plugin)));
+                }
+                Some((pt.plugin, want))
+            }
+            _ => None,
+        };
         let ctx = self.approval_call_context(access, &approval);
         // What runs is the operator's rewrite, and a refusal is final whoever
         // wrote the words.
@@ -3476,9 +3561,21 @@ impl Tools {
             note: notes.as_deref(),
             bound_to: Some(&approval.arguments),
             preview_token: preview_token.as_deref(),
+            preview_shown_for: needs_preview.as_ref().map(|(_, want)| want.as_str()),
             ..Default::default()
         };
         if !access.store.decide_approval(id, &decision)? {
+            if let Some((plugin, want)) = &needs_preview {
+                // Still waiting, but no longer previewed for this call: the
+                // card was previewed again since (another tab), and failed.
+                let still = access
+                    .store
+                    .get_approval(id)?
+                    .is_some_and(|a| a.state == PENDING);
+                if still && access.store.preview_shown_for(id)?.as_deref() != Some(want.as_str()) {
+                    return Err(rejected(&no_preview_shown(plugin)));
+                }
+            }
             return Err(no_longer_waiting());
         }
         let decided = access.store.get_approval(id)?.unwrap_or(approval);
@@ -4338,6 +4435,26 @@ fn preview_shape(result: &Value) -> Result<PluginPreview<'_>, String> {
         // A call it cannot preview has nothing to apply against.
         token: token.filter(|_| previewable),
     })
+}
+
+/// What a plugin tool's card says when Allow is held for want of a preview:
+/// the plugin answered none, or its preview failed.
+fn no_preview_offered(plugin: &str) -> String {
+    format!(
+        "{plugin} offered no preview of this call; allow without one by setting \
+         `require_preview = false` under `[[plugin]] name = \"{plugin}\"`"
+    )
+}
+
+/// What an answer to Allow is told when no preview of the call as it would
+/// run has been shown: an answer from anywhere that shows none (a CLI, the
+/// queue's card, the API) is sent to the card.
+fn no_preview_shown(plugin: &str) -> String {
+    format!(
+        "no preview of this call as it would run has been shown, so it cannot be allowed \
+         here; open the card to allow it. {plugin} requires one: allow without it by setting \
+         `require_preview = false` under `[[plugin]] name = \"{plugin}\"`"
+    )
 }
 
 /// What a page is shown of a preview's token, and sends back with its

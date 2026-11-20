@@ -406,7 +406,7 @@
 {:else}
   <header class="sess">
     <a class="lnk" href="/">‹ Queue</a>
-    <Name kind="session" id={session.id} />
+    <Name kind="session" id={session.id} renamable />
     <!-- The harness and its protocol are the node's business: on hover only. -->
     <span
       class="model"
@@ -617,6 +617,13 @@
     <div class="banner dim">
       continued <b>· its work carries on in</b>
       <Name kind="session" id={continuedAs.id} href="/sessions/{continuedAs.id}" class="lnk" />
+    </div>
+  {:else if session.end_reason === 'moved'}
+    <div class="banner dim">
+      moved to another node <b>· its open reviews stay here as they were; its workspace is kept until gc</b>
+      {#if continuedAs}
+        <Name kind="session" id={continuedAs.id} href="/sessions/{continuedAs.id}" class="lnk" prefix="continues as " />
+      {/if}
     </div>
   {:else if session.end_reason === 'node_restart'}
     <div class="banner dim">

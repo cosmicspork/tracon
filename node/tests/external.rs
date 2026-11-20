@@ -763,6 +763,7 @@ async fn an_external_item_named_by_its_worktree_joins_the_project_a_session_ther
                 on_exhaustion: None,
                 told_reviews: Vec::new(),
                 request_id: None,
+                project_id: None,
             },
             Arc::new(support::fake::FakeAdapter {
                 tx: Arc::new(tokio::sync::Mutex::new(None)),
@@ -2493,9 +2494,11 @@ async fn an_agent_reads_rewrites_and_deletes_items_on_its_own_channel() {
         .into_iter()
         .find(|p| p.id == id)
         .expect("a card for it");
+    // The prefix is resolved before the operator is asked, so the card
+    // names the task the call will change.
     assert!(
         card.title
-            .starts_with(&format!("work_update {}", &plain[..8])),
+            .starts_with(&format!("work_update {}", tracon::names::task(&plain))),
         "{}",
         card.title
     );
@@ -2659,6 +2662,7 @@ async fn an_item_in_use_takes_its_sessions_project_and_is_not_closed_or_deleted_
                 on_exhaustion: None,
                 told_reviews: Vec::new(),
                 request_id: None,
+                project_id: None,
             },
             Arc::new(support::fake::FakeAdapter {
                 tx: Arc::new(tokio::sync::Mutex::new(None)),

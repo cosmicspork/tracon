@@ -1010,6 +1010,313 @@ pub async fn head_of(git: &str, stage: &Path) -> Result<String, WorkspaceError> 
     run_git(git, Some(stage), "rev-parse", ["rev-parse", "HEAD"]).await
 }
 
+/// The part of a branch's history that travels with a moved or forked
+/// session: its commits from where it left its base up to `head`, so the
+/// receiving node recreates the same commits (messages, authorship and
+/// signatures included) rather than a tree with no past.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct BranchHistory {
+    /// The commit the branch is at. The candidate a transfer is made from, or
+    /// a later commit on the same branch that contains it.
+    pub head: String,
+    /// Where the branch left its base (`origin/HEAD` as the workspace has it):
+    /// the bundle's one prerequisite, which the receiver reads from its own
+    /// clone of the forge. `None` when the bundle carries the whole history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_sha: Option<String>,
+    /// The base branch's name on the forge (`main`), for the receiver's
+    /// `origin/HEAD` and so for what the work is reviewed against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
+}
+
+/// The name a branch head is given in a bundle. Unique per bundle, so two
+/// bundles made from one workspace at once never move each other's ref.
+fn bundle_ref() -> String {
+    format!("refs/tracon/transfer-{}", uuid::Uuid::now_v7().simple())
+}
+
+fn plain_branch(name: &str) -> Result<(), WorkspaceError> {
+    if name.is_empty() || name.starts_with('-') || name.contains("..") {
+        return Err(WorkspaceError::Git {
+            op: "branch",
+            message: format!("{name:?} is not a branch name"),
+        });
+    }
+    Ok(())
+}
+
+fn hex_id(id: &str) -> bool {
+    matches!(id.len(), 40 | 64) && id.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Write `repo`'s history of `branch` to a Git bundle at `dest`, as far as
+/// `head`: the branch's tip when it still contains `head` (commits made after
+/// the candidate travel too), else `head` itself. With `with_base`, the
+/// bundle starts where the branch left `origin/HEAD`, which the receiver
+/// holds through its own clone; without it, or when the workspace has no
+/// `origin/HEAD`, the whole history travels. Returns what the bundle holds,
+/// and `false` when there is nothing to bundle because the head is the base.
+///
+/// `repo` is a node-owned, sanitized snapshot (`sanitize_git`). A ref is
+/// written and removed in it for the bundle's header, as publication does.
+pub async fn bundle_history(
+    git: &str,
+    repo: &Path,
+    head: &str,
+    branch: &str,
+    with_base: bool,
+    dest: &Path,
+) -> Result<(BranchHistory, bool), WorkspaceError> {
+    if !hex_id(head) {
+        return Err(WorkspaceError::Git {
+            op: "bundle",
+            message: format!("{head:?} is not a commit id"),
+        });
+    }
+    run_git(
+        git,
+        Some(repo),
+        "bundle",
+        ["rev-parse", "--verify", &format!("{head}^{{commit}}")],
+    )
+    .await?;
+    let mut tip = head.to_string();
+    if plain_branch(branch).is_ok() {
+        if let Ok(branch_tip) = run_git(
+            git,
+            Some(repo),
+            "bundle",
+            [
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}^{{commit}}"),
+            ],
+        )
+        .await
+        {
+            let contains = run_git(
+                git,
+                Some(repo),
+                "bundle",
+                ["merge-base", "--is-ancestor", head, &branch_tip],
+            )
+            .await
+            .is_ok();
+            if contains {
+                tip = branch_tip;
+            }
+        }
+    }
+    let mut base_sha = None;
+    let mut base_branch = None;
+    if with_base {
+        if let Ok(named) = run_git(
+            git,
+            Some(repo),
+            "bundle",
+            ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+        )
+        .await
+        {
+            base_branch = named
+                .strip_prefix("origin/")
+                .filter(|name| plain_branch(name).is_ok())
+                .map(str::to_string);
+        }
+        if base_branch.is_some() {
+            base_sha = run_git(
+                git,
+                Some(repo),
+                "bundle",
+                ["merge-base", &tip, "refs/remotes/origin/HEAD"],
+            )
+            .await
+            .ok()
+            .filter(|sha| hex_id(sha));
+        }
+    }
+    let history = BranchHistory {
+        head: tip.clone(),
+        base_sha: base_sha.clone(),
+        base_branch,
+    };
+    if base_sha.as_deref() == Some(tip.as_str()) {
+        return Ok((history, false));
+    }
+    let name = bundle_ref();
+    run_git(git, Some(repo), "bundle", ["update-ref", &name, &tip]).await?;
+    let dest_arg = dest.to_string_lossy().into_owned();
+    let exclude = base_sha.as_deref().map(|base| format!("^{base}"));
+    let mut args = vec!["bundle", "create", dest_arg.as_str(), name.as_str()];
+    if let Some(exclude) = exclude.as_deref() {
+        args.push(exclude);
+    }
+    let bundled = run_git(git, Some(repo), "bundle", args).await;
+    let _ = run_git(git, Some(repo), "bundle", ["update-ref", "-d", &name]).await;
+    bundled?;
+    Ok((history, true))
+}
+
+/// Where a workspace rebuilt from a history starts: a managed clone of the
+/// forge the history came from, synced, and the seed's `start` and
+/// `onto_start` as `seed_from_clone` takes them.
+pub struct HistoryBase<'a> {
+    pub clone: &'a Path,
+    pub start: Option<&'a str>,
+    pub onto_start: bool,
+}
+
+/// Seed a workspace on `branch` at `history.head`, with the commits a bundle
+/// carried. On a clone (`base`), the workspace is that clone's as any
+/// session's is (its `origin/<base>` and `origin/HEAD`), and the bundle's
+/// prerequisite is read from the clone; without one it is a repository of
+/// its own and the bundle must carry the whole history. `bundle` is `None`
+/// when the head is the base. The commit checked out must be `history.head`,
+/// contain `contains`, and hold `tree`, or nothing is returned.
+#[allow(clippy::too_many_arguments)]
+pub async fn seed_from_history(
+    git: &str,
+    base: Option<HistoryBase<'_>>,
+    bundle: Option<&Path>,
+    history: &BranchHistory,
+    contains: &str,
+    tree: &str,
+    branch: &str,
+    id: &str,
+) -> Result<Workspace, WorkspaceError> {
+    plain_branch(branch)?;
+    if !hex_id(&history.head) || history.base_sha.as_deref().is_some_and(|b| !hex_id(b)) {
+        return Err(WorkspaceError::Git {
+            op: "history",
+            message: "the history names a commit that is not a commit id".into(),
+        });
+    }
+    let stage = staging_path(id);
+    match &base {
+        Some(base) => {
+            seed_from_clone(git, base.clone, branch, base.start, base.onto_start, id).await?;
+            // The branch may have left a base the clone's default no longer
+            // reaches (the base branch was rewritten, or it is another
+            // branch): every forge branch the clone holds is looked in.
+            if let Some(base_sha) = history.base_sha.as_deref() {
+                let present = run_git(
+                    git,
+                    Some(&stage),
+                    "history",
+                    ["cat-file", "-e", &format!("{base_sha}^{{commit}}")],
+                )
+                .await
+                .is_ok();
+                if !present {
+                    let clone = base.clone.to_string_lossy().into_owned();
+                    let _ = run_git(
+                        git,
+                        Some(&stage),
+                        "history",
+                        ["fetch", "--no-tags", &clone, "refs/remotes/origin/*"],
+                    )
+                    .await;
+                }
+            }
+        }
+        None => {
+            let _ = std::fs::remove_dir_all(&stage);
+            std::fs::create_dir_all(&stage)?;
+            run_git(git, Some(&stage), "init", ["init", "-q", "-b", branch]).await?;
+            if let Some(base_branch) = history.base_branch.as_deref() {
+                plain_branch(base_branch)?;
+                let default = format!("refs/remotes/origin/{base_branch}");
+                run_git(
+                    git,
+                    Some(&stage),
+                    "symbolic-ref",
+                    ["symbolic-ref", "refs/remotes/origin/HEAD", &default],
+                )
+                .await?;
+            }
+        }
+    }
+    if let Some(bundle) = bundle {
+        let bundle_arg = bundle.to_string_lossy().into_owned();
+        let heads = run_git(
+            git,
+            Some(&stage),
+            "bundle",
+            ["bundle", "list-heads", &bundle_arg],
+        )
+        .await?;
+        let name = heads
+            .lines()
+            .filter_map(|line| line.split_once(' '))
+            .find(|(sha, name)| *sha == history.head && name.starts_with("refs/tracon/"))
+            .map(|(_, name)| name.to_string())
+            .ok_or_else(|| WorkspaceError::Git {
+                op: "bundle",
+                message: "the bundle does not hold the branch's head".into(),
+            })?;
+        run_git(
+            git,
+            Some(&stage),
+            "bundle",
+            ["fetch", "--no-tags", &bundle_arg, &name],
+        )
+        .await?;
+    }
+    let fetched = run_git(
+        git,
+        Some(&stage),
+        "history",
+        [
+            "rev-parse",
+            "--verify",
+            &format!("{}^{{commit}}", history.head),
+        ],
+    )
+    .await?;
+    if !hex_id(contains) {
+        return Err(WorkspaceError::Git {
+            op: "history",
+            message: format!("{contains:?} is not a commit id"),
+        });
+    }
+    let candidate_tree = run_git(
+        git,
+        Some(&stage),
+        "history",
+        ["rev-parse", "--verify", &format!("{contains}^{{tree}}")],
+    )
+    .await?;
+    let contained = run_git(
+        git,
+        Some(&stage),
+        "history",
+        ["merge-base", "--is-ancestor", contains, &fetched],
+    )
+    .await
+    .is_ok();
+    if fetched != history.head || candidate_tree != tree || !contained {
+        return Err(WorkspaceError::Git {
+            op: "history",
+            message: "the carried commits do not hold the candidate's recorded tree".into(),
+        });
+    }
+    run_git(
+        git,
+        Some(&stage),
+        "checkout",
+        ["checkout", "--force", "-B", branch, &fetched],
+    )
+    .await?;
+    sanitize_git(&stage)?;
+    Ok(Workspace {
+        id: id.to_string(),
+        volume: volume_name(id),
+        snapshot: snapshot_path(id),
+    })
+}
+
 async fn run_git<'a>(
     git: &str,
     dir: Option<&Path>,
@@ -1651,5 +1958,217 @@ mod tests {
         let root = tmp.path();
         std::fs::write(root.join(".git"), "gitdir: /etc\n").unwrap();
         assert!(matches!(sanitize_git(root), Err(WorkspaceError::Unsafe(_))));
+    }
+
+    /// A forge with one commit on `main`, the receiver's clone of it, and a
+    /// source workspace cloned from it with two commits on `feat` by an
+    /// author of their own; the forge's `main` then moves on, and the
+    /// receiver's clone has fetched that.
+    fn moved_branch(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        let forge = root.join("forge");
+        std::fs::create_dir_all(&forge).unwrap();
+        sh(
+            &forge,
+            "git init -q -b main . && git config user.email t@e && git config user.name t \
+             && echo one > a.txt && git add -A && git commit -qm one",
+        );
+        sh(
+            root,
+            "git clone -q forge source && git clone -q forge receiver",
+        );
+        let source = root.join("source");
+        sh(
+            &source,
+            "git config user.email ada@example.com && git config user.name Ada \
+             && git checkout -q -b feat \
+             && echo two > b.txt && git add -A && git commit -qm 'add b' \
+             && echo three >> b.txt && git add -A && git commit -qm 'grow b'",
+        );
+        sh(
+            &forge,
+            "echo later > c.txt && git add -A && git commit -qm later",
+        );
+        let receiver = root.join("receiver");
+        sh(&receiver, "git pull -q --ff-only");
+        (forge, source, receiver)
+    }
+
+    /// The commits travel, not a tree: the receiver's workspace is on the
+    /// same branch, at the same commits (authorship and messages intact),
+    /// on top of the base it left, with `origin/HEAD` to diff and review
+    /// against. A candidate the branch later grew past brings the later
+    /// commits with it.
+    #[tokio::test]
+    async fn a_branch_moves_with_its_commits_onto_the_receivers_clone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, source, receiver) = moved_branch(tmp.path());
+        let base = sh_out(&source, "git rev-parse main");
+        let candidate = sh_out(&source, "git rev-parse feat~1");
+        let tree = sh_out(&source, "git rev-parse feat~1^{tree}");
+        let tip = sh_out(&source, "git rev-parse feat");
+        let bundle = tmp.path().join("history.bundle");
+
+        let (history, bundled) = bundle_history("git", &source, &candidate, "feat", true, &bundle)
+            .await
+            .unwrap();
+        assert!(bundled);
+        assert_eq!(history.head, tip);
+        assert_eq!(history.base_sha.as_deref(), Some(base.as_str()));
+        assert_eq!(history.base_branch.as_deref(), Some("main"));
+        // No ref is left behind in the source for the bundle's header.
+        assert_eq!(sh_out(&source, "git for-each-ref refs/tracon"), "");
+
+        let id = format!("history-{}", uuid::Uuid::now_v7());
+        let workspace = seed_from_history(
+            "git",
+            Some(HistoryBase {
+                clone: &receiver,
+                start: None,
+                onto_start: false,
+            }),
+            Some(&bundle),
+            &history,
+            &candidate,
+            &tree,
+            "feat",
+            &id,
+        )
+        .await
+        .unwrap();
+        let stage = staging_path(&workspace.id);
+        assert_eq!(sh_out(&stage, "git branch --show-current"), "feat");
+        assert_eq!(sh_out(&stage, "git rev-parse HEAD"), tip);
+        assert_eq!(
+            sh_out(
+                &stage,
+                &format!("git log --format='%an %ae %s' {base}..HEAD")
+            ),
+            "Ada ada@example.com grow b\nAda ada@example.com add b"
+        );
+        assert_eq!(
+            sh_out(&stage, "git symbolic-ref refs/remotes/origin/HEAD"),
+            "refs/remotes/origin/main"
+        );
+        assert_eq!(sh_out(&stage, "git merge-base HEAD origin/HEAD"), base);
+        assert_eq!(
+            std::fs::read_to_string(stage.join("b.txt")).unwrap(),
+            "two\nthree\n"
+        );
+        let _ = std::fs::remove_dir_all(&stage);
+    }
+
+    /// The carried commits must hold what the candidate recorded: a head
+    /// that does not contain the candidate, or a tree that is not its tree,
+    /// is refused rather than seeded.
+    #[tokio::test]
+    async fn a_history_that_does_not_hold_the_candidate_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, source, receiver) = moved_branch(tmp.path());
+        let candidate = sh_out(&source, "git rev-parse feat");
+        let bundle = tmp.path().join("history.bundle");
+        let (history, _) = bundle_history("git", &source, &candidate, "feat", true, &bundle)
+            .await
+            .unwrap();
+        let wrong_tree = sh_out(&source, "git rev-parse main^{tree}");
+        let id = format!("history-bad-{}", uuid::Uuid::now_v7());
+        let refused = seed_from_history(
+            "git",
+            Some(HistoryBase {
+                clone: &receiver,
+                start: None,
+                onto_start: false,
+            }),
+            Some(&bundle),
+            &history,
+            &candidate,
+            &wrong_tree,
+            "feat",
+            &id,
+        )
+        .await;
+        assert!(
+            matches!(refused, Err(WorkspaceError::Git { op: "history", .. })),
+            "{refused:?}"
+        );
+        let _ = std::fs::remove_dir_all(staging_path(&id));
+    }
+
+    /// A workspace with no forge carries its whole history, and the receiver
+    /// recreates it in a repository of its own.
+    #[tokio::test]
+    async fn a_history_with_no_base_carries_every_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        sh(
+            &source,
+            "git init -q -b work . && git config user.email t@e && git config user.name t \
+             && echo one > a.txt && git add -A && git commit -qm one \
+             && echo two > a.txt && git add -A && git commit -qm two",
+        );
+        let head = sh_out(&source, "git rev-parse HEAD");
+        let tree = sh_out(&source, "git rev-parse HEAD^{tree}");
+        let bundle = tmp.path().join("history.bundle");
+        let (history, bundled) = bundle_history("git", &source, &head, "work", false, &bundle)
+            .await
+            .unwrap();
+        assert!(bundled);
+        assert_eq!(history.base_sha, None);
+
+        let id = format!("history-whole-{}", uuid::Uuid::now_v7());
+        let workspace = seed_from_history(
+            "git",
+            None,
+            Some(&bundle),
+            &history,
+            &head,
+            &tree,
+            "work",
+            &id,
+        )
+        .await
+        .unwrap();
+        let stage = staging_path(&workspace.id);
+        assert_eq!(sh_out(&stage, "git rev-parse HEAD"), head);
+        assert_eq!(sh_out(&stage, "git rev-list --count HEAD"), "2");
+        assert_eq!(sh_out(&stage, "git branch --show-current"), "work");
+        let _ = std::fs::remove_dir_all(&stage);
+    }
+
+    /// A branch with no commits of its own past its base has nothing to
+    /// bundle, and is recreated at the base.
+    #[tokio::test]
+    async fn a_branch_at_its_base_needs_no_bundle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, source, receiver) = moved_branch(tmp.path());
+        let base = sh_out(&source, "git rev-parse main");
+        let tree = sh_out(&source, "git rev-parse main^{tree}");
+        let bundle = tmp.path().join("history.bundle");
+        let (history, bundled) = bundle_history("git", &source, &base, "main", true, &bundle)
+            .await
+            .unwrap();
+        assert!(!bundled);
+        assert_eq!(history.head, base);
+        let id = format!("history-base-{}", uuid::Uuid::now_v7());
+        let workspace = seed_from_history(
+            "git",
+            Some(HistoryBase {
+                clone: &receiver,
+                start: None,
+                onto_start: false,
+            }),
+            None,
+            &history,
+            &base,
+            &tree,
+            "feat/next",
+            &id,
+        )
+        .await
+        .unwrap();
+        let stage = staging_path(&workspace.id);
+        assert_eq!(sh_out(&stage, "git rev-parse HEAD"), base);
+        assert_eq!(sh_out(&stage, "git branch --show-current"), "feat/next");
+        let _ = std::fs::remove_dir_all(&stage);
     }
 }

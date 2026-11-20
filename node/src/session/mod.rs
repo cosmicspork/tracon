@@ -195,6 +195,12 @@ pub struct NewSession {
     /// gave none. A peer on an older build ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    /// The project the session runs in, when it carries one on from another
+    /// session (a moved session keeps its source's). Used only when this node
+    /// has that project on the session's channel; otherwise the project is
+    /// worked out from the repository as for any session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -517,10 +523,18 @@ pub(crate) fn carried_note(carried: &[ReviewRow]) -> String {
             note.push_str(&format!(
                 "\n\nThe earlier session's {what} `{}` ({}) is still waiting on the \
                  operator. It is yours now, and their decision comes back to you as a \
-                 prompt. If you change the work, call `{submit}` with that same {key} \
-                 rather than opening a new {what}.{}",
+                 prompt, unless it leaves you nothing to do: {}. If you change the work, \
+                 call `{submit}` with that same {key} rather than opening a new {what}.{}",
                 r.id,
                 r.title,
+                if r.kind == crate::store::reports::KIND {
+                    "an acknowledgement without a note is only noted at the start of your \
+                     next prompt"
+                } else {
+                    "an approval the node publishes, or an AI reviewer's approval with no \
+                     findings, is only noted at the start of your next prompt, so with more to \
+                     do after approval keep working or keep calling review_status"
+                },
                 if r.kind == crate::store::reports::KIND {
                     ""
                 } else {
@@ -1059,6 +1073,7 @@ impl Manager {
             on_exhaustion: None,
             told_reviews: told_reviews(&carried),
             request_id: None,
+            project_id: None,
         };
         self.create(spec).await
     }
@@ -1181,6 +1196,7 @@ impl Manager {
             on_exhaustion: choice,
             told_reviews: told,
             request_id: None,
+            project_id: None,
         };
         let row = self.create(spec).await?;
         // A suspended session's work now lives in the new one; the operator
@@ -1391,6 +1407,7 @@ impl Manager {
             on_exhaustion: None,
             told_reviews: Vec::new(),
             request_id: None,
+            project_id: None,
         };
         let row = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
         self.bus.publish(Frame::Session(Box::new(row.clone())));
@@ -1547,6 +1564,73 @@ impl Manager {
         for row in rows.iter().filter(|row| row.node_id == self.node_id) {
             self.end_if_item_closed(&row.id);
         }
+    }
+
+    /// Close a session whose work moved to `to_session` on `to_node`, which
+    /// confirmed it had imported transfer `transfer_id`. A live session ends
+    /// now; a suspended, paused or starting one is closed where it is. Its
+    /// reviews are left as they are, and its workspace is kept until gc.
+    /// `false` when it had already ended (a repeated confirmation).
+    pub async fn end_moved(
+        &self,
+        id: &str,
+        to_session: &str,
+        to_node: &str,
+        transfer_id: &str,
+    ) -> Result<bool, SessionError> {
+        let row = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
+        if row.node_id != self.node_id {
+            return Err(SessionError::Remote(row.node_id, row.channel));
+        }
+        if SessionState::from_stored(&row.state).is_terminal() {
+            return Ok(false);
+        }
+        let detail = json!({
+            "to_session": to_session,
+            "to_node": to_node,
+            "transfer_id": transfer_id,
+        });
+        self.record_event(id, ek::MOVED, detail.clone());
+        if self.send(id, Command::End(EndReason::Moved)).await.is_ok() {
+            return Ok(true);
+        }
+        if self.end_suspended(id, EndReason::Moved, detail)? {
+            return Ok(true);
+        }
+        // No supervisor: a paused session, or one still starting, which
+        // observes the terminal row as a stop.
+        let row = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
+        if SessionState::from_stored(&row.state).is_terminal() {
+            return Ok(false);
+        }
+        self.store.update_session(
+            id,
+            SessionPatch {
+                state: Some(SessionState::Closed.as_str().into()),
+                end_reason: Some(EndReason::Moved.as_str().into()),
+                ended_mono_ms: Some(0),
+                turn_active: Some(false),
+                ..Default::default()
+            },
+        )?;
+        if let Some(container) = row.container_name {
+            let runner = self.backend.runner(Vec::new());
+            let _ = tokio::time::timeout(
+                CLEANUP_TIMEOUT,
+                crate::sidecars::stop_all(runner.as_ref(), &self.store, id),
+            )
+            .await;
+            let _ = tokio::time::timeout(CLEANUP_TIMEOUT, runner.kill(&container)).await;
+        }
+        self.record_event(
+            id,
+            ek::STATE,
+            json!({ "state": "closed", "end_reason": EndReason::Moved.as_str() }),
+        );
+        if let Ok(Some(row)) = self.store.get_session(id) {
+            self.bus.publish(Frame::Session(Box::new(row)));
+        }
+        Ok(true)
     }
 
     /// End a suspended session, which has no supervisor to end it: the row
@@ -1717,6 +1801,27 @@ impl Manager {
         let old = &old;
         let waited = self.held_on(&old.id)?;
         if !self.waits().open(&old.id).is_empty() {
+            return None;
+        }
+        // Decisions that leave nothing to act on (`waits::needs_turn`) carry
+        // nothing on: an approval the node published leaves it an idle
+        // published session, which the operator continues from the
+        // continuation view like any other. Its state is recorded again
+        // without what it waited on, so it is not held any more.
+        let decided: Vec<_> = waited.iter().filter(|w| !w.is_open()).collect();
+        if !decided.is_empty() && !decided.iter().any(|w| waits::needs_turn(w)) {
+            self.record(NewEvent {
+                session_id: old.id.clone(),
+                work_item_id: None,
+                kind: ek::STATE.to_string(),
+                ref_id: None,
+                payload: json!({
+                    "state": SessionState::Suspended.as_str(),
+                    "end_reason": null,
+                }),
+                at_ms: now_ms(),
+                mono_ms: 0,
+            });
             return None;
         }
         let carried = self.store.carried_reviews(&old.id).ok()?;
@@ -2555,7 +2660,20 @@ impl Manager {
         // Bank identity: the channel and the repository's remote, resolved on
         // this side of the boundary and recorded on the row for memory to key
         // on; never a checkout path.
+        let carried_project = spec
+            .project_id
+            .as_deref()
+            .map(|id| self.store.project_get(id))
+            .transpose()?
+            .flatten()
+            .filter(|project| project.channel == spec.channel);
         let (project_id, project_name, remote) = match spec.workspace_id.as_deref() {
+            // Carried on from another session (a move): the same project,
+            // as this node has it.
+            _ if carried_project.is_some() => {
+                let project = carried_project.expect("checked above");
+                (project.id, project.name, project.remote_url)
+            }
             Some(workspace_id) => {
                 let canonical = format!("workspace/{workspace_id}");
                 (
@@ -2665,7 +2783,16 @@ impl Manager {
         };
         self.store.insert_session(&row)?;
         self.store.exhaustion_choose(&id, &on_exhaustion)?;
-        if let Some(from) = spec.continued_from.as_deref() {
+        // Reviews follow a continuation on the node they are on. One from
+        // another node (a moved session) leaves its reviews where they are:
+        // the new session resubmits from the branch it was given.
+        if let Some(from) = spec.continued_from.as_deref().filter(|from| {
+            self.store
+                .get_session(from)
+                .ok()
+                .flatten()
+                .is_some_and(|row| row.node_id == self.node_id)
+        }) {
             self.take_over_reviews(from, &id, &spec.told_reviews)
                 .await?;
         }

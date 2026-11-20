@@ -241,6 +241,7 @@ async fn an_explicit_model_the_channel_cannot_authenticate_is_refused_by_create_
             on_exhaustion: None,
             told_reviews: Vec::new(),
             request_id: None,
+            project_id: None,
         })
         .expect_err("preflight refuses an unauthenticatable model")
         .to_string();
@@ -3431,6 +3432,7 @@ async fn orientation_setup(
                 on_exhaustion: None,
                 told_reviews: Vec::new(),
                 request_id: None,
+                project_id: None,
             },
             launch_with.unwrap_or_else(|| adapter.clone()),
         )
@@ -3585,6 +3587,7 @@ async fn an_execute_session_starts_on_its_plan_without_a_nudge() {
                 on_exhaustion: None,
                 told_reviews: Vec::new(),
                 request_id: None,
+                project_id: None,
             },
             adapter.clone(),
         )
@@ -4004,6 +4007,98 @@ impl Held {
             json!({"slug": slug, "body": "# Plan\n\n1. Do it."}),
         )
     }
+
+    /// A review (or, with `kind` "report", a report) this session submitted,
+    /// waiting on the operator, with one revision for a reviewer's verdict
+    /// to be on.
+    fn submit(&self, kind: &str) -> String {
+        let id = uuid::Uuid::now_v7().to_string();
+        let mut row = published_review(&id, &self.o.row.id);
+        row.kind = kind.into();
+        row.state = "new".into();
+        row.publish_result = None;
+        // Earlier than anything recorded on it, so each change reads as one.
+        row.updated_ms = now_ms() - 1000;
+        self.o.store.insert_review(&row).unwrap();
+        self.o
+            .store
+            .conn()
+            .execute_batch(&format!(
+                "PRAGMA foreign_keys=OFF;
+                 INSERT INTO review_revision (id, review_id, candidate_id, title, body, diff,
+                     files, head_sha, context_json, created_ms)
+                 VALUES ('rev-{id}', '{id}', 'cand-{id}', 't', '', '+x', '[]', 'abc', '[]', {});
+                 PRAGMA foreign_keys=ON;",
+                now_ms() - 1000
+            ))
+            .unwrap();
+        id
+    }
+
+    /// The operator approved `review` and the node published it, as the
+    /// approve path records it once the forge took it (which needs a forge).
+    async fn approve_published(&self, review: &str) -> String {
+        let url = format!("https://github.test/me/repo/pull/{review}");
+        self.o
+            .store
+            .conn()
+            .execute(
+                &format!(
+                    "UPDATE review SET state='approved', publish_result='{url}', updated_ms={} \
+                     WHERE id='{review}'",
+                    now_ms()
+                ),
+                [],
+            )
+            .unwrap();
+        self.o.manager.wait_moved(&self.o.row.id).await;
+        url
+    }
+
+    /// A reviewer's verdict on `review`'s revision, as `review_verdict`
+    /// records it, and the submitter told the wait moved.
+    async fn verdict(&self, review: &str, verdict: &str, findings: Value, at_ms: i64) {
+        let revision = format!("rev-{review}");
+        let v = json!({
+            "verdict": verdict, "summary": format!("the reviewer says {verdict}"),
+            "findings": findings, "model": "m/reviewer", "at_ms": at_ms,
+            "revision_id": revision,
+        });
+        assert_eq!(
+            self.o
+                .store
+                .set_ai_verdict(review, &v.to_string(), Some(&revision))
+                .unwrap(),
+            tracon::store::VerdictRecorded::Recorded
+        );
+        self.o.manager.wait_moved(&self.o.row.id).await;
+    }
+
+    fn count(&self, kind: &str) -> usize {
+        self.o
+            .store
+            .events_after(&self.o.row.id, 0, 1000)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == kind)
+            .count()
+    }
+
+    /// The prompts that contain `containing`, once there are `n`.
+    async fn prompted(&self, containing: &str, n: usize) -> Vec<String> {
+        for _ in 0..1200 {
+            let found: Vec<_> = self
+                .prompts()
+                .into_iter()
+                .filter(|p| p.contains(containing))
+                .collect();
+            if found.len() >= n {
+                return found;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("no {n} prompts with {containing:?}: {:?}", self.prompts());
+    }
 }
 
 /// The live case on 0.31.1: a plan session asks the operator, polls, writes
@@ -4253,6 +4348,308 @@ async fn a_session_held_on_its_review_is_given_the_verdict() {
     tracon::session::materialize::remove(&h.o.row.id);
 }
 
+// ---- news with nothing to act on starts no turn ---------------------------
+
+/// The live case on 0.54.0: the operator approved a review and the node
+/// published it, and the session was woken for a turn that had nothing to do
+/// but say so, a full cache write. Now it is recorded as told and the
+/// session carries on as that turn would have left it: running, to be put
+/// away once idle.
+#[tokio::test]
+async fn an_approval_the_node_published_starts_no_turn() {
+    state::isolate();
+    let h = Held::in_phase("quiet-approved", Phase::Execute).await;
+    let review = h.submit("pr");
+    h.until(|s| s.state == "waiting_on_you", "held on its review")
+        .await;
+    let turns = h.count("turn_end");
+
+    h.approve_published(&review).await;
+    h.until(|s| s.state == "running", "running again").await;
+    // Past the supervisor's own tick, which would bring it back too.
+    tokio::time::sleep(Duration::from_millis(5500)).await;
+    assert!(
+        !h.prompts().iter().any(|p| p.contains(&review)),
+        "{:?}",
+        h.prompts()
+    );
+    assert_eq!(h.count("turn_end"), turns, "no turn ran");
+    assert_eq!(h.session().state, "running");
+    let row = h.o.store.get_review(&review).unwrap().unwrap();
+    assert!(h
+        .o
+        .manager
+        .waits()
+        .was_told(&h.o.row.id, &tracon::session::waits::review_key(&row)));
+    tracon::session::materialize::remove(&h.o.row.id);
+}
+
+/// A finished phase waiting only on that approval ends without a prompt.
+#[tokio::test]
+async fn a_finished_phase_waiting_on_an_approval_the_node_published_ends_without_a_turn() {
+    state::isolate();
+    let h = Held::new("quiet-phase-done").await;
+    let review = h.submit("pr");
+    h.until(|s| s.state == "waiting_on_you", "held on its review")
+        .await;
+    h.write_plan().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(h.session().state, "waiting_on_you", "the phase waits too");
+    let turns = h.count("turn_end");
+
+    h.approve_published(&review).await;
+    let s = h.until(|s| s.state == "closed", "closed").await;
+    assert_eq!(s.end_reason.as_deref(), Some("phase_done"));
+    assert!(
+        !h.prompts().iter().any(|p| p.contains(&review)),
+        "{:?}",
+        h.prompts()
+    );
+    assert_eq!(h.count("turn_end"), turns, "no turn ran");
+    tracon::session::materialize::remove(&h.o.row.id);
+}
+
+/// With something else still open, the session stays held on it; the
+/// approval is said in a line at the start of the prompt that brings the
+/// other back, once.
+#[tokio::test]
+async fn an_approval_the_node_published_is_noted_with_the_next_decision() {
+    state::isolate();
+    let h = Held::in_phase("quiet-noted", Phase::Execute).await;
+    let review = h.submit("pr");
+    let asked = h
+        .tool(
+            "ask_operator",
+            json!({ "request_id": "after-approval", "question": "Tag a release?",
+                    "wait_secs": 0 }),
+        )
+        .await;
+    let question = asked["question_id"].as_str().unwrap().to_string();
+    h.until(|s| s.state == "waiting_on_you", "held").await;
+
+    let url = h.approve_published(&review).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !h.prompts().iter().any(|p| p.contains(&review)),
+        "{:?}",
+        h.prompts()
+    );
+    assert_eq!(h.session().state, "waiting_on_you");
+
+    let (status, body) = support::http::call(
+        &h.operator,
+        "POST",
+        &format!("/api/operator/questions/{question}/answer"),
+        Some(json!({ "answer": "yes, v2" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let prompt = h.delivered(&question).await;
+    assert!(prompt.contains("\"text\": \"yes, v2\""), "{prompt}");
+    assert!(
+        prompt.starts_with(&format!(
+            "Since your last turn: review `{review}` was approved and published at {url}"
+        )),
+        "{prompt}"
+    );
+    h.until(|s| s.state == "running" && s.turn_active == 0, "idle")
+        .await;
+    let noted: usize = h
+        .prompts()
+        .iter()
+        .map(|p| p.matches("approved and published").count())
+        .sum();
+    assert_eq!(noted, 1, "{:?}", h.prompts());
+    tracon::session::materialize::remove(&h.o.row.id);
+}
+
+/// An AI reviewer's approval with no findings leaves the submitter held,
+/// unwoken, with nothing recorded; its summary is still review_status's to
+/// carry.
+#[tokio::test]
+async fn an_ai_approval_with_no_findings_starts_no_turn() {
+    state::isolate();
+    let h = Held::in_phase("quiet-ai-approve", Phase::Execute).await;
+    let review = h.submit("pr");
+    h.until(|s| s.state == "waiting_on_you", "held on its review")
+        .await;
+    let states = h.count("state");
+
+    h.verdict(&review, "approve", json!([]), now_ms()).await;
+    tokio::time::sleep(Duration::from_millis(5500)).await;
+    assert!(
+        !h.prompts()
+            .iter()
+            .any(|p| p.contains("has given its verdict")),
+        "{:?}",
+        h.prompts()
+    );
+    assert_eq!(h.count("state"), states, "no state moved");
+    assert_eq!(h.session().state, "waiting_on_you");
+    let s = h
+        .tool(
+            "review_status",
+            json!({ "review_id": review, "wait_secs": 0 }),
+        )
+        .await;
+    assert_eq!(s["reviewer"]["verdict"], "approve", "{s}");
+    assert_eq!(s["reviewer"]["summary"], "the reviewer says approve", "{s}");
+    tracon::session::materialize::remove(&h.o.row.id);
+}
+
+/// What still gives the agent something to do still wakes it, once each:
+/// an AI approval with a finding, an AI request for changes, and the
+/// operator's own request for changes.
+#[tokio::test]
+async fn verdicts_with_something_to_act_on_still_wake_the_session() {
+    state::isolate();
+    let h = Held::in_phase("loud-verdicts", Phase::Execute).await;
+    let review = h.submit("pr");
+    h.until(|s| s.state == "waiting_on_you", "held on its review")
+        .await;
+
+    h.verdict(
+        &review,
+        "approve",
+        json!([{ "path": "a.txt", "line": 1, "note": "name it better" }]),
+        now_ms(),
+    )
+    .await;
+    let found = h.prompted("has given its verdict", 1).await;
+    assert!(found[0].contains("name it better"), "{found:?}");
+    h.until(
+        |s| s.state == "waiting_on_you" && s.turn_active == 0,
+        "held again",
+    )
+    .await;
+
+    h.verdict(&review, "request_changes", json!([]), now_ms() + 1)
+        .await;
+    let found = h.prompted("has given its verdict", 2).await;
+    assert!(found[1].contains("request_changes"), "{found:?}");
+    h.until(
+        |s| s.state == "waiting_on_you" && s.turn_active == 0,
+        "held again",
+    )
+    .await;
+
+    let (status, body) = support::http::call(
+        &h.operator,
+        "POST",
+        &format!("/api/reviews/{review}/verdict"),
+        Some(json!({ "verdict": "revise", "reason": "split the ledger out" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let prompt = h.delivered(&review).await;
+    assert!(prompt.contains("split the ledger out"), "{prompt}");
+    assert_eq!(h.prompted("has given its verdict", 2).await.len(), 2);
+    tracon::session::materialize::remove(&h.o.row.id);
+}
+
+/// A report acknowledged without a note records receipt only, and starts no
+/// turn; one acknowledged with a note brings the note back.
+#[tokio::test]
+async fn a_report_acknowledged_without_a_note_starts_no_turn() {
+    state::isolate();
+    let h = Held::in_phase("quiet-report", Phase::Execute).await;
+    let acknowledge = |id: String, note: Option<&'static str>| {
+        let operator = h.operator.clone();
+        async move {
+            let mut body = json!({ "verdict": "acknowledge", "head_sha": "abc1234567890" });
+            if let Some(note) = note {
+                body["reason"] = json!(note);
+            }
+            let (status, body) = support::http::call(
+                &operator,
+                "POST",
+                &format!("/api/reviews/{id}/verdict"),
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+    };
+    let report = h.submit("report");
+    h.until(|s| s.state == "waiting_on_you", "held on its report")
+        .await;
+    let turns = h.count("turn_end");
+    acknowledge(report.clone(), None).await;
+    h.until(|s| s.state == "running", "running again").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !h.prompts().iter().any(|p| p.contains(&report)),
+        "{:?}",
+        h.prompts()
+    );
+    assert_eq!(h.count("turn_end"), turns, "no turn ran");
+    let row = h.o.store.get_review(&report).unwrap().unwrap();
+    assert!(h
+        .o
+        .manager
+        .waits()
+        .was_told(&h.o.row.id, &tracon::session::waits::review_key(&row)));
+
+    let noted = h.submit("report");
+    h.until(|s| s.state == "waiting_on_you", "held on the next report")
+        .await;
+    acknowledge(noted.clone(), Some("Filed upstream as #12.")).await;
+    let prompt = h.delivered(&noted).await;
+    assert!(prompt.contains("Filed upstream as #12."), "{prompt}");
+    assert!(
+        prompt.starts_with(&format!(
+            "Since your last turn: the operator acknowledged report `{report}` without a note."
+        )),
+        "{prompt}"
+    );
+    tracon::session::materialize::remove(&h.o.row.id);
+}
+
+/// A session the node stopped under while it waited on its review, whose
+/// review is then approved and published, is not carried on as a new
+/// session: there is nothing to carry. It stays suspended as an idle
+/// published session, no longer held, for the operator to continue.
+#[tokio::test]
+async fn a_held_session_whose_review_was_published_is_not_carried_on() {
+    state::isolate();
+    let h = Held::in_phase("quiet-held", Phase::Execute).await;
+    let review = h.submit("pr");
+    h.until(|s| s.state == "waiting_on_you", "held on its review")
+        .await;
+    h.o.manager.shutdown_all().await;
+    h.until(|s| s.state == "suspended", "put away").await;
+
+    h.approve_published(&review).await;
+    let unheld = || {
+        h.o.store
+            .last_event_payload(&h.o.row.id, "state")
+            .unwrap()
+            .unwrap()
+    };
+    for _ in 0..1200 {
+        if unheld()["waiting_on"].is_null() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let state = unheld();
+    assert_eq!(state["state"], "suspended", "{state}");
+    assert!(state["waiting_on"].is_null(), "{state}");
+    h.o.manager.continue_held().await;
+    h.o.manager.continue_held().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(h.session().state, "suspended");
+    assert!(
+        !h.o.store
+            .list_sessions(None)
+            .unwrap()
+            .iter()
+            .any(|s| s.continued_from.as_deref() == Some(h.o.row.id.as_str())),
+        "nothing carried it on"
+    );
+    tracon::session::materialize::remove(&h.o.row.id);
+}
+
 /// A node that stops under a held session puts it away with what it waits
 /// on, rather than ending it: the question stays answerable, and once it is
 /// answered the work carries on as a new session told the answer.
@@ -4455,6 +4852,7 @@ async fn a_review_sent_back_while_its_continuation_is_made_is_told_once() {
         on_exhaustion: None,
         told_reviews: tracon::session::told_reviews(&carried),
         request_id: None,
+        project_id: None,
     };
 
     // Then, before the continuation exists, the operator sends it back.
@@ -4841,6 +5239,7 @@ async fn a_harness_that_never_starts_fails_the_session_visibly_and_removes_the_h
                 on_exhaustion: None,
                 told_reviews: Vec::new(),
                 request_id: None,
+                project_id: None,
             },
             Arc::new(StallingAdapter),
         )
@@ -7169,4 +7568,255 @@ async fn at_start_a_session_left_in_its_sandbox_is_carried_on_and_any_other_remo
     );
     reattach::forget(&container);
     tracon::session::materialize::remove(&id);
+}
+
+/// A session moved here from a peer continues the peer's session across
+/// nodes: it holds the work item the peer's session holds, keeps the project
+/// the package carried, takes the budget it is given, and links back. The
+/// peer's open review stays the peer's: it is not taken over here.
+#[tokio::test]
+async fn a_moved_session_takes_over_a_peers_item_and_project_but_not_its_review() {
+    state::isolate();
+    let h = Harness::new(1000).await;
+    h.store
+        .channel_put(
+            "personal",
+            b"ring",
+            r#"{"phases":{"execute":{"requires_plan":false}}}"#,
+        )
+        .unwrap();
+    let item = tracon::corpus::work::create(
+        &h.store,
+        &Bus::new(),
+        "n1",
+        tracon::corpus::work::NewWork {
+            channel: "personal".into(),
+            project_id: None,
+            title: "move me".into(),
+            body: String::new(),
+            deps: vec![],
+            priority: 0,
+            discovered_from: None,
+            discovered_by_session: None,
+            discovered_by_lane: None,
+        },
+    )
+    .unwrap();
+    // The peer's session, as it mirrors here: running, holding the item.
+    let template = insert_session_for_item(&h.store, 777, None);
+    let mut peer = h.store.get_session(&template).unwrap().unwrap();
+    peer.id = uuid::Uuid::now_v7().to_string();
+    peer.node_id = "n2".into();
+    peer.work_item_id = Some(item.id.clone());
+    h.store.ensure_peer_node("n2").unwrap();
+    h.store.insert_session(&peer).unwrap();
+    let source = peer.id;
+    let mut review = published_review("rv-open", &source);
+    review.state = "new".into();
+    review.node_id = "n2".into();
+    h.store.insert_review(&review).unwrap();
+    h.store
+        .project_put(&tracon::store::ProjectRow {
+            id: "p-moved".into(),
+            channel: "personal".into(),
+            name: "repo".into(),
+            remote_url: Some("github.com/owner/repo".into()),
+            created_ms: now_ms(),
+        })
+        .unwrap();
+
+    let row = h
+        .manager
+        .create(tracon::session::NewSession {
+            channel: "personal".into(),
+            repo_path: String::new(),
+            branch: Some("feat/moved".into()),
+            base: None,
+            work_item_id: Some(item.id.clone()),
+            model: "m/a".into(),
+            budget_tokens: Some(777),
+            initial_prompt: Some("moved here".into()),
+            node_id: None,
+            phase: tracon::session::Phase::Execute,
+            review_id: None,
+            base_sha: None,
+            workspace_id: Some(format!("transfer-{}", uuid::Uuid::now_v7())),
+            parent_session: Some(source.clone()),
+            continued_from: Some(source.clone()),
+            harness: None,
+            on_exhaustion: None,
+            told_reviews: Vec::new(),
+            request_id: None,
+            project_id: Some("p-moved".into()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(row.work_item_id.as_deref(), Some(item.id.as_str()));
+    assert_eq!(row.project_id.as_deref(), Some("p-moved"));
+    assert_eq!(row.budget_tokens, 777);
+    assert_eq!(row.continued_from.as_deref(), Some(source.as_str()));
+    assert_eq!(row.parent_session.as_deref(), Some(source.as_str()));
+    assert_eq!(
+        h.store.session_remote(&row.id).unwrap().as_deref(),
+        Some("github.com/owner/repo")
+    );
+    let review = h.store.get_review("rv-open").unwrap().unwrap();
+    assert_eq!(review.session_id.as_deref(), Some(source.as_str()));
+}
+
+/// A moved session closes once the receiver confirms its import, naming
+/// where its work went; one with no supervisor (paused here) or suspended
+/// closes where it is, and a repeated confirmation changes nothing.
+#[tokio::test]
+async fn a_moved_session_closes_naming_where_its_work_went() {
+    state::isolate();
+    let h = Harness::new(1000).await;
+    for state in ["paused", "suspended"] {
+        let id = insert_running_session(&h.store, 1000);
+        h.store
+            .update_session(&id, tracon::store::SessionPatch::state(state))
+            .unwrap();
+        assert!(h
+            .manager
+            .end_moved(&id, "s-there", "n2", "t-1")
+            .await
+            .unwrap());
+        let row = h.store.get_session(&id).unwrap().unwrap();
+        assert_eq!(row.state, "closed", "{state}");
+        assert_eq!(row.end_reason.as_deref(), Some("moved"), "{state}");
+        let moved = h
+            .store
+            .session_events_of_kind(&id, "moved")
+            .unwrap()
+            .pop()
+            .expect("a moved event");
+        assert_eq!(moved.payload["to_session"], "s-there");
+        assert_eq!(moved.payload["to_node"], "n2");
+        assert!(!h
+            .manager
+            .end_moved(&id, "s-there", "n2", "t-1")
+            .await
+            .unwrap());
+    }
+}
+
+/// A version 2 package's import recreates the real branch: the receiving
+/// workspace is on the source's branch at the source's commits, and the new
+/// session is given the export note as its first prompt. (No forge here, so
+/// the bundle carries the whole history.)
+#[tokio::test]
+async fn importing_a_package_with_history_recreates_the_branch_and_delivers_the_note() {
+    state::isolate();
+    let h = Harness::new(1000).await;
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git(&source, &["init", "-q", "-b", "work"]);
+    git(&source, &["config", "user.email", "ada@example.com"]);
+    git(&source, &["config", "user.name", "Ada"]);
+    std::fs::write(source.join("hello.txt"), "hi\n").unwrap();
+    git(&source, &["add", "-A"]);
+    git(&source, &["commit", "-qm", "first"]);
+    std::fs::write(source.join("hello.txt"), "hello\n").unwrap();
+    git(&source, &["commit", "-qam", "second"]);
+    let head = git(&source, &["rev-parse", "HEAD"]);
+    let tree = git(&source, &["rev-parse", "HEAD^{tree}"]);
+
+    let identity = proto::keys::Identity::from_seed(&[7u8; 32]);
+    h.store.channel_put("personal", b"ring", "{}").unwrap();
+    h.store
+        .node_channel_add(&identity.node_id(), "personal")
+        .unwrap();
+    let candidate_id = format!("{head}:personal");
+    h.store
+        .insert_candidate(&tracon::store::CandidateRow {
+            id: candidate_id.clone(),
+            head_sha: head.clone(),
+            tree_sha: Some(tree),
+            channel: "personal".into(),
+            owner_session_id: None,
+            source_kind: "git".into(),
+            captured_ms: 1,
+            capture_json: r#"{"materialized":true}"#.into(),
+        })
+        .unwrap();
+    h.store
+        .insert_candidate_files(
+            &candidate_id,
+            &[tracon::store::CandidateFile {
+                path: "hello.txt".into(),
+                mode: 0o100644,
+                content: b"hello\n".to_vec(),
+            }],
+        )
+        .unwrap();
+    let carried = tracon::transfers::capture_git("git", &source, &head, "work", None)
+        .await
+        .unwrap();
+    let transfer = tracon::transfers::export_with(
+        &h.store,
+        &identity,
+        &candidate_id,
+        tracon::transfers::ContextSelection {
+            note: "carry on from the second commit".into(),
+            ..Default::default()
+        },
+        None,
+        tracon::transfers::Extras {
+            git: Some(carried),
+            source: None,
+        },
+    )
+    .unwrap();
+    let (status, staged) = h
+        .call(
+            "POST",
+            "/api/transfers/stage",
+            Some(json!({ "transfer": transfer })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{staged}");
+
+    let (status, imported) = h
+        .call(
+            "POST",
+            &format!("/api/transfers/{}/import", transfer.id()),
+            Some(json!({ "confirm": true, "model": "m/a" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{imported}");
+    assert_eq!(imported["history"], json!(true));
+    assert_eq!(imported["branch"], json!("work"));
+    assert_eq!(imported["session"]["branch"], json!("work"));
+    let session_id = imported["session"]["id"].as_str().unwrap();
+    let draft = h
+        .store
+        .get_session(session_id)
+        .unwrap()
+        .unwrap()
+        .draft
+        .unwrap_or_default();
+    assert!(draft.contains("carry on from the second commit"), "{draft}");
+    assert!(draft.contains("with its commits"), "{draft}");
+
+    let workspace = imported["workspace_id"].as_str().unwrap();
+    let volume = Config::state_dir()
+        .join("local-runtime")
+        .join(tracon::workspace::volume_name(workspace));
+    assert_eq!(git(&volume, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git(&volume, &["branch", "--show-current"]), "work");
+    assert_eq!(
+        git(&volume, &["log", "--format=%an %s"]),
+        "Ada second\nAda first"
+    );
+    assert_eq!(git(&volume, &["status", "--porcelain"]), "");
 }

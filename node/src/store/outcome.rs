@@ -15,6 +15,38 @@ impl Store {
         Ok(rows)
     }
 
+    /// The reviews on `channel` whose target names change `number` of
+    /// `project` on `provider`, oldest first. The project is compared
+    /// without regard to ASCII case, as the forges do; a target that is not
+    /// JSON names nothing.
+    pub fn reviews_naming_change(
+        &self,
+        channel: &str,
+        provider: &str,
+        project: &str,
+        number: u64,
+    ) -> Result<Vec<ReviewRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM review
+             WHERE channel=?1 AND json_valid(target)
+               AND CASE WHEN json_valid(target) THEN
+                     json_extract(target, '$.provider')=?2
+                     AND lower(json_extract(target, '$.project'))=lower(?3)
+                     AND json_extract(target, '$.change.number')=?4
+                   END
+             ORDER BY created_ms ASC, id ASC",
+        )?;
+        let number = i64::try_from(number).unwrap_or(i64::MAX);
+        let rows = stmt
+            .query_map(
+                rusqlite::params![channel, provider, project, number],
+                ReviewRow::from_row,
+            )?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
     /// A session's events of one kind, oldest first.
     pub fn session_events_of_kind(&self, session_id: &str, kind: &str) -> Result<Vec<EventRow>> {
         let conn = self.conn.lock().unwrap();

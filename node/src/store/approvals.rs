@@ -227,6 +227,11 @@ pub struct Decision<'a> {
     /// given, the decision lands only if the row still keeps exactly it, so a
     /// later preview (another tab) is not decided on an older one's read.
     pub preview_token: Option<&'a str>,
+    /// The arguments hash of the call a shown preview must have been of.
+    /// When given, the decision lands only if the row's last preview was
+    /// shown for exactly that call, so a preview that failed in another tab
+    /// since this one was read is not decided past.
+    pub preview_shown_for: Option<&'a str>,
 }
 
 impl Store {
@@ -345,7 +350,8 @@ impl Store {
                 finished_ms=CASE WHEN ?2 IN ('rejected','changes_requested') THEN ?7 ELSE NULL END
              WHERE id=?1 AND state='pending' AND expires_ms > ?7
                AND (?8 IS NULL OR arguments = ?8)
-               AND (?9 IS NULL OR preview_token = ?9)",
+               AND (?9 IS NULL OR preview_token = ?9)
+               AND (?10 IS NULL OR preview_shown_for = ?10)",
             rusqlite::params![
                 id,
                 decision.state,
@@ -355,21 +361,44 @@ impl Store {
                 decision.note,
                 now,
                 decision.bound_to,
-                decision.preview_token
+                decision.preview_token,
+                decision.preview_shown_for
             ],
         )?;
         Ok(n == 1)
     }
 
-    /// Keep the token of the preview a waiting approval's card showed, or
-    /// none. A decided approval keeps the one it was decided on.
-    pub fn set_preview_token(&self, id: &str, token: Option<&str>) -> Result<bool> {
+    /// Keep what a waiting approval's card last previewed: the preview's
+    /// token, or none, and the arguments hash of the call it was shown for,
+    /// or none when the plugin refused, failed or offered no preview. A
+    /// decided approval keeps what it was decided on.
+    pub fn set_preview(
+        &self,
+        id: &str,
+        token: Option<&str>,
+        shown_for: Option<&str>,
+    ) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let n = conn.execute(
-            "UPDATE approval SET preview_token=?2 WHERE id=?1 AND state='pending'",
-            rusqlite::params![id, token],
+            "UPDATE approval SET preview_token=?2, preview_shown_for=?3
+             WHERE id=?1 AND state='pending'",
+            rusqlite::params![id, token, shown_for],
         )?;
         Ok(n == 1)
+    }
+
+    /// The arguments hash of the call an approval's card last showed a
+    /// plugin's preview of, if its last preview was shown.
+    pub fn preview_shown_for(&self, id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let shown = conn
+            .query_row(
+                "SELECT preview_shown_for FROM approval WHERE id=?1",
+                [id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        Ok(shown.flatten())
     }
 
     /// The token of the preview an approval's card last showed. Kept apart
@@ -771,12 +800,12 @@ mod tests {
             .insert_approval(&row("a1", "k", now_ms() + 60_000))
             .unwrap();
         assert_eq!(store.preview_token("a1").unwrap(), None);
-        assert!(store.set_preview_token("a1", Some("v1")).unwrap());
+        assert!(store.set_preview("a1", Some("v1"), None).unwrap());
         assert_eq!(store.preview_token("a1").unwrap().as_deref(), Some("v1"));
         let row = store.get_approval("a1").unwrap().unwrap();
         assert!(!serde_json::to_string(&row).unwrap().contains("v1"));
 
-        assert!(store.set_preview_token("a1", Some("v2")).unwrap());
+        assert!(store.set_preview("a1", Some("v2"), None).unwrap());
         let bound = Decision {
             preview_token: Some("v1"),
             ..allow()
@@ -788,8 +817,39 @@ mod tests {
         };
         assert!(store.decide_approval("a1", &bound).unwrap());
         // Decided: the token it was decided on stays.
-        assert!(!store.set_preview_token("a1", Some("v3")).unwrap());
+        assert!(!store.set_preview("a1", Some("v3"), None).unwrap());
         assert_eq!(store.preview_token("a1").unwrap().as_deref(), Some("v2"));
+    }
+
+    /// What a shown preview was of is kept with the token, cleared by a
+    /// preview that was not shown, and binds the decision as the token does.
+    #[test]
+    fn the_call_a_preview_was_shown_for_binds_the_decision() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .insert_approval(&row("a1", "k", now_ms() + 60_000))
+            .unwrap();
+        assert_eq!(store.preview_shown_for("a1").unwrap(), None);
+        assert!(store.set_preview("a1", None, Some("h1")).unwrap());
+        assert_eq!(
+            store.preview_shown_for("a1").unwrap().as_deref(),
+            Some("h1")
+        );
+        // Another tab's preview failed: nothing is shown for any call now.
+        assert!(store.set_preview("a1", None, None).unwrap());
+        let bound = Decision {
+            preview_shown_for: Some("h1"),
+            ..allow()
+        };
+        assert!(!store.decide_approval("a1", &bound).unwrap());
+        assert!(store.set_preview("a1", Some("v1"), Some("h1")).unwrap());
+        assert!(store.decide_approval("a1", &bound).unwrap());
+        assert!(!store.set_preview("a1", None, None).unwrap());
+        assert_eq!(
+            store.preview_shown_for("a1").unwrap().as_deref(),
+            Some("h1")
+        );
+        assert_eq!(store.preview_shown_for("gone").unwrap(), None);
     }
 
     #[test]

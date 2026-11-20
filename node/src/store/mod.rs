@@ -34,6 +34,7 @@ pub mod infra;
 pub mod limits;
 pub mod manifest;
 pub mod metrics;
+pub mod names;
 pub mod operator;
 pub mod outcome;
 pub mod passkeys;

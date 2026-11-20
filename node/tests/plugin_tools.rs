@@ -4,7 +4,9 @@
 //! disagrees with its manifest, decided under `[[plugin]]` as an
 //! `[[mcp_server]]` is, and called with a signed caller context that lends
 //! only what the manifest declares and, for `lend = "approved"`, only to an
-//! approved call, which runs only on the build its card showed.
+//! approved call, which runs only on the build its card showed and, unless
+//! the plugin's entry opts out, only once its card showed a preview of the
+//! call as it would run.
 
 #[path = "support/mod.rs"]
 mod support;
@@ -329,6 +331,14 @@ fn allow(plugin: &str, tools: &[&str]) -> PluginEntry {
     }
 }
 
+/// `entry`, with Allow on its plugin's cards needing no preview.
+fn unpreviewed(entry: PluginEntry) -> PluginEntry {
+    PluginEntry {
+        require_preview: false,
+        ..entry
+    }
+}
+
 #[tokio::test]
 async fn tools_are_offered_to_a_channel_binding_a_credential_the_plugin_declares() {
     let rig = rig(
@@ -598,7 +608,11 @@ async fn each_call_carries_a_signed_caller_context_bound_to_its_instance() {
 
 #[tokio::test]
 async fn credentials_are_lent_per_call_and_an_approved_only_one_only_when_approved() {
-    let rig = rig("lend", vec![allow("fake", &["query"])], Policy::shipped());
+    let rig = rig(
+        "lend",
+        vec![unpreviewed(allow("fake", &["query"]))],
+        Policy::shipped(),
+    );
     rig.listed(&rig.ctx).await;
     // Allowed by the entry: the read credential, not the approved-only one,
     // and never one the manifest does not declare.
@@ -763,7 +777,7 @@ async fn an_approval_gone_stale_between_page_and_dispatch_fails_as_stale() {
 }
 
 #[tokio::test]
-async fn a_plugin_without_preview_gets_the_generic_card() {
+async fn a_plugin_without_preview_gets_the_generic_card_and_is_allowed_only_once_opted_out() {
     let rig = rig(
         "nopreview",
         vec![allow("fake", &["query"])],
@@ -771,15 +785,48 @@ async fn a_plugin_without_preview_gets_the_generic_card() {
     );
     rig.listed(&rig.ctx).await;
     let id = asked(&rig.call("fake__describe", json!({ "sql": "x" })).await);
-    assert!(rig.open(&id).await.is_none());
+    // Not even opened: nothing was shown, and the answer is sent to the card.
+    let refused = rig.allow(&id, None).await.unwrap_err().to_string();
+    assert!(refused.contains("open the card to allow it"), "{refused}");
+    // Opened: the plugin answers -32601, so the card is the generic one,
+    // and it says why Allow is held and what would let it through.
+    let shown = rig.open(&id).await.expect("the card's hold");
+    assert!(shown.get("preview").is_none(), "{shown}");
+    assert_eq!(
+        shown["allow_blocked"],
+        "fake offered no preview of this call; allow without one by setting \
+         `require_preview = false` under `[[plugin]] name = \"fake\"`"
+    );
     assert_eq!(rig.store.preview_token(&id).unwrap(), None);
+    let refused = rig.allow(&id, None).await.unwrap_err().to_string();
+    assert!(
+        refused.contains("`require_preview = false` under `[[plugin]] name = \"fake\"`"),
+        "{refused}"
+    );
+    assert_eq!(rig.lines("fake", "nopreview", "calls.jsonl"), 0);
+    assert_eq!(
+        rig.store.get_approval(&id).unwrap().unwrap().state,
+        approvals::PENDING
+    );
+
+    // The operator opts the plugin out, live: the same card is allowed.
+    let path = rig.state.join("nopreview-node.toml");
+    let text = "[[plugin]]\nname = \"fake\"\nallow = [\"query\"]\nrequire_preview = false\n";
+    std::fs::write(&path, text).unwrap();
+    let newer: Config = toml::from_str(text).unwrap();
+    rig.tools.cfg.apply_live_at(
+        &path,
+        &newer,
+        &tracon::config::edit::file_hash(&path).unwrap(),
+    );
+    assert!(rig.open(&id).await.is_none(), "no hold once opted out");
     let seen = approved_echo(&rig.approve(&id).await);
     assert!(seen["meta"].get("preview_token").is_none(), "{seen}");
     rig.manager.plugins().shutdown().await;
 }
 
 #[tokio::test]
-async fn a_refused_preview_is_shown_and_the_call_can_still_be_decided() {
+async fn a_refused_preview_is_shown_and_holds_allow_but_not_reject() {
     let rig = rig(
         "refused",
         vec![allow("fake", &["query"])],
@@ -797,9 +844,78 @@ async fn a_refused_preview_is_shown_and_the_call_can_still_be_decided() {
             .contains("plugin fake: cannot preview"),
         "{shown}"
     );
+    assert!(
+        shown["allow_blocked"]
+            .as_str()
+            .unwrap()
+            .starts_with("fake offered no preview of this call"),
+        "{shown}"
+    );
     assert_eq!(rig.store.preview_token(&id).unwrap(), None);
-    let seen = approved_echo(&rig.approve(&id).await);
-    assert!(seen["meta"].get("preview_token").is_none());
+    let refused = rig.allow(&id, None).await.unwrap_err().to_string();
+    assert!(refused.contains("no preview of this call"), "{refused}");
+    // Rejecting needs no preview.
+    rig.tools
+        .answer_approval(
+            &id,
+            OperatorAnswer {
+                option_id: tracon::adapter::types::OPTION_REJECT_ONCE.into(),
+                reason: Some("not without seeing it".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let row = rig.store.get_approval(&id).unwrap().unwrap();
+    assert_eq!(row.state, approvals::REJECTED);
+    assert_eq!(rig.lines("fake", "refused", "calls.jsonl"), 0);
+
+    // Nor does asking for changes, on another call it would not preview.
+    let other = asked(&rig.call("fake__describe", json!({ "sql": "y" })).await);
+    rig.tools
+        .answer_approval(
+            &other,
+            OperatorAnswer {
+                option_id: tracon::store::approvals::OPTION_REQUEST_CHANGES.into(),
+                notes: Some("narrow it".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let row = rig.store.get_approval(&other).unwrap().unwrap();
+    assert_eq!(row.state, approvals::CHANGES_REQUESTED);
+    rig.manager.plugins().shutdown().await;
+}
+
+/// The rule is held where every answer lands, not on the page: an answer
+/// through the session manager, as the API, a peer's relay and the queue's
+/// card send it, is refused until the card has shown a preview, and allowed
+/// once it has.
+#[tokio::test]
+async fn an_answer_from_outside_the_page_is_held_to_the_shown_preview() {
+    let rig = rig("api", vec![allow("fake", &["query"])], Policy::shipped());
+    rig.listed(&rig.ctx).await;
+    rig.knob("api", "preview", "on");
+    let id = asked(&rig.call("fake__describe", json!({ "sql": "x" })).await);
+    let allow = || OperatorAnswer {
+        option_id: tracon::adapter::types::OPTION_ALLOW_ONCE.into(),
+        by: Some("api".into()),
+        ..Default::default()
+    };
+    let refused = rig
+        .manager
+        .answer(&id, allow())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("open the card to allow it"), "{refused}");
+    assert_eq!(rig.lines("fake", "api", "calls.jsonl"), 0);
+    assert!(rig.records("api", "previews.jsonl").is_empty());
+    rig.open(&id).await.expect("a preview");
+    rig.manager.answer(&id, allow()).await.unwrap();
+    let seen = approved_echo(&rig.settled(&id).await);
+    assert_eq!(seen["meta"]["preview_token"], "v1");
     rig.manager.plugins().shutdown().await;
 }
 
@@ -817,6 +933,8 @@ async fn an_unpreviewable_call_keeps_no_token() {
     assert_eq!(shown["preview"]["status"], "shown");
     assert_eq!(shown["preview"]["previewable"], false);
     assert_eq!(shown["preview"]["token_sha256"], Value::Null);
+    // Shown, though it could not show the effect: Allow is not held.
+    assert!(shown.get("allow_blocked").is_none(), "{shown}");
     assert_eq!(rig.store.preview_token(&id).unwrap(), None);
     let seen = approved_echo(&rig.approve(&id).await);
     assert!(seen["meta"].get("preview_token").is_none());
@@ -877,11 +995,31 @@ async fn an_operators_edit_is_previewed_and_its_preview_is_what_allow_binds() {
         .as_str()
         .unwrap()
         .to_string();
+    let edit = json!({ "sql": "UPDATE b" });
+    // Allowing the edit before it is previewed is refused, though the answer
+    // names the preview the card showed: that was of another call.
+    let unseen = rig
+        .tools
+        .answer_approval(
+            &id,
+            OperatorAnswer {
+                option_id: tracon::adapter::types::OPTION_ALLOW_ONCE.into(),
+                arguments: Some(edit.clone()),
+                preview_hash: Some(h1.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        unseen.contains("no preview of this call as it would run"),
+        "{unseen}"
+    );
     // The operator edits the call; the plugin previews the edit, against a
     // target that has moved since the card opened.
     rig.knob("edited", "version", "v2");
     let row = rig.store.get_approval(&id).unwrap().unwrap();
-    let edit = json!({ "sql": "UPDATE b" });
     let second = rig.tools.preview_edit(&row, &edit).await.unwrap().unwrap();
     assert!(
         second["preview"]["body"]
@@ -1039,7 +1177,7 @@ async fn a_consequential_plugin_tool_needs_a_grant_naming_the_call() {
     let channel = "consequential";
     let rig = rig(
         channel,
-        vec![allow("move", &["*"])],
+        vec![unpreviewed(allow("move", &["*"]))],
         allowing(&["move__transition", "move__note"]),
     );
     install_move(&rig, channel);
@@ -1168,7 +1306,11 @@ async fn a_plugin_tools_marked_prose_is_not_matched_against_a_denial() {
 
 #[tokio::test]
 async fn an_approved_call_runs_only_on_the_build_its_card_showed() {
-    let rig = rig("rebuilt", vec![], Policy::shipped());
+    let rig = rig(
+        "rebuilt",
+        vec![unpreviewed(allow("fake", &[]))],
+        Policy::shipped(),
+    );
     rig.listed(&rig.ctx).await;
     let first = asked(&rig.call("fake__describe", json!({ "table": "apps" })).await);
     let waiting = asked(

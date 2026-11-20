@@ -374,6 +374,136 @@ async fn mr_ready_waits_on_the_operator_then_marks_the_draft_ready_and_back() {
     assert_eq!(puts().len(), 2);
 }
 
+/// [`rig_with_bodies`] with a node store and session manager, as an
+/// external caller's calls run.
+async fn session_rig() -> (Arc<Tools>, Seen) {
+    let (t, seen, _) = rig().await;
+    let tools = Arc::new(t);
+    let store = Arc::new(tracon::store::Store::open_in_memory().unwrap());
+    store.ensure_peer_node("n1").unwrap();
+    store.channel_put("work", &[], "{}").unwrap();
+    let manager = tracon::session::Manager::new(
+        store.clone(),
+        tracon::stream::Bus::new(),
+        tools.cfg.clone(),
+        "n1".into(),
+        tools.clone(),
+        Default::default(),
+        Arc::new(tracon::runner::local::LocalBackend),
+    );
+    let _ = tools
+        .session
+        .set(tracon::mcp::SessionAccess { store, manager });
+    (tools, seen)
+}
+
+/// A review on merge request `iid` of g/p, submitted by `session` (none for
+/// an external harness's) on `channel`; a publication of it opened the
+/// merge request when `opened`.
+fn mr_review(
+    store: &tracon::store::Store,
+    id: &str,
+    session: Option<&str>,
+    channel: &str,
+    iid: u64,
+    opened: bool,
+) {
+    let mut review = support::rows::review_row(id, "", "approved");
+    review.session_id = session.map(String::from);
+    review.channel = channel.into();
+    review.provider = "gitlab".into();
+    review.kind = "mr".into();
+    let url = format!("https://gitlab.example/g/p/-/merge_requests/{iid}");
+    review.target = json!({
+        "provider": "gitlab", "project": "g/p", "base": "main",
+        "branch": format!("feat/{iid}"),
+        "change": { "number": iid, "url": url },
+    })
+    .to_string();
+    store.insert_review(&review).unwrap();
+    if !opened {
+        return;
+    }
+    let publication = format!("{id}-p");
+    store
+        .publication_begin(&tracon::store::PublicationBegin {
+            id: &publication,
+            review_id: id,
+            revision_id: None,
+            candidate_id: "c",
+            channel,
+            node_id: "n1",
+            provider: "gitlab",
+            project: "g/p",
+            base: "main",
+            branch: &format!("feat/{iid}"),
+            head_sha: &review.head_sha,
+            instance: "i",
+        })
+        .unwrap();
+    store.publication_opened(&publication, &url).unwrap();
+}
+
+/// The GitLab half of #1001: an external caller drafts the merge request a
+/// review its harness submitted opened, without asking, and the channel's
+/// log says the node let it run. Marking it ready, and drafting a managed
+/// session's merge request, another channel's, or one a review only
+/// adopted, are asked.
+#[tokio::test]
+async fn mr_ready_on_the_change_of_an_external_callers_own_review_is_not_asked() {
+    state::isolate();
+    let (t, seen) = session_rig().await;
+    let access = t.session.get().unwrap();
+    let external = CallContext::external(None, "work", "n1");
+    let reached = || seen.0.lock().unwrap().len();
+    mr_review(&access.store, "r1", None, "work", 8, true);
+
+    let draft = json!({ "project": "g/p", "iid": 8, "ready": false,
+                        "reason": "PHPUnit failed on CI" });
+    let (err, v) = call(&t, &external, "mr_ready", draft).await;
+    assert!(!err, "{v}");
+    // The stub's merge request is a draft already: it ran, and wrote nothing.
+    assert_eq!(v["draft"], true, "{v}");
+    assert_eq!(v["already"], true, "{v}");
+    let ran = reached();
+    assert!(ran > 0, "the call reached GitLab");
+    let mark = access.store.change_mark("r1").unwrap().unwrap();
+    assert_eq!(mark["ready"], false);
+    assert_eq!(mark["by"], "agent");
+    assert_eq!(mark["reason"], "PHPUnit failed on CI");
+    let decided: Vec<Value> = access
+        .store
+        .external_events_after("work", 0, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|row| row.kind == "tool_decided")
+        .map(|row| row.payload)
+        .collect();
+    assert_eq!(decided.len(), 1, "{decided:?}");
+    assert_eq!(decided[0]["tool"], "mr_ready");
+    assert_eq!(decided[0]["decision"], "node_allowed");
+    assert_eq!(decided[0]["rule"], "own-change");
+
+    let ready = json!({ "project": "g/p", "iid": 8, "ready": true });
+    let (err, v) = call(&t, &external, "mr_ready", ready).await;
+    assert!(!err, "{v}");
+    assert_eq!(v["state"], "awaiting_operator", "{v}");
+
+    let mut managed = support::rows::session_row("s1", "n1", "work");
+    managed.state = "closed".into();
+    access.store.insert_session(&managed).unwrap();
+    mr_review(&access.store, "r2", Some("s1"), "work", 13, true);
+    mr_review(&access.store, "r3", None, "other", 14, true);
+    mr_review(&access.store, "r4", None, "work", 15, false);
+    for iid in [13, 14, 15] {
+        let draft = json!({ "project": "g/p", "iid": iid, "ready": false });
+        let (err, v) = call(&t, &external, "mr_ready", draft).await;
+        assert!(!err, "{iid}: {v}");
+        assert_eq!(v["state"], "awaiting_operator", "{iid}: {v}");
+    }
+    assert_eq!(reached(), ran, "nothing more reached GitLab");
+}
+
 #[tokio::test]
 async fn mr_ready_is_an_error_when_gitlab_still_reads_a_draft_after_the_retitle() {
     state::isolate();

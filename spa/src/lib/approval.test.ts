@@ -10,6 +10,7 @@ import {
   outcome,
   pluginRows,
   previewOutdated,
+  allowGate,
   problemsByField,
   amendsNothing,
   previewHash,
@@ -362,4 +363,21 @@ test('a plugin preview goes stale once the call is edited, and only a previewed 
   expect(previewOutdated({}, asked, { sql: 'x' })).toBe(false)
   expect(previewOutdated(null, asked, { sql: 'x' })).toBe(false)
   expect(previewOutdated(shown, null, { sql: 'x' })).toBe(false)
+})
+
+test("Allow is held while the plugin offered no preview of the call, and says which setting lifts it", () => {
+  const why =
+    'jira-review offered no preview of this call; allow without one by setting `require_preview = false` under `[[plugin]] name = "jira-review"`'
+  const idle = { busy: false, blocked: false, outdated: false }
+  expect(allowGate({ allow_blocked: why }, idle)).toEqual({ disabled: true, why })
+  // Nothing held: a shown preview, an opted-out plugin, any other tool.
+  expect(allowGate({ allow_blocked: null }, idle)).toEqual({ disabled: false, why: null })
+  expect(allowGate({}, idle)).toEqual({ disabled: false, why: null })
+  expect(allowGate(null, idle)).toEqual({ disabled: false, why: null })
+  // While an edit is being previewed, Allow waits for that, and the last
+  // answer's reason is not shown over it.
+  expect(allowGate({ allow_blocked: why }, { ...idle, outdated: true })).toEqual({ disabled: true, why: null })
+  // The page's own holds still hold.
+  expect(allowGate({}, { ...idle, busy: true }).disabled).toBe(true)
+  expect(allowGate({}, { ...idle, blocked: true }).disabled).toBe(true)
 })

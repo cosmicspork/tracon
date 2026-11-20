@@ -7,7 +7,7 @@
 // break a run: every Claude Code call now carries a policy record, and letting
 // those through left no two calls side by side.
 
-import { generatedName } from './names'
+import { nameOf } from './names'
 import { roomWords } from './capabilities'
 import { exhaustionNote } from './exhaustion'
 import { formatBytes } from './data'
@@ -689,12 +689,19 @@ export function eventLine(e: Event): EventLine | null {
       if (reconciled) return line('ok', ['review recorded as published', `at ${reconciled}`, 'by the operator'])
       return line(tone, [text, 'by the operator', waited !== null ? `after ${formatDuration(waited)} waiting` : ''])
     }
+    case 'moved': {
+      // The work moved to a session on another node, which confirmed its
+      // import; this session ends right after.
+      const to = str(p.to_session)
+      const name = to ? generatedName('session', to) : ''
+      return line('mark', ['moved to another node', to ? `continues as ${name}` : ''], to ? `/sessions/${to}` : undefined, name || undefined, to || undefined)
+    }
     case 'review_taken_over': {
       // The continuation took over a review the attempt before it left open
       // or sent back for changes; the link is that attempt.
       const from = str(p.from_session)
       const what = str(p.state) === 'revising' ? 'review sent back for changes taken over' : 'open review taken over'
-      const name = from ? generatedName('session', from) : ''
+      const name = from ? nameOf('session', from) : ''
       return line('mark', [what, from ? `from ${name}` : ''], from ? `/sessions/${from}` : undefined, name || undefined, from || undefined)
     }
     case 'provider_exhausted': {
@@ -714,7 +721,7 @@ export function eventLine(e: Event): EventLine | null {
           return line('mark', ["the provider's limit reset", 'resumed', note])
         case 'continued': {
           const next = str(p.continued_by)
-          return line('mark', ['continued in a new session', str(p.model) ? `on ${str(p.model)}` : '', note], next ? `/sessions/${next}` : undefined, next ? generatedName('session', next) : undefined, next || undefined)
+          return line('mark', ['continued in a new session', str(p.model) ? `on ${str(p.model)}` : '', note], next ? `/sessions/${next}` : undefined, next ? nameOf('session', next) : undefined, next || undefined)
         }
         case 'held':
           return line('wait', ['held for you', note])

@@ -6,6 +6,7 @@ import * as push from './push'
 import { router } from './router.svelte'
 import { api, ApiError } from './api'
 import { upsertNode } from './nodes'
+import { applyOperatorName, setOperatorNames } from './names'
 import { LOADING, refetchOnOpen, settledLoad, type LoadStatus } from './load'
 import { applySessionFrame } from './queue'
 import { allAnswered, kept, wantsLogin } from './snapshot'
@@ -200,6 +201,7 @@ class Store {
       'providers',
       'promotions',
       'changes',
+      'name',
       'awake',
       'restart',
     ] as const) {
@@ -221,6 +223,12 @@ class Store {
       api.sessions(),
       api.providers(),
     ]).finally(() => (this.refetching = false))
+    // Operator names: a page shows generated names until these arrive, and
+    // an older node has no such route.
+    void api
+      .names()
+      .then((r) => setOperatorNames(r.names))
+      .catch(() => {})
     // Nothing else depends on it, and an older node has no such route.
     void api
       .awake()
@@ -434,6 +442,10 @@ class Store {
       }
       case 'restart': {
         this.restart = frame
+        break
+      }
+      case 'name': {
+        applyOperatorName(frame.kind, frame.id, frame.name)
         break
       }
       case 'changes': {

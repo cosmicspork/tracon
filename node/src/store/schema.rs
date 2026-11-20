@@ -1828,7 +1828,15 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE approval ADD COLUMN plugin_digest TEXT;
     "#,
-    // 83: the id the caller gave a session's create, so a create retried
+    // 83: the arguments hash of the call a plugin tool's card last showed a
+    // `tracon/preview` of (`crate::mcp::Tools::approval_preview`), NULL when
+    // its last preview was refused, failed or not offered. Allow is refused
+    // unless it names the call that would run, when the plugin's
+    // `[[plugin]]` entry requires a preview.
+    r#"
+    ALTER TABLE approval ADD COLUMN preview_shown_for TEXT;
+    "#,
+    // 84: the id the caller gave a session's create, so a create retried
     // after an answer that never arrived (a peer's late ack, a proxy's 504)
     // finds the session the first one made instead of making a second. One
     // per owner and channel; NULL for every session made without one.

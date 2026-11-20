@@ -142,7 +142,6 @@ impl From<TransferError> for ApiError {
             | TransferError::ReceiverUnauthorized(_)
             | TransferError::DestinationUnauthorized(_)
             | TransferError::MeshUnavailable
-            | TransferError::MeshTooLarge
             | TransferError::Workspace(_) => StatusCode::CONFLICT,
             TransferError::Store(_) | TransferError::Json(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -660,7 +659,10 @@ pub async fn list_transfers(State(s): State<AppState>) -> ApiResult<Json<serde_j
             "session_id": import.and_then(|row| row.session_id),
         }));
     }
-    Ok(Json(json!({ "transfers": transfers })))
+    Ok(Json(json!({
+        "transfers": transfers,
+        "incoming": transfers::partial_deliveries(),
+    })))
 }
 
 #[derive(Deserialize)]
@@ -672,6 +674,36 @@ pub struct ExportTransferBody {
     destination_node: Option<String>,
     #[serde(default)]
     delivery: TransferDelivery,
+    /// `move` carries the candidate's session over: the new session takes
+    /// its work item, project and budget, and links back to it. Absent: a
+    /// handoff, which leaves the source as it is.
+    #[serde(default)]
+    intent: transfers::TransferIntent,
+}
+
+/// The branch's history out of `session`'s workspace, for a package.
+async fn capture_branch(
+    s: &AppState,
+    session: &crate::store::SessionRow,
+    head_sha: &str,
+) -> Result<transfers::TransferGit, String> {
+    let snapshot = s
+        .manager
+        .snapshot_workspace(&session.id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let origin = crate::environment::origin_repo(s.store(), Some(&session.id))?
+        .and_then(|repo| crate::forge::managed_identity(&crate::config::Config::state_dir(), &repo))
+        .filter(|identity| crate::mesh::recipe::valid_identity(identity).is_ok());
+    transfers::capture_git(
+        &s.cfg.live().publish.git,
+        &snapshot,
+        head_sha,
+        &session.branch,
+        origin,
+    )
+    .await
+    .map_err(|error| error.to_string())
 }
 
 /// Create a signed portable package. Choosing `mesh` delivers the same package
@@ -683,12 +715,63 @@ pub async fn export_transfer(
 ) -> ApiResult<Json<serde_json::Value>> {
     let (identity, _) = crate::mesh::identity::load_or_generate()
         .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-    let transfer = transfers::export(
+    let candidate = s
+        .store()
+        .candidate(&body.candidate_id)?
+        .ok_or(TransferError::CandidateNotFound)?;
+    // The session the candidate came from, when it is one this node runs:
+    // its workspace holds the branch's history.
+    let owner = candidate
+        .owner_session_id
+        .as_deref()
+        .map(|id| s.store().get_session(id))
+        .transpose()?
+        .flatten()
+        .filter(|row| {
+            row.node_id == s.node_id
+                && row.harness_id != crate::session::external::HARNESS_ID
+                && row.phase != Phase::Review.as_str()
+        });
+    let moving = body.intent == transfers::TransferIntent::Move;
+    if moving && owner.is_none() {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "a move takes the candidate's own session over, and that session is not one this \
+             node runs; export a handoff instead",
+        ));
+    }
+    let mut extras = transfers::Extras::default();
+    if let Some(session) = &owner {
+        match capture_branch(&s, session, &candidate.head_sha).await {
+            Ok(git) => extras.git = Some(git),
+            Err(error) if moving => {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    format!("the branch's history could not be read for the move: {error}"),
+                ))
+            }
+            // A handoff still has the candidate's files to carry.
+            Err(error) => tracing::warn!(
+                session = %session.id, %error,
+                "transfer exported without the branch's history"
+            ),
+        }
+        if moving {
+            extras.source = Some(transfers::describe_source(
+                s.store(),
+                session,
+                transfers::TransferIntent::Move,
+                s.manager.waits().of(&session.id),
+            )?);
+        }
+    }
+    let transfer = transfers::export_with(
         s.store(),
         &identity,
         &body.candidate_id,
         body.context,
         body.destination_node.clone(),
+        extras,
     )?;
     match body.delivery {
         TransferDelivery::Portable => Ok(Json(json!({
@@ -703,45 +786,120 @@ pub async fn export_transfer(
                     "online delivery needs one destination node",
                 )
             })?;
-            if !s
-                .store()
-                .nodes_in_channel(&transfer.payload.channel)?
-                .iter()
-                .any(|node| node == &destination)
-            {
-                return Err(TransferError::DestinationUnauthorized(
-                    transfer.payload.channel.clone(),
-                )
-                .into());
-            }
-            if transfer.serialized_len()? > transfers::MAX_MESH_TRANSFER_BYTES {
-                return Err(TransferError::MeshTooLarge.into());
-            }
-            let mesh = s.mesh.as_ref().ok_or(TransferError::MeshUnavailable)?;
-            mesh.enqueue_direct(
-                &transfer.payload.channel,
-                &destination,
-                &proto::frame::Payload::CandidateTransfer {
-                    transfer: serde_json::to_value(&transfer).map_err(|error| {
-                        ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
-                    })?,
-                },
-            )
-            .map_err(|error| ApiError::new(StatusCode::BAD_GATEWAY, error.to_string()))?;
-            s.store().append_transfer_event(
-                transfer.id(),
-                "mesh_queued",
-                Some(&destination),
-                None,
-            )?;
+            let pieces = deliver_mesh(&s, &transfer, &destination, None)?;
             Ok(Json(json!({
                 "delivery": "mesh_queued",
                 "transfer": transfer,
                 "destination_node": destination,
-                "note": "The recipient must explicitly confirm import; no session has moved.",
+                "pieces": pieces,
+                "note": if moving {
+                    "The recipient must explicitly confirm import; this session closes once it has."
+                } else {
+                    "The recipient must explicitly confirm import; no session has moved."
+                },
             })))
         }
     }
+}
+
+/// Queue a package for `destination` over the mesh: whole when it fits one
+/// frame, else in pieces (`only` sends just those pieces again). Returns how
+/// many frames were queued. The outbox is durable, so a delivery cut off by
+/// a restart carries on, and the receiver keeps the pieces it has.
+fn deliver_mesh(
+    s: &AppState,
+    transfer: &SignedTransfer,
+    destination: &str,
+    only: Option<&[u32]>,
+) -> ApiResult<usize> {
+    if !s
+        .store()
+        .nodes_in_channel(&transfer.payload.channel)?
+        .iter()
+        .any(|node| node == destination)
+    {
+        return Err(
+            TransferError::DestinationUnauthorized(transfer.payload.channel.clone()).into(),
+        );
+    }
+    let mesh = s.mesh.as_ref().ok_or(TransferError::MeshUnavailable)?;
+    let queue = |payload: &proto::frame::Payload| {
+        mesh.enqueue_direct(&transfer.payload.channel, destination, payload)
+            .map_err(|error| ApiError::new(StatusCode::BAD_GATEWAY, error.to_string()))
+    };
+    let pieces =
+        if transfer.serialized_len()? <= transfers::MAX_MESH_TRANSFER_BYTES && only.is_none() {
+            queue(&proto::frame::Payload::CandidateTransfer {
+                transfer: serde_json::to_value(transfer).map_err(|error| {
+                    ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+                })?,
+            })?;
+            1
+        } else {
+            let chunks = transfers::mesh_chunks(transfer, only)?;
+            for chunk in &chunks {
+                queue(&proto::frame::Payload::CandidateTransferChunk {
+                    transfer_id: chunk.transfer_id.clone(),
+                    index: chunk.index,
+                    count: chunk.count,
+                    sha256: chunk.sha256.clone(),
+                    data_b64: chunk.data_b64.clone(),
+                })?;
+            }
+            chunks.len()
+        };
+    s.store()
+        .append_transfer_event(transfer.id(), "mesh_queued", Some(destination), None)?;
+    Ok(pieces)
+}
+
+#[derive(Deserialize)]
+pub struct SendTransferBody {
+    destination_node: String,
+    /// Just these pieces again, as the receiver lacks them. Absent: the
+    /// whole package.
+    #[serde(default)]
+    pieces: Option<Vec<u32>>,
+}
+
+/// Send a package this node holds over the mesh again: one whose delivery
+/// was lost, or the pieces a receiver is missing. The receiver takes what it
+/// does not have yet and ignores the rest.
+pub async fn send_transfer(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<SendTransferBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let row = s
+        .store()
+        .transfer(&id)?
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "transfer not found"))?;
+    let transfer: SignedTransfer = serde_json::from_str(&row.package_json).map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "stored transfer is corrupt",
+        )
+    })?;
+    if transfer
+        .payload
+        .target_node
+        .as_deref()
+        .is_some_and(|target| target != body.destination_node)
+    {
+        return Err(TransferError::WrongTarget.into());
+    }
+    let pieces = deliver_mesh(
+        &s,
+        &transfer,
+        &body.destination_node,
+        body.pieces.as_deref(),
+    )?;
+    Ok(Json(json!({
+        "delivery": "mesh_queued",
+        "transfer_id": id,
+        "destination_node": body.destination_node,
+        "pieces": pieces,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -783,8 +941,12 @@ pub struct ImportTransferBody {
     branch: Option<String>,
 }
 
-/// Turn one staged, verified transfer into a new, local execute session. This
-/// has no relationship to the origin session beyond immutable candidate data.
+/// Turn one staged, verified transfer into a new, local session. A version 2
+/// package's branch is recreated with its commits on this node's own clone of
+/// its origin; a move's session takes over the source's work item, project
+/// and budget, links back to it, and is told the export note and the source's
+/// last state as its first prompt. A version 1 package imports its files as
+/// it always has.
 pub async fn import_transfer(
     State(s): State<AppState>,
     Path(id): Path<String>,
@@ -822,35 +984,111 @@ pub async fn import_transfer(
             ));
         }
     }
+    let channel = transfer.payload.channel.clone();
+    let carried = transfer.payload.git.as_ref();
+    let moving = transfer
+        .payload
+        .source
+        .as_ref()
+        .filter(|source| source.intent == transfers::TransferIntent::Move);
+    // The real branch, unless the operator names another.
     let branch = body
         .branch
         .clone()
+        .or_else(|| carried.map(|git| git.branch.clone()))
         .unwrap_or_else(|| format!("continuation/{}", id.get(..12).unwrap_or(&id)));
-    // Everything `create` would reject outright (an archived channel,
-    // no resolvable model) is checked before materializing or reusing a
-    // workspace, so a request doomed to fail never leaks one.
-    let preflight_spec = NewSession {
-        channel: transfer.payload.channel.clone(),
+    // What a move takes over, as far as this node can see it. The source
+    // session is linked when this node holds its row (a peer's sessions
+    // mirror here); the work item when it is on this channel here.
+    let continued_from = match moving {
+        Some(source) => s.store().get_session(&source.session_id)?.map(|row| row.id),
+        None => None,
+    };
+    let work_item_id = match moving.and_then(|source| source.work_item_id.as_deref()) {
+        Some(item) => s
+            .store()
+            .work_get(item)?
+            .filter(|row| row.channel == channel)
+            .map(|row| row.id),
+        None => None,
+    };
+    let project_id = match (moving.and_then(|source| source.project.as_ref()), carried) {
+        (Some(project), _) => {
+            if s.store().project_get(&project.id)?.is_none() {
+                s.store().project_put(&crate::store::ProjectRow {
+                    id: project.id.clone(),
+                    channel: channel.clone(),
+                    name: project.name.clone(),
+                    remote_url: project.remote_url.clone(),
+                    created_ms: crate::store::now_ms(),
+                })?;
+            }
+            Some(project.id.clone())
+        }
+        (None, Some(git)) => match git.origin.as_deref() {
+            Some(origin) => {
+                let project = crate::corpus::project::project_id(&channel, origin);
+                if s.store().project_get(&project)?.is_none() {
+                    s.store().project_put(&crate::store::ProjectRow {
+                        id: project.clone(),
+                        channel: channel.clone(),
+                        name: origin.rsplit('/').next().unwrap_or("repo").to_string(),
+                        remote_url: Some(origin.to_string()),
+                        created_ms: crate::store::now_ms(),
+                    })?;
+                }
+                Some(project)
+            }
+            None => None,
+        },
+        (None, None) => None,
+    };
+    let phase = match moving {
+        Some(source) if source.phase == Phase::Plan.as_str() && work_item_id.is_some() => {
+            Phase::Plan
+        }
+        _ => Phase::Execute,
+    };
+    let mut spec = NewSession {
+        channel: channel.clone(),
         repo_path: String::new(),
         branch: Some(branch.clone()),
         base: None,
-        work_item_id: None,
-        model: body.model.clone(),
-        budget_tokens: body.budget_tokens,
+        work_item_id: work_item_id.clone(),
+        model: match body.model.trim() {
+            "" => moving
+                .map(|source| source.model.clone())
+                .unwrap_or_default(),
+            named => named.to_string(),
+        },
+        budget_tokens: body
+            .budget_tokens
+            .or_else(|| moving.map(|source| source.budget_tokens)),
         initial_prompt: None,
         node_id: None,
-        phase: Phase::Execute,
+        phase,
         review_id: None,
         base_sha: None,
         workspace_id: None,
-        parent_session: None,
-        continued_from: None,
+        parent_session: continued_from.clone(),
+        continued_from: continued_from.clone(),
         harness: None,
         on_exhaustion: None,
         told_reviews: Vec::new(),
         request_id: None,
+        project_id: project_id.clone(),
     };
-    if let Err(error) = s.manager.preflight(&preflight_spec) {
+    // Everything `create` would reject outright (an archived channel,
+    // no resolvable model) is checked before materializing or reusing a
+    // workspace, so a request doomed to fail never leaks one. The source's
+    // model is only a preference: one this node cannot run falls back to
+    // the node's own resolution.
+    let mut preflight = s.manager.preflight(&spec);
+    if preflight.is_err() && body.model.trim().is_empty() && !spec.model.is_empty() {
+        spec.model = String::new();
+        preflight = s.manager.preflight(&spec);
+    }
+    if let Err(error) = preflight {
         let detail = error.to_string();
         s.store().fail_transfer_import(&id, &detail, None)?;
         s.store()
@@ -880,48 +1118,80 @@ pub async fn import_transfer(
         }
         None => None,
     };
-    let workspace = match reused {
-        Some(workspace) => workspace,
+    let git_bin = s.cfg.live().publish.git.clone();
+    let (workspace, history) = match reused {
+        Some(workspace) => {
+            let history = s.store().transfer_events(&id)?.iter().any(|event| {
+                event.kind == "history_imported"
+                    && event.detail.as_deref() == Some(workspace.id.as_str())
+            });
+            (workspace, history)
+        }
         None => {
-            match transfers::import_workspace(
-                &transfer,
-                &s.cfg.live().publish.git,
-                s.manager.backend().as_ref(),
-            )
-            .await
-            {
-                Ok(workspace) => workspace,
-                Err(error) => {
-                    let detail = error.to_string();
-                    s.store().fail_transfer_import(&id, &detail, None)?;
-                    s.store()
-                        .append_transfer_event(&id, "import_failed", Some(&detail), None)?;
-                    return Err(error.into());
+            let recreated = match carried {
+                Some(_) => Some(
+                    transfers::import_onto_origin(
+                        &transfer, &s.manager, &s.node_id, &git_bin, &branch,
+                    )
+                    .await,
+                ),
+                None => None,
+            };
+            match recreated {
+                Some(Ok((workspace, clone))) => {
+                    s.store().record_workspace_origin(
+                        &workspace.id,
+                        clone.as_deref().and_then(|clone| clone.to_str()),
+                    )?;
+                    s.store().append_transfer_event(
+                        &id,
+                        "history_imported",
+                        Some(&workspace.id),
+                        None,
+                    )?;
+                    (workspace, true)
+                }
+                // The history could not be recreated here (the base is not
+                // on this node's clone of the forge, or the forge could not
+                // be reached): the files still travel, and the session is
+                // told it has them without their history.
+                other => {
+                    if let Some(Err(error)) = &other {
+                        let detail = error.to_string();
+                        tracing::warn!(transfer = %id, error = %detail, "transfer imported without its history");
+                        s.store().append_transfer_event(
+                            &id,
+                            "history_unavailable",
+                            Some(&detail),
+                            None,
+                        )?;
+                    }
+                    match transfers::import_workspace(
+                        &transfer,
+                        &git_bin,
+                        s.manager.backend().as_ref(),
+                    )
+                    .await
+                    {
+                        Ok(workspace) => (workspace, false),
+                        Err(error) => {
+                            let detail = error.to_string();
+                            s.store().fail_transfer_import(&id, &detail, None)?;
+                            s.store().append_transfer_event(
+                                &id,
+                                "import_failed",
+                                Some(&detail),
+                                None,
+                            )?;
+                            return Err(error.into());
+                        }
+                    }
                 }
             }
         }
     };
-    let spec = NewSession {
-        channel: transfer.payload.channel.clone(),
-        repo_path: String::new(),
-        branch: Some(branch),
-        base: None,
-        work_item_id: None,
-        model: body.model,
-        initial_prompt: None,
-        budget_tokens: body.budget_tokens,
-        node_id: None,
-        phase: Phase::Execute,
-        review_id: None,
-        base_sha: None,
-        workspace_id: Some(workspace.id.clone()),
-        parent_session: None,
-        continued_from: None,
-        harness: None,
-        on_exhaustion: None,
-        told_reviews: Vec::new(),
-        request_id: None,
-    };
+    spec.workspace_id = Some(workspace.id.clone());
+    spec.initial_prompt = transfers::first_prompt(&transfer, &branch, history);
     let session = match s.manager.create(spec).await {
         Ok(session) => session,
         Err(error) => {
@@ -937,13 +1207,64 @@ pub async fn import_transfer(
         .complete_transfer_import(&id, &workspace.id, &session.id)?;
     s.store()
         .append_transfer_event(&id, "imported", Some(&workspace.id), Some(&session.id))?;
+    // A move closes its source once the import is confirmed: the origin is
+    // told, through the outbox, so an origin that is offline closes it when
+    // it is back. Without the mesh nothing can tell it, and the operator
+    // stops the source there.
+    let source_close = match moving {
+        None => None,
+        Some(source) if transfer.payload.origin_node == s.node_id => {
+            match s
+                .manager
+                .end_moved(&source.session_id, &session.id, &s.node_id, &id)
+                .await
+            {
+                Ok(_) => Some("closed"),
+                Err(error) => {
+                    tracing::warn!(transfer = %id, %error, "moved source not closed");
+                    Some("not_closed")
+                }
+            }
+        }
+        Some(_) => match s.mesh.as_ref() {
+            Some(mesh) => match mesh.send_command(
+                &transfer.payload.origin_node,
+                proto::frame::Command::TransferImported {
+                    transfer_id: id.clone(),
+                    session_id: session.id.clone(),
+                },
+            ) {
+                Ok(_) => {
+                    s.store().append_transfer_event(
+                        &id,
+                        "source_close_queued",
+                        Some(&transfer.payload.origin_node),
+                        Some(&session.id),
+                    )?;
+                    Some("queued")
+                }
+                Err(error) => {
+                    tracing::warn!(transfer = %id, %error, "origin not told of the import");
+                    Some("not_sent")
+                }
+            },
+            None => Some("not_sent"),
+        },
+    };
     Ok((
         StatusCode::CREATED,
         Json(json!({
             "transfer_id": id,
             "workspace_id": workspace.id,
             "session": session,
-            "source_session_changed": false,
+            "history": history,
+            "branch": branch,
+            "source_session": moving.map(|source| &source.session_id),
+            "continued_from": continued_from,
+            "work_item_id": work_item_id,
+            "project_id": session.project_id,
+            "source_close": source_close,
+            "source_session_changed": source_close == Some("closed"),
         })),
     ))
 }
@@ -1607,6 +1928,7 @@ async fn compose_inner(s: AppState, c: ComposeBody) -> ApiResult<Response> {
         on_exhaustion: None,
         told_reviews: Vec::new(),
         request_id: None,
+        project_id: None,
         branch: c.branch,
         base: c.base,
         work_item_id: Some(item.id.clone()),
@@ -7426,6 +7748,75 @@ fn shares(s: &AppState, sender: &str, channel: &str) -> bool {
         .is_ok_and(|members| members.iter().any(|m| m == sender) && members.contains(&s.node_id))
 }
 
+/// A peer confirmed it imported a package this node exported as a move:
+/// close the session the package moved, naming the session that carries the
+/// work on. Only the package's destination may confirm it (any member of its
+/// channel, for a portable package with none), and only a move closes
+/// anything. A repeated confirmation changes nothing.
+async fn close_moved_source(
+    s: &AppState,
+    sender: &str,
+    transfer_id: &str,
+    session_id: &str,
+) -> ApiResult<serde_json::Value> {
+    let row = s
+        .store()
+        .transfer(transfer_id)?
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "no such transfer"))?;
+    let transfer: SignedTransfer = serde_json::from_str(&row.package_json).map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "stored transfer is corrupt",
+        )
+    })?;
+    if transfer.payload.origin_node != s.node_id {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "this transfer was not exported by this node",
+        ));
+    }
+    let allowed = match transfer.payload.target_node.as_deref() {
+        Some(target) => target == sender,
+        None => shares(s, sender, &transfer.payload.channel),
+    };
+    if !allowed {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "only the node this transfer was sent to can confirm its import",
+        ));
+    }
+    let source = transfer
+        .payload
+        .source
+        .as_ref()
+        .filter(|source| source.intent == transfers::TransferIntent::Move)
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::CONFLICT,
+                "this transfer is not a move; its source is left as it is",
+            )
+        })?;
+    if session_id.is_empty() || session_id.len() > 64 {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "the importing session id is malformed",
+        ));
+    }
+    let closed = s
+        .manager
+        .end_moved(&source.session_id, session_id, sender, transfer_id)
+        .await?;
+    if closed {
+        s.store().append_transfer_event(
+            transfer_id,
+            "source_closed",
+            Some(session_id),
+            Some(&source.session_id),
+        )?;
+    }
+    Ok(json!({ "source_session": source.session_id, "closed": closed }))
+}
+
 /// Commands other nodes forward to this one run exactly as local requests do.
 #[async_trait::async_trait]
 impl crate::mesh::forward::CommandExecutor for AppState {
@@ -7456,6 +7847,10 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                 crate::http::evidence::forwarded_candidates(self, sender, query)
             }
             C::ReviewDetail { request } => forwarded_review_detail(self, sender, request).await,
+            C::TransferImported {
+                transfer_id,
+                session_id,
+            } => close_moved_source(self, sender, &transfer_id, &session_id).await,
             // Prepared here under this node's own recipe and policy; the
             // answer is where the template stands, the rest in the hello.
             C::DoTemplatePrepare {

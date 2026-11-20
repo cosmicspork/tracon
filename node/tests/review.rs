@@ -1125,6 +1125,108 @@ async fn a_revising_review_can_be_rejected_and_the_result_is_honest() {
     assert_eq!(status, StatusCode::CONFLICT);
 }
 
+/// A rejection is final: resubmitting a rejected review is refused before
+/// the worktree is captured or a check runs, quoting the operator's reason,
+/// and `review_status` gives the same next step (#999).
+#[tokio::test]
+async fn a_rejected_review_is_refused_at_once_and_says_rejection_is_final() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "reject", "reason": "retargeting consumers" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let revisions = f.store.review_revisions(&id).unwrap().len();
+    let started = |f: &Fixture| {
+        f.event_kinds("s1")
+            .iter()
+            .filter(|kind| *kind == "check_started")
+            .count()
+    };
+    let checks = started(&f);
+
+    sh(
+        std::path::Path::new(&f.worktree),
+        "echo more >> a.txt && git commit -qam more",
+    );
+    let mut args = f.submit_args();
+    args["review_id"] = json!(id);
+    args["body"] = json!("changed prose");
+    let v = f.tool("s1", "submit_review", args).await;
+    let err = v["error"].as_str().unwrap_or_default();
+    assert_eq!(
+        err,
+        format!(
+            "review {id} was rejected (\"retargeting consumers\"); a rejected review is final \
+             and cannot be resubmitted. Submit the work again without review_id to open a new \
+             review."
+        ),
+        "{v}"
+    );
+    // Refused before anything was captured or checked.
+    assert_eq!(f.store.review_revisions(&id).unwrap().len(), revisions);
+    assert_eq!(started(&f), checks);
+    let r = f.store.get_review(&id).unwrap().unwrap();
+    assert_eq!(r.state, "rejected");
+    assert_eq!(r.body, "why");
+
+    let status = f.status_tool(&id).await;
+    assert_eq!(status["state"], "rejected", "{status}");
+    assert_eq!(status["reason"], "retargeting consumers", "{status}");
+    assert_eq!(
+        status["message"],
+        "Rejected: retargeting consumers. This review is closed; submit a new review without \
+         review_id if the work continues.",
+        "{status}"
+    );
+}
+
+/// A review whose approval has not yet landed on the forge is still being
+/// published, and a resubmission of it is told so, before any capture.
+#[tokio::test]
+async fn a_review_being_published_is_refused_as_being_published() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    let revisions = f.store.review_revisions(&id).unwrap().len();
+    for state in ["approved", "publishing"] {
+        f.store
+            .conn()
+            .execute(
+                "UPDATE review SET state=?2, publish_result=NULL WHERE id=?1",
+                [id.as_str(), state],
+            )
+            .unwrap();
+        let mut args = f.submit_args();
+        args["review_id"] = json!(id);
+        args["body"] = json!("changed prose");
+        let v = f.tool("s1", "submit_review", args).await;
+        let err = v["error"].as_str().unwrap_or_default();
+        assert_eq!(
+            err,
+            format!(
+                "review {id} is currently being published and cannot be resubmitted; call \
+                 review_status to wait for the verdict"
+            ),
+            "{state}: {v}"
+        );
+        assert_eq!(f.store.review_revisions(&id).unwrap().len(), revisions);
+    }
+}
+
 #[tokio::test]
 async fn publish_pins_the_reviewed_commit_and_refuses_a_moved_branch() {
     state::isolate();
@@ -3347,6 +3449,53 @@ async fn the_submitter_hears_its_reviewer_and_the_verdict_while_it_waits() {
     assert_eq!(detail["reviewer"]["started_by"], "submission", "{detail}");
     assert_eq!(detail["reviewer"]["verdict_revision"], 1, "{detail}");
     assert_eq!(detail["reviewer"]["revision"], 1, "{detail}");
+}
+
+/// A reviewer's approval with no findings, as `review_verdict` records it,
+/// is news the submitter has nothing to act on: it is not brought back as a
+/// prompt, and its summary is still review_status's to carry. One with a
+/// finding still is.
+#[tokio::test]
+async fn an_ai_approval_with_no_findings_is_not_brought_back() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    bind_review_model(&f);
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    let reviewer = v["review_session"]["session_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    running_reviewer(&f, &reviewer).await;
+    let v = f
+        .tool(
+            &reviewer,
+            "review_verdict",
+            json!({"verdict": "approve", "summary": "small and covered", "findings": []}),
+        )
+        .await;
+    assert_eq!(v["recorded"], true, "{v}");
+    let waits = f.manager.waits().of("s1");
+    let verdict = waits
+        .iter()
+        .find(|w| w.key.starts_with("reviewer:"))
+        .unwrap_or_else(|| panic!("{waits:?}"));
+    assert!(!tracon::session::waits::needs_turn(verdict), "{verdict:?}");
+    let line = tracon::session::waits::notice(verdict).unwrap();
+    assert!(
+        line.contains(&format!("approved review `{id}` with no findings")),
+        "{line}"
+    );
+    let s = f.status_tool(&id).await;
+    assert_eq!(s["reviewer"]["summary"], "small and covered", "{s}");
+    let message = s["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("An approval the node publishes"),
+        "{message}"
+    );
 }
 
 /// A continuation that takes over a review the reviewer has already given
