@@ -1092,6 +1092,19 @@ was sent. Staleness is enforced by the plugin at dispatch. The page's display is
 display. Prose in a format a plugin owns is rendered by that plugin's
 `tracon/format/convert`, a pure function given no context and no credentials.
 
+**Allow is held until a preview was shown.** Each preview also records, as
+`preview_shown_for`, the arguments hash of the call it was shown for: set when the
+plugin answered (`previewable: false` included), cleared when it refused, errored,
+timed out or answered `-32601`. Unless the plugin's `[[plugin]]` entry says
+`require_preview = false`, `Tools::answer_approval` refuses Allow when that hash is not
+the call that would run (the operator's edit included), and `decide_approval` binds it
+as it binds the preview token, so a preview that failed in another tab since is not
+decided past. The check sits in the decide path, not the page, so an API, peer or
+inline-card answer meets it and is told to open the card; the card itself is told why
+(`allow_blocked`) and names the setting. Reject and Request changes never need a
+preview, and calls that make no card (allowed outright, node tools, `[[mcp_server]]`
+tools) never meet it.
+
 **A plugin's UI runs on an origin of its own, and speaks to its plugin as the
 operator.** `http::plugin_ui` gives each plugin whose manifest has `[ui]` a loopback
 listener on a port it keeps (`[plugins] ui_port_first..ui_port_last`, recorded on its

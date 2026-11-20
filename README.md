@@ -1150,6 +1150,7 @@ ask = ["explain"]
 deny = ["drop_*"]
 timeout_secs = 120              # one call; 0 or unset is 60
 idle_timeout_secs = 900
+# require_preview = false       # allow its cards without a shown preview (default true)
 ```
 
 Each call carries a caller context in `params._meta.tracon`: the plugin and tool, a hash
@@ -1177,7 +1178,18 @@ do (`tracon/preview`), with a context made as for an asked call: no approval, an
 nothing marked `lend = "approved"`. The card shows the preview's heading and its body
 (a diff, a table, or the statement, as Markdown), marked "not previewable" when the
 plugin cannot show the effect. A plugin that has no previews gets the generic card. One
-that refuses is shown refusing, and you can still decide. The preview's token, the
+that refuses is shown refusing.
+
+Allow needs a preview by default. It is refused unless the card was shown the plugin's
+preview of the call exactly as it would run, your edit included; a "not previewable"
+answer counts as shown. A plugin that has no previews, or whose preview refuses, fails or
+times out, can't be allowed until you opt it out with `require_preview = false` in its
+`[[plugin]]` entry. The card disables Allow and names that setting. Reject and Request
+changes always stay open. The node enforces this when it records the answer, so an answer
+from the API, a peer or the queue's inline card is held to the same rule; one that showed
+no preview is told to open the card, and a push for such a card opens it. Calls the
+policy or the entry allow outright never make a card, so they are unaffected, as are
+node tools and `[[mcp_server]]` tools. The preview's token, the
 version it was taken against, stays with the node; the page is shown only its hash,
 and your answer sends that hash back, so an answer read from an older preview (another
 tab opened since) decides nothing. An approved call carries the token as
@@ -2080,6 +2092,9 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
 # allow = ["query"]                 # by the plugin's own tool names, as [[mcp_server]]'s lists
 # ask = []
 # deny = ["drop_*"]
+# require_preview = true            # Allow on its cards needs the plugin's preview of the call as it
+                                    # would run to have been shown; false allows without one
+                                    # (for a plugin with no previews). Reject is always open
 
 [providers.anthropic]               # anthropic, openai and openai-codex are built in; add others the same way
 credential = "anthropic"

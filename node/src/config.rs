@@ -549,7 +549,7 @@ impl Plugins {
 
 /// One `[[plugin]]`: the operator's settings for an installed plugin, by
 /// its name. An entry may name a plugin not installed yet.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct PluginEntry {
     pub name: String,
@@ -570,6 +570,27 @@ pub struct PluginEntry {
     /// Tools refused outright. Deny wins over ask, and ask over allow.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub deny: Vec<String>,
+    /// Whether the operator's Allow on a card for one of its tools needs a
+    /// preview of the call, as it would run, to have been shown first: the
+    /// plugin's `tracon/preview` answered (`previewable: false` counts).
+    /// `false` lets a plugin that offers none, or whose preview fails, be
+    /// allowed without one. Reject and Request changes never need one.
+    #[serde(skip_serializing_if = "is_on")]
+    pub require_preview: bool,
+}
+
+impl Default for PluginEntry {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            idle_timeout_secs: 0,
+            timeout_secs: 0,
+            allow: Vec::new(),
+            ask: Vec::new(),
+            deny: Vec::new(),
+            require_preview: true,
+        }
+    }
 }
 
 impl PluginEntry {
@@ -4629,6 +4650,19 @@ mod tests {
         assert_eq!(parsed.plugins.owners, ["cosmicspork", "acme-co"]);
         assert_eq!(parsed.plugin[0].idle_timeout_secs(), 900);
         assert_eq!(parsed.plugin[0].timeout_secs(), 60);
+        // Allow needs a shown preview unless the entry opts its plugin out.
+        assert!(parsed.plugin[0].require_preview);
+        let opted: Config =
+            toml::from_str("[[plugin]]\nname = \"jira-review\"\nrequire_preview = false\n")
+                .unwrap();
+        assert!(!opted.plugin[0].require_preview);
+        assert!(toml::to_string(&parsed.plugin[0])
+            .unwrap()
+            .find("require_preview")
+            .is_none());
+        assert!(toml::to_string(&opted.plugin[0])
+            .unwrap()
+            .contains("require_preview = false"));
         assert_eq!(Config::default().plugins.owners, ["cosmicspork"]);
         let ok = parsed.plugin[0].clone();
         for (owners, entries, says) in [

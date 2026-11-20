@@ -4,6 +4,7 @@
   import PluginCardContent from '../components/PluginCardContent.svelte'
   import { askedBy, pluginCard } from '../lib/plugin-card'
   import {
+    allowGate,
     approvalArguments,
     approvalFields,
     asArguments,
@@ -122,6 +123,8 @@
   const blocked = $derived(Object.keys(problems).length > 0)
   /** The preview shows the call as asked, not as edited: Allow waits for the edit's. */
   const outdated = $derived(pending && previewOutdated(details, previewedFor, edited))
+  /** Allow, held until the call as it would run has been previewed. */
+  const allow = $derived(allowGate(details, { busy, blocked, outdated }))
   /** What the document shows: the operator's draft while it waits, what ran once it is decided. */
   const shown = $derived(
     pending ? edited : details?.edited_arguments ? asArguments(details.edited_arguments) : original,
@@ -218,6 +221,7 @@
           if (!details || !current()) return
           previewError = null
           if (r.preview) details.preview = r.preview
+          details.allow_blocked = r.allow_blocked ?? null
           previewedFor = args
         })
         .catch((e) => {
@@ -386,7 +390,7 @@
 
   {#if pending && details.preview?.status === 'refused'}
     <div class="banner crit" role="alert">
-      the plugin refused the preview <b>· {details.preview.error} · you can still decide</b>
+      the plugin refused the preview <b>· {details.preview.error} · {allow.why ? 'you can still reject it or ask for changes' : 'you can still decide'}</b>
     </div>
   {:else if pending && details.preview?.status === 'shown'}
     {@const p = details.preview}
@@ -627,10 +631,16 @@
     <div class="banner crit">{m}</div>
   {/each}
 
+  {#if open && allow.why}
+    <div class="banner crit" role="status" data-testid="allow-held">
+      Allow waits for a preview <b>· {@html codeSpans(allow.why)}</b>
+    </div>
+  {/if}
+
   {#if open}
     <div class="decide">
       {#if can.has('allow_once')}
-        <button class="btn p" disabled={busy || blocked || outdated} onclick={() => answer('allow_once')}>
+        <button class="btn p" disabled={allow.disabled} title={allow.why ?? undefined} onclick={() => answer('allow_once')}>
           {can.has('allow_repo') ? 'Allow once' : changes.length ? 'Allow with edits' : 'Allow'}
         </button>
       {/if}
