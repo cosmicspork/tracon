@@ -29,7 +29,8 @@
   import { hubLight, nodeLight, runningHere } from './lib/railStatus'
   import { remedy } from './lib/refusal'
   import { router } from './lib/router.svelte'
-  import { screenFor } from './lib/routes'
+  import { nameLookup, screenFor } from './lib/routes'
+  import NameLookup from './components/NameLookup.svelte'
   import { store } from './lib/store.svelte'
   import { surface } from './lib/surface.svelte'
   import { staleInterface, versionLabel } from './lib/version'
@@ -100,6 +101,8 @@
     }).count,
   )
   const screen = $derived(screenFor(router.path))
+  /** A record address that carries a name: resolved before the screen opens. */
+  const lookup = $derived(nameLookup(router.path, router.search, router.hash))
   /** Which rail entry the screen belongs to. Enrolling a node is part of Mesh. */
   const nav = $derived(
     screen.name === 'settings' || screen.name === 'enroll'
@@ -246,7 +249,9 @@
     {:else if store.reconnected !== null}
       <div class="banner ok">Hub reconnected <b>· {store.reconnected} queued update{store.reconnected === 1 ? '' : 's'} handed to the hub</b></div>
     {/if}
-    {#if screen.name === 'review'}
+    {#if lookup}
+      <NameLookup {lookup} />
+    {:else if screen.name === 'review'}
       <Review id={screen.id} />
     {:else if screen.name === 'approval'}
       <Approval id={screen.id} />

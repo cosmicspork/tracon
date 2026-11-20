@@ -1,5 +1,5 @@
 //! What the node and the hub share about records: the tables that replicate
-//! (`document`, `memory`, `promotion`, `work_item`), the change log that makes a change
+//! (`document`, `memory`, `promotion`, `work_item`, `entity_name`), the change log that makes a change
 //! idempotent, the hybrid logical clock that orders writes across sites, and
 //! the last-writer-wins rule that applies them. One crate so the replica in
 //! the hub is the same code as the replica in a node, and neither drags the
@@ -126,11 +126,30 @@ pub const TABLES: &[(&str, &[&str])] = &[
             "updated_ms",
         ],
     ),
+    // The operator's names for records, keyed `<kind>:<entity id>`. Sparse:
+    // a record without a row reads by its generated name.
+    (
+        "entity_name",
+        &[
+            "channel",
+            "kind",
+            "entity_id",
+            "name",
+            "created_ms",
+            "updated_ms",
+        ],
+    ),
 ];
 
 /// Columns emptied on a tombstone so a deleted record carries no content.
-pub const CLEARED_ON_DELETE: &[&str] =
-    &["title", "body", "items_json", "verdicts_json", "bytes_b64"];
+pub const CLEARED_ON_DELETE: &[&str] = &[
+    "title",
+    "body",
+    "items_json",
+    "verdicts_json",
+    "bytes_b64",
+    "name",
+];
 
 pub fn columns_of(table: &str) -> Option<&'static [&'static str]> {
     TABLES.iter().find(|(t, _)| *t == table).map(|(_, c)| *c)

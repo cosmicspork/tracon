@@ -366,6 +366,58 @@ async fn records_converge_through_the_hub_and_survive_its_absence() {
     assert!(hits.iter().all(|h| h.kind != "document"), "{hits:?}");
 }
 
+/// An operator name given on A reads on B through the hub, and so does its
+/// revert. The session is A's own; B holds only the name.
+#[tokio::test]
+async fn a_rename_and_its_revert_reach_the_other_node_through_the_hub() {
+    state::isolate();
+    let (_hub, a, b) = pair().await;
+    let ai = a.id.node_id();
+    let sid = uuid::Uuid::now_v7().to_string();
+    a.store
+        .insert_session(&support::rows::session_row(&sid, &ai, "personal"))
+        .unwrap();
+    let mut b_frames = b.bus.subscribe();
+
+    let renamed = tracon::names::rename(
+        &a.store,
+        &a.bus,
+        &ai,
+        "session",
+        &sid,
+        Some("Login flow"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(renamed.name, "Login flow");
+    wait_for("B to hold A's name for the session", || {
+        b.store
+            .name_get("session", &sid)
+            .ok()
+            .flatten()
+            .is_some_and(|n| n.name == "Login flow" && n.channel == "personal")
+    })
+    .await;
+    // B's open tabs heard it.
+    let mut heard = false;
+    while let Ok(f) = b_frames.try_recv() {
+        if let Frame::Name { id, name, .. } = f {
+            heard |= id == sid && name.as_deref() == Some("Login flow");
+        }
+    }
+    assert!(heard, "B published a name frame");
+
+    tracon::names::rename(&a.store, &a.bus, &ai, "session", &sid, None, None).unwrap();
+    wait_for("B to see the revert", || {
+        b.store.name_get("session", &sid).ok().flatten().is_none()
+    })
+    .await;
+    assert_eq!(
+        b.store.change_log_max(&ai, "personal").unwrap(),
+        a.store.change_log_max(&ai, "personal").unwrap()
+    );
+}
+
 #[tokio::test]
 async fn a_late_joiner_backfills_records_from_each_site() {
     state::isolate();

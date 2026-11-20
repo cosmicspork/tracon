@@ -1699,6 +1699,7 @@ export type Frame =
   | { type: 'providers'; providers: ProviderInfo[] }
   | { type: 'promotions'; waiting: Promotion[] }
   | { type: 'changes'; channel: string; changes: { table: string; id: string; op: string }[] }
+  | { type: 'name'; channel: string; kind: string; id: string; name: string | null }
   | ({ type: 'awake' } & AwakeState)
   | ({ type: 'restart' } & RestartStatus)
 

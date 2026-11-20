@@ -66,6 +66,16 @@ pub enum Frame {
         channel: String,
         changes: Vec<proto::frame::Change>,
     },
+    /// An operator name set or reverted, here or on a peer: `name` is null
+    /// after a revert, when the record reads by its generated name again.
+    /// Derived from the `entity_name` changes a `Changes` frame carries, for
+    /// subscribers only; the change itself is what replicates.
+    Name {
+        channel: String,
+        kind: String,
+        id: String,
+        name: Option<String>,
+    },
     /// Open promotion batches: the third thing that can wait on the operator.
     Promotions {
         waiting: Vec<crate::store::PromotionRow>,
@@ -100,6 +110,7 @@ impl Frame {
             Frame::Mesh(_) => "mesh",
             Frame::Providers { .. } => "providers",
             Frame::Changes { .. } => "changes",
+            Frame::Name { .. } => "name",
             Frame::Promotions { .. } => "promotions",
             Frame::Questions { .. } => "questions",
             Frame::Awake(_) => "awake",
@@ -162,14 +173,18 @@ impl Bus {
                 tracing::warn!(frame = frame.name(), error = %e, "mesh tap dropped a frame");
             }
         }
-        // An error here only means nobody is listening.
-        let _ = self.tx.send(frame);
+        self.publish_untapped(frame);
     }
 
     /// Publish a frame that arrived from a peer: subscribers only, never the
     /// tap, so mirrored state does not echo back onto the mesh.
     pub fn publish_untapped(&self, frame: Frame) {
+        let names = name_frames(&frame);
+        // An error here only means nobody is listening.
         let _ = self.tx.send(frame);
+        for name in names {
+            let _ = self.tx.send(name);
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Frame> {
@@ -185,6 +200,38 @@ impl Bus {
     pub fn begin_shutdown(&self) {
         self.shutdown.cancel();
     }
+}
+
+/// The `name` frames a frame implies: one per operator name a `Changes`
+/// frame sets or reverts. Every path a change takes to subscribers (a local
+/// write, a mirrored one, a backfill) goes through the bus, so deriving them
+/// here is what makes a rename anywhere reach every open tab.
+fn name_frames(frame: &Frame) -> Vec<Frame> {
+    let Frame::Changes { channel, changes } = frame else {
+        return Vec::new();
+    };
+    changes
+        .iter()
+        .filter(|c| c.table == crate::store::names::TABLE)
+        .filter_map(|c| {
+            let (kind, id) = c.id.split_once(':')?;
+            let name = match c.op {
+                proto::frame::ChangeOp::Delete => None,
+                proto::frame::ChangeOp::Upsert => c
+                    .row
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|n| !n.is_empty())
+                    .map(str::to_string),
+            };
+            Some(Frame::Name {
+                channel: channel.clone(),
+                kind: kind.to_string(),
+                id: id.to_string(),
+                name,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -244,5 +291,49 @@ mod tests {
         assert!(rx.try_recv().is_err());
         assert_eq!(sub.recv().await.unwrap().id(), Some(1));
         assert_eq!(sub.recv().await.unwrap().id(), Some(2));
+    }
+
+    #[tokio::test]
+    async fn an_entity_name_change_reaches_subscribers_as_a_name_frame_and_never_the_tap() {
+        let bus = Bus::new();
+        let (tx, mut tap) = mpsc::channel(4);
+        bus.with_tap(tx);
+        let mut sub = bus.subscribe();
+        let change = |op, row| proto::frame::Change {
+            table: "entity_name".into(),
+            op,
+            id: "session:s1".into(),
+            site: "a".into(),
+            site_seq: 1,
+            hlc_ms: 1,
+            hlc_ctr: 0,
+            row,
+        };
+        bus.publish(Frame::Changes {
+            channel: "personal".into(),
+            changes: vec![change(
+                proto::frame::ChangeOp::Upsert,
+                json!({"name": "Login flow"}),
+            )],
+        });
+        bus.publish_untapped(Frame::Changes {
+            channel: "personal".into(),
+            changes: vec![change(proto::frame::ChangeOp::Delete, Value::Null)],
+        });
+        assert_eq!(tap.recv().await.unwrap().name(), "changes");
+        assert!(tap.try_recv().is_err(), "a name frame is never forwarded");
+        let mut names = Vec::new();
+        while let Ok(f) = sub.try_recv() {
+            if let Frame::Name { kind, id, name, .. } = f {
+                names.push((kind, id, name));
+            }
+        }
+        assert_eq!(
+            names,
+            vec![
+                ("session".into(), "s1".into(), Some("Login flow".into())),
+                ("session".into(), "s1".into(), None),
+            ]
+        );
     }
 }

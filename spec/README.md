@@ -270,6 +270,16 @@ name = kind "-" adjectives[h mod A] "-" nouns[(h / A) mod N] "-" zero_pad2((h / 
 
 A name is a label, never a key; two records of a kind may share one.
 
+The operator can rename a session, review, report, approval, manifest, transfer
+or check. Those names are the replicated `entity_name` table (row id
+`<kind>:<entity id>`, last writer wins by HLC like any record); a revert is a
+tombstone. A record with no row reads by its generated name, and the generated
+name still resolves after a rename. Resolution (`GET /api/resolve`, CLI id
+arguments, tool id arguments) tries, in order: an operator name (ignoring case),
+a generated name, the full id, then an id prefix of at least 6 characters; the
+first step that finds anything answers, and several answers are an ambiguity
+listed by name and id, never a guess.
+
 ## Vectors
 
 | File | Pins |

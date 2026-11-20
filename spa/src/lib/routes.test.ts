@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { localDate, redirect, screenFor, settingsSection, tasksSearch, tasksView, usageSearch, usageView, usageWindow } from './routes'
+import { localDate, nameLookup, redirect, screenFor, settingsSection, tasksSearch, tasksView, usageSearch, usageView, usageWindow } from './routes'
 
 test('old top-level addresses lead to where the screen moved', () => {
   expect(redirect('/metrics')).toBe('/usage')
@@ -108,4 +108,21 @@ test('the Tasks address carries the project tab and the search, and nothing that
   expect(tasksSearch({ project: 'none', q: '  ' })).toBe('?project=none')
   const view = { project: 'p1', q: 'word machine' }
   expect(tasksView(tasksSearch(view))).toEqual(view)
+})
+
+test('a record address with a name in place of its id is looked up, then replaced by the id address', () => {
+  const uuid = '019a9e5c-7f20-7a3b-8c1d-2e3f4a5b6c7d'
+  expect(nameLookup(`/sessions/${uuid}`)).toBeNull()
+  expect(nameLookup(`/tasks/${'ab'.repeat(32)}`)).toBeNull()
+  expect(nameLookup('/sessions')).toBeNull()
+  expect(nameLookup('/docs/personal/guide-x')).toBeNull()
+  const s = nameLookup('/sessions/session-loving-bubble-21', '?tab=log', '#authority')
+  expect(s?.kind).toBe('session')
+  expect(s?.q).toBe('session-loving-bubble-21')
+  expect(s?.canonical(uuid)).toBe(`/sessions/${uuid}?tab=log#authority`)
+  const r = nameLookup('/reviews/Login%20flow')
+  expect(r?.kind).toBe('review')
+  expect(r?.q).toBe('Login flow')
+  expect(nameLookup('/approvals/approval-quiet-otter-07')?.kind).toBe('approval')
+  expect(nameLookup('/tasks/0b0e29c4')?.kind).toBe('task')
 })

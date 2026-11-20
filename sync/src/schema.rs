@@ -232,6 +232,28 @@ const STEPS: &[&str] = &[
     r#"
     ALTER TABLE work_item DROP COLUMN brief_slug;
     "#,
+    // Step 10: the names the operator gives records, which every node shows.
+    // A generated name needs no row, so the table holds only overrides; a
+    // revert is a tombstone, so it travels like any other change. A replica
+    // that predates the table drops these changes as malformed and keeps
+    // applying everything else from the same site.
+    r#"
+    CREATE TABLE IF NOT EXISTS entity_name (
+        id         TEXT PRIMARY KEY,
+        channel    TEXT NOT NULL DEFAULT '',
+        kind       TEXT NOT NULL DEFAULT '',
+        entity_id  TEXT NOT NULL DEFAULT '',
+        name       TEXT NOT NULL DEFAULT '',
+        site       TEXT NOT NULL,
+        site_seq   INTEGER NOT NULL,
+        hlc_ms     INTEGER NOT NULL,
+        hlc_ctr    INTEGER NOT NULL DEFAULT 0,
+        deleted    INTEGER NOT NULL DEFAULT 0,
+        created_ms INTEGER NOT NULL DEFAULT 0,
+        updated_ms INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS entity_name_lookup ON entity_name(channel, kind, name COLLATE NOCASE);
+    "#,
 ];
 
 /// Install or upgrade the replicated schema. Safe to call on every open.

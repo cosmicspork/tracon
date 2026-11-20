@@ -36,7 +36,7 @@
 
 <header class="head">
   <div>
-    <span class="overline">Narrative report · <Name kind="report" id={report.id} /></span>
+    <span class="overline">Narrative report · <Name kind="report" id={report.id} renamable /></span>
     <h1>{report.title}</h1>
     <p>Operator feedback, without code changes or publication.</p>
   </div>
