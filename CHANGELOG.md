@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.57.0](https://github.com/cosmicspork/tracon/compare/v0.56.0...v0.57.0) (2026-11-20)
+
+
+### Features
+
+* **node,spa:** fork a session here or on another node, leaving the source running ([#1035](https://github.com/cosmicspork/tracon/issues/1035)) ([54dd9eb](https://github.com/cosmicspork/tracon/commit/54dd9ebbda0fdf730c144a00a6e5a150d93729f3))
+* **node,spa:** move a session to another node with its branch history, chunked delivery and handover ([#1030](https://github.com/cosmicspork/tracon/issues/1030)) ([1f5e234](https://github.com/cosmicspork/tracon/commit/1f5e234b381ecb697a9fa01a4b51755b81f396c7))
+* **node,spa:** require a shown preview before a plugin call can be allowed ([#1033](https://github.com/cosmicspork/tracon/issues/1033)) ([97821be](https://github.com/cosmicspork/tracon/commit/97821beccd1401b7d4f193dbea3f7356984cf844))
+* **spa,node:** operator names that replicate, resolve and reach agents ([#1031](https://github.com/cosmicspork/tracon/issues/1031)) ([47683f5](https://github.com/cosmicspork/tracon/commit/47683f57237da12514bb35c9f94aa89cf2a232e0))
+* **spa,node:** restart a node from Settings, and one Restart in the banner ([#1018](https://github.com/cosmicspork/tracon/issues/1018)) ([faddc06](https://github.com/cosmicspork/tracon/commit/faddc06c8bb78f134bab96f4ed00b2d6d91d5d21))
+
+
+### Bug Fixes
+
+* **node,spa:** make a remote session create idempotent and say when its outcome is unknown ([#1019](https://github.com/cosmicspork/tracon/issues/1019)) ([4a73e1f](https://github.com/cosmicspork/tracon/commit/4a73e1fd56feb908f17c20d66a4a74119bddfac6))
+* **node:** don't wake a session for a decision it has nothing to act on ([#1017](https://github.com/cosmicspork/tracon/issues/1017)) ([f19e7de](https://github.com/cosmicspork/tracon/commit/f19e7de8331adb6b1c0fced2af5edcfec9a224b0))
+* **node:** let an external caller draft its own review's change unasked ([#1014](https://github.com/cosmicspork/tracon/issues/1014)) ([f6f4bbe](https://github.com/cosmicspork/tracon/commit/f6f4bbe1b8fcf4d2f81c8fd1cc381e6cf461e04c))
+* **node:** refuse resubmitting a rejected review early and say rejection is final ([#1015](https://github.com/cosmicspork/tracon/issues/1015)) ([cd268d4](https://github.com/cosmicspork/tracon/commit/cd268d4058b2e572737e9a7df7b7c10fbebb9c37))
+
 ## [0.56.0](https://github.com/cosmicspork/tracon/compare/v0.55.0...v0.56.0) (2026-11-20)
 
 
