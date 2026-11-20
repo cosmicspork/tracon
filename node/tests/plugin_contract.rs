@@ -124,6 +124,7 @@ fn the_node_writes_case(name: &str, case: &str) {
         kind: "agent",
         session: ctx["caller"]["session"].as_str().map(str::to_string),
         harness: ctx["caller"]["harness"].as_str().map(str::to_string),
+        plugin: None,
     };
     let credentials: BTreeMap<String, BTreeMap<String, String>> =
         serde_json::from_value(ctx["credentials"].clone()).unwrap();

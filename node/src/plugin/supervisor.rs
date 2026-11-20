@@ -29,6 +29,11 @@
 //! caller context (`super::context`), and its public half is what a plugin
 //! is started with as `TRACON_NODE_KEY`.
 //!
+//! A plugin whose manifest names `node_methods` is also started with
+//! `--node-socket <path>`: a socket the node serves for that start alone
+//! (`super::host`), in the same private directory, through which it calls
+//! the node back. It goes when the start ends.
+//!
 //! The restart loop has the shape of the sandbox's service supervisor
 //! (`tracon_sandbox::inside::services`) without sharing it: that one spawns
 //! through the sandbox's `Spawner` as another user and reports in protocol
@@ -303,6 +308,9 @@ struct Shared {
     refused: std::sync::Mutex<HashMap<String, (String, String)>>,
     /// What each plugin's build listed when it last started.
     listed: std::sync::Mutex<HashMap<String, Listed>>,
+    /// What answers a plugin's calls on its node socket. Weak: the node's
+    /// tools own the supervisor, through the session manager.
+    host: OnceLock<std::sync::Weak<dyn super::host::Host>>,
 }
 
 impl Shared {
@@ -360,6 +368,7 @@ impl Supervisor {
                 signer: OnceLock::new(),
                 refused: Default::default(),
                 listed: Default::default(),
+                host: OnceLock::new(),
             }),
             instances: Default::default(),
             closed: AtomicBool::new(false),
@@ -371,6 +380,19 @@ impl Supervisor {
     /// public half.
     pub fn set_signer(&self, identity: proto::keys::Identity) {
         let _ = self.shared.signer.set(Arc::new(identity));
+    }
+
+    /// Answer plugins' calls on their node sockets with `host`. Set once.
+    pub fn set_host(&self, host: std::sync::Weak<dyn super::host::Host>) {
+        let _ = self.shared.host.set(host);
+    }
+
+    /// The public half of the key that signs plugin calls, once there is one.
+    pub(crate) fn verifying_key(&self) -> Option<ed25519_dalek::VerifyingKey> {
+        self.shared
+            .signer
+            .get()
+            .map(|identity| identity.verifying_key())
     }
 
     /// `bytes`, signed with the node's identity.
@@ -762,6 +784,29 @@ async fn once(
     };
     let _ = std::fs::remove_file(&socket);
     let token: Arc<str> = hex::encode(rand::random::<[u8; 32]>()).into();
+    // Held for this start alone: a later start is answered on another.
+    let node_socket = if build.manifest.node_methods.is_empty() {
+        None
+    } else {
+        let path =
+            socket.with_file_name(format!("{}.sock", hex::encode(rand::random::<[u8; 6]>())));
+        let from = super::host::From {
+            plugin: plugin.to_string(),
+            channel: instance.channel.clone(),
+            token: token.clone(),
+            version: build.version.clone(),
+            manifest: Arc::new(build.manifest.clone()),
+        };
+        let host = shared
+            .host
+            .get()
+            .cloned()
+            .unwrap_or_else(|| std::sync::Weak::<NoHost>::new());
+        match super::host::listen(path, from, host) {
+            Ok(listening) => Some(listening),
+            Err(e) => return (Outcome::Failed(format!("node socket: {e}")), Duration::ZERO),
+        }
+    };
     let dir = install::build_dir(&shared.state_dir, plugin, &build.version, &build.digest);
     let exec = &build.manifest.exec;
     // Reached through no link an agent could have made, and writable by no
@@ -776,7 +821,11 @@ async fn once(
         .arg("--socket")
         .arg(&socket)
         .arg("--data")
-        .arg(&data)
+        .arg(&data);
+    if let Some(listening) = &node_socket {
+        command.arg("--node-socket").arg(&listening.path);
+    }
+    command
         .env_clear()
         .env("TRACON_PLUGIN_TOKEN", &*token)
         .env("TRACON_NODE_KEY", shared.node_key())
@@ -929,11 +978,29 @@ async fn once(
         inner.started = None;
     }
     let _ = std::fs::remove_file(&socket);
+    drop(node_socket);
     // Its last lines, unless something it started still holds the pipe.
     for pump in pumps.into_iter().flatten() {
         let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
     }
     (outcome, ready_at.map(|at| at.elapsed()).unwrap_or_default())
+}
+
+/// What answers a node socket before the node has set its host: nothing.
+struct NoHost;
+
+#[async_trait::async_trait]
+impl super::host::Host for NoHost {
+    async fn call(
+        &self,
+        _: &super::host::From,
+        _: &str,
+        _: serde_json::Value,
+    ) -> Result<serde_json::Value, super::host::Error> {
+        Err(super::host::Error::failed(
+            "the node cannot answer plugins yet",
+        ))
+    }
 }
 
 /// Why `tools`, what a start listed, is not what `manifest` declares.

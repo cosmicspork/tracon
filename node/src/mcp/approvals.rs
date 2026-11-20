@@ -141,7 +141,31 @@ pub(crate) fn view(a: &ApprovalRow) -> Value {
         // What ran, when the operator rewrote the call before allowing it.
         "edited_arguments": parse(&a.edited_arguments),
     });
+    let card = a.tool == crate::store::approvals::PLUGIN_CARD_TOOL;
+    let plugin = || {
+        serde_json::from_str::<Value>(&a.arguments)
+            .ok()
+            .and_then(|args| args["plugin"].as_str().map(str::to_string))
+            .unwrap_or_else(|| "the plugin".into())
+    };
     let message = match a.state.as_str() {
+        // A plugin's card for a call of yours: the plugin acts on the
+        // decision, and its own tool says what came of it.
+        CHANGES_REQUESTED | REJECTED if card => Some(format!(
+            "The operator did not approve what plugin {} asked on your behalf, and it did not \
+             act. Revise the call to its tool as their {} say and call it again.",
+            plugin(),
+            if a.state == CHANGES_REQUESTED {
+                "notes"
+            } else {
+                "reason"
+            }
+        )),
+        crate::store::approvals::SUCCEEDED if card => Some(format!(
+            "The operator approved what plugin {} asked on your behalf; the plugin now acts on \
+             it. Its own tools say what came of it.",
+            plugin()
+        )),
         CHANGES_REQUESTED => Some(format!(
             "The operator requested changes and nothing ran. Revise the call as their notes \
              say and call {} again; that asks the operator anew, with a new approval_id.",

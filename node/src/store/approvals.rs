@@ -75,6 +75,12 @@ pub const PLUGIN_INSTALL_TOOL: &str = "plugin_install";
 /// What an install card offers: install the build as published, or not.
 pub const PLUGIN_CARD_OPTIONS: &str = r#"[{"option_id":"allow_once","name":"Install","kind":"allow_once"},{"option_id":"reject_once","name":"Reject","kind":"reject_once"}]"#;
 
+/// A card a plugin raises for the operator through its node socket
+/// (`approval/request`, `crate::mcp::plugin_host`). Its arguments are the
+/// plugin's account of what it will do; allowing it runs nothing on the
+/// node: the plugin, waiting on `approval/status`, does what it asked to.
+pub const PLUGIN_CARD_TOOL: &str = "plugin_card";
+
 /// The answers a card for `tool` offers.
 pub fn card_options(tool: &str) -> &'static str {
     match tool {

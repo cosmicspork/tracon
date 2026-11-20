@@ -19,6 +19,7 @@ pub mod gitlab;
 pub mod memory;
 pub mod operator;
 pub mod parity;
+pub mod plugin_host;
 pub mod review;
 pub mod schema;
 pub mod services;
@@ -118,6 +119,15 @@ pub enum Caller {
         /// external log.
         lane: String,
     },
+    /// A plugin calling through the socket the node serves its instance
+    /// (`crate::plugin::host`), as itself. Like the operator API's, its calls
+    /// are allowed by policy or refused, never held.
+    Plugin {
+        plugin: String,
+        /// `plugin:<name>`, which its calls and cards are logged under in
+        /// the channel's external log.
+        lane: String,
+    },
 }
 
 impl CallContext {
@@ -137,7 +147,7 @@ impl CallContext {
     pub fn session_id(&self) -> Option<&str> {
         match &self.caller {
             Caller::Session(id) => Some(id),
-            Caller::External { .. } | Caller::Operator { .. } => None,
+            Caller::External { .. } | Caller::Operator { .. } | Caller::Plugin { .. } => None,
         }
     }
 
@@ -148,7 +158,7 @@ impl CallContext {
     pub fn lane(&self) -> Option<&str> {
         match &self.caller {
             Caller::External { lane, .. } => lane.as_deref(),
-            Caller::Operator { lane } => Some(lane),
+            Caller::Operator { lane } | Caller::Plugin { lane, .. } => Some(lane),
             Caller::Session(_) => None,
         }
     }
@@ -162,6 +172,23 @@ impl CallContext {
     ) -> Self {
         Self {
             caller: Caller::Operator { lane: lane.into() },
+            channel: channel.into(),
+            node_id: node_id.into(),
+        }
+    }
+
+    /// The plugin `plugin`'s instance on `channel`, calling the node.
+    pub fn plugin(
+        plugin: impl Into<String>,
+        channel: impl Into<String>,
+        node_id: impl Into<String>,
+    ) -> Self {
+        let plugin = plugin.into();
+        Self {
+            caller: Caller::Plugin {
+                lane: format!("plugin:{plugin}"),
+                plugin,
+            },
             channel: channel.into(),
             node_id: node_id.into(),
         }
@@ -195,7 +222,7 @@ impl CallContext {
     pub fn wait_budget(&self) -> Option<u64> {
         match &self.caller {
             Caller::External { wait_budget, .. } => *wait_budget,
-            Caller::Session(_) | Caller::Operator { .. } => None,
+            Caller::Session(_) | Caller::Operator { .. } | Caller::Plugin { .. } => None,
         }
     }
 }
@@ -238,7 +265,8 @@ pub struct UiAnswer {
     pub body: axum::body::Bytes,
 }
 
-/// Why a call through [`Tools::call_for_operator`] did not run.
+/// Why a call through [`Tools::call_for_operator`], or a plugin's through
+/// its node socket, did not run.
 #[derive(Debug)]
 pub enum OperatorCallError {
     /// The node has no sessions, so no plugins.
@@ -255,7 +283,8 @@ pub enum OperatorCallError {
     Unreachable(String),
     /// Refused by a rule or the operator's entry.
     Denied(String),
-    /// The call would be asked, and an operator API call is never held.
+    /// The call would be asked, and an operator API or plugin call is never
+    /// held.
     Asked(String),
     /// The plugin answered with an error, or could not be called.
     Tool(String),
@@ -881,16 +910,25 @@ impl Tools {
                     .ok()
                     .flatten()
                     .map(|s| s.harness_id),
+                plugin: None,
             },
             Caller::External { .. } => context::CallerId {
                 kind: "agent",
                 session: None,
                 harness: Some(crate::session::external::HARNESS_ID.to_string()),
+                plugin: None,
             },
             Caller::Operator { .. } => context::CallerId {
                 kind: "operator",
                 session: None,
                 harness: None,
+                plugin: None,
+            },
+            Caller::Plugin { plugin, .. } => context::CallerId {
+                kind: "plugin",
+                session: None,
+                harness: None,
+                plugin: Some(plugin.clone()),
             },
         };
         let timeout = std::time::Duration::from_secs(
@@ -988,11 +1026,12 @@ impl Tools {
         Ok(credentials)
     }
 
-    /// Call a plugin's tool for the operator API ([`Caller::Operator`]):
-    /// decided by the signed policy and the operator's `[[plugin]]` entry as
-    /// an agent's call is, but never held. A call either would ask about is
-    /// refused, naming how to allow it. Every call the channel can take is
-    /// logged to its external log under the route's lane, refusals included.
+    /// Call a plugin's tool for the operator API ([`Caller::Operator`]), or
+    /// for another plugin ([`Caller::Plugin`]): decided by the signed policy
+    /// and the operator's `[[plugin]]` entry as an agent's call is, but never
+    /// held. A call either would ask about is refused, naming how to allow
+    /// it. Every call the channel can take is logged to its external log
+    /// under the caller's lane, refusals included.
     pub async fn call_for_operator(
         &self,
         ctx: &CallContext,
@@ -1078,8 +1117,12 @@ impl Tools {
                     .as_deref()
                     .map(|r| format!(" ({r})"))
                     .unwrap_or_default();
+                let from = match &ctx.caller {
+                    Caller::Plugin { plugin, .. } => format!("plugin {plugin}"),
+                    _ => "the operator API".to_string(),
+                };
                 let refused = format!(
-                    "{name} would be put to the operator{why}, and a call from the operator API \
+                    "{name} would be put to the operator{why}, and a call from {from} \
                      is never held: allow it with [[plugin]] name = \"{}\" and allow = [\"{}\"] \
                      in node.toml, or with a policy bundle that allows it",
                     pt.plugin, pt.tool
@@ -1356,6 +1399,7 @@ impl Tools {
             kind: "operator",
             session: None,
             harness: None,
+            plugin: None,
         };
         let draft = context::Draft {
             plugin,
@@ -3086,9 +3130,11 @@ impl Tools {
         // allowed would not be what happened. Refused instead.
         let place = crate::store::approvals::PLACE_TOOL;
         let plugin = crate::store::approvals::PLUGIN_INSTALL_TOOL;
+        let plugin_card = crate::store::approvals::PLUGIN_CARD_TOOL;
         let takes_no_edit = matches!(approval.tool.as_str(), egress::REQUEST | egress::PREPARE)
             || approval.tool == place
-            || approval.tool == plugin;
+            || approval.tool == plugin
+            || approval.tool == plugin_card;
         if takes_no_edit
             && option_id != OPTION_REQUEST_CHANGES
             && option_id != crate::adapter::types::OPTION_REJECT_ONCE
@@ -3104,6 +3150,10 @@ impl Tools {
                         t if t == plugin => {
                             "a plugin is installed as published, or not: this card takes no \
                                  edit; reject it instead"
+                        }
+                        t if t == plugin_card => {
+                            "a plugin's card is decided as the plugin asked it: it takes no \
+                                 edit; ask for changes instead"
                         }
                         _ => {
                             "this card opens the host it asked about and takes no edit; \
@@ -3157,6 +3207,38 @@ impl Tools {
                 )?;
                 return Ok(());
             }
+        }
+        // A plugin's card runs nothing here: allowing it settles it as
+        // approved, for the plugin waiting on `approval/status` to act on.
+        // Refusing it, or asking for changes, is answered as any call's is,
+        // below.
+        if approval.tool == plugin_card && option_id == OPTION_ALLOW_ONCE {
+            use crate::store::approvals::SUCCEEDED;
+            let decision = Decision {
+                state: RUNNING,
+                option_id,
+                note: notes.as_deref(),
+                bound_to: Some(&approval.arguments),
+                ..Default::default()
+            };
+            if !access.store.decide_approval(id, &decision)? {
+                return Err(no_longer_waiting());
+            }
+            let decided = access.store.get_approval(id)?.unwrap_or(approval);
+            access
+                .manager
+                .approval_answered(&decided, RUNNING, by.as_deref())
+                .await;
+            access.store.finish_approval(
+                id,
+                SUCCEEDED,
+                Some(&json!({ "approved": true }).to_string()),
+                None,
+            )?;
+            if let Some(settled) = access.store.get_approval(id)? {
+                access.manager.approval_decided(&settled, SUCCEEDED).await;
+            }
+            return Ok(());
         }
         // An install card installs the build it names, or drops it: there is
         // no call to run, and nothing to change.

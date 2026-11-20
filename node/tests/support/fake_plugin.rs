@@ -21,6 +21,12 @@
 //!   jira-review's paged search does: the page `arguments.cursor` names
 //!   (`""` for the first) as JSON text. A page that is a string is answered
 //!   as an error with that text.
+//! - `node`: calls the node back on the socket it was given with
+//!   `--node-socket` (written to `node_socket` at start): `arguments.method`
+//!   with `arguments.params`, under its own token or `arguments.token`, and
+//!   with the `_meta.tracon` it was sent added as `params.on_behalf` when
+//!   `arguments.on_behalf` is true. It answers with `{status, body}`: the
+//!   HTTP status and the node's JSON-RPC response.
 //!
 //! Previews and formats, read at each request rather than each start:
 //!
@@ -71,16 +77,19 @@ struct Fake {
     sessions: Arc<Mutex<HashSet<String>>>,
     own_instance: String,
     node_key: String,
+    token: String,
+    node_socket: Option<PathBuf>,
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let mut args = std::env::args().skip(1);
-    let (mut socket, mut data) = (None, None);
+    let (mut socket, mut data, mut node_socket) = (None, None, None);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--socket" => socket = args.next().map(PathBuf::from),
             "--data" => data = args.next().map(PathBuf::from),
+            "--node-socket" => node_socket = args.next().map(PathBuf::from),
             _ => {}
         }
     }
@@ -92,6 +101,11 @@ async fn main() {
         .collect();
     std::fs::write(data.join("env.json"), Value::Object(env).to_string()).unwrap();
     std::fs::write(data.join("pid"), std::process::id().to_string()).unwrap();
+    match &node_socket {
+        Some(path) => std::fs::write(data.join("node_socket"), path.to_string_lossy().as_bytes()),
+        None => std::fs::remove_file(data.join("node_socket")).or(Ok(())),
+    }
+    .unwrap();
     let cwd = std::env::current_dir().unwrap();
     std::fs::write(data.join("cwd"), cwd.to_string_lossy().as_bytes()).unwrap();
     let mode = std::fs::read_to_string(data.join("mode")).unwrap_or_default();
@@ -140,6 +154,8 @@ async fn main() {
         sessions: Default::default(),
         own_instance: hex::encode(Sha256::digest(token.as_bytes())),
         node_key: std::env::var("TRACON_NODE_KEY").unwrap_or_default(),
+        token,
+        node_socket,
     };
     let app = Router::new()
         .route("/", post(mcp))
@@ -355,6 +371,42 @@ async fn mcp(
                 }
             }
             append(&fake, "calls.jsonl", &echo);
+            if tool == "node" {
+                let args = &params["arguments"];
+                let mut rpc_params = args.get("params").cloned().unwrap_or(json!({}));
+                if args["on_behalf"] == true {
+                    rpc_params["on_behalf"] = params["_meta"]["tracon"].clone();
+                }
+                let token = args["token"].as_str().unwrap_or(&fake.token).to_string();
+                let out = match &fake.node_socket {
+                    None => json!({ "status": 0, "body": "no --node-socket" }),
+                    Some(path) => {
+                        let http = reqwest::Client::builder()
+                            .unix_socket(path.as_path())
+                            .build()
+                            .unwrap();
+                        let response = http
+                            .post("http://node/")
+                            .bearer_auth(token)
+                            .json(&json!({
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "method": args["method"],
+                                "params": rpc_params,
+                            }))
+                            .send()
+                            .await
+                            .unwrap();
+                        let status = response.status().as_u16();
+                        let body: Value = response.json().await.unwrap_or(Value::Null);
+                        json!({ "status": status, "body": body })
+                    }
+                };
+                return answer(
+                    &request,
+                    json!({ "content": [{ "type": "text", "text": out.to_string() }], "isError": false }),
+                );
+            }
             if tool == "sleep" {
                 let ms = params["arguments"]["ms"].as_u64().unwrap_or(0);
                 tokio::time::sleep(Duration::from_millis(ms)).await;
