@@ -288,6 +288,10 @@ export interface CandidateTransfer {
     evidence: unknown
     files: TransferFile[]
     context: { documents: unknown[]; memories: unknown[]; note: string }
+    /** Version 2: the branch's commits and where they came from. */
+    git?: unknown
+    /** Version 2: the session a move takes the work from. */
+    source?: unknown
   }
   sha256: string
   signature: string
@@ -324,7 +328,16 @@ export interface TransferImport {
   transfer_id: string
   workspace_id: string
   session: Session
-  source_session_changed: false
+  /** Whether the branch arrived with its commits (a version 2 package). */
+  history?: boolean
+  branch?: string
+  /** For a move: the session it took over, and whether that one is closed yet. */
+  source_session?: string | null
+  continued_from?: string | null
+  work_item_id?: string | null
+  project_id?: string | null
+  source_close?: 'closed' | 'not_closed' | 'queued' | 'not_sent' | null
+  source_session_changed: boolean
 }
 
 export interface Invite {

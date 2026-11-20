@@ -16,6 +16,7 @@ const ENDED: Record<string, string> = {
   node_restart: 'node restarted',
   provider_exhausted: 'provider exhausted',
   harness_died: 'harness died',
+  moved: 'moved to another node',
   error: 'failed',
 }
 

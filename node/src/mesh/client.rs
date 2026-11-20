@@ -936,6 +936,42 @@ impl MeshClient {
                     }
                 }
             }
+            Payload::CandidateTransferChunk {
+                transfer_id,
+                index,
+                count,
+                sha256,
+                data_b64,
+            } if env.is_direct() => {
+                let chunk = crate::transfers::MeshChunk {
+                    transfer_id: transfer_id.clone(),
+                    index: *index,
+                    count: *count,
+                    sha256: sha256.clone(),
+                    data_b64: data_b64.clone(),
+                };
+                match crate::transfers::receive_chunk(
+                    &self.store,
+                    &self.node_id(),
+                    sender,
+                    &env.channel,
+                    chunk,
+                ) {
+                    Ok(crate::transfers::ChunkOutcome::Staged(id)) => {
+                        tracing::info!(from = %sender, transfer = %id, "candidate transfer staged for confirmation");
+                        return Opened::Applied;
+                    }
+                    Ok(outcome) => {
+                        tracing::debug!(from = %sender, transfer = %transfer_id, ?outcome, "candidate transfer piece kept");
+                        return Opened::Applied;
+                    }
+                    Err(error) => {
+                        tracing::warn!(from = %sender, error = %error, "candidate transfer piece refused");
+                        self.note_refusal(format!("candidate transfer from {sender}: {error}"));
+                        return Opened::Ignored;
+                    }
+                }
+            }
 
             Payload::CredentialHandoff { credentials } if env.is_direct() => {
                 let Some((broker, path)) = self.broker.get() else {

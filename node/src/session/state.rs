@@ -94,6 +94,10 @@ pub enum EndReason {
     /// The session's error says how it ended. Its work can be carried on
     /// from its workspace in a new session, as a node restart's can.
     HarnessDied,
+    /// The work moved to a session on another node, which confirmed it had
+    /// imported it: a `moved` event names that session. Its open reviews are
+    /// left as they were, and its workspace is kept until gc.
+    Moved,
     Error,
 }
 
@@ -111,6 +115,7 @@ impl EndReason {
             Self::NodeRestart => "node_restart",
             Self::ProviderExhausted => "provider_exhausted",
             Self::HarnessDied => "harness_died",
+            Self::Moved => "moved",
             Self::Error => "error",
         }
     }
@@ -252,6 +257,10 @@ pub mod event_kind {
     /// The session's work item was closed (by the agent or the operator);
     /// the session ends at the end of the turn.
     pub const WORK_CLOSED: &str = "work_closed";
+    /// The session's work moved to another node, whose import is confirmed
+    /// (`to_session`, `to_node`, `transfer_id`). The session ends with
+    /// `moved` right after.
+    pub const MOVED: &str = "moved";
     /// A plan session wrote its plan document; the item now carries its slug.
     pub const PLAN_ARTIFACT: &str = "plan_artifact";
     /// The agent showed the operator its work (`id`, `title`, `format`,

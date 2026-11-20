@@ -11,6 +11,9 @@
   let documentSlugs = $state('')
   let memoryIds = $state('')
   let note = $state('')
+  // A move takes the candidate's session over: the receiver's session holds
+  // its task, project and budget, and this one closes once that import lands.
+  let moving = $state(true)
   let sending = $state(false)
   let result = $state<string | null>(null)
   let error = $state<string | null>(null)
@@ -46,16 +49,21 @@
         candidate_id: candidateId.trim(),
         context: { documents: ids(documentSlugs), memories: ids(memoryIds), note },
         destination_node: destination || undefined,
-        // A selected node means direct sealed mesh delivery. The server refuses
-        // an unavailable or oversized online transfer rather than downloading
-        // or importing somewhere else.
+        // A selected node means direct sealed mesh delivery, in pieces when the
+        // package is larger than one frame. The server refuses an unavailable
+        // online transfer rather than downloading or importing somewhere else.
         delivery: destination ? 'mesh' : 'portable',
+        intent: moving ? 'move' : 'handoff',
       })
       if (response.delivery === 'portable') {
         download(response.transfer, `tracon-${generatedName('transfer', response.transfer.payload.candidate_id)}.json`)
-        result = 'Signed package downloaded. On the receiving node, choose Import a session and explicitly start the isolated continuation.'
+        result = moving
+          ? 'Signed package downloaded. Import it on the receiving node; this session closes once that node confirms the import over the mesh.'
+          : 'Signed package downloaded. On the receiving node, choose Import a session and explicitly start the isolated continuation.'
       } else {
-        result = `Sealed package queued for ${nodeDisplayName(store.nodes, destination)}. That node must explicitly import it before a new isolated session starts.`
+        result = moving
+          ? `Sealed package queued for ${nodeDisplayName(store.nodes, destination)}. Once that node imports it, its new session takes this work over and this session closes.`
+          : `Sealed package queued for ${nodeDisplayName(store.nodes, destination)}. That node must explicitly import it before a new isolated session starts.`
       }
     } catch (caught) {
       error = caught instanceof Error ? caught.message : String(caught)
@@ -66,9 +74,9 @@
 </script>
 
 <details class="transfer">
-  <summary>Continue on another node</summary>
+  <summary>Move to another node</summary>
   <p class="consequence">
-    Continue a candidate elsewhere with only the named context. No credentials travel; the receiver confirms the import.
+    Continue a candidate elsewhere, with its branch's commits and only the named context. No credentials travel; the receiver confirms the import.
   </p>
   <label>
     <span>Source candidate ID</span>
@@ -83,6 +91,10 @@
       {/each}
     </select>
     <small>Reachable nodes in {channel}. Blank downloads a package.</small>
+  </label>
+  <label class="check">
+    <input type="checkbox" bind:checked={moving} />
+    <span>Move this work: the new session takes over its task, project and budget, and the candidate's session here closes once the receiver imports.</span>
   </label>
   <label>
     <span>Included document slugs</span>
@@ -131,6 +143,13 @@
   }
   small { color: var(--dim); }
   input, select, textarea { width: 100%; }
+  label.check {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+  }
+  label.check > input { width: auto; }
+  label.check > span { text-transform: none; letter-spacing: 0; }
   .transfer > .btn { margin-top: 12px; }
   .ok { color: var(--ok); }
   .transfer > p.bad { color: var(--crit); }

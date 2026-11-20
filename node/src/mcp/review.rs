@@ -4500,6 +4500,7 @@ async fn start_review_session(
         harness: None,
         on_exhaustion: None,
         told_reviews: Vec::new(),
+        project_id: None,
         model,
         budget_tokens: bindings["phases"]["review"]["budget_tokens"].as_i64(),
         initial_prompt: None,

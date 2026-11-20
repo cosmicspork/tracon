@@ -314,6 +314,7 @@ pub fn router(state: AppState) -> Router {
             )),
         )
         .route("/api/transfers/{id}/import", post(api::import_transfer))
+        .route("/api/transfers/{id}/send", post(api::send_transfer))
         .route("/api/transfers/{id}", get(api::get_transfer))
         .route(
             "/api/channels",

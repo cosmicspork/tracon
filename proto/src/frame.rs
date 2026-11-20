@@ -245,6 +245,20 @@ pub enum Payload {
     CandidateTransfer {
         transfer: Value,
     },
+    /// Direct only. One piece of a [`Payload::CandidateTransfer`] package too
+    /// large for one frame: bytes `index` of `count` of the package's JSON,
+    /// with this piece's own sha256. `transfer_id` is the package's signed
+    /// sha256, which the reassembled package must verify to. The receiver
+    /// keeps the pieces it has, so a piece sent again completes it and one it
+    /// already holds changes nothing. An older peer cannot read this payload
+    /// and drops it.
+    CandidateTransferChunk {
+        transfer_id: String,
+        index: u32,
+        count: u32,
+        sha256: String,
+        data_b64: String,
+    },
     /// Direct only: credentials for the recipient's broker, each
     /// `{ "name": …, "credential": … }` in the broker's own row shape. The
     /// receiver keeps its own bindings check; a credential not bound to it is
@@ -587,6 +601,17 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         commit: String,
         key: String,
+    },
+    /// From the node that imported a moved session's transfer package, to
+    /// the package's origin: the import is confirmed and `session_id` is the
+    /// session there that carries the work on, so the origin closes the
+    /// session the package moved. The origin checks the transfer is one it
+    /// exported as a move and that the sender may hold it. An older peer
+    /// cannot read this op and answers that it runs an older build; its
+    /// source session is then left for the operator to stop.
+    TransferImported {
+        transfer_id: String,
+        session_id: String,
     },
 }
 

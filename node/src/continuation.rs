@@ -350,6 +350,7 @@ pub fn next_action(s: &Situation<'_>) -> NextAction {
             EndReason::PhaseDone,
             EndReason::ItemClose,
             EndReason::Continued,
+            EndReason::Moved,
         ]
         .iter()
         .any(|ok| r == ok.as_str())
@@ -374,6 +375,13 @@ pub fn next_action(s: &Situation<'_>) -> NextAction {
         return at(
             "continue",
             format!("{who} ended without a written plan; continue planning from its workspace."),
+            Some(latest),
+        );
+    }
+    if is(EndReason::Moved) {
+        return at(
+            "watch",
+            format!("{who} moved to another node, which carries the work on."),
             Some(latest),
         );
     }
@@ -1069,6 +1077,7 @@ pub async fn carry_on(
         // The policy the old attempt ran under carries over with the work.
         on_exhaustion: store.exhaustion(&old.id)?.map(|row| row.choice()),
         told_reviews: crate::session::told_reviews(&carried),
+        project_id: None,
     };
     let row = manager.create(spec).await?;
     if suspended {

@@ -618,6 +618,13 @@
       continued <b>· its work carries on in</b>
       <Name kind="session" id={continuedAs.id} href="/sessions/{continuedAs.id}" class="lnk" />
     </div>
+  {:else if session.end_reason === 'moved'}
+    <div class="banner dim">
+      moved to another node <b>· its open reviews stay here as they were; its workspace is kept until gc</b>
+      {#if continuedAs}
+        <Name kind="session" id={continuedAs.id} href="/sessions/{continuedAs.id}" class="lnk" prefix="continues as " />
+      {/if}
+    </div>
   {:else if session.end_reason === 'node_restart'}
     <div class="banner dim">
       ended by a node restart <b>· you did not stop it; its workspace is kept</b>
