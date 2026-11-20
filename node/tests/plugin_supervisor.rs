@@ -14,6 +14,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use serde_json::{json, Value};
+
 use tracon::{
     config::Config,
     mcp::upstream,
@@ -420,4 +422,43 @@ async fn a_node_restart_waits_for_a_running_instance() {
     assert!(!busy.idle());
     manager.plugins().shutdown().await;
     assert!(tracon::restart::busy(&manager).idle());
+}
+
+#[tokio::test]
+async fn a_process_left_by_a_node_killed_outright_is_ended_at_the_next_start() {
+    use tracon::plugin::supervisor::running;
+    let r = rig();
+    r.sup.ensure(PLUGIN, "personal").await.unwrap();
+    let pid = r.pid("personal");
+    let records = || -> Vec<PathBuf> {
+        std::fs::read_dir(running::dir(&r.state))
+            .map(|entries| entries.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default()
+    };
+    let recorded = records();
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    let record = recorded[0].clone();
+    assert!(
+        record
+            .to_string_lossy()
+            .ends_with(&format!(".personal.{pid}.json")),
+        "{record:?}"
+    );
+    // As the next run of the node finds it: written by a run that is gone.
+    let mut written: Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+    written["node"] = json!("a-run-killed-outright");
+    std::fs::write(&record, written.to_string()).unwrap();
+    let ended = tokio::task::spawn_blocking({
+        let state = r.state.clone();
+        move || running::reap_orphans(&state, Duration::from_secs(2))
+    })
+    .await
+    .unwrap();
+    assert_eq!(ended, 1);
+    r.until("the orphan ends", Duration::from_secs(5), |_| gone(pid))
+        .await;
+    assert!(!record.exists());
+    // A process this run starts is recorded and, once stopped, forgotten.
+    r.sup.shutdown().await;
+    assert!(records().is_empty(), "{:?}", records());
 }

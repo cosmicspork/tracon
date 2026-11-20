@@ -429,9 +429,16 @@ on macOS both are `~/Library/Application Support/tracon/`.
 | `providers/` | harness provider logins | re-doable by logging in again |
 | `plugins/data/` | each installed plugin's own data, by channel (`<name>/<channel>/`, 0700) | back it up |
 | `plugins/logs/` | plugin processes' output, rotated | disposable |
+| `plugins/run/` | one record per running plugin process, so a node killed outright ends them at its next start | disposable; skip |
 | `plugins/bin/` | installed plugin builds, pinned by digest in `node.db` | derived from the releases; a lost or changed build is refused by its digest, and `tracon plugin rm` then `add` installs the latest release again, on a new card |
 | `local-runtime/`, `workspaces/`, `harness-state/`, `git-home/` | runtime volumes, snapshots, caches | derived; large; skip |
 | the vector index, inside `node.db` | semantic search | derived; `tracon doc reindex` |
+
+A node killed outright (SIGKILL, the OOM killer) cannot stop its plugin processes. Each
+runs in its own process group, so it outlives the node. At its next start the node ends
+every process its last run recorded under `plugins/run/`, but only when the process
+holding that pid still started when the record says and runs the same program. A pid
+the system has since handed to something else is left alone.
 
 Plugin processes' sockets are in the runtime directory (`$XDG_RUNTIME_DIR/tracon/p/`,
 or `/tmp/tracon-<uid>/tracon/p/`), not the state directory, and are made afresh at
