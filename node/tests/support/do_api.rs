@@ -30,6 +30,8 @@ pub struct Api {
     pub manifests: Vec<Value>,
     /// Every exec: the session and its argv.
     pub execs: Vec<(String, Vec<String>)>,
+    /// Every fork: the session forked and the request's body.
+    pub forks: Vec<(String, Value)>,
     pub deleted_sessions: Vec<String>,
     pub deleted_configs: Vec<String>,
     pub deleted_checkpoints: Vec<String>,
@@ -329,29 +331,36 @@ async fn checkpoint_delete(State(s): State<S>, Path((id, cp)): Path<(String, Str
     StatusCode::NO_CONTENT.into_response()
 }
 
-async fn fork(State(s): State<S>, Path(id): Path<String>) -> Response {
+async fn fork(State(s): State<S>, Path(id): Path<String>, body: Option<Json<Value>>) -> Response {
+    let body = body.map(|Json(body)| body).unwrap_or_else(|| json!({}));
     let mut api = s.api.lock().unwrap();
     let Some(parent) = api.sessions.get(&id).cloned() else {
         return not_found();
     };
-    let child = api.id("aa");
-    let config = api.id("cc");
+    api.forks.push((id.clone(), body.clone()));
+    let count = body["count"].as_u64().unwrap_or(1);
     let name = format!("{}-fork", parent["name"].as_str().unwrap_or(""));
     let manifest = api
         .configs
         .get(parent["config_id"].as_str().unwrap_or(""))
         .map(|c| c["manifest"].clone());
-    api.configs.insert(
-        config.clone(),
-        json!({"id": config, "name": name, "created_at": "2026-11-02T00:00:00Z",
-               "manifest": manifest}),
-    );
-    let session = json!({
-        "session_id": child, "name": name, "agent_kind": "AGENT_KIND_NONE",
-        "status": "SESSION_STATUS_READY", "config_id": config, "parent_session_id": id,
-    });
-    api.sessions.insert(child, session.clone());
-    Json(json!({"sessions": [session]})).into_response()
+    let mut made = Vec::new();
+    for _ in 0..count {
+        let child = api.id("aa");
+        let config = api.id("cc");
+        api.configs.insert(
+            config.clone(),
+            json!({"id": config, "name": name, "created_at": "2026-11-02T00:00:00Z",
+                   "manifest": manifest}),
+        );
+        let session = json!({
+            "session_id": child, "name": name, "agent_kind": "AGENT_KIND_NONE",
+            "status": "SESSION_STATUS_READY", "config_id": config, "parent_session_id": id,
+        });
+        api.sessions.insert(child, session.clone());
+        made.push(session);
+    }
+    Json(json!({"sessions": made})).into_response()
 }
 
 async fn configs(State(s): State<S>) -> Response {

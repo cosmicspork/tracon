@@ -464,7 +464,11 @@ fn push_waiting(out: &mut String, facts: &Facts) {
         // A review's checks are the node's wait, not the operator's, but
         // they come back the same way, queued for room or running.
         let checks = match facts.tools.iter().any(|t| t == crate::mcp::review::STATUS) {
-            true => " So do a review's required checks, running or queued for room on the node.",
+            true => {
+                " So do a review's required checks, running or queued for room on the node, or \
+                 running on DigitalOcean when the node has no room and may place them there \
+                 (review_status says where they run)."
+            }
             false => "",
         };
         out.push_str(&format!(
@@ -955,7 +959,16 @@ fn push_check(out: &mut String, store: &Store, run: &crate::store::CheckRunRow) 
         ));
         return;
     }
-    out.push_str(&format!("- `{command}`: {outcome}{exit}{took}{reused}\n"));
+    // Checks placed off the node say where: their evidence is derived from
+    // the check image (a template built from it), not that image exactly.
+    let elsewhere = serde_json::from_str::<serde_json::Value>(&run.metadata_json)
+        .ok()
+        .filter(|metadata| metadata["execution_backend"] == "digitalocean")
+        .map(|_| " on DigitalOcean, in a sandbox derived from the check image")
+        .unwrap_or_default();
+    out.push_str(&format!(
+        "- `{command}`: {outcome}{exit}{took}{elsewhere}{reused}\n"
+    ));
     let passed = outcome == "passed";
     let cap = if passed {
         PASSED_TAIL_CHARS
@@ -2704,6 +2717,10 @@ mod tests {
         store
             .insert_check_run(&check_run(head, "c2", "cargo fmt --check", "passed", "ok"))
             .unwrap();
+        // Placed on DigitalOcean: said, as derived from the check image.
+        let mut remote = check_run(head, "c4", "cargo clippy", "passed", "clean");
+        remote.metadata_json = json!({ "execution_backend": "digitalocean" }).to_string();
+        store.insert_check_run(&remote).unwrap();
         // A reused failure's record only points at the run that executed;
         // what failed is read from that one.
         let mut source = check_run(
@@ -2793,6 +2810,13 @@ mod tests {
         );
         assert!(
             text.contains("- `cargo fmt --check`: passed, exit 0 in 42s"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "- `cargo clippy`: passed, exit 0 in 42s on DigitalOcean, in a sandbox derived \
+                 from the check image"
+            ),
             "{text}"
         );
         // A failure says what failed and how it ended, bounded; a pass is

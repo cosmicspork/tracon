@@ -139,6 +139,20 @@ pub struct CheckReport {
     /// run is one to make again when there is room, not a verdict.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_room: Option<String>,
+    /// Where the checks ran when it was not the node's own runtime, and
+    /// what that provider confirmed they ran in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elsewhere: Option<Elsewhere>,
+}
+
+/// Checks run off the node's own runtime: by which provider, and the image
+/// identity it confirmed for the sandbox they were forked from.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Elsewhere {
+    pub provider: crate::provider::ProviderKind,
+    pub identity: crate::provider::ImageIdentity,
+    /// The sandboxes forked from the prepared one, one per check that ran.
+    pub forks: usize,
 }
 
 /// One preparation of a candidate: the repository's `prepare` commands, run
@@ -214,9 +228,9 @@ impl std::fmt::Display for PrepareFailure {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct CheckDefinition {
-    command: String,
-    timeout_secs: u64,
+pub(crate) struct CheckDefinition {
+    pub command: String,
+    pub timeout_secs: u64,
 }
 
 /// The trusted required definitions. Candidate files never alter this list.
@@ -321,12 +335,9 @@ pub async fn run_required_for(
         let definition_json =
             serde_json::to_string(&definition).map_err(|error| error.to_string())?;
         let definition_hash = hash(&definition_json);
-        let reuse_key = pinned_image.as_ref().map(|image| {
-            hash(&format!(
-                "{}\n{}\n{}\n{}",
-                candidate.head_sha, definition_hash, image, inputs_json
-            ))
-        });
+        let reuse_key = pinned_image
+            .as_ref()
+            .map(|image| reuse_key(&candidate.head_sha, &definition_hash, image, &inputs_json));
         let rerun_of = if force_rerun {
             store
                 .latest_check_for_identity(
@@ -353,50 +364,22 @@ pub async fn run_required_for(
         let started_ms = now_ms();
 
         if let Some(source) = prior {
-            let source_outcome = effective_outcome(&source).to_string();
-            let ok = source_outcome == "passed";
-            store
-                .insert_check_run(&CheckRunRow {
-                    id: run_id.clone(),
-                    candidate_id: Some(candidate.id.clone()),
-                    session_id: session_id.map(str::to_string),
-                    command: Some(command.clone()),
+            results.push(record_reuse(
+                store,
+                candidate,
+                session_id,
+                Pending {
+                    index,
+                    command: command.clone(),
                     definition_json,
-                    definition_hash: Some(definition_hash),
-                    execution_image: Some(recorded_image.clone()),
-                    inputs_json: Some(inputs_json.clone()),
+                    definition_hash,
                     reuse_key,
-                    outcome: "reused".into(),
-                    source_outcome: Some(source_outcome),
-                    exit_code: source.exit_code,
-                    log: source.log.clone(),
-                    duration_ms: source.duration_ms,
-                    started_ms,
-                    finished_ms: Some(started_ms),
                     rerun_of: None,
-                    reused_from_id: Some(source.id.clone()),
-                    metadata_json: json!({
-                        "reused": true,
-                        "source_run_id": source.id,
-                        "source_outcome": effective_outcome(&source),
-                        "execution_backend": backend.kind(),
-                        "candidate_tree": candidate.tree_sha,
-                    })
-                    .to_string(),
-                })
-                .map_err(|error| error.to_string())?;
-            telemetry().check_finished("review", environment.repo.as_deref(), "reused", None);
-            results.push(CheckResult {
-                command: command.clone(),
-                ok,
-                exit: source.exit_code.and_then(|code| i32::try_from(code).ok()),
-                outcome: "reused".into(),
-                tail: source.log,
-                ms: source.duration_ms.unwrap_or_default().max(0) as u64,
-                reused_from: Some(source.id),
-                missing_tool: None,
-                failures: recorded_failures(&source.metadata_json),
-            });
+                },
+                (&recorded_image, &inputs_json),
+                source,
+                (backend.kind(), environment.repo.as_deref()),
+            )?);
             any_reused = true;
             continue;
         }
@@ -590,43 +573,7 @@ pub async fn run_required_for(
             break;
         }
         let (outcome, exit, tail_text, metadata) = match finished {
-            Ok(Ok(output)) => {
-                let mut output_text = String::from_utf8_lossy(&output.stdout).into_owned();
-                output_text.push_str(&String::from_utf8_lossy(&output.stderr));
-                let code = output.status.code();
-                // 127 is the shell saying it could not find the command. That
-                // is the check environment's failing, not the candidate's, so
-                // it is neither a pass nor a failure the agent is told to fix
-                // — and `latest_reusable_check` does not accept the outcome,
-                // so it can never become evidence either.
-                let missing = (!output.status.success() && code == Some(127))
-                    .then(|| missing_tool(command, &output_text));
-                let outcome = match (output.status.success(), &missing) {
-                    (true, _) => "passed",
-                    (false, Some(_)) => "not_runnable",
-                    (false, None) => "failed",
-                };
-                let mut metadata = json!({
-                    "execution_backend": backend.kind(),
-                    "timeout_secs": timeout.as_secs(),
-                });
-                if let Some(tool) = &missing {
-                    metadata["missing_tool"] = json!(tool);
-                    metadata["execution_image_source"] = json!(environment.image_source);
-                }
-                if !environment.prepare.is_empty() {
-                    metadata["prepared_with"] = json!(environment.prepare);
-                    metadata["cache_volume"] = json!(environment.cache_volume);
-                }
-                // Read from the whole output, before it is cut to a tail.
-                if outcome == "failed" {
-                    let failures = output::failure_lines(&output_text);
-                    if !failures.is_empty() {
-                        metadata["failures"] = json!(failures);
-                    }
-                }
-                (outcome, code, tail(&output_text), metadata)
-            }
+            Ok(Ok(output)) => judge(&output, command, &environment, timeout, backend.kind()),
             // The cluster had no room for the check's pod past its grace,
             // refused it, or put it out under pressure: said in the
             // cluster's words, never waited on until the check's own
@@ -782,6 +729,7 @@ pub async fn run_required_for(
         image_source: environment.image_source,
         cancelled,
         no_room: short_of_room,
+        elsewhere: None,
         prepared: prepared.map(|(outcome, ms)| Preparation {
             ok: outcome.is_ok(),
             ms,
@@ -791,6 +739,121 @@ pub async fn run_required_for(
             },
         }),
     })
+}
+
+/// A check that is to execute rather than be reused: its place among the
+/// candidate's checks and the identity its record is kept under.
+pub(crate) struct Pending {
+    pub index: usize,
+    pub command: String,
+    pub definition_json: String,
+    pub definition_hash: String,
+    pub reuse_key: Option<String>,
+    pub rerun_of: Option<String>,
+}
+
+/// Record `pending` as reusing `source`'s evidence, run in `image` with
+/// `inputs_json`, by `backend` for `repo`: what it contributes.
+pub(crate) fn record_reuse(
+    store: &Store,
+    candidate: &CandidateRow,
+    session_id: Option<&str>,
+    pending: Pending,
+    (image, inputs_json): (&str, &str),
+    source: CheckRunRow,
+    (backend, repo): (&str, Option<&str>),
+) -> Result<CheckResult, String> {
+    let source_outcome = effective_outcome(&source).to_string();
+    let ok = source_outcome == "passed";
+    let started_ms = now_ms();
+    store
+        .insert_check_run(&CheckRunRow {
+            id: uuid::Uuid::now_v7().to_string(),
+            candidate_id: Some(candidate.id.clone()),
+            session_id: session_id.map(str::to_string),
+            command: Some(pending.command.clone()),
+            definition_json: pending.definition_json,
+            definition_hash: Some(pending.definition_hash),
+            execution_image: Some(image.to_string()),
+            inputs_json: Some(inputs_json.to_string()),
+            reuse_key: pending.reuse_key,
+            outcome: "reused".into(),
+            source_outcome: Some(source_outcome),
+            exit_code: source.exit_code,
+            log: source.log.clone(),
+            duration_ms: source.duration_ms,
+            started_ms,
+            finished_ms: Some(started_ms),
+            rerun_of: None,
+            reused_from_id: Some(source.id.clone()),
+            metadata_json: json!({
+                "reused": true,
+                "source_run_id": source.id,
+                "source_outcome": effective_outcome(&source),
+                "execution_backend": backend,
+                "candidate_tree": candidate.tree_sha,
+            })
+            .to_string(),
+        })
+        .map_err(|error| error.to_string())?;
+    telemetry().check_finished("review", repo, "reused", None);
+    Ok(CheckResult {
+        command: pending.command,
+        ok,
+        exit: source.exit_code.and_then(|code| i32::try_from(code).ok()),
+        outcome: "reused".into(),
+        tail: source.log,
+        ms: source.duration_ms.unwrap_or_default().max(0) as u64,
+        reused_from: Some(source.id),
+        missing_tool: None,
+        failures: recorded_failures(&source.metadata_json),
+    })
+}
+
+/// What a check's finished `output` says, as the outcome, exit, tail and
+/// metadata its record settles with, run by `backend` in `environment`.
+pub(crate) fn judge(
+    output: &std::process::Output,
+    command: &str,
+    environment: &RepoEnvironment,
+    timeout: Duration,
+    backend: &str,
+) -> (&'static str, Option<i32>, String, serde_json::Value) {
+    let mut output_text = String::from_utf8_lossy(&output.stdout).into_owned();
+    output_text.push_str(&String::from_utf8_lossy(&output.stderr));
+    let code = output.status.code();
+    // 127 is the shell saying it could not find the command. That is the
+    // check environment's failing, not the candidate's, so it is neither a
+    // pass nor a failure the agent is told to fix — and
+    // `latest_reusable_check` does not accept the outcome, so it can never
+    // become evidence either.
+    let missing = (!output.status.success() && code == Some(127))
+        .then(|| missing_tool(command, &output_text));
+    let outcome = match (output.status.success(), &missing) {
+        (true, _) => "passed",
+        (false, Some(_)) => "not_runnable",
+        (false, None) => "failed",
+    };
+    let mut metadata = json!({
+        "execution_backend": backend,
+        "timeout_secs": timeout.as_secs(),
+    });
+    if let Some(tool) = &missing {
+        metadata["missing_tool"] = json!(tool);
+        metadata["execution_image_source"] = json!(environment.image_source);
+    }
+    if !environment.prepare.is_empty() {
+        metadata["prepared_with"] = json!(environment.prepare);
+        metadata["cache_volume"] = json!(environment.cache_volume);
+    }
+    // Read from the whole output, before it is cut to a tail.
+    if outcome == "failed" {
+        let failures = output::failure_lines(&output_text);
+        if !failures.is_empty() {
+            metadata["failures"] = json!(failures);
+        }
+    }
+    (outcome, code, tail(&output_text), metadata)
 }
 
 /// The tool the shell said was missing, read out of the shell's own wording:
@@ -845,7 +908,7 @@ impl std::fmt::Display for Stopped {
 /// work is no longer wanted (`Err(Some(reason))`). Both ways of stopping kill
 /// the named runtime *while `work` is still held*: an identity released first
 /// could be reused by the runtime before the kill names it.
-async fn until_stopped<T>(
+pub(crate) async fn until_stopped<T>(
     work: impl std::future::Future<Output = T>,
     deadline: tokio::time::Instant,
     cancel: &dyn Cancel,
@@ -1240,6 +1303,14 @@ async fn run_steps(
     Ok(())
 }
 
+/// The repository a candidate's checks belong to: the one its owning
+/// session's work came from, if that is known.
+pub fn candidate_origin(store: &Store, candidate: &CandidateRow) -> Option<std::path::PathBuf> {
+    origin_repo(store, candidate.owner_session_id.as_deref())
+        .ok()
+        .flatten()
+}
+
 /// What this candidate answers to: the `[[repo]]` entry for the repository its
 /// session was working in, over the node-wide defaults. Resolved once per
 /// report, from the candidate, so the run path and the approval path cannot
@@ -1257,7 +1328,7 @@ pub fn candidate_environment(
 /// check finishes as replaces the one it started as, so the candidate's tree is
 /// written again here: an outcome that does not say which bytes produced it
 /// cannot be audited against the candidate it is offered as evidence for.
-fn with_candidate_tree(
+pub(crate) fn with_candidate_tree(
     candidate: &CandidateRow,
     mut metadata: serde_json::Value,
 ) -> serde_json::Value {
@@ -1275,7 +1346,7 @@ async fn release_check_volume(backend: &dyn crate::boundary::Backend, volume: &s
     }
 }
 
-fn cancelled_result(command: &str, reason: &str, ms: u64) -> CheckResult {
+pub(crate) fn cancelled_result(command: &str, reason: &str, ms: u64) -> CheckResult {
     CheckResult {
         command: command.to_string(),
         ok: false,
@@ -1348,22 +1419,45 @@ pub async fn review_required_checks_current(
         })
         .map_err(|error| error.to_string())?;
         let definition_hash = hash(&definition_json);
-        let valid = if let Some(image) = pinned_image.as_ref() {
-            let reuse_key = hash(&format!(
-                "{}\n{}\n{}\n{}",
-                candidate.head_sha, definition_hash, image, inputs_json
-            ));
-            store
-                .latest_reusable_check(&candidate.id, &reuse_key)
-                .map_err(|error| error.to_string())?
-                .is_some_and(|run| effective_outcome(&run) == "passed")
-        } else {
+        // Evidence of either kind answers for the review, each under its own
+        // key: exact, from the node's own runtime and the image it confirms
+        // now; or derived from this same image by a provider elsewhere
+        // (`forked`), keyed on the digest the image names. Neither is ever
+        // looked up under the other's.
+        let derived_from = immutable_image_identity(&environment.image);
+        let keys: Vec<String> = pinned_image
+            .iter()
+            .cloned()
+            .chain(
+                derived_from
+                    .iter()
+                    .chain(pinned_image.iter())
+                    .map(|from| derived_key(from)),
+            )
+            .collect();
+        if keys.is_empty() {
             return Err(format!(
                 "required check `{command}` has no execution image confirmed against the runtime \
                  (reported: {}); configure and verify an image digest before approval",
                 resolved_image.as_deref().unwrap_or("none")
             ));
-        };
+        }
+        let mut valid = false;
+        for image_key in keys {
+            let key = reuse_key(
+                &candidate.head_sha,
+                &definition_hash,
+                &image_key,
+                &inputs_json,
+            );
+            valid = store
+                .latest_reusable_check(&candidate.id, &key)
+                .map_err(|error| error.to_string())?
+                .is_some_and(|run| effective_outcome(&run) == "passed");
+            if valid {
+                break;
+            }
+        }
         if !valid {
             return Err(format!(
                 "required check `{command}` has no current passing evidence for candidate {}",
@@ -1374,7 +1468,29 @@ pub async fn review_required_checks_current(
     Ok(())
 }
 
-fn immutable_image_identity(image: &str) -> Option<String> {
+/// The key a check's evidence is kept under: the candidate, the check's
+/// definition, the image it ran in as `image_key` says, and every other
+/// input.
+pub(crate) fn reuse_key(
+    head_sha: &str,
+    definition_hash: &str,
+    image_key: &str,
+    inputs_json: &str,
+) -> String {
+    hash(&format!(
+        "{head_sha}\n{definition_hash}\n{image_key}\n{inputs_json}"
+    ))
+}
+
+/// The image part of the key of evidence a provider elsewhere recorded from
+/// a sandbox derived from the image whose digest is `from`
+/// (`ImageIdentity::Derived`): never the same as that digest's exact key, so
+/// derived evidence is never taken for exact, nor exact for derived.
+pub(crate) fn derived_key(from: &str) -> String {
+    format!("derived:{from}")
+}
+
+pub(crate) fn immutable_image_identity(image: &str) -> Option<String> {
     let (_, digest) = image.split_once("@sha256:")?;
     (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .then(|| format!("sha256:{digest}"))
@@ -1383,7 +1499,7 @@ fn immutable_image_identity(image: &str) -> Option<String> {
 /// Everything besides the command and the image that decides what a check
 /// established. Preparation is part of it only where a repository names some:
 /// a node with none keeps the identity its existing evidence was keyed on.
-fn check_inputs(cfg: &Config, environment: &RepoEnvironment) -> serde_json::Value {
+pub(crate) fn check_inputs(cfg: &Config, environment: &RepoEnvironment) -> serde_json::Value {
     let mut inputs = json!({
         "runtime": cfg.runtime.kind.as_str(),
         "timeout_secs": environment.timeout_secs,
@@ -1410,7 +1526,7 @@ pub fn effective_outcome(run: &CheckRunRow) -> &str {
     }
 }
 
-fn hash(value: &str) -> String {
+pub(crate) fn hash(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
 }
 
@@ -1858,6 +1974,160 @@ mod tests {
             runs.iter().any(|run| run.execution_image.as_deref()
                 == Some("registry/example@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")),
             "the recorded identity is what the backend reported, never the raw config string: {runs:?}"
+        );
+
+        // Before a dispatch, the review's evidence may be exact (run here)
+        // or derived from the same image elsewhere (DigitalOcean), each
+        // found under its own key only.
+        let pinned = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let environment = environment_for(&cfg, &store, None);
+        let inputs_json = serde_json::to_string(&check_inputs(&cfg, &environment)).unwrap();
+        let definition_hash = hash(
+            &serde_json::to_string(&CheckDefinition {
+                command: "true".into(),
+                timeout_secs: environment.timeout_secs,
+            })
+            .unwrap(),
+        );
+        let reviewed = |id: &str, head: &str| {
+            let candidate = CandidateRow {
+                id: format!("cand-{id}"),
+                head_sha: head.into(),
+                ..candidate.clone()
+            };
+            store.insert_candidate(&candidate).unwrap();
+            store
+                .insert_review_with_revision(
+                    &crate::store::ReviewRow {
+                        id: id.into(),
+                        session_id: None,
+                        node_id: "n".into(),
+                        channel: "ch".into(),
+                        kind: "pr".into(),
+                        title: "fix: it".into(),
+                        body: "b".into(),
+                        edited_title: None,
+                        edited_body: None,
+                        provider: "github".into(),
+                        target: "{}".into(),
+                        diff: "+x".into(),
+                        files: "[]".into(),
+                        head_sha: head.into(),
+                        base_ref: "main".into(),
+                        added: 1,
+                        removed: 0,
+                        state: "new".into(),
+                        verdict_reason: None,
+                        publish_result: None,
+                        claimed_ms: None,
+                        created_ms: 1,
+                        created_mono_ms: 0,
+                        resolved_mono_ms: None,
+                        updated_ms: 1,
+                        checks_json: None,
+                        review_session_id: None,
+                        ai_verdict_json: None,
+                        revision_patch: None,
+                        lane: None,
+                        publication_failed: None,
+                    },
+                    &crate::store::ReviewRevisionRow {
+                        id: format!("rev-{id}"),
+                        review_id: id.into(),
+                        candidate_id: candidate.id.clone(),
+                        title: "fix: it".into(),
+                        body: "b".into(),
+                        diff: "+x".into(),
+                        files: "[]".into(),
+                        head_sha: head.into(),
+                        context_json: "[]".into(),
+                        requirements_work_item_id: None,
+                        requirements_title: None,
+                        requirements_body: None,
+                        requirements_hash: None,
+                        created_ms: 1,
+                        intent_json: None,
+                    },
+                )
+                .unwrap();
+            candidate
+        };
+        let passed = |candidate: &CandidateRow, image_key: &str| {
+            let id = uuid::Uuid::now_v7().to_string();
+            store
+                .insert_check_run(&CheckRunRow {
+                    id: id.clone(),
+                    candidate_id: Some(candidate.id.clone()),
+                    session_id: None,
+                    command: Some("true".into()),
+                    definition_json: "{}".into(),
+                    definition_hash: Some(definition_hash.clone()),
+                    execution_image: None,
+                    inputs_json: Some(inputs_json.clone()),
+                    reuse_key: Some(reuse_key(
+                        &candidate.head_sha,
+                        &definition_hash,
+                        image_key,
+                        &inputs_json,
+                    )),
+                    outcome: "running".into(),
+                    source_outcome: None,
+                    exit_code: None,
+                    log: String::new(),
+                    duration_ms: None,
+                    started_ms: now_ms(),
+                    finished_ms: None,
+                    rerun_of: None,
+                    reused_from_id: None,
+                    metadata_json: "{}".into(),
+                })
+                .unwrap();
+            store
+                .finish_check_run(&id, "passed", None, Some(0), "ok", Some(1), &json!({}))
+                .unwrap();
+        };
+        let derived_only = reviewed("r-derived", "sha-derived");
+        assert!(
+            review_required_checks_current(&store, &backend, "r-derived", &cfg)
+                .await
+                .is_err(),
+            "no evidence yet"
+        );
+        passed(&derived_only, &derived_key(pinned));
+        review_required_checks_current(&store, &backend, "r-derived", &cfg)
+            .await
+            .unwrap();
+        // Derived evidence is never what an exact lookup finds.
+        let exact = reuse_key("sha-derived", &definition_hash, pinned, &inputs_json);
+        assert!(store
+            .latest_reusable_check(&derived_only.id, &exact)
+            .unwrap()
+            .is_none());
+        let exact_only = reviewed("r-exact", "sha-exact");
+        passed(&exact_only, pinned);
+        review_required_checks_current(&store, &backend, "r-exact", &cfg)
+            .await
+            .unwrap();
+        let derived = reuse_key(
+            "sha-exact",
+            &definition_hash,
+            &derived_key(pinned),
+            &inputs_json,
+        );
+        assert!(store
+            .latest_reusable_check(&exact_only.id, &derived)
+            .unwrap()
+            .is_none());
+        // Evidence derived from another image answers for nothing.
+        let elsewhere = reviewed("r-other", "sha-other");
+        passed(
+            &elsewhere,
+            &derived_key("sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        );
+        assert!(
+            review_required_checks_current(&store, &backend, "r-other", &cfg)
+                .await
+                .is_err()
         );
 
         let _ = std::fs::remove_dir_all(&snapshot);

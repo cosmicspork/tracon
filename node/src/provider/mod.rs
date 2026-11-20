@@ -367,6 +367,35 @@ pub trait SandboxProvider: Send + Sync {
         Err(self.unsupported("fork"))
     }
 
+    /// Several sandboxes from one snapshot, each with the bootstrap at its
+    /// place in `bootstraps`: what each child came to, in that order. One
+    /// [`Self::fork`] each, unless the provider forks several in one call
+    /// (DigitalOcean's runtime, at most [`Self::fork_batch`] at a time).
+    /// `Err` when none was made.
+    async fn fork_many(
+        &self,
+        snapshot: &SnapshotId,
+        resources: &Resources,
+        bootstraps: &[Bootstrap],
+    ) -> Result<Vec<Result<Handle, ProviderError>>, ProviderError> {
+        let mut children = Vec::with_capacity(bootstraps.len());
+        for bootstrap in bootstraps {
+            children.push(self.fork(snapshot, resources, bootstrap).await);
+        }
+        Ok(children)
+    }
+
+    /// The most children [`Self::fork_many`] makes in one call.
+    fn fork_batch(&self) -> usize {
+        1
+    }
+
+    /// Remove a snapshot nothing forks from any more. Best effort: one a
+    /// provider keeps of its own accord, or sweeps later, is left.
+    async fn forget_snapshot(&self, _snapshot: &SnapshotId) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
     async fn image_identity(&self, handle: &Handle) -> Result<ImageIdentity, ProviderError>;
 
     async fn network(&self, handle: &Handle) -> Result<Network, ProviderError>;

@@ -2745,6 +2745,54 @@ impl Manager {
         }
     }
 
+    /// Decide where a review's required checks run (`placing::place_checks`):
+    /// on the node's own runtime, counted short of room when `short` says
+    /// why, or on DigitalOcean. Recorded on `session_id`, when there is one,
+    /// as a `placement` event `for` checks. Out of play, with nothing
+    /// recorded, where DigitalOcean is not on.
+    pub async fn place_checks(
+        &self,
+        session_id: Option<&str>,
+        channel: &str,
+        origin: Option<&std::path::Path>,
+        short: Option<&str>,
+    ) -> placing::ChecksPlaced {
+        use crate::provider::digitalocean::runtime as do_runtime;
+        use crate::provider::ProviderKind;
+        let Some(runtime) = do_runtime::global().filter(|_| do_runtime::enabled(&self.cfg)) else {
+            return placing::ChecksPlaced::Local;
+        };
+        let resolved = placing::resolve(&self.cfg, channel, origin);
+        let mut providers = Vec::new();
+        if let Some(kind) = ProviderKind::of_backend(self.backend.kind()) {
+            let node = self.store.get_node(&self.node_id).ok().flatten();
+            providers.push(placing::checks_candidate(
+                kind,
+                placing::node_health(node.as_ref()),
+                short,
+            ));
+        }
+        providers.push(runtime.candidate(&self.cfg).await);
+        let decision = placing::place_checks(
+            &providers,
+            &resolved,
+            self.cfg.live().placement.digitalocean,
+        );
+        if let Some(id) = session_id {
+            let mut payload = placing::event(&decision, &resolved, &providers);
+            payload["for"] = serde_json::json!("checks");
+            payload["short"] = serde_json::json!(short);
+            self.record_event(id, ek::PLACEMENT, payload);
+        }
+        match placing::checks_elsewhere(&decision) {
+            true => placing::ChecksPlaced::DigitalOcean {
+                runtime,
+                requirements: resolved.requirements,
+            },
+            false => placing::ChecksPlaced::Local,
+        }
+    }
+
     /// Prepare a starting session's workspace (`prepare_session_workspace`)
     /// and record how it went. `None` when the entry prepares nothing.
     #[allow(clippy::too_many_arguments)]

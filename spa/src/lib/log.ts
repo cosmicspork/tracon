@@ -532,6 +532,13 @@ export function eventLine(e: Event): EventLine | null {
     case 'placement': {
       // Where the session runs, when the node had to decide it.
       const where = (v: unknown) => (str(v) === 'digitalocean' ? 'DigitalOcean' : str(v) ? `this node (${str(v)})` : '')
+      if (str(p.for) === 'checks') {
+        // Where a review's checks run: elsewhere only when placed on DigitalOcean.
+        if (str(p.decision) === 'place' && str(p.provider) === 'digitalocean')
+          return line('mark', ['checks run on DigitalOcean', str(p.short) || 'DigitalOcean is preferred'])
+        if (str(p.fell_back)) return line('sys', ['checks run on this node', `not on DigitalOcean: ${str(p.fell_back)}`])
+        return line('sys', ['checks run on this node', str(p.short) ? `in its line: ${str(p.short)}` : ''])
+      }
       switch (str(p.decision)) {
         case 'place': {
           if (str(p.provider) !== 'digitalocean') return line('sys', [`runs on ${where(p.provider)}`])

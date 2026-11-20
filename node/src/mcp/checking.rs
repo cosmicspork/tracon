@@ -146,6 +146,8 @@ pub struct Entry {
     /// How many times its checks have stopped short of room, kept while
     /// they run again.
     short: std::sync::atomic::AtomicU32,
+    /// Where its checks run now, when it is not the node's own runtime.
+    elsewhere: Mutex<Option<crate::provider::ProviderKind>>,
 }
 
 #[derive(Clone)]
@@ -187,6 +189,7 @@ impl Checking {
             settled: tokio::sync::watch::Sender::new(None),
             queued: tokio::sync::watch::Sender::new(None),
             short: Default::default(),
+            elsewhere: Mutex::default(),
         });
         let mut entries = self.entries.lock().unwrap();
         let now = crate::store::now_ms();
@@ -357,8 +360,9 @@ impl Checking {
         true
     }
 
-    /// Take `entry` out of the line.
-    fn leave(&self, entry: &Arc<Entry>) {
+    /// Take `entry` out of the line: its checks run elsewhere, or not at
+    /// all.
+    pub fn leave(&self, entry: &Arc<Entry>) {
         let mut line = self.line.lock().unwrap();
         line.waiting.retain(|waiting| !Arc::ptr_eq(waiting, entry));
         entry.queued.send_replace(None);
@@ -390,6 +394,17 @@ impl Checking {
 }
 
 impl Entry {
+    /// Its checks run on `provider` from now, or on the node's own runtime
+    /// (`None`).
+    pub fn run_on(&self, provider: Option<crate::provider::ProviderKind>) {
+        *self.elsewhere.lock().unwrap() = provider;
+    }
+
+    /// Where its checks run, when it is not the node's own runtime.
+    pub fn running_on(&self) -> Option<crate::provider::ProviderKind> {
+        *self.elsewhere.lock().unwrap()
+    }
+
     /// What the submission came to, once it has.
     pub fn outcome(&self) -> Option<Outcome> {
         self.settled
