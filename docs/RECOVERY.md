@@ -264,6 +264,42 @@ nothing. Nothing needs recovering. The agent sees `stale: true` from
 `approval_status` and calls the tool again, which raises a fresh card against the
 target as it is now.
 
+## Jira after the node's Jira tools
+
+The node no longer talks to Jira. The tracker tools are the `jira-review` plugin's
+(`tracon plugin add cosmicspork/jira-review`), offered as `jira-review__search`,
+`jira-review__issue`, `jira-review__transitions`, `jira-review__comment`,
+`jira-review__update`, `jira-review__create`, `jira-review__link` and
+`jira-review__transition`.
+
+Upgrading from a node that had its own Jira tools:
+
+- **Credentials** need nothing. The plugin declares `jira` (and `jira-<profile>`),
+  which is the name the node's own tools used, with the same fields (`JIRA_URL`,
+  `JIRA_EMAIL`, `JIRA_TOKEN`; or `JIRA_PAT` for Data Center), so a channel that bound
+  `jira` is lent it as it stands.
+- **The old tool names** (`issue`, `issue_search`, `issue_transitions`,
+  `issue_comment`, `issue_update`, `issue_create`, `issue_link`, `issue_transition`)
+  are refused with the name that replaced each, and nothing is asked. A card for one
+  still waiting at the upgrade fails the same way if you allow it; reject it, and the
+  agent calls the plugin's tool. Past approvals still open, their wiki markup shown
+  as source.
+- **Grants.** A `ticket_transition` grant is still listed and matches nothing.
+  `jira-review__transition` is consequential: each call is asked, and runs unattended
+  only under a `plugin_call` grant naming that exact call, whose target its card
+  shows. A new grant cannot be made for `ticket_transition`.
+- **The policy bundle.** The shipped agreements name the plugin's reads from
+  version 26. A node still on an older signed bundle asks for every
+  `jira-review__search`, and the workboard's `GET /api/jira/search` answers 403,
+  until you sign and install the new one (`tracon policy sign`, then restart), or
+  add `[[plugin]] name = "jira-review"` with `allow = ["search", "issue",
+  "transitions"]` to `node.toml` meanwhile.
+
+With the plugin not installed, broken, or the node down, run `jira-review` directly:
+its CLI reads and proposes changes with its own credential from the environment, a
+`.env` or the keyring, and `jira-review mcp` serves any MCP client, holding each write
+until you approve it with `jira-review review`.
+
 ## Locked out of admin from afar
 
 Admin actions made from off the node need a passkey; made at the node they need

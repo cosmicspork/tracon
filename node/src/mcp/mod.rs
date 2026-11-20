@@ -16,7 +16,6 @@ pub mod docs;
 pub mod egress;
 pub mod github;
 pub mod gitlab;
-pub mod jira;
 pub mod memory;
 pub mod operator;
 pub mod parity;
@@ -62,10 +61,6 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 /// frame then reports, and the session never gets its tools).
 const SUPPORTED_PROTOCOL_VERSIONS: [&str; 4] =
     ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
-
-/// How long a held Jira transition waits on Jira to name the status it leads
-/// to before it is titled by its id instead.
-const TRANSITION_LOOKUP: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub struct Tools {
     pub broker: SharedBroker,
@@ -260,6 +255,58 @@ struct PluginTool {
     entry: Option<crate::config::PluginEntry>,
 }
 
+impl PluginTool {
+    /// Whether its manifest marks it `consequential`: asked unless a grant
+    /// scoped to the one call allows it, and called with an `operation_id`
+    /// the node keeps the outcome under.
+    fn consequential(&self) -> bool {
+        self.manifest
+            .tools
+            .iter()
+            .any(|t| t.name == self.tool && t.consequential)
+    }
+
+    /// The arguments as the plugin is sent them: without the `operation_id`
+    /// the node adds to a consequential tool, which is the node's own.
+    fn forwarded<'a>(&self, args: &'a Value) -> std::borrow::Cow<'a, Value> {
+        match args.as_object() {
+            Some(map) if self.consequential() && map.contains_key(OPERATION_ID) => {
+                let mut map = map.clone();
+                map.remove(OPERATION_ID);
+                std::borrow::Cow::Owned(Value::Object(map))
+            }
+            _ => std::borrow::Cow::Borrowed(args),
+        }
+    }
+}
+
+/// The argument a consequential call is recorded and replayed under.
+const OPERATION_ID: &str = "operation_id";
+
+/// `schema` with the `operation_id` a consequential plugin tool is called
+/// with: the node's argument, never sent to the plugin.
+fn with_operation_id(schema: &Value) -> Value {
+    let mut schema = schema.clone();
+    if !schema.is_object() {
+        return schema;
+    }
+    if !schema["properties"].is_object() {
+        schema["properties"] = json!({});
+    }
+    schema["properties"][OPERATION_ID] = json!({
+        "type": "string",
+        "description": "A stable id for this one operation: at least 8 letters, digits or \
+                        dashes. A retry with the same id and arguments returns the outcome \
+                        already recorded rather than running it again.",
+    });
+    let mut required: Vec<Value> = schema["required"].as_array().cloned().unwrap_or_default();
+    if !required.iter().any(|r| r == OPERATION_ID) {
+        required.push(Value::from(OPERATION_ID));
+    }
+    schema["required"] = Value::Array(required);
+    schema
+}
+
 /// What [`Tools::plugin_call_parts`] gathers for one request to a plugin.
 struct PluginCallParts {
     lease: crate::plugin::supervisor::Lease,
@@ -403,9 +450,10 @@ impl Tools {
         gitlab::PIPELINE_WAIT,
         gitlab::PIPELINE_LIST_BY_SHA,
         gitlab::JOB_TRACE,
-        jira::ISSUE,
-        jira::ISSUE_SEARCH,
-        jira::ISSUE_TRANSITIONS,
+        // The jira-review plugin's reads, offered when it is installed.
+        "jira-review__search",
+        "jira-review__issue",
+        "jira-review__transitions",
     ];
 
     /// What an execute session is not offered: everything else is its to use.
@@ -508,9 +556,6 @@ impl Tools {
         if available.contains(&github::CREDENTIAL) {
             out.extend(github::definitions());
         }
-        if available.contains(&jira::CREDENTIAL) {
-            out.extend(jira::definitions());
-        }
         // Review tools need no credential of their own: submitting is always
         // allowed, and publishing is what needs one. An agent that cannot
         // publish can still ask for review and be told why it stopped there.
@@ -580,10 +625,20 @@ impl Tools {
                 } else {
                     format!("[plugin {name}] {}", tool.description.trim())
                 };
+                let consequential = build
+                    .manifest
+                    .tools
+                    .iter()
+                    .any(|t| t.name == tool.remote && t.consequential);
+                let schema = if consequential {
+                    with_operation_id(&tool.input_schema)
+                } else {
+                    tool.input_schema.clone()
+                };
                 out.push(json!({
                     "name": tool.name,
                     "description": upstream::bounded(&description, PLUGIN_DESCRIPTION),
-                    "inputSchema": tool.input_schema,
+                    "inputSchema": schema,
                 }));
             }
         }
@@ -859,6 +914,8 @@ impl Tools {
         };
         let supervisor = access.manager.plugins();
         let endpoint = &parts.lease.endpoint;
+        let args = pt.forwarded(args);
+        let args = args.as_ref();
         let draft = context::Draft {
             plugin: &pt.plugin,
             token: &endpoint.token,
@@ -1032,6 +1089,8 @@ impl Tools {
         };
         let supervisor = access.manager.plugins();
         let endpoint = &parts.lease.endpoint;
+        let args = pt.forwarded(args);
+        let args = args.as_ref();
         let draft = context::Draft {
             plugin: &pt.plugin,
             token: &endpoint.token,
@@ -1095,14 +1154,18 @@ impl Tools {
         }
     }
 
-    /// The input schema a plugin's running build gave one of its tools.
+    /// The input schema a plugin's running build gave one of its tools, with
+    /// the `operation_id` the node adds when it is consequential.
     pub fn plugin_schema(&self, name: &str) -> Option<Value> {
         let pt = self.plugin_tool(name)?;
         let listed = self.session.get()?.manager.plugins().listed(&pt.plugin)?;
         (listed.digest == pt.digest)
             .then(|| listed.tools.iter().find(|t| t.remote == pt.tool))
             .flatten()
-            .map(|t| t.input_schema.clone())
+            .map(|t| match pt.consequential() {
+                true => with_operation_id(&t.input_schema),
+                false => t.input_schema.clone(),
+            })
     }
 
     /// How a card for one of a plugin's tools is laid out, from the schema
@@ -1247,12 +1310,21 @@ impl Tools {
                 json!({ "name": c.name, "lend": c.lend.as_str(), "bindings": bindings })
             })
             .collect();
+        // What a grant allowing exactly this call names, for a consequential
+        // tool: it is asked unless one does.
+        let grant_target = tool
+            .consequential
+            .then(|| serde_json::from_str::<Value>(&approval.arguments).ok())
+            .flatten()
+            .and_then(|args| plugin_consequential(&approval.tool, &args))
+            .map(|(_, target, _)| target);
         Some(json!({
             "name": pt.plugin,
             "version": pt.manifest.version,
             "tool": pt.tool,
             "hint": tool.hint.as_str(),
             "consequential": tool.consequential,
+            "grant_target": grant_target,
             "egress": pt.manifest.egress,
             "credentials": credentials,
         }))
@@ -1286,7 +1358,20 @@ impl Tools {
         };
         if let Some(pt) = self.plugin_tool(name) {
             let entry = upstream::Entry::plugin(&pt.plugin, pt.entry.as_ref());
-            return Some(upstream::decide(&entry, &pt.tool, policy, policy_decision));
+            let decision = upstream::decide(&entry, &pt.tool, policy, policy_decision);
+            // As [`Self::decide`] has it: allowed by name is not allowed.
+            if pt.consequential() && decision.verdict == Verdict::Allow {
+                return Some(Decision {
+                    verdict: Verdict::Ask,
+                    rule_id: None,
+                    reason: Some(format!(
+                        "{name} is consequential: each call is asked unless a {} grant names \
+                         that one call",
+                        crate::authority::PLUGIN_CALL
+                    )),
+                });
+            }
+            return Some(decision);
         }
         let (server, remote) = self.upstream_tool(name)?;
         Some(upstream::decide(
@@ -1515,7 +1600,10 @@ impl Tools {
             *gate = audit::Gate::node("approval-status");
             return approvals::status(access, ctx, args).await;
         }
-        if consequential_name(name) && consequential(name, args).is_none() {
+        if let Some(refusal) = retired(name) {
+            return Err(refusal);
+        }
+        if self.is_consequential(name) && self.consequential_scope(name, args).is_none() {
             return Err(
                 "consequential calls require a valid operation_id and canonical arguments".into(),
             );
@@ -1526,14 +1614,6 @@ impl Tools {
         // is asked about it, not after.
         if let Some(refusal) = self.refusal_before_asking(ctx, name, args) {
             return Err(refusal);
-        }
-        // So is a link type Jira does not have, with the ones it does; a
-        // Jira that cannot say in time leaves the call to be asked.
-        if name == jira::ISSUE_LINK {
-            let lookup = jira::link_target(&self.broker, &self.http, ctx, args);
-            if let Ok(Err(refusal)) = tokio::time::timeout(TRANSITION_LOOKUP, lookup).await {
-                return Err(refusal);
-            }
         }
         // Drafting the change of a review this session submitted or is
         // reviewing, and pushed to or opened, is not asked: drafting blocks
@@ -1718,7 +1798,7 @@ impl Tools {
         let gated = GatedCall {
             one_shot: approval.is_some(),
         };
-        if consequential_name(name) && consequential(name, args).is_none() {
+        if self.is_consequential(name) && self.consequential_scope(name, args).is_none() {
             return Err(
                 "consequential calls require a valid operation_id and canonical arguments".into(),
             );
@@ -1735,7 +1815,8 @@ impl Tools {
             let Some(ActionRecord::New(id)) = &action_record else {
                 return Ok(());
             };
-            let (action, target, revision) = consequential(name, args)
+            let (action, target, revision) = self
+                .consequential_scope(name, args)
                 .expect("consequential action record has canonical arguments");
             let policy = self.policy.read();
             let live = self.cfg.live();
@@ -1745,7 +1826,7 @@ impl Tools {
                 kind: Some(TOOL_KIND),
                 resource: None,
                 command: None,
-                arguments: Some(args),
+                arguments: Some(&self.policy_arguments(name, args)),
                 doc_kinds: Some(&live.docs.kind),
             });
             if tool.verdict == Verdict::Deny {
@@ -1796,24 +1877,6 @@ impl Tools {
             | gitlab::MR_FOR_BRANCH
             | gitlab::PIPELINE_RETRY => {
                 gitlab::call(
-                    &self.broker,
-                    &self.http,
-                    ctx,
-                    name,
-                    args,
-                    Some(&before_mutation),
-                )
-                .await
-            }
-            jira::ISSUE
-            | jira::ISSUE_SEARCH
-            | jira::ISSUE_TRANSITIONS
-            | jira::ISSUE_COMMENT
-            | jira::ISSUE_UPDATE
-            | jira::ISSUE_CREATE
-            | jira::ISSUE_LINK
-            | jira::ISSUE_TRANSITION => {
-                jira::call(
                     &self.broker,
                     &self.http,
                     ctx,
@@ -1940,7 +2003,13 @@ impl Tools {
                             Err(format!("{other} runs only once the operator allows it"))
                         }
                         Verdict::Allow | Verdict::Ask => {
-                            self.call_plugin(ctx, &pt, args, approval).await
+                            // A consequential call records the grant that
+                            // let it run, read again just before it is sent;
+                            // a refusal there finishes its record as failed.
+                            match before_mutation() {
+                                Ok(()) => self.call_plugin(ctx, &pt, args, approval).await,
+                                Err(refused) => Err(refused),
+                            }
                         }
                     }
                 }
@@ -1967,7 +2036,9 @@ impl Tools {
                         }
                     }
                 }
-                (None, None) => Err(format!("no tool named {other}")),
+                (None, None) => {
+                    Err(retired(other).unwrap_or_else(|| format!("no tool named {other}")))
+                }
             },
         };
         let result = match (name, result) {
@@ -2375,9 +2446,6 @@ impl Tools {
             // The card names the direction, so a `ready` it cannot read is
             // refused before it is shown.
             github::PR_READY | gitlab::MR_READY => github::ready_arg(args).err(),
-            // A set whose items do not fit together, such as a parent named
-            // after its child, is refused before the operator reads it.
-            jira::ISSUE_CREATE if args.get("issues").is_some() => jira::create_plan(args).err(),
             _ => None,
         }
     }
@@ -2529,24 +2597,11 @@ impl Tools {
     }
 
     /// What the operator reads on the card and in the push for a held call:
-    /// [`summarize`], except that a Jira transition is named by the status it
-    /// leads to, which only Jira can say, and a document write says whether
-    /// it creates or edits, and what, and when it changes the document's
-    /// format or drops files of its bundle. A lookup that fails or is slow
-    /// leaves the plain summary rather than holding the request.
+    /// [`summarize`], except that a document write says whether it creates
+    /// or edits, and what, and when it changes the document's format or
+    /// drops files of its bundle. A lookup that fails leaves the plain
+    /// summary rather than holding the request.
     async fn approval_title(&self, ctx: &CallContext, name: &str, args: &Value) -> String {
-        if name == jira::ISSUE_TRANSITION {
-            let lookup = jira::transition_target(&self.broker, &self.http, ctx, args);
-            if let Ok(Some(to)) = tokio::time::timeout(TRANSITION_LOOKUP, lookup).await {
-                return transition_title(args, &to);
-            }
-        }
-        if name == jira::ISSUE_LINK {
-            let lookup = jira::link_target(&self.broker, &self.http, ctx, args);
-            if let Ok(Ok(Some(kind))) = tokio::time::timeout(TRANSITION_LOOKUP, lookup).await {
-                return link_title(args, &kind.outward);
-            }
-        }
         if name == docs::DOC_EDIT {
             if let Some(access) = self.session.get() {
                 if let Ok(current) = docs::replaced(&access.store, &ctx.channel, args) {
@@ -3143,7 +3198,7 @@ impl Tools {
             kind: Some(TOOL_KIND),
             resource: None,
             command: None,
-            arguments: Some(args),
+            arguments: Some(&self.policy_arguments(name, args)),
             doc_kinds: Some(&live.docs.kind),
         });
         if tool.verdict == Verdict::Deny {
@@ -3152,7 +3207,17 @@ impl Tools {
         if let Some(pt) = self.plugin_tool(name) {
             // What the plugin says the tool does decides nothing.
             let entry = upstream::Entry::plugin(&pt.plugin, pt.entry.as_ref());
-            return upstream::decide(&entry, &pt.tool, &self.policy.read(), tool);
+            let decision = upstream::decide(&entry, &pt.tool, &self.policy.read(), tool);
+            // A consequential tool is never allowed by name, by the bundle or
+            // by the operator's entry: only a grant scoped to this one call
+            // allows it. A denial, and an entry that asks, still hold.
+            if !pt.consequential()
+                || decision.verdict == Verdict::Deny
+                || entry.setting(&pt.tool) == Some(Verdict::Ask)
+            {
+                return decision;
+            }
+            return self.authority_decision(ctx, plugin_consequential(name, args), args);
         }
         if let Some((server, remote)) = self.upstream_tool(name) {
             return upstream::decide(
@@ -3162,33 +3227,74 @@ impl Tools {
                 tool,
             );
         }
-        if let Some((action, target, revision)) = consequential(name, args) {
-            let Some(access) = self.session.get() else {
-                return Decision {
-                    verdict: Verdict::Ask,
-                    rule_id: None,
-                    reason: None,
-                };
-            };
-            return crate::authority::decide(
-                access.store.as_ref(),
-                &self.policy.read(),
-                &crate::authority::AuthorityQuery {
-                    channel: &ctx.channel,
-                    session_id: ctx.session_id(),
-                    action,
-                    target: &target,
-                    revision: revision.as_deref(),
-                    args,
-                },
-            )
-            .unwrap_or(Decision {
-                verdict: Verdict::Ask,
-                rule_id: None,
-                reason: None,
-            });
+        if let Some(scope) = consequential(name, args) {
+            return self.authority_decision(ctx, Some(scope), args);
         }
         tool
+    }
+
+    /// How a consequential call in `scope` is decided: by the grants that
+    /// name it, under the signed policy. No scope, or no store to read the
+    /// grants from, asks.
+    fn authority_decision(
+        &self,
+        ctx: &CallContext,
+        scope: Option<(&'static str, String, Option<String>)>,
+        args: &Value,
+    ) -> Decision {
+        let ask = Decision {
+            verdict: Verdict::Ask,
+            rule_id: None,
+            reason: None,
+        };
+        let (Some((action, target, revision)), Some(access)) = (scope, self.session.get()) else {
+            return ask;
+        };
+        crate::authority::decide(
+            access.store.as_ref(),
+            &self.policy.read(),
+            &crate::authority::AuthorityQuery {
+                channel: &ctx.channel,
+                session_id: ctx.session_id(),
+                action,
+                target: &target,
+                revision: revision.as_deref(),
+                args,
+            },
+        )
+        .unwrap_or(ask)
+    }
+
+    /// Whether a call to `name` is consequential: one of the node's merge or
+    /// deploy verbs, or a plugin tool its manifest marks so.
+    fn is_consequential(&self, name: &str) -> bool {
+        consequential_name(name) || self.plugin_tool(name).is_some_and(|pt| pt.consequential())
+    }
+
+    /// The authority scope of a consequential call, `(action, target,
+    /// revision)`; `None` for any other call, and for one whose arguments do
+    /// not name its scope or carry a valid `operation_id`.
+    fn consequential_scope(
+        &self,
+        name: &str,
+        args: &Value,
+    ) -> Option<(&'static str, String, Option<String>)> {
+        if consequential_name(name) {
+            return consequential(name, args);
+        }
+        self.plugin_tool(name)
+            .filter(PluginTool::consequential)
+            .and_then(|_| plugin_consequential(name, args))
+    }
+
+    /// What a consequential call is recorded as, and compared with on replay.
+    fn consequential_payload(&self, name: &str, args: &Value) -> Option<Value> {
+        if consequential_name(name) {
+            return canonical_consequential_payload(name, args);
+        }
+        self.plugin_tool(name)
+            .filter(PluginTool::consequential)
+            .and_then(|_| plugin_consequential_payload(args))
     }
 
     fn revalidate_tool_policy(
@@ -3204,13 +3310,42 @@ impl Tools {
             kind: Some(TOOL_KIND),
             resource: None,
             command: None,
-            arguments: Some(args),
+            arguments: Some(&self.policy_arguments(name, args)),
             doc_kinds: Some(&live.docs.kind),
         });
         if decision.verdict == Verdict::Deny {
             return Err(refusal(decision));
         }
         Ok(())
+    }
+
+    /// A call's arguments as the policy matches them. For a plugin's tool,
+    /// without the prose its schema marks (`x-tracon-format`): text the call
+    /// carries, not an action it takes, as the node's own comment and
+    /// document tools have theirs (`policy::prose_fields`), so a comment may
+    /// say what a denial names and is read on its card instead. What the call
+    /// acts on is still matched.
+    fn policy_arguments<'a>(&self, name: &str, args: &'a Value) -> std::borrow::Cow<'a, Value> {
+        let Some(shown) = self.plugin_presentation(name) else {
+            return std::borrow::Cow::Borrowed(args);
+        };
+        let strip = |value: &mut Value| {
+            if let Some(fields) = value.as_object_mut() {
+                for field in &shown.prose_fields {
+                    fields.remove(field.as_ref());
+                }
+            }
+        };
+        let mut matched = args.clone();
+        if let Some(Value::Array(items)) = shown
+            .item_list
+            .as_deref()
+            .and_then(|list| matched.get_mut(list))
+        {
+            items.iter_mut().for_each(strip);
+        }
+        strip(&mut matched);
+        std::borrow::Cow::Owned(matched)
     }
 
     /// Grants are re-read after every operator wait and immediately before a
@@ -3224,7 +3359,7 @@ impl Tools {
         one_shot: bool,
     ) -> Result<(), String> {
         self.revalidate_tool_policy(ctx, name, args)?;
-        let Some((action, target, revision)) = consequential(name, args) else {
+        let Some((action, target, revision)) = self.consequential_scope(name, args) else {
             return Ok(());
         };
         let decision = crate::authority::decide(
@@ -3261,7 +3396,7 @@ impl Tools {
         one_shot: bool,
     ) -> Result<Option<ActionRecord>, String> {
         self.revalidate_tool_policy(ctx, name, args)?;
-        let Some((action, target, revision)) = consequential(name, args) else {
+        let Some((action, target, revision)) = self.consequential_scope(name, args) else {
             return Ok(None);
         };
         let access = self.session.get().ok_or("authority requires a session")?;
@@ -3281,7 +3416,7 @@ impl Tools {
             return Err("authority changed before dispatch".into());
         }
         let evidence = serde_json::json!({
-            "arguments": canonical_consequential_payload(name, args).expect("validated consequential arguments"),
+            "arguments": self.consequential_payload(name, args).expect("validated consequential arguments"),
         }).to_string();
         let operation_id = args["operation_id"]
             .as_str()
@@ -3428,13 +3563,21 @@ fn negotiate_protocol(params: &Value) -> Result<String, String> {
     ))
 }
 
-/// Consequential verbs carry their scope in arguments. This parser is strict:
-/// malformed input cannot fall through to an unscoped authority decision.
+/// The node's own consequential verbs, which carry their scope in
+/// arguments. A plugin's are the tools its manifest marks `consequential`
+/// ([`plugin_consequential`]). This parser is strict: malformed input cannot
+/// fall through to an unscoped authority decision.
 fn consequential_name(name: &str) -> bool {
-    matches!(
-        name,
-        github::PR_MERGE | gitlab::MR_MERGE | gitlab::DEPLOY | jira::ISSUE_TRANSITION
-    )
+    matches!(name, github::PR_MERGE | gitlab::MR_MERGE | gitlab::DEPLOY)
+}
+
+/// A consequential call's `operation_id`, when it is one: at least 8
+/// letters, digits or dashes.
+fn operation_id(args: &Value) -> Option<&str> {
+    args.get(OPERATION_ID)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| id.len() >= 8 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
 }
 
 fn consequential(name: &str, args: &Value) -> Option<(&'static str, String, Option<String>)> {
@@ -3444,12 +3587,7 @@ fn consequential(name: &str, args: &Value) -> Option<(&'static str, String, Opti
             .map(str::trim)
             .filter(|v| !v.is_empty())
     };
-    if matches!(
-        name,
-        github::PR_MERGE | gitlab::MR_MERGE | gitlab::DEPLOY | jira::ISSUE_TRANSITION
-    ) && !string("operation_id").is_some_and(|id| {
-        id.len() >= 8 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-    }) {
+    if consequential_name(name) && operation_id(args).is_none() {
         return None;
     }
     match name {
@@ -3482,25 +3620,40 @@ fn consequential(name: &str, args: &Value) -> Option<(&'static str, String, Opti
             ),
             string("source_sha").map(str::to_string),
         )),
-        jira::ISSUE_TRANSITION => {
-            let transition = string("transition_id")?;
-            if !transition
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
-            {
-                return None;
-            }
-            Some((
-                crate::authority::TICKET_TRANSITION,
-                format!(
-                    "jira:issue:{}:transition:{transition}",
-                    string("key")?.to_ascii_uppercase(),
-                ),
-                None,
-            ))
-        }
         _ => None,
     }
+}
+
+/// The scope of a call to a plugin's tool its manifest marks
+/// `consequential`: that one call. The node cannot read a plugin's
+/// arguments for what they act on, so the target is the tool and a hash of
+/// its arguments (`plugin:<plugin>__<tool>:<sha256>`, the `operation_id`
+/// left out): a grant names exactly the call it allows, and no grant covers
+/// the tool as a whole. `None` without a valid `operation_id`.
+fn plugin_consequential(
+    name: &str,
+    args: &Value,
+) -> Option<(&'static str, String, Option<String>)> {
+    let payload = plugin_consequential_payload(args)?;
+    let mut call = payload;
+    call.as_object_mut()?.remove(OPERATION_ID);
+    Some((
+        crate::authority::PLUGIN_CALL,
+        format!(
+            "plugin:{name}:{}",
+            crate::corpus::hash_body(&call.to_string())
+        ),
+        None,
+    ))
+}
+
+/// A consequential plugin call's arguments as they are recorded and
+/// compared on replay: as sent, with the `operation_id` trimmed.
+fn plugin_consequential_payload(args: &Value) -> Option<Value> {
+    let id = operation_id(args)?.to_string();
+    let mut payload = args.as_object()?.clone();
+    payload.insert(OPERATION_ID.into(), Value::from(id));
+    Some(Value::Object(payload))
 }
 
 /// The forge a tool reaches, for the tools that take a repository.
@@ -3630,10 +3783,6 @@ fn canonical_consequential_payload(name: &str, args: &Value) -> Option<Value> {
             "job_id": args.get("job_id")?.as_i64()?, "environment": string("environment")?,
             "source_sha": string("source_sha")?, "operation_id": operation_id,
         })),
-        jira::ISSUE_TRANSITION => Some(serde_json::json!({
-            "key": string("key")?.to_ascii_uppercase(), "transition_id": string("transition_id")?,
-            "operation_id": operation_id,
-        })),
         _ => None,
     }
 }
@@ -3745,6 +3894,30 @@ pub fn approval_context(
     }
 }
 
+/// The node's own Jira tools, before Jira became the jira-review plugin's,
+/// and what each is called now.
+pub const RETIRED_JIRA: &[(&str, &str)] = &[
+    ("issue", "jira-review__issue"),
+    ("issue_search", "jira-review__search"),
+    ("issue_transitions", "jira-review__transitions"),
+    ("issue_comment", "jira-review__comment"),
+    ("issue_update", "jira-review__update"),
+    ("issue_create", "jira-review__create"),
+    ("issue_link", "jira-review__link"),
+    ("issue_transition", "jira-review__transition"),
+];
+
+/// Why a call to a tool the node no longer has is refused, naming the one
+/// that replaced it; `None` for any other name.
+fn retired(name: &str) -> Option<String> {
+    let (_, now) = RETIRED_JIRA.iter().find(|(old, _)| *old == name)?;
+    Some(format!(
+        "{name} is no longer the node's: Jira is the jira-review plugin's, and this is {now}, \
+         offered once the plugin is installed (tracon plugin add cosmicspork/jira-review) on a \
+         channel that binds a jira credential. Nothing was asked or run"
+    ))
+}
+
 /// A title cut to the length a card and a push notification carry.
 fn bound(s: &mut String) {
     if s.len() > 400 {
@@ -3755,34 +3928,6 @@ fn bound(s: &mut String) {
         s.truncate(cut);
         s.push('…');
     }
-}
-
-/// A Jira transition titled by the status it leads to, which the operator
-/// knows, rather than by its id, which they do not. Jira is asked at request
-/// time; when it cannot say, the title names the id.
-fn transition_title(args: &Value, to: &str) -> String {
-    let key = args
-        .get("key")
-        .and_then(Value::as_str)
-        .unwrap_or("?")
-        .trim();
-    let mut s = format!("{} {key}: move to {to}", jira::ISSUE_TRANSITION);
-    bound(&mut s);
-    s
-}
-
-/// A Jira link titled the way it will read on `from`, in the type's outward
-/// wording ("blocks"), which Jira is asked for at request time.
-fn link_title(args: &Value, outward: &str) -> String {
-    let key = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or("?").trim();
-    let mut s = format!(
-        "{} {} {outward} {}",
-        jira::ISSUE_LINK,
-        key("from"),
-        key("to")
-    );
-    bound(&mut s);
-    s
 }
 
 /// A title a person reads for a call that carries prose: what it acts on and
@@ -3821,41 +3966,6 @@ fn prose_title(name: &str, args: &Value) -> Option<String> {
         }
     };
     Some(match name {
-        jira::ISSUE_CREATE => match args.get("issues").and_then(Value::as_array) {
-            Some(issues) => issue_set_title(name, issues),
-            None => with(
-                format!("{name} {} {}", id("project"), id("type")),
-                text("summary"),
-            ),
-        },
-        jira::ISSUE_UPDATE => {
-            let fields: Vec<&str> = ["summary", "description", "priority", "labels", "parent"]
-                .into_iter()
-                .filter(|f| args.get(*f).is_some())
-                .collect();
-            // A relative label edit is short enough to read in full, and
-            // which labels it adds and removes is the whole of it.
-            let labels = |key: &str, sign: char| -> Vec<String> {
-                args.get(key)
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .map(|l| format!("{sign}{l}"))
-                    .collect()
-            };
-            let relative = [labels("add_labels", '+'), labels("remove_labels", '-')].concat();
-            let mut head = format!("{name} {}", id("key"));
-            if !fields.is_empty() || relative.is_empty() {
-                head = format!("{head} ({})", fields.join(", "));
-            }
-            match (relative.is_empty(), text("summary")) {
-                (true, summary) => with(head, summary),
-                (false, None) => format!("{head}: {}", relative.join(" ")),
-                (false, Some(summary)) => format!("{head}: {}; {summary}", relative.join(" ")),
-            }
-        }
-        jira::ISSUE_COMMENT => with(format!("{name} {}", id("key")), first_line("body")),
         github::PR_COMMENT | github::ISSUE_COMMENT | github::PR_REPLY => with(
             format!("{name} {}#{}", id("repo"), id("number")),
             first_line("body"),
@@ -3905,10 +4015,6 @@ fn prose_title(name: &str, args: &Value) -> Option<String> {
             }
         }
         review::SUBMIT_REPORT => with(name.to_string(), text("title")),
-        jira::ISSUE_TRANSITION => {
-            format!("{name} {}: transition {}", id("key"), id("transition_id"))
-        }
-        jira::ISSUE_LINK => format!("{name} {} {} {}", id("from"), id("type"), id("to")),
         github::PR_MERGE => format!(
             "{name} {}#{}: {} at {}",
             id("repo"),
@@ -3997,39 +4103,6 @@ fn prose_title(name: &str, args: &Value) -> Option<String> {
     })
 }
 
-/// An `issue_create` of several issues: how many, in which projects, and
-/// their summaries in the order they are created.
-fn issue_set_title(name: &str, issues: &[Value]) -> String {
-    let field = |key: &'static str| {
-        issues
-            .iter()
-            .filter_map(move |i| i.get(key).and_then(Value::as_str))
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-    };
-    let mut projects: Vec<&str> = Vec::new();
-    for p in field("project") {
-        if !projects.contains(&p) {
-            projects.push(p);
-        }
-    }
-    let count = match issues.len() {
-        1 => "1 issue".to_string(),
-        n => format!("{n} issues"),
-    };
-    let head = if projects.is_empty() {
-        format!("{name} {count}")
-    } else {
-        format!("{name} {count} in {}", projects.join(", "))
-    };
-    let summaries: Vec<&str> = field("summary").collect();
-    if summaries.is_empty() {
-        head
-    } else {
-        format!("{head}: {}", summaries.join(", "))
-    }
-}
-
 /// What a `pr_ready` or `mr_ready` call asks for, in words: ready unless it
 /// says `ready: false`.
 fn ready_or_draft(args: &Value) -> &'static str {
@@ -4066,36 +4139,6 @@ mod tests {
 
     #[test]
     fn a_prose_call_is_titled_by_its_target_and_first_line() {
-        let create = json!({ "project": "WRK", "type": "Task", "summary": "Rotate keys", "description": "h1. Why" });
-        assert_eq!(
-            summarize(jira::ISSUE_CREATE, &create),
-            "issue_create WRK Task: Rotate keys"
-        );
-        let set = json!({ "issues": [
-            { "project": "WRK", "type": "Epic", "summary": "Port the feed" },
-            { "project": "WRK", "type": "Story", "summary": " Read it ", "parent": "#0" },
-            { "project": "OPS", "type": "Task", "summary": "Open the port" },
-        ] });
-        assert_eq!(
-            summarize(jira::ISSUE_CREATE, &set),
-            "issue_create 3 issues in WRK, OPS: Port the feed, Read it, Open the port"
-        );
-        let update = json!({ "key": "WRK-2", "description": "d", "labels": ["a"] });
-        assert_eq!(
-            summarize(jira::ISSUE_UPDATE, &update),
-            "issue_update WRK-2 (description, labels)"
-        );
-        let relative =
-            json!({ "key": "NUDEV-140", "add_labels": ["nead"], "remove_labels": ["stale"] });
-        assert_eq!(
-            summarize(jira::ISSUE_UPDATE, &relative),
-            "issue_update NUDEV-140: +nead -stale"
-        );
-        let mixed = json!({ "key": "WRK-2", "summary": "Rename", "add_labels": ["nead"] });
-        assert_eq!(
-            summarize(jira::ISSUE_UPDATE, &mixed),
-            "issue_update WRK-2 (summary): +nead; Rename"
-        );
         let comment = json!({ "repo": "o/n", "number": 4, "body": "\n  Looks good.\nMore." });
         assert_eq!(
             summarize(github::PR_COMMENT, &comment),
@@ -4223,25 +4266,6 @@ mod tests {
         assert_eq!(
             summarize(gitlab::DEPLOY, &deploy),
             "deploy g/p: qa from job 7 of pipeline 12 at abcdef1"
-        );
-        // Without Jira's word on where it leads, a transition names its id.
-        let transition = json!({ "key": "WRK-1", "transition_id": "31", "operation_id": "op" });
-        assert_eq!(
-            summarize(jira::ISSUE_TRANSITION, &transition),
-            "issue_transition WRK-1: transition 31"
-        );
-        assert_eq!(
-            transition_title(&transition, "In Review"),
-            "issue_transition WRK-1: move to In Review"
-        );
-        let link = json!({ "from": "NUDEV-140", "to": "NUDEV-141", "type": "Blocks" });
-        assert_eq!(
-            summarize(jira::ISSUE_LINK, &link),
-            "issue_link NUDEV-140 Blocks NUDEV-141"
-        );
-        assert_eq!(
-            link_title(&link, "blocks"),
-            "issue_link NUDEV-140 blocks NUDEV-141"
         );
     }
 

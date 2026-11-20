@@ -111,6 +111,11 @@ export interface PluginContext {
   /** What the plugin says the tool does. It decides nothing. */
   hint: 'read' | 'write'
   consequential: boolean
+  /**
+   * For a consequential tool, what a `plugin_call` grant allowing exactly
+   * this call names: it is asked unless one does. Null otherwise.
+   */
+  grant_target?: string | null
   /** Hosts it says it reaches: shown, not enforced. */
   egress: string[]
   credentials: PluginCredential[]
@@ -141,6 +146,7 @@ export function pluginRows(details: Pick<ApprovalDetails, 'plugin'>): { key: str
     { key: 'Says it', value: p.consequential ? `${p.hint}s, consequential` : `${p.hint}s` },
     { key: 'Reaches', value: p.egress.length > 0 ? p.egress.join(', ') : 'declares none' },
     { key: 'Lent on allow', value: lent.length > 0 ? lent.join(', ') : 'nothing' },
+    ...(p.grant_target ? [{ key: 'Grant target', value: `plugin_call ${p.grant_target}` }] : []),
   ]
 }
 

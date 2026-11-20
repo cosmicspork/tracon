@@ -1192,8 +1192,8 @@ async fn an_edit_may_not_change_what_the_call_acts_on() {
     let h = harness_with(enabled()).await;
     let id = ask(
         &h,
-        "issue_comment",
-        json!({ "key": "WRK-1", "body": "a comment" }),
+        "github_issue_comment",
+        json!({ "repo": "o/n", "number": 1, "body": "a comment" }),
     )
     .await;
     let (status, v) = answer(
@@ -1201,12 +1201,12 @@ async fn an_edit_may_not_change_what_the_call_acts_on() {
         &id,
         json!({
             "option_id": "allow_once",
-            "arguments": { "key": "WRK-2", "body": "a comment" }
+            "arguments": { "repo": "o/n", "number": 2, "body": "a comment" }
         }),
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
-    assert_eq!(v["error"]["fields"][0]["field"], "key", "{v}");
+    assert_eq!(v["error"]["fields"][0]["field"], "number", "{v}");
     assert_eq!(approval(&h, &id, 0).await["state"], "still_waiting");
 }
 
@@ -1218,8 +1218,8 @@ async fn opening_an_approval_claims_it_and_leaving_releases_it() {
     let h = harness_with(enabled()).await;
     let id = ask(
         &h,
-        "issue_create",
-        json!({ "project": "WRK", "type": "Task", "summary": "Rotate the keys", "description": "h1. Why" }),
+        "github_issue_comment",
+        json!({ "repo": "o/n", "number": 4, "body": "Rotate the keys\n\nWhy: they leaked." }),
     )
     .await;
     let card = h
@@ -1229,26 +1229,21 @@ async fn opening_an_approval_claims_it_and_leaving_releases_it() {
         .into_iter()
         .find(|p| p.id == id)
         .unwrap();
-    assert_eq!(card.title, "issue_create WRK Task: Rotate the keys");
+    assert_eq!(card.title, "github_issue_comment o/n#4: Rotate the keys");
 
     let (status, v) = call(&h.operator, "GET", &format!("/api/approvals/{id}"), None).await;
     assert_eq!(status, StatusCode::OK, "{v}");
     assert_eq!(v["approval"]["id"], id.as_str());
-    assert_eq!(v["arguments"]["summary"], "Rotate the keys");
+    assert_eq!(v["arguments"]["number"], 4);
     assert_eq!(v["format"], "markdown");
-    assert_eq!(v["plugin_format"], "jira_wiki");
-    assert_eq!(v["prose_fields"], json!(["description"]));
+    assert!(v["plugin_format"].is_null(), "{v}");
+    assert_eq!(v["prose_fields"], json!(["body"]));
     assert_eq!(
         v["locked_fields"],
         json!(["key", "project", "repo", "number", "iid"])
     );
-    // Required of a single issue and of each item of a set alike, which
-    // the handler checks: the schema can only say it of the items.
-    assert_eq!(
-        v["input_schema"]["properties"]["issues"]["items"]["required"][0],
-        "project"
-    );
-    assert_eq!(v["item_list"], "issues");
+    assert_eq!(v["input_schema"]["required"][0], "repo");
+    assert!(v["item_list"].is_null(), "{v}");
     assert!(v["approval"]["claimed_ms"].is_i64(), "{v}");
     assert!(v["claimed_before_ms"].is_null(), "{v}");
     assert!(v["options"]
@@ -2194,7 +2189,7 @@ async fn an_unbound_channel_is_offered_no_brokered_tools() {
     state::isolate();
     let h = harness_with(enabled()).await;
     let names = list(&h.operator, "personal").await;
-    for brokered in ["pr_status", "issue", "issue_update", "mr_status"] {
+    for brokered in ["pr_status", "pr_merge", "mr_comment", "mr_status"] {
         assert!(
             !names.contains(&brokered.to_string()),
             "{brokered} in {names:?}"
@@ -2304,69 +2299,11 @@ async fn an_external_caller_cannot_retain_into_a_session_scope() {
     assert!(out.to_string().contains("global"), "{out}");
 }
 
-/// A Jira that offers WRK-1 one transition, and records every request.
-async fn fake_jira(seen: Arc<std::sync::Mutex<Vec<String>>>) -> std::net::SocketAddr {
-    let app = axum::Router::new().route(
-        "/rest/api/2/issue/WRK-1/transitions",
-        axum::routing::any(move |method: axum::http::Method| {
-            seen.lock().unwrap().push(method.to_string());
-            async {
-                axum::Json(json!({ "transitions": [
-                    { "id": "21", "name": "Start review",
-                      "to": { "name": "In Review", "statusCategory": { "name": "In Progress" } } },
-                ] }))
-            }
-        }),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    addr
-}
-
-/// A held Jira transition reads as the status it moves the issue to, which
-/// Jira is asked for when the call is held; nothing is transitioned by asking.
-/// An id Jira does not offer is titled by the id.
+/// Jira is the jira-review plugin's: a channel that binds a `jira` credential
+/// is offered none of the node's old Jira tools, and a call to one is refused
+/// by the name that replaced it, with nothing asked.
 #[tokio::test]
-async fn a_held_transition_is_titled_by_the_status_it_leads_to() {
-    state::isolate();
-    let h = harness_with(enabled()).await;
-    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let addr = fake_jira(seen.clone()).await;
-    h.tools.broker.write().unwrap().put(
-        "jira",
-        tracon::broker::Credential {
-            env: [
-                ("JIRA_URL".to_string(), format!("http://{addr}")),
-                ("JIRA_EMAIL".to_string(), "me@example.com".to_string()),
-                ("JIRA_TOKEN".to_string(), "t".to_string()),
-            ]
-            .into_iter()
-            .collect(),
-            channels: vec!["work".into()],
-            ..Default::default()
-        },
-    );
-    let args = |id: &str| json!({ "key": "WRK-1", "transition_id": id, "operation_id": format!("transition-{id}") });
-
-    let id = ask(&h, "issue_transition", args("21")).await;
-    let row = h.store.get_approval(&id).unwrap().unwrap();
-    assert_eq!(row.title, "issue_transition WRK-1: move to In Review");
-
-    let id = ask(&h, "issue_transition", args("99")).await;
-    let row = h.store.get_approval(&id).unwrap().unwrap();
-    assert_eq!(row.title, "issue_transition WRK-1: transition 99");
-
-    assert_eq!(*seen.lock().unwrap(), ["GET", "GET"]);
-}
-
-/// A held node-native Jira edit gets the generic card: its description is
-/// wiki markup a plugin would render, and with no plugin owning `jira_wiki`
-/// the page is told so and shows it as the node renders it. The live "as it
-/// is now" diff went with the generic plugin preview path. Nothing asks Jira
-/// when the page opens: the plugin's preview is what reads the issue now.
-#[tokio::test]
-async fn a_held_issue_edit_gets_the_generic_card_until_a_plugin_owns_its_format() {
+async fn the_nodes_own_jira_tools_are_gone_and_name_the_plugins() {
     state::isolate();
     let h = harness_with(enabled()).await;
     h.tools.broker.write().unwrap().put(
@@ -2383,22 +2320,65 @@ async fn a_held_issue_edit_gets_the_generic_card_until_a_plugin_owns_its_format(
             ..Default::default()
         },
     );
-    let edit = json!({ "key": "WRK-1", "description": "h2. Goal\n* one\n* three" });
-    let id = ask(&h, "issue_update", edit).await;
-    let (status, v) = call(&h.operator, "GET", &format!("/api/approvals/{id}"), None).await;
+    let names = list(&h.operator, "work").await;
+    for (old, _) in tracon::mcp::RETIRED_JIRA {
+        assert!(!names.iter().any(|n| n == old), "{old} in {names:?}");
+    }
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call(
+            "issue_transition",
+            json!({ "key": "WRK-1", "transition_id": "21", "operation_id": "transition-21" }),
+        ),
+    )
+    .await;
+    let (err, out) = outcome(&v);
+    assert!(err, "{out}");
+    assert!(out.to_string().contains("jira-review__transition"), "{out}");
+    assert!(h.store.open_permission_views().unwrap().is_empty());
+}
+
+/// A Jira approval from before the plugin still opens: its wiki markup is
+/// shown as the source it is, and nothing tries to render it.
+#[tokio::test]
+async fn a_past_jira_approval_displays_as_source() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let now = tracon::store::now_ms();
+    h.store
+        .insert_approval(&tracon::store::approvals::ApprovalRow {
+            id: "old-jira".into(),
+            channel: "work".into(),
+            session_id: None,
+            node_id: "n1".into(),
+            lane: None,
+            tool: "issue_update".into(),
+            arguments: json!({ "key": "WRK-1", "description": "h2. Goal\n* one" }).to_string(),
+            request_key: "key-old-jira".into(),
+            title: "issue_update WRK-1 (description)".into(),
+            state: "succeeded".into(),
+            answer_option_id: Some("allow_once".into()),
+            edited_arguments: None,
+            result: Some("{}".into()),
+            reason: None,
+            operator_note: None,
+            claimed_ms: None,
+            created_ms: now - 1000,
+            decided_ms: Some(now - 500),
+            finished_ms: Some(now - 400),
+            expires_ms: now + 600_000,
+        })
+        .unwrap();
+    let (status, v) = call(&h.operator, "GET", "/api/approvals/old-jira", None).await;
     assert_eq!(status, StatusCode::OK, "{v}");
-    assert!(v.get("issue").is_none(), "{v}");
-    assert!(v.get("preview").is_none(), "{v}");
-    assert_eq!(v["format"], "markdown");
-    assert_eq!(v["plugin_format"], "jira_wiki");
+    assert_eq!(v["approval"]["title"], "issue_update WRK-1 (description)");
+    assert_eq!(v["arguments"]["description"], "h2. Goal\n* one");
+    assert_eq!(v["format"], "source");
+    assert!(v["plugin_format"].is_null(), "{v}");
+    assert_eq!(v["prose_fields"], json!(["description"]));
+    assert!(v.get("render_error").is_none(), "{v}");
     assert!(v.get("rendered").is_none(), "{v}");
-    assert!(
-        v["render_error"]
-            .as_str()
-            .unwrap()
-            .contains("no installed plugin owns the format jira_wiki"),
-        "{v}"
-    );
 }
 
 /// Seed an item on `channel` through the operator's API and return its id.
@@ -3045,7 +3025,7 @@ async fn a_held_write_conflicts_when_the_document_changed_while_it_waited() {
     );
 }
 
-/// SQL is the `sql-review` plugin's: the shipped agreements (bundle v25)
+/// SQL is the `sql-review` plugin's: the shipped agreements (bundle v25 on)
 /// name its reads in `brokered-reads`, so they run unattended with no
 /// `[[plugin]]` entry and are lent the channel's `sql-read` account, while
 /// any other tool it offers is asked.

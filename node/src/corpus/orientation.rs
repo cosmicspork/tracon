@@ -313,7 +313,7 @@ fn push_working_with(out: &mut String, policy: &Policy, facts: &Facts) {
 /// exactly one group, and a test keeps new tools from going unlisted.
 const TOOL_GROUPS: &[(&str, &[&str])] = {
     use crate::mcp::{
-        approvals, docs, egress, jira, memory, operator, review, services, setup, show, work,
+        approvals, docs, egress, memory, operator, review, services, setup, show, work,
     };
     &[
         (
@@ -369,17 +369,20 @@ const TOOL_GROUPS: &[(&str, &[&str])] = {
         ),
         ("GitHub", crate::mcp::github::TOOLS),
         ("GitLab", crate::mcp::gitlab::TOOLS),
+        // The `jira-review` plugin's tools, offered once it is installed; the
+        // node itself no longer talks to Jira. `transition` is consequential:
+        // it takes an `operation_id` and is asked unless a grant names it.
         (
             "Jira",
             &[
-                jira::ISSUE,
-                jira::ISSUE_SEARCH,
-                jira::ISSUE_TRANSITIONS,
-                jira::ISSUE_COMMENT,
-                jira::ISSUE_UPDATE,
-                jira::ISSUE_CREATE,
-                jira::ISSUE_LINK,
-                jira::ISSUE_TRANSITION,
+                "jira-review__issue",
+                "jira-review__search",
+                "jira-review__transitions",
+                "jira-review__comment",
+                "jira-review__update",
+                "jira-review__create",
+                "jira-review__link",
+                "jira-review__transition",
             ],
         ),
         // The `sql-review` plugin's reads, as the shipped policy bundle names
@@ -1856,7 +1859,6 @@ mod tests {
         let mut all = Vec::new();
         all.extend(github::definitions());
         all.extend(gitlab::definitions());
-        all.extend(jira::definitions());
         all.extend(review::definitions());
         all.extend(memory::definitions());
         all.extend(docs::definitions(&crate::config::default_doc_kinds()));

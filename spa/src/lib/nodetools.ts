@@ -58,14 +58,6 @@ export const NODE_TOOLS = new Set([
   'job_trace',
   'job_play',
   'deploy',
-  // Jira
-  'issue',
-  'issue_search',
-  'issue_comment',
-  'issue_update',
-  'issue_create',
-  'issue_transition',
-  'issue_transitions',
   // documents, memory, databases
   'doc_read',
   'doc_search',
@@ -253,25 +245,6 @@ function callLine(tool: string, rawInput: unknown): string {
       return `Start job ${job}`
     case 'deploy':
       return `Deploy job ${job}`
-    case 'issue':
-      return `Issue ${key}`
-    case 'issue_search':
-      return line('Search issues', clip(str(a.jql), 56))
-    case 'issue_comment':
-      return `Comment on ${key}`
-    case 'issue_update':
-      return `Update ${key}`
-    case 'issue_create':
-      if (Array.isArray(a.issues)) {
-        const first: unknown = a.issues[0]
-        const summary = first && typeof first === 'object' ? str((first as Record<string, unknown>).summary) : ''
-        return line(a.issues.length === 1 ? 'Create an issue' : `Create ${a.issues.length} issues`, clip(summary))
-      }
-      return line('Create an issue', clip(str(a.summary)))
-    case 'issue_transition':
-      return `Move ${key}`
-    case 'issue_transitions':
-      return `Transitions of ${key}`
     case 'doc_read':
       return sp('Read document', str(a.slug))
     case 'doc_search':

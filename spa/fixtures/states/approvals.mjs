@@ -30,7 +30,8 @@ const EGRESS_OPTIONS = [
 ]
 const IDENTIFYING = ['key', 'project', 'repo', 'number', 'iid']
 
-// Tool input schemas as node/src/mcp/{github,jira,egress,setup,docs}.rs define them.
+// Tool input schemas as node/src/mcp/{github,egress,setup,docs}.rs define them, and
+// as the jira-review plugin lists its tools (the node adds a consequential tool's operation_id).
 const repo = { type: 'string', description: 'owner/name' }
 const SCHEMAS = {
   pr_comment: {
@@ -73,28 +74,36 @@ const SCHEMAS = {
     },
     required: ['name'],
   },
-  issue_transition: {
+  'jira-review__transition': {
     type: 'object',
-    properties: { key: { type: 'string' }, transition_id: { type: 'string' }, operation_id: { type: 'string' } },
-    required: ['key', 'transition_id', 'operation_id'],
+    properties: {
+      key: { type: 'string', description: 'Issue key, e.g. WRK-123.' },
+      transition: { type: 'string', description: 'Transition id or name, e.g. 31 or In Review.' },
+      fields: { type: 'object' },
+      operation_id: {
+        type: 'string',
+        description:
+          'A stable id for this one operation: at least 8 letters, digits or dashes. A retry with the same id and arguments returns the outcome already recorded rather than running it again.',
+      },
+    },
+    required: ['key', 'transition', 'operation_id'],
   },
-  issue_comment: {
+  github_issue_comment: {
     type: 'object',
-    properties: { key: { type: 'string' }, body: { type: 'string' } },
-    required: ['key', 'body'],
+    properties: { repo, number: { type: 'integer' }, body: { type: 'string' } },
+    required: ['repo', 'number', 'body'],
   },
-  issue_create: {
+  'jira-review__create': {
     type: 'object',
     properties: {
       project: { type: 'string', description: 'Project key, e.g. WRK.' },
       type: { type: 'string', description: 'Issue type name, e.g. Task.' },
       summary: { type: 'string' },
-      description: { type: 'string' },
+      description: { type: 'string', 'x-tracon-format': 'jira_wiki' },
       priority: { type: 'string' },
       labels: { type: 'array', items: { type: 'string' } },
       parent: { type: 'string', description: 'Parent issue key.' },
     },
-    required: ['project', 'type', 'summary'],
   },
   request_egress: {
     type: 'object',
@@ -155,12 +164,11 @@ const SCHEMAS = {
 const PRESENT = {
   pr_comment: ['markdown', ['body'], []],
   pr_reply: ['markdown', ['body'], ['thread_id']],
-  issue_comment: ['jira_wiki', ['body'], []],
-  issue_create: ['jira_wiki', ['description'], []],
+  github_issue_comment: ['markdown', ['body'], []],
+  'jira-review__create': ['markdown', ['description'], []],
   request_egress: ['markdown', [], ['host']],
   repo_setup_propose: ['markdown', ['why'], []],
   service_start: ['markdown', [], ['name']],
-  issue_transition: ['markdown', [], ['transition_id']],
 }
 
 /** mcp::summarize: a prose or gated call is titled in words; anything else is `name {json}`. */
@@ -173,14 +181,8 @@ function summarize(tool, args) {
     case 'pr_reply':
       s = withSaid(`${tool} ${args.repo}#${args.number}`, first('body'))
       break
-    case 'issue_comment':
-      s = withSaid(`${tool} ${args.key}`, first('body'))
-      break
-    case 'issue_create':
-      s = withSaid(`${tool} ${args.project} ${args.type}`, args.summary)
-      break
-    case 'issue_transition':
-      s = `${tool} ${args.key}: transition ${args.transition_id}`
+    case 'github_issue_comment':
+      s = withSaid(`${tool} ${args.repo}#${args.number}`, first('body'))
       break
     case 'pr_merge':
       s = `${tool} ${args.repo}#${args.number}: ${args.method ?? 'squash'} at ${args.head_sha.slice(0, 7)}`
@@ -379,25 +381,45 @@ const merge = approval(ID.merge, 'pr_merge', {
 
 const rerun = approval(ID.rerun, 'run_rerun', { repo: 'acme/orbit', run_id: 11893472205 })
 
-// The node asks Jira where transition 31 leads when the call is held.
+/** The card's facts about a jira-review tool, as `Tools::plugin_approval_context` gives them. */
+const jiraReview = (tool, hint, more = {}) => ({
+  name: 'jira-review',
+  version: '0.1.0',
+  tool,
+  hint,
+  consequential: false,
+  grant_target: null,
+  egress: ['*.atlassian.net:443'],
+  credentials: [{ name: 'jira', lend: 'always', bindings: ['jira'] }],
+  ...more,
+})
+
+// Consequential in the plugin's manifest: asked unless a grant names this call.
 const transition = approval(
   ID.transition,
-  'issue_transition',
+  'jira-review__transition',
   {
     key: 'WRK-1874',
-    transition_id: '31',
+    transition: 'In Review',
     operation_id: 'transition-WRK-1874-31-0199f2d5',
   },
-  { title: 'issue_transition WRK-1874: move to In Review' },
+  {},
+  {
+    plugin: jiraReview('transition', 'write', {
+      consequential: true,
+      grant_target: 'plugin:jira-review__transition:5b0f3c1e9a7d2b4c6e8f0a1b3c5d7e9f1a2b4c6d8e0f2a4b6c8d0e2f4a6b8c0d',
+    }),
+    preview: {
+      status: 'shown',
+      previewable: true,
+      summary: 'WRK-1874: In Progress → In Review',
+      body: '**WRK-1874** moves from *In Progress* to *In Review* by the transition **Start review** (31). It asks for no fields.',
+      token_sha256: '9c1e5f7a3b2d4c6e8f0a1b3c5d7e9f1a2b4c6d8e0f2a4b6c8d0e2f4a6b8c0d1e',
+    },
+  },
 )
 
-const create = approval(ID.create, 'issue_create', {
-  project: 'WRK',
-  type: 'Task',
-  summary: 'Rotate the gateway signing key before the March expiry',
-  priority: 'High',
-  labels: ['security', 'gateway', 'q1'],
-  description: `h2. Why
+const createDescription = `h2. Why
 The gateway's signing key expires on *14 March*. After that, every session token it issued is refused and running sessions stop at their next tool call.
 
 h2. What to do
@@ -411,8 +433,44 @@ h3. Risk
 
 {code}
 tracon keys list --kind gateway
-{code}`,
-})
+{code}`
+
+// What jira-review's tracon/format/convert makes of it.
+const createMarkdown = `## Why
+The gateway's signing key expires on **14 March**. After that, every session token it issued is refused and running sessions stop at their next tool call.
+
+## What to do
+1. Generate a new key with \`tracon keys rotate --kind gateway\`.
+2. Publish the new public half to the mesh before retiring the old one.
+3. Keep the old key verifying for 24 hours.
+
+### Risk
+- A peer that misses the publish refuses new tokens until it next syncs.
+- Do not delete the old key file until the overlap ends.
+
+\`\`\`
+tracon keys list --kind gateway
+\`\`\``
+
+const create = approval(
+  ID.create,
+  'jira-review__create',
+  {
+    project: 'WRK',
+    type: 'Task',
+    summary: 'Rotate the gateway signing key before the March expiry',
+    priority: 'High',
+    labels: ['security', 'gateway', 'q1'],
+    description: createDescription,
+  },
+  {},
+  {
+    plugin_format: 'jira_wiki',
+    rendered: { description: createMarkdown },
+    rendered_items: null,
+    plugin: jiraReview('create', 'write'),
+  },
+)
 
 const egress = approval(ID.egress, 'request_egress', {
   host: 'registry.npmjs.org',
@@ -425,9 +483,10 @@ const service = approval(ID.service, 'service_start', { name: 'postgres', wait_s
 
 const propose = approval(ID.propose, 'repo_setup_propose', proposeArgs)
 
-const unnamed = approval(ID.unnamed, 'issue_comment', {
-  key: 'WRK-1874',
-  body: 'Key rotation is scheduled for *Tuesday 09:00*; the overlap window is 24 hours.\n\n* new key id: {{gw-2026-03}}\n* old key retires: Wednesday 09:00',
+const unnamed = approval(ID.unnamed, 'github_issue_comment', {
+  repo: 'acme/orbit',
+  number: 1874,
+  body: 'Key rotation is scheduled for **Tuesday 09:00**; the overlap window is 24 hours.\n\n- new key id: `gw-2026-03`\n- old key retires: Wednesday 09:00',
   visibility: { type: 'role', value: 'Developers' },
   notify: false,
 })
@@ -502,14 +561,14 @@ export default [
   }),
   at(ID.transition, transition, {
     id: 'approvals-issue-transition',
-    since: '#401',
-    title: 'Jira transition, titled by the status it leads to',
-    note: 'issue_transition takes the id issue_transitions (new in #401) lists; the node asks Jira when the call is held and titles it "move to In Review". transition_id is locked.',
+    since: 'plugins U7',
+    title: 'Jira transition through the jira-review plugin: consequential',
+    note: 'jira-review__transition is consequential in its manifest: the node added operation_id, the card says "writes, consequential" and names the plugin_call grant target for exactly this call, and the preview shows where the issue moves.',
   }),
   at(ID.create, create, {
     id: 'approvals-issue-create-jira',
-    title: 'Jira issue create: wiki markup rendered, labels as tags',
-    note: 'format jira_wiki: headings, numbered list, {{code}}, colour and {code} rendered. labels is one per line; project is locked and leads the form.',
+    title: 'Jira issue create: wiki markup rendered by its plugin, labels as tags',
+    note: 'jira-review owns jira_wiki: the description shows as the Markdown its tracon/format/convert made, with the source one click away. labels is one per line; project is locked and leads the form.',
   }),
   at(ID.unnamed, unnamed, {
     id: 'approvals-unnamed-args',

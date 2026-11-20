@@ -1545,8 +1545,11 @@ export interface AuthorityGrant {
   action:
     | 'merge'
     | 'publish'
-    | 'ticket_transition'
     | 'deploy'
+    /** One call to a plugin tool its manifest marks consequential. */
+    | 'plugin_call'
+    /** The node's own Jira transition, before Jira became a plugin's: past grants only. */
+    | 'ticket_transition'
     /** An interactive terminal in one session's workspace. Bound to that session. */
     | 'terminal'
   verdict: 'allow' | 'ask' | 'deny'

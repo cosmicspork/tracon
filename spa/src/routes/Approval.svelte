@@ -25,7 +25,6 @@
   import { clock } from '../lib/clock.svelte'
   import { formatAge, formatExpiry } from '../lib/format'
   import { isNotFound } from '../lib/load'
-  import { renderJiraWiki } from '../lib/jira-wiki'
   import { codeSpans, render } from '../lib/markdown'
   import { router } from '../lib/router.svelte'
   import { formValues, type Field, type FieldValue } from '../lib/schema-form'
@@ -154,14 +153,13 @@
 
   /**
    * A prose field as HTML, or null to show its source. Prose in a plugin's
-   * format is shown as that plugin rendered it; the node-native Jira tools'
-   * wiki markup is rendered here until they move to the jira-review plugin.
+   * format is shown as that plugin rendered it, and as source when it could
+   * not be.
    */
   function html(key: string, text: string, item?: number): string | null {
     if (!details) return null
     const md = renderedProse(details, key, text, item) ?? drafts[text]
     if (md !== undefined) return render(md)
-    if (details.plugin_format === 'jira_wiki' && details.render_error) return renderJiraWiki(text)
     return null
   }
 

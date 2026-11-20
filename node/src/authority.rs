@@ -13,14 +13,18 @@ use crate::{
 
 pub const MERGE: &str = "merge";
 pub const PUBLISH: &str = "publish";
-pub const TICKET_TRANSITION: &str = "ticket_transition";
 pub const DEPLOY: &str = "deploy";
+/// A call to a plugin tool its manifest marks `consequential`, scoped to the
+/// one call (`plugin:<plugin>__<tool>:<sha256 of its arguments>`). Grants for
+/// `ticket_transition`, the node's own Jira transition before Jira became the
+/// jira-review plugin's, are still listed and match nothing.
+pub const PLUGIN_CALL: &str = "plugin_call";
 
 /// The policy kind the forge actions are decided under.
 pub const AUTHORITY_KIND: &str = "authority";
 
 pub fn valid_action(action: &str) -> bool {
-    matches!(action, MERGE | PUBLISH | TICKET_TRANSITION | DEPLOY)
+    matches!(action, MERGE | PUBLISH | DEPLOY | PLUGIN_CALL)
 }
 
 /// The policy kind one action is decided under.

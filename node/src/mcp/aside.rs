@@ -104,8 +104,8 @@ fn tidy(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::mcp::{
-        approvals, docs, egress, github, gitlab, jira, memory, operator, review, services, setup,
-        show, work,
+        approvals, docs, egress, github, gitlab, memory, operator, review, services, setup, show,
+        work,
     };
     use crate::session::Phase;
 
@@ -113,7 +113,6 @@ mod tests {
         let mut all = Vec::new();
         all.extend(github::definitions());
         all.extend(gitlab::definitions());
-        all.extend(jira::definitions());
         all.extend(review::definitions());
         all.extend(memory::definitions());
         all.extend(docs::definitions(&crate::config::default_doc_kinds()));

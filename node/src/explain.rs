@@ -75,8 +75,8 @@ pub struct SessionAuthority {
 const AUTHORITY_ACTIONS: &[&str] = &[
     authority::MERGE,
     authority::PUBLISH,
-    authority::TICKET_TRANSITION,
     authority::DEPLOY,
+    authority::PLUGIN_CALL,
 ];
 
 pub fn session_authority(
