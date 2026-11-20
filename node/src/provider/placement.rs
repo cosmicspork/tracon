@@ -45,6 +45,9 @@ pub enum Room {
     /// The scheduler kept this session's pod unschedulable past its grace:
     /// full, whatever was read, in the scheduler's words.
     Unschedulable { fits: bool, unschedulable: String },
+    /// Short of room by the node's own account: a review's checks were put
+    /// out or refused for want of it, or others' wait for it.
+    Short { fits: bool, short: String },
 }
 
 impl Room {
@@ -55,11 +58,19 @@ impl Room {
         }
     }
 
+    /// Short of room, as `said` says.
+    pub fn short(said: impl Into<String>) -> Self {
+        Room::Short {
+            fits: false,
+            short: said.into(),
+        }
+    }
+
     pub fn is_full(&self) -> bool {
         match self {
             Room::Read(fit) => !fit.fits,
             Room::Unread { .. } => false,
-            Room::Unschedulable { .. } => true,
+            Room::Unschedulable { .. } | Room::Short { .. } => true,
         }
     }
 }
@@ -70,6 +81,7 @@ impl std::fmt::Display for Room {
             Room::Read(fit) => fit.fmt(f),
             Room::Unread { unread } => write!(f, "the cluster's room was not read: {unread}"),
             Room::Unschedulable { unschedulable, .. } => write!(f, "its pod {unschedulable}"),
+            Room::Short { short, .. } => write!(f, "{short}"),
         }
     }
 }

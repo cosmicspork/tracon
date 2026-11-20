@@ -870,6 +870,36 @@ fn tracked_files(root: &Path) -> Result<Vec<std::path::PathBuf>, String> {
     Ok(out)
 }
 
+/// How a [`Held`] sandbox is made, beyond its image and mounts.
+#[derive(Debug, Clone)]
+pub struct Making {
+    /// How its trees come back at the end ([`Held::start_as`]).
+    pub kind: crate::runner::RunKind,
+    /// What its provider is told it is.
+    pub labels: crate::runner::RunLabels,
+    /// What a provider elsewhere sizes it by.
+    pub resources: Resources,
+    /// How long its token may wait to be redeemed, for a provider that may
+    /// keep a copy of how it was delivered; `None` for as long as it runs.
+    pub token_window: Option<Duration>,
+}
+
+/// A run of its own for a sandbox named `name`, and the bootstrap that
+/// carries a token issued for that run alone.
+fn issue(server: &SandboxServer, name: &str, window: Option<Duration>) -> (String, Bootstrap) {
+    let run = format!("{name}:{}", uuid::Uuid::now_v7().simple());
+    let token = match window {
+        Some(window) => server.tokens().issue_within(run.clone(), window),
+        None => server.tokens().issue(run.clone()),
+    };
+    let bootstrap = Bootstrap {
+        run: run.clone(),
+        cert_pin: server.pin().to_string(),
+        token,
+    };
+    (run, bootstrap)
+}
+
 /// One sandbox held open for several commands: a preparation's steps all
 /// run in it, so what each leaves in the sandbox's own filesystem is there
 /// for the next and for the snapshot. Its mounts are fixed when it is made;
@@ -889,6 +919,9 @@ pub struct Held {
     tunnels: Mutex<Vec<tracon_sandbox::node::Tunnel>>,
     /// The trees sent in where the runtime mounts no volume.
     files: Option<crate::runner::sandbox_files::Attached>,
+    /// Where every command runs, whatever directory it names: where the
+    /// sandbox holds its tree, when that is not `/work`.
+    workdir: Option<String>,
     finished: std::sync::atomic::AtomicBool,
 }
 
@@ -924,6 +957,34 @@ impl Held {
         mounts: &[Mount],
         kind: crate::runner::RunKind,
     ) -> Result<Held, String> {
+        Held::start_making(
+            provider,
+            files,
+            server,
+            name,
+            image,
+            mounts,
+            &Making {
+                kind,
+                labels: crate::runner::RunLabels::of(crate::runner::RunKind::Prepare),
+                resources: Resources::default(),
+                token_window: None,
+            },
+        )
+        .await
+    }
+
+    /// [`Held::start_as`], made as `making` says.
+    pub async fn start_making(
+        provider: Arc<dyn SandboxProvider>,
+        files: Option<&crate::runner::sandbox_files::FilesStore>,
+        server: Arc<SandboxServer>,
+        name: &str,
+        image: &str,
+        mounts: &[Mount],
+        making: &Making,
+    ) -> Result<Held, String> {
+        let kind = making.kind;
         let (mounts, plan) = match files {
             // A tree sent in lands in the image's own filesystem rather than
             // on storage of the sandbox's own: what the image holds there
@@ -938,23 +999,17 @@ impl Held {
             }
             None => (mounts.to_vec(), None),
         };
-        let run = format!("{name}:{}", uuid::Uuid::now_v7().simple());
-        let token = server.tokens().issue(run.clone());
-        let bootstrap = Bootstrap {
-            run: run.clone(),
-            cert_pin: server.pin().to_string(),
-            token,
-        };
+        let (run, bootstrap) = issue(&server, name, making.token_window);
         let created = {
             let _images = crate::boundary::reconcile::images_in_use().await;
             provider
                 .create(&CreateSpec {
                     name: Some(name),
                     image,
-                    resources: &Resources::default(),
+                    resources: &making.resources,
                     mounts: &mounts,
                     bootstrap: &bootstrap,
-                    labels: &crate::runner::RunLabels::of(crate::runner::RunKind::Prepare),
+                    labels: &making.labels,
                     shape: crate::provider::Shape::Command,
                 })
                 .await
@@ -992,6 +1047,7 @@ impl Held {
                 running: Mutex::new(HashMap::new()),
                 tunnels: Mutex::new(Vec::new()),
                 files,
+                workdir: None,
                 finished: Default::default(),
             }),
             (Err(error), _) | (_, Err(error)) => {
@@ -1146,6 +1202,134 @@ impl Held {
         &self.handle
     }
 
+    /// Run every command in `workdir`, where this sandbox holds its tree.
+    pub fn at(mut self, workdir: &str) -> Self {
+        self.workdir = Some(workdir.to_string());
+        self
+    }
+
+    /// The run its token was issued for.
+    pub fn run(&self) -> &str {
+        &self.run
+    }
+
+    /// Its isolation as its provider reads it back, held to `requirements`.
+    pub async fn verify(&self, requirements: &crate::provider::Requirements) -> Result<(), String> {
+        self.provider
+            .verify_isolation(&self.handle)
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|caps| requirements.check(&caps))
+    }
+
+    /// What it runs, as its provider confirms it.
+    pub async fn identity(&self) -> Result<crate::provider::ImageIdentity, String> {
+        self.provider
+            .image_identity(&self.handle)
+            .await
+            .map_err(|error| format!("{}'s image: {error}", self.handle.0))
+    }
+
+    /// Close its tunnels: nothing in it reaches the node's gateways after.
+    pub fn close_tunnels(&self) {
+        drop(std::mem::take(&mut *self.tunnels.lock().unwrap()));
+    }
+
+    /// A checkpoint of it, as its provider takes one, to fork from.
+    pub async fn checkpoint(&self) -> Result<crate::provider::SnapshotId, String> {
+        self.provider
+            .snapshot(&self.handle)
+            .await
+            .map_err(|error| format!("checkpoint {}: {error}", self.handle.0))
+    }
+
+    /// End its run on the node's side: its connection, and any redial of
+    /// it, are refused from now on. A fork of it holds a copy of its
+    /// supervisor, which must never come back as this run.
+    pub fn end_run(&self) {
+        self.server.end_run(&self.run);
+    }
+
+    /// Sandboxes forked from `snapshot`, one per name, each with a run and
+    /// token of its own, connected: what each came to, in `names`' order.
+    /// Nothing is sent into them and no tunnel is opened: they start from
+    /// what the snapshot holds, with no way to the node's gateways. At most
+    /// the provider's [`SandboxProvider::fork_batch`] are forked in one call,
+    /// so more take several.
+    pub async fn forked(
+        provider: Arc<dyn SandboxProvider>,
+        server: Arc<SandboxServer>,
+        snapshot: &crate::provider::SnapshotId,
+        image: &str,
+        names: &[String],
+        making: &Making,
+    ) -> Vec<Result<Held, String>> {
+        let mut children = Vec::with_capacity(names.len());
+        for batch in names.chunks(provider.fork_batch().max(1)) {
+            let issued: Vec<(String, Bootstrap)> = batch
+                .iter()
+                .map(|name| issue(&server, name, making.token_window))
+                .collect();
+            let bootstraps: Vec<Bootstrap> = issued.iter().map(|(_, b)| b.clone()).collect();
+            let forked = provider
+                .fork_many(snapshot, &making.resources, &bootstraps)
+                .await;
+            let handles = match forked {
+                Ok(handles) => handles,
+                Err(error) => {
+                    for (run, _) in &issued {
+                        server.tokens().revoke(run);
+                    }
+                    let why = format!("fork {}: {error}", snapshot.0);
+                    children.extend(batch.iter().map(|_| Err(why.clone())));
+                    continue;
+                }
+            };
+            let connected =
+                handles
+                    .into_iter()
+                    .zip(issued)
+                    .zip(batch)
+                    .map(|((handle, (run, _)), name)| {
+                        let (provider, server) = (provider.clone(), server.clone());
+                        async move {
+                            let handle = match handle {
+                                Ok(handle) => handle,
+                                Err(error) => {
+                                    server.tokens().revoke(&run);
+                                    return Err(format!("fork {name}: {error}"));
+                                }
+                            };
+                            match provider
+                                .connect(&handle, &server, crate::runner::protocol::CONNECT_WITHIN)
+                                .await
+                            {
+                                Ok(conn) => Ok(Held {
+                                    provider,
+                                    server,
+                                    handle,
+                                    image: image.to_string(),
+                                    run,
+                                    conn,
+                                    running: Mutex::new(HashMap::new()),
+                                    tunnels: Mutex::new(Vec::new()),
+                                    files: None,
+                                    workdir: None,
+                                    finished: Default::default(),
+                                }),
+                                Err(error) => {
+                                    server.tokens().revoke(&run);
+                                    let _ = provider.destroy(&handle).await;
+                                    Err(format!("connect to sandbox {name}: {error}"))
+                                }
+                            }
+                        }
+                    });
+            children.extend(futures_util::future::join_all(connected).await);
+        }
+        children
+    }
+
     pub async fn snapshot(
         &self,
         reference: &str,
@@ -1229,7 +1413,13 @@ impl Runner for Held {
         let spec = SpawnSpec {
             argv: cmd.argv.clone(),
             env,
-            cwd: Some(cmd.workdir.clone().unwrap_or_else(|| "/work".into()).into()),
+            cwd: Some(
+                self.workdir
+                    .clone()
+                    .or_else(|| cmd.workdir.clone())
+                    .unwrap_or_else(|| "/work".into())
+                    .into(),
+            ),
             stdin: false,
             stdout: true,
             stderr: true,

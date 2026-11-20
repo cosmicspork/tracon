@@ -1783,7 +1783,8 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
 # [placement]                       # where sessions may run and what each channel and repository
                                     # requires of the sandbox provider. Decided as each session starts
                                     # once DigitalOcean is on or a requirement is set; the session's
-                                    # log says where it runs and why
+                                    # log says where it runs and why. A review's checks overflow the
+                                    # same way when the node has no room for them, client work never
 # digitalocean = "off"              # off | overflow (only once every local provider is full) | prefer.
                                     # A node whose own boundary is not verified asks first: a card
                                     # offers DigitalOcean, and nothing moves without it
@@ -2474,10 +2475,26 @@ and an emptyDir at `/tmp` that `TMPDIR` names.
   `digitalocean = "off"`); the placement event records why. A check's or a
   preparation's pod fails its run with "could not be scheduled: 0/1 nodes are
   available: 1 Insufficient memory ...", the check's result, instead of waiting until
-  its timeout; checks run where their session's boundary is. A session's start is
+  its timeout, and the review's checks are placed again (below). A session's start is
   bounded at 90 seconds, so a grace longer than that ends the start before it is placed
   again. A pod the kubelet itself refuses (`OutOfcpu`, ...) is refused at once
   (`out_of_cpu`, `out_of_memory`, ...).
+- **A review's checks.** They run on the node's own runtime while it has room. Once it
+  has none (a check's pod could not be scheduled, was refused or evicted, or other
+  checks already wait in the node's line), they are placed as a session is: with
+  `[placement] digitalocean` at `overflow` or `prefer`, a repository that is not
+  `client` work and does not forbid it has them run on DigitalOcean, and the rest wait
+  in the line. There they start from the template of the image they run in (the
+  repository's prepared snapshot, whose `/work` and `/cache` it holds), waiting up to
+  ten minutes for it to build, else running here after all; only the candidate's tree
+  is sent. `prepare` runs once in one sandbox with its egress grant, which is revoked
+  before one sandbox per check is forked from it (four to a fork call) with no
+  network of its own. Their evidence is recorded as derived from the image, and only
+  derived evidence is reused there; `review_status` says where they run, and the
+  session log records each placement. Nothing of a Podman node's cache volumes moves:
+  the template carries its own. Templates the node takes from a peer (`templates =
+  "peer"`) or one image of the operator's (`[digitalocean] image`) serve sessions alone,
+  so checks there stay on the node.
 - **Route.** A sandbox dials the node pod's address on `sandbox_port` (7426) over TLS
   pinned to the node's certificate. Its policy, `tracon-sandbox`, selects this node's
   sandboxes (`tracon.dev/role=sandbox`, `tracon.dev/node=<prefix>`) and allows that

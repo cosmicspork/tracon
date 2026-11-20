@@ -1139,7 +1139,15 @@ Checks the machine had no room for (a pod the scheduler could not place, the kub
 refused, or evicted under memory pressure; `review::checks::no_room`) are no verdict
 and refuse nothing: the submission joins a line (`queued`, the session
 `queued_for_check`), and while anything is in it the node runs checks one at a time,
-the next only once none is running. Stopped short of room three times, they are held
+the next only once none is running. Short of room is also a placement input
+(`session::placing::place_checks`): where `[placement] digitalocean` allows and the
+repository is not client work, checks short of room here run on DigitalOcean instead
+(`review::forked`), prepared once in a sandbox from the image's template with the
+preparation's egress grant, then forked per check with that grant revoked and no
+tunnel; their evidence is keyed as derived from the image's digest, never as exact.
+Anything that stops them there before a check runs (no template within ten minutes, a
+sandbox not isolated as required, a failed checkpoint or fork) sends them back to the
+line. Stopped short of room three times, they are held
 rather than tried for ever: the agent is told why, the session waits on the operator,
 and submitting the same commit again puts them back in line. A
 restart interrupts whatever was still `running` and closes the sessions that asked for

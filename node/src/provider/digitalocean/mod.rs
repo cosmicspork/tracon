@@ -1181,6 +1181,90 @@ impl SandboxProvider for DoProvider {
         .await
     }
 
+    /// Up to [`crate::do_harness::FORK_MAX_COUNT`] children in one fork of
+    /// the checkpoint, each then told its own bootstrap: its own run and a
+    /// token issued for that run alone, never its parent's or a sibling's.
+    /// Each starts as [`Self::fork`]'s child does, and one that does not
+    /// start is removed without taking the others with it.
+    async fn fork_many(
+        &self,
+        snapshot: &SnapshotId,
+        _resources: &Resources,
+        bootstraps: &[Bootstrap],
+    ) -> Result<Vec<Result<Handle, ProviderError>>, ProviderError> {
+        let (session, checkpoint) = snapshot
+            .0
+            .split_once('/')
+            .ok_or_else(|| failed(format!("{} is not a DigitalOcean checkpoint", snapshot.0)))?;
+        let count = u8::try_from(bootstraps.len())
+            .ok()
+            .filter(|count| (1..=crate::do_harness::FORK_MAX_COUNT).contains(count))
+            .ok_or_else(|| {
+                failed(format!(
+                    "a DigitalOcean fork makes 1 to {} sandboxes, not {}",
+                    crate::do_harness::FORK_MAX_COUNT,
+                    bootstraps.len()
+                ))
+            })?;
+        let (image, template, size) = self
+            .made
+            .lock()
+            .unwrap()
+            .get(session)
+            .map(|m| (m.image.clone(), m.template.clone(), m.size.clone()))
+            .unwrap_or_default();
+        let client = self.client()?;
+        let started_ms = crate::store::now_ms();
+        let mut children = client
+            .fork_session(session, Some(checkpoint), count)
+            .await
+            .map_err(failed)?;
+        // More than asked for is not this node's to run: removed at once.
+        for extra in children.split_off(children.len().min(bootstraps.len())) {
+            let _ = client.delete_session(&extra.session_id).await;
+            if let Some(config) = &extra.config_id {
+                let _ = client.delete_config(config).await;
+            }
+        }
+        let made = children.len();
+        let started = children
+            .into_iter()
+            .zip(bootstraps)
+            .map(|(child, bootstrap)| {
+                self.metered_run(
+                    &client,
+                    child,
+                    (&image, &template, size.clone()),
+                    bootstrap,
+                    (None, meter::FORK, None, started_ms),
+                )
+            });
+        let mut handles = futures_util::future::join_all(started).await;
+        handles.extend((made..bootstraps.len()).map(|_| {
+            Err(failed(format!(
+                "DigitalOcean forked {made} of the {} sandboxes asked for",
+                bootstraps.len()
+            )))
+        }));
+        Ok(handles)
+    }
+
+    fn fork_batch(&self) -> usize {
+        usize::from(crate::do_harness::FORK_MAX_COUNT)
+    }
+
+    /// The checkpoint goes; its session, if it is still there, stays.
+    async fn forget_snapshot(&self, snapshot: &SnapshotId) -> Result<(), ProviderError> {
+        let (session, checkpoint) = snapshot
+            .0
+            .split_once('/')
+            .ok_or_else(|| failed(format!("{} is not a DigitalOcean checkpoint", snapshot.0)))?;
+        self.client()?
+            .delete_checkpoint(session, checkpoint)
+            .await
+            .map_err(failed)
+    }
+
     /// Derived: the runtime rebuilt the image as its template, under a
     /// digest of its own that this API does not report, so the template
     /// stands for it.

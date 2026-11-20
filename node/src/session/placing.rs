@@ -23,7 +23,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::provider::digitalocean::runtime::DoRuntime;
-use crate::provider::requirements::Resolved;
+use crate::provider::requirements::{DoMode, Resolved};
 use crate::provider::{Candidate, Capacity, Placement, ProviderKind, Requirements};
 use crate::store::approvals::{ApprovalRow, PENDING, PLACE_TOOL};
 use crate::store::{NodeRow, Store};
@@ -125,6 +125,57 @@ pub fn event(decision: &Placement, resolved: &Resolved, providers: &[Candidate])
         })
         .collect();
     payload
+}
+
+/// Where a review's required checks run.
+pub enum ChecksPlaced {
+    /// On the node's own runtime, in its line when that is short of room.
+    Local,
+    /// Forked on DigitalOcean (`review::forked`).
+    DigitalOcean {
+        runtime: Arc<DoRuntime>,
+        requirements: Requirements,
+    },
+}
+
+/// The node's own runtime as a review's checks see it: what its verified
+/// boundary gives, held to no count (checks never counted against
+/// `local_limit`), and full only when `short` says why: its checks were
+/// put out or refused for want of room, or others' wait for it.
+pub fn checks_candidate(
+    kind: ProviderKind,
+    health: Result<(), String>,
+    short: Option<&str>,
+) -> Candidate {
+    let mut local = local_candidate(kind, health, 0, None);
+    local.room = short.map(crate::provider::Room::short);
+    local
+}
+
+/// Where a review's checks run, from what the session's channel and
+/// repository resolved to: placed as a session is (`provider::place`), and
+/// elsewhere only when that places them on DigitalOcean. A client's are
+/// never placed there, whatever else allows it. Asking the operator is for
+/// sessions: checks on a node whose boundary is not verified run where
+/// they always have, and checks nowhere else can take wait in the node's
+/// line.
+pub fn place_checks(providers: &[Candidate], resolved: &Resolved, mode: DoMode) -> Placement {
+    crate::provider::place(
+        providers,
+        &resolved.requirements,
+        mode,
+        resolved.forbid_digitalocean || resolved.client,
+    )
+}
+
+/// Whether `decision` sends a review's checks to DigitalOcean.
+pub fn checks_elsewhere(decision: &Placement) -> bool {
+    matches!(
+        decision,
+        Placement::Place {
+            provider: ProviderKind::DigitalOcean
+        }
+    )
 }
 
 /// One card per session.
@@ -313,7 +364,6 @@ impl Slots {
 mod tests {
     use super::*;
     use crate::provider::digitalocean;
-    use crate::provider::requirements::DoMode;
 
     fn node(state: &str) -> Result<(), String> {
         match state {
@@ -443,6 +493,59 @@ mod tests {
         let linux = local_candidate(ProviderKind::Podman, node("ready"), 0, None);
         let p = crate::provider::place(&[linux], &vm, DoMode::Off, false);
         assert!(matches!(p, Placement::Refuse { .. }), "{p:?}");
+    }
+
+    /// A review's checks short of room here go to DigitalOcean when their
+    /// repository is not a client's; a client's stay on the node, in its
+    /// line, whatever `[placement]` allows; and checks with room here stay.
+    #[test]
+    fn checks_short_of_room_overflow_unless_they_are_a_clients() {
+        let open = placement("digitalocean = \"overflow\"\n[[repo]]\npath = \"/src/hounddogreading\"\nclient = true\n");
+        let personal = open.resolve("personal", Some(Path::new("/src/tracon")));
+        let client = open.resolve("personal", Some(Path::new("/src/hounddogreading")));
+        let short = || {
+            checks_candidate(
+                ProviderKind::Kubernetes,
+                node("ready"),
+                Some("its pod was evicted"),
+            )
+        };
+        let roomy = || checks_candidate(ProviderKind::Kubernetes, node("ready"), None);
+
+        let p = place_checks(&[short(), droplet(0)], &personal, DoMode::Overflow);
+        assert!(checks_elsewhere(&p), "{p:?}");
+        let p = place_checks(&[roomy(), droplet(0)], &personal, DoMode::Overflow);
+        assert!(!checks_elsewhere(&p), "{p:?}");
+        // DigitalOcean off: short checks wait in the node's line.
+        let p = place_checks(&[short(), droplet(0)], &personal, DoMode::Off);
+        assert!(!checks_elsewhere(&p), "{p:?}");
+
+        for mode in [DoMode::Overflow, DoMode::Prefer] {
+            let p = place_checks(&[short(), droplet(0)], &client, mode);
+            assert!(!checks_elsewhere(&p), "{mode:?} {p:?}");
+            let p = place_checks(&[roomy(), droplet(0)], &client, mode);
+            assert!(!checks_elsewhere(&p), "{mode:?} {p:?}");
+        }
+        // A client entry whose requirements DigitalOcean happened to meet
+        // is still kept off it.
+        let mut lenient = client.clone();
+        lenient.requirements = Requirements::any();
+        let p = place_checks(&[short(), droplet(0)], &lenient, DoMode::Overflow);
+        assert!(!checks_elsewhere(&p), "{p:?}");
+        // Prefer sends a personal repository's checks there with room here.
+        let p = place_checks(&[roomy(), droplet(0)], &personal, DoMode::Prefer);
+        assert!(checks_elsewhere(&p), "{p:?}");
+        // What the event records of the node's runtime: short, and why.
+        let e = event(&p, &personal, &[short()]);
+        assert_eq!(
+            e["providers"][0]["capacity"]["short"],
+            "its pod was evicted"
+        );
+        // Checks are never asked about: an unverified node runs them there.
+        let sick = checks_candidate(ProviderKind::Podman, node("refused"), None);
+        let p = place_checks(&[sick, droplet(0)], &personal, DoMode::Overflow);
+        assert!(matches!(p, Placement::Ask { .. }), "{p:?}");
+        assert!(!checks_elsewhere(&p));
     }
 
     #[test]

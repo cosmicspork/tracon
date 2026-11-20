@@ -356,6 +356,14 @@ test('each 0.29.0 kind reads as a sentence, not its name', () => {
     ],
     ['placement', { decision: 'ask', offer: 'digitalocean', reason: 'the gateway is down' }, 'asked whether to run on DigitalOcean · the gateway is down'],
     ['placement', { decision: 'refuse', reason: 'dns is provider-open' }, 'no sandbox provider can take it · dns is provider-open'],
+    ['placement', { for: 'checks', decision: 'place', provider: 'digitalocean', short: 'kubernetes evicted it' }, 'checks run on DigitalOcean · kubernetes evicted it'],
+    ['placement', { for: 'checks', decision: 'refuse', reason: 'dns is provider-open', short: 'kubernetes evicted it' }, 'checks run on this node · in its line: kubernetes evicted it'],
+    ['placement', { for: 'checks', decision: 'place', provider: 'podman' }, 'checks run on this node'],
+    [
+      'placement',
+      { for: 'checks', decision: 'place', provider: 'podman', fell_back: 'its template was not ready within 10 minutes' },
+      'checks run on this node · not on DigitalOcean: its template was not ready within 10 minutes',
+    ],
   ]
   for (const [kind, payload, text] of lines) expect(eventLine(ev(kind, null, payload))?.text).toBe(text)
 })

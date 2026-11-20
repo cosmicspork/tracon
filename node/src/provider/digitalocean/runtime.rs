@@ -32,6 +32,14 @@ const TEMPLATE_READY_POLL: Duration = Duration::from_secs(15 * 60);
 /// How often configs, checkpoints and stale templates are swept.
 const SWEEP_EVERY: Duration = Duration::from_secs(30 * 60);
 
+/// How long a review's checks placed here wait for the template of the
+/// image they run in, which the runtime takes several minutes to build once
+/// per image: past it, they run on the node's own runtime after all.
+pub const CHECK_TEMPLATE_WITHIN: Duration = Duration::from_secs(10 * 60);
+
+/// How often a check waiting for its template looks at it.
+pub const CHECK_TEMPLATE_POLL: Duration = Duration::from_secs(15);
+
 /// How long placement waits on the runtime's answer about capacity.
 const CAPACITY_WITHIN: Duration = Duration::from_secs(15);
 
@@ -1226,6 +1234,96 @@ impl DoRuntime {
                 .with_requirements(requirements)
                 .with_token_window(TOKEN_WINDOW),
         )
+    }
+}
+
+impl DoRuntime {
+    /// The template a review's checks in `image` start from here, waiting
+    /// up to `within` while it is registered and built, looking every
+    /// `every`; or why there is none: this node makes none for `image` (an
+    /// image of the operator's names only itself, and a peer's templates
+    /// are made for sessions' images alone), it failed, it was not ready in
+    /// time, or the checks were withdrawn meanwhile.
+    pub async fn check_template(
+        &self,
+        image: &str,
+        within: Duration,
+        every: Duration,
+        cancel: &dyn crate::review::checks::Cancel,
+    ) -> Result<String, String> {
+        let templates = self.provider.templates();
+        if self.takes_from_peer() || !templates.serves(image) {
+            return Err(format!(
+                "DigitalOcean makes no template for {image} on this node"
+            ));
+        }
+        let deadline = tokio::time::Instant::now() + within;
+        loop {
+            if let Ok(template) = templates.ready(image) {
+                return Ok(template);
+            }
+            match self.ensure_template(image).await {
+                TemplateState::Ready { .. } => {
+                    if let Ok(template) = templates.ready(image) {
+                        return Ok(template);
+                    }
+                }
+                state @ (TemplateState::Failed { .. }
+                | TemplateState::OnPeer { .. }
+                | TemplateState::NoBuilder { .. }) => return Err(state.describe()),
+                TemplateState::Preparing
+                | TemplateState::Building { .. }
+                | TemplateState::Unknown => {}
+            }
+            if let Some(reason) = cancel.cancelled() {
+                return Err(format!("the checks were withdrawn: {reason}"));
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Err(format!(
+                    "its DigitalOcean template was not ready within {} minutes: {}",
+                    within.as_secs() / 60,
+                    templates.state(image).describe()
+                ));
+            }
+            tokio::time::sleep(every.min(deadline - now)).await;
+        }
+    }
+
+    /// What runs a review's checks here, as forks of one prepared sandbox
+    /// (`review::forked`): each sandbox held to `requirements` and sized by
+    /// their memory floor, its tree sent from `files` (where this node's own
+    /// sandboxes keep theirs) and, while it prepares, the node's gateways
+    /// through tunnels.
+    pub fn check_forks(
+        &self,
+        cfg: &Config,
+        requirements: Requirements,
+        files: crate::runner::sandbox_files::FilesStore,
+        repo: Option<String>,
+    ) -> Result<crate::review::forked::Forks, String> {
+        let server = crate::runner::protocol::node_server().map_err(|e| e.to_string())?;
+        Ok(crate::review::forked::Forks {
+            kind: ProviderKind::DigitalOcean,
+            provider: self.provider.clone(),
+            server,
+            files,
+            tunnels: do_tunnels(cfg),
+            making: crate::sandbox_images::Making {
+                kind: crate::runner::RunKind::Check,
+                labels: crate::runner::RunLabels {
+                    repo,
+                    ..crate::runner::RunLabels::of(crate::runner::RunKind::Check)
+                },
+                resources: crate::provider::Resources {
+                    memory_bytes: requirements.memory_bytes(),
+                    ..Default::default()
+                },
+                token_window: Some(TOKEN_WINDOW),
+            },
+            requirements,
+            workdir: crate::sandbox_images::PREPARED_TREE.to_string(),
+        })
     }
 }
 

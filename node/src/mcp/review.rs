@@ -913,6 +913,7 @@ async fn submit(
             cancelled: None,
             prepared: None,
             no_room: None,
+            elsewhere: None,
         };
         let recorded = submission.record(store, manager, ctx, checks).await?;
         return publish_if_granted(manager, ctx, recorded).await;
@@ -968,7 +969,87 @@ async fn submit(
             };
             let checking = manager.checking().clone();
             let mut ready = (!queued).then_some(slot);
+            // Why the node's own runtime is short of room for these checks:
+            // others' wait for room before them, or their last run here
+            // stopped short. A placement input: checks short of room here go
+            // to DigitalOcean where they may.
+            let mut short: Option<String> = queued.then(|| WAITING_FOR_ROOM.to_string());
+            // Set once DigitalOcean has not run them: the rest of this
+            // submission's runs are the node's own.
+            let mut stay_here = no_checks;
+            let origin = review::checks::candidate_origin(&store, &submission.candidate);
             let report = loop {
+                if !stay_here {
+                    if let crate::session::placing::ChecksPlaced::DigitalOcean {
+                        runtime,
+                        requirements,
+                    } = manager
+                        .place_checks(
+                            Some(&session_id),
+                            &ctx.channel,
+                            origin.as_deref(),
+                            short.as_deref(),
+                        )
+                        .await
+                    {
+                        // Their place here, or in the line, is given up while
+                        // they run there. One queued until now has its
+                        // session told they started.
+                        let was_queued = entry.queued().is_some();
+                        drop(ready.take());
+                        checking.leave(&entry);
+                        if was_queued {
+                            begin_checks(
+                                &manager,
+                                &session_id,
+                                &submission.candidate,
+                                &entry.commands,
+                                rerun,
+                            );
+                        }
+                        entry.run_on(Some(crate::provider::ProviderKind::DigitalOcean));
+                        let ran = run_checks_on_digitalocean(
+                            &store,
+                            &manager,
+                            &session_id,
+                            &submission.candidate,
+                            &snapshot.root,
+                            rerun,
+                            &runtime,
+                            requirements,
+                        )
+                        .await;
+                        entry.run_on(None);
+                        match ran {
+                            Ok(report) => {
+                                manager.set_checking(&session_id, false);
+                                break report;
+                            }
+                            Err(why) => {
+                                tracing::warn!(%why, review = %entry.handle, "checks placed on DigitalOcean run on this node instead");
+                                manager.record_event(
+                                    &session_id,
+                                    ek::PLACEMENT,
+                                    json!({
+                                        "for": "checks",
+                                        "decision": "place",
+                                        "provider": crate::provider::ProviderKind::of_backend(
+                                            manager.backend().kind()
+                                        ),
+                                        "short": short,
+                                        "fell_back": why,
+                                    }),
+                                );
+                                stay_here = true;
+                                // Back in the node's line, or straight on.
+                                match checking.start(&entry) {
+                                    Some(slot) => ready = Some(Some(slot)),
+                                    None => queue_checks(&manager, &session_id, &entry, None),
+                                }
+                            }
+                        }
+                    }
+                }
                 let slot = match ready.take() {
                     Some(slot) => slot,
                     None => match checking
@@ -1017,8 +1098,9 @@ async fn submit(
                 drop(slot);
                 match checked {
                     Checked::NoRoom(why) => {
-                        let now = checking.stopped_short(&entry, why);
+                        let now = checking.stopped_short(&entry, why.clone());
                         queue_checks(&manager, &session_id, &entry, Some(&now));
+                        short = Some(why);
                         // Held, the session waits on the operator now, and
                         // is brought why as its next prompt.
                         if now.held.is_some() {
@@ -1248,6 +1330,7 @@ impl Submission {
                 "checks_reused": checks.reused,
                 "authorship": authorship,
             });
+            with_ran_on(&mut resubmitted, &checks);
             with_ships(&mut resubmitted, &ships);
             return Ok(resubmitted);
         }
@@ -1370,8 +1453,19 @@ impl Submission {
             "checks_reused": checks.reused,
             "authorship": authorship,
         });
+        with_ran_on(&mut submitted, &checks);
         with_ships(&mut submitted, &ships);
         Ok(submitted)
+    }
+}
+
+/// Where a submission's checks ran, when it was not the node's own runtime:
+/// the provider, and that its evidence is derived from the check image
+/// rather than that image exactly.
+fn with_ran_on(result: &mut Value, checks: &review::checks::CheckReport) {
+    if let Some(elsewhere) = &checks.elsewhere {
+        result["checks_ran_on"] = json!(elsewhere.provider);
+        result["checks_image_identity"] = json!(elsewhere.identity);
     }
 }
 
@@ -1430,6 +1524,18 @@ fn checking(manager: &Manager, entry: &crate::mcp::checking::Entry) -> Value {
                     until they pass. Call review_status with this review_id to wait for them: it \
                     returns the review once they pass, or what failed.",
     });
+    if let Some(provider) = entry.running_on() {
+        response["running_on"] = json!(provider);
+        response["message"] = json!(format!(
+            "The required checks are running on {}, because this node had no room for them: \
+             prepared once in one sandbox there, then one sandbox forked from it per check, with \
+             no network of their own. Nothing reaches the operator until they pass. Call \
+             review_status with this review_id to wait for them: it returns the review once they \
+             pass, or what failed.",
+            provider_name(provider)
+        ));
+        return response;
+    }
     let Some(queued) = entry.queued() else {
         return response;
     };
@@ -1463,6 +1569,14 @@ fn checking(manager: &Manager, entry: &crate::mcp::checking::Entry) -> Value {
         position.map_or("next".to_string(), |at| format!("number {at}")),
     ));
     response
+}
+
+/// A provider as an agent reads it.
+fn provider_name(provider: crate::provider::ProviderKind) -> &'static str {
+    match provider {
+        crate::provider::ProviderKind::DigitalOcean => "DigitalOcean",
+        other => other.as_str(),
+    }
 }
 
 /// What a review's checks are while they wait for room, as `review_status`
@@ -1987,24 +2101,78 @@ async fn check_kept_candidate(
             .map_err(|error| error.to_string())?,
     };
     let snapshot = candidate_tree(candidate, files, false).await?;
-    let report = review::checks::run_required_for(
-        manager.backend().as_ref(),
-        manager.cfg(),
-        store,
-        candidate,
-        // The node's own run, for no session: whoever first captured this
-        // commit did not ask for it.
-        None,
-        repo.as_deref(),
-        &snapshot.root,
-        false,
-        &ReviewStillWants {
-            store: store.clone(),
-            review_id: review_id.to_string(),
-            head_sha: candidate.head_sha.clone(),
-        },
-    )
-    .await;
+    let wants = ReviewStillWants {
+        store: store.clone(),
+        review_id: review_id.to_string(),
+        head_sha: candidate.head_sha.clone(),
+    };
+    // Placed as a session's checks are, with no session to record it on:
+    // on DigitalOcean first only where it is preferred, and there after
+    // the node's own runtime had no room for them, where it may.
+    let elsewhere = |short: Option<String>| {
+        let (repo, root) = (repo.clone(), snapshot.root.clone());
+        let wants = &wants;
+        let channel = review.channel.clone();
+        async move {
+            let crate::session::placing::ChecksPlaced::DigitalOcean {
+                runtime,
+                requirements,
+            } = manager
+                .place_checks(None, &channel, repo.as_deref(), short.as_deref())
+                .await
+            else {
+                return None;
+            };
+            match review::forked::run_on_digitalocean(
+                manager.backend().as_ref(),
+                manager.cfg(),
+                store,
+                candidate,
+                None,
+                repo.as_deref(),
+                &root,
+                false,
+                wants,
+                &runtime,
+                requirements,
+            )
+            .await
+            {
+                review::forked::Forked::Ran(report) => Some(*report),
+                review::forked::Forked::Unplaced(why) => {
+                    tracing::warn!(review_id, %why, "an external candidate's checks run on this node instead of DigitalOcean");
+                    None
+                }
+            }
+        }
+    };
+    let report = match elsewhere(None).await {
+        Some(report) => report,
+        None => {
+            let report = review::checks::run_required_for(
+                manager.backend().as_ref(),
+                manager.cfg(),
+                store,
+                candidate,
+                // The node's own run, for no session: whoever first captured
+                // this commit did not ask for it.
+                None,
+                repo.as_deref(),
+                &snapshot.root,
+                false,
+                &wants,
+            )
+            .await;
+            let short = match &report {
+                Ok(ran) if ran.cancelled.is_none() => ran.no_room.clone(),
+                _ => None,
+            };
+            match short {
+                Some(short) => elsewhere(Some(short)).await.unwrap_or(report),
+                None => report,
+            }
+        }
+    };
     tokio::task::spawn_blocking(move || drop(snapshot));
     let mut report = report?;
     if report.cancelled.is_some() {
@@ -3093,6 +3261,50 @@ async fn run_checks(
         manager, session_id, candidate, report,
     )))
 }
+
+/// [`run_checks`], placed on DigitalOcean: forked there from one prepared
+/// sandbox (`review::forked`). `Err` with why when nothing ran there, for
+/// the node's own runtime to run them instead.
+#[allow(clippy::too_many_arguments)]
+async fn run_checks_on_digitalocean(
+    store: &Arc<Store>,
+    manager: &Manager,
+    session_id: &str,
+    candidate: &CandidateRow,
+    snapshot: &std::path::Path,
+    force_rerun: bool,
+    runtime: &crate::provider::digitalocean::runtime::DoRuntime,
+    requirements: crate::provider::Requirements,
+) -> Result<Result<review::checks::CheckReport, String>, String> {
+    let repo = review::checks::candidate_origin(store, candidate);
+    let forked = review::forked::run_on_digitalocean(
+        manager.backend().as_ref(),
+        manager.cfg(),
+        store,
+        candidate,
+        candidate.owner_session_id.as_deref(),
+        repo.as_deref(),
+        snapshot,
+        force_rerun,
+        &SessionStillWants {
+            store: store.clone(),
+            session_id: session_id.to_string(),
+        },
+        runtime,
+        requirements,
+    )
+    .await;
+    match forked {
+        review::forked::Forked::Ran(report) => {
+            Ok(judge_checks(manager, session_id, candidate, *report))
+        }
+        review::forked::Forked::Unplaced(why) => Err(why),
+    }
+}
+
+/// Why checks that join the line are short of room before any of theirs
+/// ran: others wait for room ahead of them.
+const WAITING_FOR_ROOM: &str = "other checks are waiting for room on this node";
 
 /// What a run of the checks that had room says of the candidate: the report
 /// when every required check passed, otherwise the refusal.
