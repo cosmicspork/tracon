@@ -187,6 +187,19 @@ const KINDS: &[Kind] = &[
         delete: Some(RUNTIME_STORAGE),
         propagation: "This node only. Removed by hand, or by the [gc] schedule once its session is archived. Removing one ends resuming the session.",
     },
+    Kind {
+        kind: "plugins",
+        label: "Plugins",
+        unit: "plugin",
+        tables: &["plugin"],
+        // Builds, each plugin's data by channel, and its logs.
+        dirs: &[crate::plugin::install::DIR],
+        delete: Some(Delete {
+            path: "/settings#plugins",
+            label: "Plugins, with tracon plugin rm --purge",
+        }),
+        propagation: "This node only. Removing a plugin keeps its data unless it is purged.",
+    },
 ];
 
 /// What the node holds now. Walks the state directories, so call it off
@@ -278,6 +291,8 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("workspaces/w1/src")).unwrap();
         std::fs::write(dir.path().join("workspaces/w1/src/a"), [0u8; 100]).unwrap();
         std::fs::create_dir_all(dir.path().join("workspace-staging/w2")).unwrap();
+        std::fs::create_dir_all(dir.path().join("plugins/data/p/personal")).unwrap();
+        std::fs::write(dir.path().join("plugins/data/p/personal/db"), [0u8; 40]).unwrap();
         let inventory = inventory_in(&store, dir.path()).unwrap();
         let kinds: Vec<&str> = inventory.holdings.iter().map(|h| h.kind).collect();
         assert_eq!(
@@ -291,14 +306,18 @@ mod tests {
                 "work",
                 "index",
                 "workspaces",
-                "harness"
+                "harness",
+                "plugins"
             ]
         );
         let workspaces = &inventory.holdings[7];
         assert_eq!((workspaces.count, workspaces.bytes), (2, 100));
+        // Plugins are counted by their rows, and weigh their files too.
+        let plugins = &inventory.holdings[9];
+        assert_eq!((plugins.count, plugins.bytes), (0, 40));
         assert_eq!(
             inventory.total_bytes,
-            inventory.database_bytes + 100,
+            inventory.database_bytes + 140,
             "the total is the database and the directories"
         );
         // Each table a kind names is one the schema has: a renamed table
@@ -311,8 +330,15 @@ mod tests {
         assert!(missing.is_empty(), "missing: {missing:?}");
         for holding in &inventory.holdings {
             let deletable = holding.delete.is_some();
-            let named =
-                ["documents", "memories", "work", "workspaces", "harness"].contains(&holding.kind);
+            let named = [
+                "documents",
+                "memories",
+                "work",
+                "workspaces",
+                "harness",
+                "plugins",
+            ]
+            .contains(&holding.kind);
             assert_eq!(deletable, named, "{}", holding.kind);
             assert!(!holding.propagation.is_empty());
         }
