@@ -1372,7 +1372,8 @@ pub fn read_package(path: &Path) -> Result<SignedTransfer, TransferError> {
 
 /// The package rendered as one JSON object per line, each tagged with a
 /// `kind`, in a fixed order: the manifest, the candidate, its evidence, the
-/// handoff note, the carried documents and memories, then one line per file.
+/// handoff note, the branch's history and the moved session (version 2), the
+/// carried documents and memories, then one line per file.
 ///
 /// File contents are left out and named by digest instead: a dump is for
 /// reading, and the bytes are recovered by importing the package or by
@@ -1400,6 +1401,26 @@ pub fn package_jsonl(transfer: &SignedTransfer) -> Vec<Value> {
     out.push(serde_json::json!({ "kind": "evidence", "evidence": payload.evidence }));
     if !payload.context.note.is_empty() {
         out.push(serde_json::json!({ "kind": "note", "text": payload.context.note }));
+    }
+    if let Some(git) = &payload.git {
+        let bundle = base64::engine::general_purpose::STANDARD
+            .decode(git.bundle_b64.as_bytes())
+            .unwrap_or_default();
+        out.push(serde_json::json!({
+            "kind": "git",
+            "branch": git.branch,
+            "origin": git.origin,
+            "head": git.history.head,
+            "base_sha": git.history.base_sha,
+            "base_branch": git.history.base_branch,
+            "bundle_bytes": bundle.len(),
+            "bundle_sha256": hex::encode(Sha256::digest(&bundle)),
+        }));
+    }
+    if let Some(source) = &payload.source {
+        let mut record = serde_json::to_value(source).unwrap_or_default();
+        record["kind"] = serde_json::json!("source");
+        out.push(record);
     }
     for document in &payload.context.documents {
         out.push(serde_json::json!({
@@ -1809,6 +1830,15 @@ mod tests {
         let round: SignedTransfer =
             serde_json::from_slice(&serde_json::to_vec(&transfer).unwrap()).unwrap();
         round.verify().unwrap();
+
+        let kinds: Vec<String> = package_jsonl(&transfer)
+            .iter()
+            .map(|record| record["kind"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            kinds,
+            ["package", "candidate", "evidence", "git", "source", "file"]
+        );
 
         let mut downgraded = transfer.clone();
         downgraded.payload.version = TRANSFER_VERSION;
