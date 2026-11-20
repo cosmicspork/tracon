@@ -841,7 +841,10 @@ its cache: the snapshot's `/cache` is the warm one. A candidate's preparation be
 checks always runs, since it prepares a tree under review rather than a commit the
 snapshot was made from.
 You approve, reject with a reason, or — on a desktop — edit the diff and send it back as
-a request for changes. Approval publishes exactly the reviewed tree with the brokered
+a request for changes. A request for changes is how a review comes back: the agent
+resubmits with the same `review_id`. A rejection is final: `submit_review` refuses a
+rejected review's id, quoting your reason, and the agent submits the work again as a new
+review if it continues. Approval publishes exactly the reviewed tree with the brokered
 credential; if the branch moved since submit, approval is refused and the changed files
 are named. The tree is what was reviewed; the commit message and branch it ships with are
 prose you edit beside the diff, where the agent's own commits are listed. By default the
