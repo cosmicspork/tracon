@@ -1123,6 +1123,9 @@ plugin's own cards only. `tools/call` runs through the operator API's unheld pat
 (`Tools::call_for_operator`) with a `Caller::Plugin`, so the signed policy and the
 callee's entry decide it, the channel's external log records it, and an ask is a refusal.
 
+The contract as a plugin's author meets it (manifest, release, start, caller context,
+previews and formats, the node socket and plugin pages) is [reference/plugins.md](reference/plugins.md).
+
 ### Authority grants
 
 A grant is a local operator decision layered under signed policy, not a
