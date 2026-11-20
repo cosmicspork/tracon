@@ -1026,8 +1026,9 @@ something blocking, so nobody merges it in the meantime.
 A pull request that should not be merged right now is kept a draft. The session
 that owns a review and its reviewer turn that review's change back into a draft
 with `pr_ready` or `mr_ready` (`ready: false`) without being asked, once a
-publication of the review has pushed to it or opened it. Marking it ready, and
-anything on another change, is still yours to allow.
+publication of the review has pushed to it or opened it. An external harness may
+do the same, unasked, for a review submitted through it on its channel.
+Marking it ready, and anything on another change, is still yours to allow.
 Submitting a new revision of a review whose change is open drafts it at once,
 and approving a revision marks it ready again. A change an authority grant
 publishes without you opens as a draft, and `pr_merge` and `mr_merge` refuse a

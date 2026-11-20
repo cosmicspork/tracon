@@ -162,6 +162,9 @@ answered with `already: true` and no write; a closed or merged one is refused.
 GitHub's REST API cannot clear `draft`, so the GitHub side goes through the
 GraphQL mutations; GitLab's REST update has no draft field either, so the
 GitLab side rewrites the title's `Draft:` prefix, as GitLab's own button does.
+Drafting the change of a review the harness submitted on its channel, once a
+publication of that review pushed to it or opened it, is not asked, as for a
+session (#1001); marking it ready, or touching any other change, still is.
 
 **A pipeline could only take its default inputs.** `pipeline_run` sent a ref
 and variables, and GitLab does not let a variable set `spec:inputs`, so a

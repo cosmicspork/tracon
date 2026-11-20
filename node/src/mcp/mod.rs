@@ -1929,6 +1929,19 @@ impl Tools {
                 crate::session::state::event_kind::TOOL_DECIDED,
                 audit::record(name, args, &gate, &result),
             );
+        } else if gate.rule.as_deref() == Some("own-change") {
+            // That log says what was called, not who let it run. A forge
+            // write the node let an external caller make without asking
+            // anyone has no approval to say so, so its decision is logged
+            // beside the call.
+            if let Some(access) = self.session.get() {
+                access.manager.record_for(
+                    ctx,
+                    crate::session::state::event_kind::TOOL_DECIDED,
+                    None,
+                    audit::record(name, args, &gate, &result),
+                );
+            }
         }
         match (store, own) {
             (Some(store), true) => result.map(|mut v| {
@@ -2088,7 +2101,8 @@ impl Tools {
             return Err(refusal);
         }
         // Drafting the change of a review this session submitted or is
-        // reviewing, and pushed to or opened, is not asked: drafting blocks
+        // reviewing, or an external caller's harness submitted, and pushed to
+        // or opened, is not asked: drafting blocks
         // nothing that cannot be undone, and the agent is the first to know
         // another revision is coming. Marking it ready is asked like any
         // other call: a ready change can be merged at a revision nobody
@@ -2186,9 +2200,11 @@ impl Tools {
     }
 
     /// The review whose change a `pr_ready` or `mr_ready` call names, when
-    /// the caller owns it: the execute session that submitted it, or the
-    /// review session reviewing it. With who that is, as the review page
-    /// says it (`agent` or `reviewer`).
+    /// the caller owns it: the execute session that submitted it, the
+    /// review session reviewing it, or an external caller on the channel of
+    /// a review [`review::caller_owns`] gives it (one an external harness
+    /// submitted). With who that is, as the review page says it (`agent` or
+    /// `reviewer`).
     ///
     /// Naming the change is not enough: `submit_review` adopts any open
     /// change of the repository it is pointed at, so a review owns one only
@@ -2201,7 +2217,6 @@ impl Tools {
         args: &Value,
     ) -> Option<(crate::store::ReviewRow, &'static str)> {
         let access = self.session.get()?;
-        let session = access.store.get_session(ctx.session_id()?).ok()??;
         let (provider, project, number) = match name {
             github::PR_READY => ("github", args["repo"].as_str()?, args["number"].as_u64()?),
             _ => ("gitlab", args["project"].as_str()?, args["iid"].as_u64()?),
@@ -2219,6 +2234,25 @@ impl Tools {
                         .any(|row| row.pushed_sha.is_some() || row.state == "opened")
                 })
         };
+        let Some(session_id) = ctx.session_id() else {
+            // An external caller has no session: it owns what the channel's
+            // external harnesses submitted, the most recent first.
+            if !ctx.is_external() {
+                return None;
+            }
+            return access
+                .store
+                .reviews_naming_change(&ctx.channel, provider, project, number)
+                .ok()?
+                .into_iter()
+                .rev()
+                .find(|r| {
+                    review::caller_owns(&access.store, ctx, &r.channel, r.session_id.as_deref())
+                        && names(r)
+                })
+                .map(|review| (review, "agent"));
+        };
+        let session = access.store.get_session(session_id).ok()??;
         if session.phase == crate::session::Phase::Review.as_str() {
             let review = access
                 .store

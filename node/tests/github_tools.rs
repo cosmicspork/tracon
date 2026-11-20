@@ -456,8 +456,22 @@ async fn pr_ready_waits_on_the_operator_then_marks_the_draft_ready_and_back() {
 /// A review's change: `number` on owner/name, which a publication of the
 /// review pushed to when `pushed`.
 fn owned_review(store: &tracon::store::Store, id: &str, session: &str, number: u64, pushed: bool) {
-    let mut review = support::rows::review_row(id, session, "approved");
-    review.channel = "work".into();
+    change_review(store, id, Some(session), "work", number, pushed);
+}
+
+/// [`owned_review`] on any channel, by a session or by none (an external
+/// harness's).
+fn change_review(
+    store: &tracon::store::Store,
+    id: &str,
+    session: Option<&str>,
+    channel: &str,
+    number: u64,
+    pushed: bool,
+) {
+    let mut review = support::rows::review_row(id, "", "approved");
+    review.session_id = session.map(String::from);
+    review.channel = channel.into();
     review.target = json!({
         "provider": "github", "project": "owner/name", "base": "main",
         "branch": format!("feat/{number}"),
@@ -475,7 +489,7 @@ fn owned_review(store: &tracon::store::Store, id: &str, session: &str, number: u
             review_id: id,
             revision_id: None,
             candidate_id: "c",
-            channel: "work",
+            channel,
             node_id: "n1",
             provider: "github",
             project: "owner/name",
@@ -578,6 +592,94 @@ async fn pr_ready_on_the_change_of_a_review_the_session_owns_is_not_asked() {
         reached,
         "nothing reached GitHub"
     );
+}
+
+/// An external caller has no session, but owns the reviews its channel's
+/// external harnesses submitted (#1001): with no session, or through a
+/// session one attached. It drafts the change of such a review on the same
+/// terms as a session, once a publication of the review pushed to it or
+/// opened it, and the channel's log says the node let it run. Marking it
+/// ready, a managed session's review, another channel's, and one that never
+/// pushed are asked.
+#[tokio::test]
+async fn pr_ready_on_the_change_of_an_external_callers_own_review_is_not_asked() {
+    state::isolate();
+    let (t, seen) = session_rig(r#""run_status""#).await;
+    let access = t.session.get().unwrap();
+    let external = CallContext::external(None, "work", "n1");
+    change_review(&access.store, "r1", None, "work", 8, true);
+
+    let draft = json!({ "repo": "owner/name", "number": 8, "ready": false,
+                        "reason": "PHPUnit failed on CI" });
+    let (err, v) = call(&t, &external, "pr_ready", draft.clone()).await;
+    assert!(!err, "{v}");
+    assert_eq!(v["draft"], true, "{v}");
+    let mark = access.store.change_mark("r1").unwrap().unwrap();
+    assert_eq!(mark["review_id"], "r1");
+    assert_eq!(mark["ready"], false);
+    assert_eq!(mark["by"], "agent");
+    assert_eq!(mark["reason"], "PHPUnit failed on CI");
+    let decided: Vec<Value> = access
+        .store
+        .external_events_after("work", 0, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|row| row.kind == "tool_decided")
+        .map(|row| row.payload)
+        .collect();
+    assert_eq!(decided.len(), 1, "{decided:?}");
+    assert_eq!(decided[0]["tool"], "pr_ready");
+    assert_eq!(decided[0]["decision"], "node_allowed");
+    assert_eq!(decided[0]["rule"], "own-change");
+    assert_eq!(decided[0]["outcome"], "ok");
+
+    // A review submitted through a session an external harness attached is
+    // the caller's too, and its log has the change_ready event.
+    let mut attached = support::rows::session_row("ext", "n1", "work");
+    attached.harness_id = tracon::session::external::HARNESS_ID.into();
+    access.store.insert_session(&attached).unwrap();
+    change_review(&access.store, "r2", Some("ext"), "work", 8, true);
+    let (err, v) = call(&t, &external, "pr_ready", draft).await;
+    assert!(!err, "{v}");
+    let said = access
+        .store
+        .last_event_payload("ext", "change_ready")
+        .unwrap()
+        .unwrap();
+    assert_eq!(said["review_id"], "r2");
+    assert_eq!(said["ready"], false);
+    assert_eq!(said["by"], "agent");
+    assert_eq!(said["reason"], "PHPUnit failed on CI");
+    let reached = seen.lock().unwrap().len();
+
+    // Marking it ready is asked.
+    let ready = json!({ "repo": "owner/name", "number": 8, "ready": true });
+    let (err, v) = call(&t, &external, "pr_ready", ready).await;
+    assert!(!err, "{v}");
+    assert_eq!(v["state"], "awaiting_operator", "{v}");
+
+    // A managed session's review, another channel's, and one that never
+    // pushed to or opened its change are not the caller's to draft.
+    owned_review(&access.store, "r3", "s3", 13, true);
+    change_review(&access.store, "r4", None, "other", 14, true);
+    change_review(&access.store, "r5", None, "work", 15, false);
+    for number in [13, 14, 15] {
+        let draft = json!({ "repo": "owner/name", "number": number, "ready": false });
+        let (err, v) = call(&t, &external, "pr_ready", draft).await;
+        assert!(!err, "{number}: {v}");
+        assert_eq!(v["state"], "awaiting_operator", "{number}: {v}");
+    }
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        reached,
+        "nothing reached GitHub"
+    );
+    for review in ["r3", "r4", "r5"] {
+        assert!(
+            access.store.change_mark(review).unwrap().is_none(),
+            "{review}"
+        );
+    }
 }
 
 /// Naming a change does not make it a review's own: `submit_review` adopts
