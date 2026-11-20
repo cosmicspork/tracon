@@ -847,6 +847,15 @@ async fn once(
         Err(e) => return (Outcome::Failed(format!("start: {e}")), Duration::ZERO),
     };
     let pid = child.id().unwrap_or(0);
+    // Found again by the next node start should this node be killed outright
+    // while it runs, which `kill_on_drop` cannot cover.
+    let running = match running::record(&shared.state_dir, plugin, &instance.channel, pid) {
+        Ok(path) => Some(path),
+        Err(error) => {
+            tracing::warn!(%plugin, channel = %instance.channel, %error, "a plugin process was not recorded");
+            None
+        }
+    };
     instance
         .log
         .line(&format!("[tracon] started {} pid {pid}", build.version));
@@ -979,6 +988,9 @@ async fn once(
     }
     let _ = std::fs::remove_file(&socket);
     drop(node_socket);
+    if let Some(path) = running {
+        let _ = std::fs::remove_file(path);
+    }
     // Its last lines, unless something it started still holds the pipe.
     for pump in pumps.into_iter().flatten() {
         let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
@@ -1129,6 +1141,195 @@ pub fn socket_dir() -> std::io::Result<PathBuf> {
         .join(format!("tracon-{uid}"))
         .join("p");
     private_dir(&short, Path::new("/tmp"))
+}
+
+/// The plugin processes a node starts, written down where the next start of
+/// a node on the same state directory finds them: one file per process,
+/// `<state>/plugins/run/<plugin>.<channel>.<pid>.json`, removed once the
+/// process has ended. A node killed outright (SIGKILL, the OOM killer)
+/// cannot stop its plugins, and nothing else will: each runs in its own
+/// process group, so it outlives the node holding memory and its data
+/// directory. [`reap_orphans`] ends them at the next start.
+pub mod running {
+    use std::path::{Path, PathBuf};
+
+    use serde::{Deserialize, Serialize};
+
+    use crate::process::{Identity, Record, Stale};
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct Running {
+        /// The node run that started it ([`crate::process::instance_id`]):
+        /// a start never reaps its own.
+        node: String,
+        process: Record,
+    }
+
+    pub fn dir(state_dir: &Path) -> PathBuf {
+        super::install::root(state_dir).join("run")
+    }
+
+    /// Record `pid`, a process this node run just started for `plugin` on
+    /// `channel`, by the identity the kernel gives it now.
+    pub fn record(
+        state_dir: &Path,
+        plugin: &str,
+        channel: &str,
+        pid: u32,
+    ) -> std::io::Result<PathBuf> {
+        let identity = Identity::of(pid).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, format!("no process {pid}"))
+        })?;
+        let dir = dir(state_dir);
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{plugin}.{channel}.{pid}.json"));
+        let running = Running {
+            node: crate::process::instance_id().to_string(),
+            process: Record::from(identity),
+        };
+        std::fs::write(&path, serde_json::to_vec(&running)?)?;
+        Ok(path)
+    }
+
+    /// End every plugin process an earlier run of a node on this state
+    /// directory recorded and did not see end, and forget the records. A
+    /// record names a process only while the process holding its pid
+    /// started when it did and runs the same program, so a pid handed to
+    /// something else since is never signalled. Blocking: a process is
+    /// given `grace` after SIGTERM before SIGKILL. Returns how many were
+    /// ended.
+    pub fn reap_orphans(state_dir: &Path, grace: std::time::Duration) -> usize {
+        let Ok(entries) = std::fs::read_dir(dir(state_dir)) else {
+            return 0;
+        };
+        let mut ended = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            let running: Option<Running> = std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+            let Some(running) = running else {
+                let _ = std::fs::remove_file(&path);
+                continue;
+            };
+            if running.node == crate::process::instance_id() {
+                continue;
+            }
+            match running.process.verify() {
+                Ok(pid) => {
+                    tracing::warn!(
+                        pid,
+                        record = %path.display(),
+                        "ending a plugin process a node killed outright left running"
+                    );
+                    end(&running.process, pid, grace);
+                    ended += 1;
+                }
+                Err(Stale::Gone { .. }) => {}
+                Err(why) => {
+                    tracing::info!(record = %path.display(), %why, "a plugin process record names nothing to end")
+                }
+            }
+            let _ = std::fs::remove_file(&path);
+        }
+        ended
+    }
+
+    /// SIGTERM to its process group, which the node made it lead, then
+    /// SIGKILL once `grace` has passed with it still there.
+    fn end(process: &Record, pid: u32, grace: std::time::Duration) {
+        let group = pid as libc::pid_t;
+        // SAFETY: signalling a process group a node made, verified above to
+        // be led by the process it recorded; no memory is shared.
+        unsafe { libc::killpg(group, libc::SIGTERM) };
+        let deadline = std::time::Instant::now() + grace;
+        while std::time::Instant::now() < deadline {
+            if process.verify().is_err() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // SAFETY: as above.
+        unsafe { libc::killpg(group, libc::SIGKILL) };
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::os::unix::process::CommandExt as _;
+
+        fn write(state: &Path, name: &str, node: &str, process: Record) -> PathBuf {
+            std::fs::create_dir_all(dir(state)).unwrap();
+            let path = dir(state).join(name);
+            let running = Running {
+                node: node.into(),
+                process,
+            };
+            std::fs::write(&path, serde_json::to_vec(&running).unwrap()).unwrap();
+            path
+        }
+
+        fn sleeper() -> std::process::Child {
+            std::process::Command::new("sleep")
+                .arg("30")
+                .process_group(0)
+                .spawn()
+                .unwrap()
+        }
+
+        fn identity(child: &std::process::Child) -> Record {
+            Record::from(Identity::of(child.id()).unwrap())
+        }
+
+        #[test]
+        fn a_process_an_earlier_run_left_is_ended_and_forgotten() {
+            let state = tempfile::tempdir().unwrap();
+            let mut child = sleeper();
+            let record = write(
+                state.path(),
+                "p.personal.1.json",
+                "an-earlier-run",
+                identity(&child),
+            );
+            let grace = std::time::Duration::from_secs(2);
+            assert_eq!(reap_orphans(state.path(), grace), 1);
+            let status = child.wait().unwrap();
+            assert!(!status.success(), "{status:?}");
+            assert!(!record.exists());
+            // Nothing is left to end the next time.
+            assert_eq!(reap_orphans(state.path(), grace), 0);
+        }
+
+        #[test]
+        fn a_record_of_this_run_or_of_another_process_ends_nothing() {
+            let state = tempfile::tempdir().unwrap();
+            let mut child = sleeper();
+            let grace = std::time::Duration::from_millis(200);
+            // This run's own: still running here, so kept and not signalled.
+            let own = write(
+                state.path(),
+                "p.personal.2.json",
+                crate::process::instance_id(),
+                identity(&child),
+            );
+            // The same pid, recorded as a process that started at another
+            // time: the pid was handed on, so it is not signalled.
+            let mut reused = identity(&child);
+            reused.started = Some("another start".into());
+            let stale = write(state.path(), "p.work.3.json", "an-earlier-run", reused);
+            let garbage = dir(state.path()).join("p.ops.4.json");
+            std::fs::write(&garbage, b"not json").unwrap();
+            assert_eq!(reap_orphans(state.path(), grace), 0);
+            assert!(child.try_wait().unwrap().is_none(), "it was signalled");
+            assert!(own.exists());
+            assert!(!stale.exists() && !garbage.exists());
+            child.kill().unwrap();
+            child.wait().unwrap();
+        }
+    }
 }
 
 /// Remove the sockets a node killed outright left behind. The directory is

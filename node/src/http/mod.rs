@@ -812,8 +812,15 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     manager.plugins().set_signer(store_key_identity);
     manager.record_egress_refusals();
     manager.report_workspace_syncs();
-    // A node killed outright leaves its plugins' sockets behind.
-    tokio::task::spawn_blocking(crate::plugin::supervisor::sweep_sockets);
+    // A node killed outright leaves its plugins running, and their sockets
+    // behind: the processes it recorded are ended first, so their sockets
+    // no longer answer when the sweep tries them.
+    let plugin_state = Config::state_dir();
+    tokio::task::spawn_blocking(move || {
+        use crate::plugin::supervisor;
+        supervisor::running::reap_orphans(&plugin_state, supervisor::Timings::default().stop_grace);
+        supervisor::sweep_sockets();
+    });
     // Off unless `[digitalocean]` names a credential and `[placement]
     // digitalocean` is not `off`.
     if let Err(error) = crate::provider::digitalocean::runtime::DoRuntime::start(
