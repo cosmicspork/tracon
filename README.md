@@ -1061,6 +1061,9 @@ version, the program it runs under `bin/`, the broker credentials it may be lent
 tools it offers, its UI, the hosts it says it reaches, the document formats it owns, and
 the node methods it calls (see "A plugin calling the node" below).
 An unknown key is refused.
+Writing a plugin is covered in [docs/reference/plugins.md](docs/reference/plugins.md):
+the manifest's fields, the release shape, the process the node starts, the signed caller
+context, previews and formats, and testing against a scratch node.
 
 `tracon plugin add owner/repo` fetches the latest release for this node's target and
 checks the archive against `checksums.txt`. It refuses an owner outside `[plugins]
