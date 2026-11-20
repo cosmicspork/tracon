@@ -1233,7 +1233,8 @@ not take, `-32003` for a refusal (`data.decision` is `denied` or `asked` for a t
   characters), an optional Markdown `summary`, and `content`, a list of 1 to 64 blocks
   (512 KiB in all), each in a format the node renders: `{format: "markdown", text}`,
   `{format: "diff", text}` (a unified diff), `{format: "word_diff", before, after}` (a
-  text before and after, which the page diffs by word), `{format: "table", rows:
+  text before and after, which the page diffs by word itself: words taken out struck
+  through, words put in highlighted, both texts a click away), `{format: "table", rows:
   [{key, value}]}` and `{format: "source", text, language?}`, each with an optional
   `title`. `request_key` makes a repeat while the card waits return that card (otherwise
   identical content does), and `expires_secs` shortens its wait. It returns

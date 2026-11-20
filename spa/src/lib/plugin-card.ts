@@ -8,7 +8,7 @@ export type PluginBlock =
   | { format: 'markdown'; title?: string; text: string }
   | { format: 'diff'; title?: string; text: string }
   | { format: 'source'; title?: string; text: string; language?: string }
-  /** A text before and after; the page diffs it by word. */
+  /** A text before and after; the page diffs it by word (`word-diff.ts`). */
   | { format: 'word_diff'; title?: string; before: string; after: string }
   | { format: 'table'; title?: string; rows: { key: string; value: string }[] }
 
