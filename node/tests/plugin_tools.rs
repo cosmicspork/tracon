@@ -820,6 +820,92 @@ async fn an_answer_bound_to_an_older_preview_is_refused() {
 }
 
 #[tokio::test]
+async fn an_operators_edit_is_previewed_and_its_preview_is_what_allow_binds() {
+    let rig = rig("edited", vec![allow("fake", &["query"])], Policy::shipped());
+    rig.listed(&rig.ctx).await;
+    rig.knob("edited", "preview", "on");
+    let id = asked(
+        &rig.call("fake__describe", json!({ "sql": "UPDATE a" }))
+            .await,
+    );
+    let first = rig.open(&id).await.unwrap();
+    let h1 = first["preview"]["token_sha256"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // The operator edits the call; the plugin previews the edit, against a
+    // target that has moved since the card opened.
+    rig.knob("edited", "version", "v2");
+    let row = rig.store.get_approval(&id).unwrap().unwrap();
+    let edit = json!({ "sql": "UPDATE b" });
+    let second = rig.tools.preview_edit(&row, &edit).await.unwrap().unwrap();
+    assert!(
+        second["preview"]["body"]
+            .as_str()
+            .unwrap()
+            .contains("+ UPDATE b"),
+        "{second}"
+    );
+    let h2 = second["preview"]["token_sha256"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(h1, h2);
+    let previews = rig.records("edited", "previews.jsonl");
+    assert_eq!(previews.len(), 2);
+    assert_eq!(
+        previews[1]["arguments_sha256"],
+        sha256(r#"{"sql":"UPDATE b"}"#),
+        "the edit is what was previewed"
+    );
+    // An answer read against the preview before the edit is refused.
+    let answer = |hash: &str| OperatorAnswer {
+        option_id: tracon::adapter::types::OPTION_ALLOW_ONCE.into(),
+        arguments: Some(edit.clone()),
+        preview_hash: Some(hash.to_string()),
+        ..Default::default()
+    };
+    let refused = rig
+        .tools
+        .answer_approval(&id, answer(&h1))
+        .await
+        .unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains("the preview changed since you read it"),
+        "{refused}"
+    );
+    // Read against the edit's preview, the edit runs against its token.
+    rig.tools.answer_approval(&id, answer(&h2)).await.unwrap();
+    let seen = approved_echo(&rig.settled(&id).await);
+    assert_eq!(seen["meta"]["preview_token"], "v2");
+    assert_eq!(seen["arguments"], edit);
+    rig.manager.plugins().shutdown().await;
+}
+
+#[tokio::test]
+async fn an_edit_an_answer_would_refuse_is_not_previewed() {
+    let rig = rig(
+        "badedit",
+        vec![allow("fake", &["query"])],
+        Policy::shipped(),
+    );
+    rig.listed(&rig.ctx).await;
+    rig.knob("badedit", "preview", "on");
+    let id = asked(&rig.call("fake__describe", json!({ "sql": "x" })).await);
+    let row = rig.store.get_approval(&id).unwrap().unwrap();
+    let errors = rig
+        .tools
+        .preview_edit(&row, &json!("not an object"))
+        .await
+        .unwrap_err();
+    assert!(!errors.is_empty());
+    assert!(rig.records("badedit", "previews.jsonl").is_empty());
+    rig.manager.plugins().shutdown().await;
+}
+
+#[tokio::test]
 async fn prose_in_a_plugin_format_is_rendered_by_its_owner() {
     let rig = rig(
         "formats",

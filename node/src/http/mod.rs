@@ -403,6 +403,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/approvals/{id}", get(api::get_approval))
         .route("/api/approvals/{id}/release", post(api::release_approval))
         .route("/api/approvals/{id}/render", post(api::render_approval))
+        .route("/api/approvals/{id}/preview", post(api::preview_approval))
         .route("/api/operator/questions", get(api::operator_questions))
         .route(
             "/api/operator/questions/{id}/answer",
