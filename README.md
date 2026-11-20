@@ -2115,9 +2115,9 @@ shape = "anthropic"                 # or "openai", "openai-codex"; the shape als
 # output_per_mtok = 15.0
 
 [publish]                           # the binaries the node runs to publish an approved review
-gh = "gh"
-glab = "glab"
-git = "git"
+gh = "gh"                           # the node image carries pinned gh and glab releases on PATH
+glab = "glab"                       # (gh 2.49 or later, as `gh attestation verify` needs); a node
+git = "git"                         # on a host runs whichever its service's PATH finds
 forge_timeout_secs = 15             # how long one gh or glab call may run
 commits = "squash"                  # one commit of the reviewed tree; "keep" pushes the agent's commits
 warn_direct = true                  # warn when a review pushes straight to its base, no change opened
@@ -2510,7 +2510,10 @@ interface (the banner, or Settings › System › Restart), or `POST /api/admin/
 the node drains, exits 0, and the kubelet starts the
 container again on the same volume and pod IP, so a phone with a passkey restarts it
 without `kubectl`. That needs `TRACON_RESTART_BY_EXIT=1` in the pod's environment, as
-`deploy/kubernetes/base/deployment.yaml` sets it; without it the restart is refused. Every sandbox pod
+`deploy/kubernetes/base/deployment.yaml` sets it; without it the restart is refused. The
+image carries pinned, checksum-verified releases of `gh`, `glab` and `buildctl` on its
+`PATH`, so publishing to GitHub or GitLab and building repository images need no binary
+mounted, and the `[publish]` and builder defaults find them. Every sandbox pod
 names its own requests and memory limit (`[runtime.kubernetes.resources]`, sized by
 default for one shared 4 vCPU / 8 GB node), so a namespace's LimitRange never
 substitutes its defaults. Each pod also gets a memory-backed `/dev/shm` for browsers

@@ -1,6 +1,7 @@
 # The node image, for a node that runs as a pod (the Kubernetes runtime). It
-# carries the node binary with the SPA embedded and git for worktrees. SQL is
-# the sql-review plugin's, installed with `tracon plugin add`, not part of
+# carries the node binary with the SPA embedded, git for worktrees, and pinned
+# releases of gh, glab and buildctl (see the tools stage). SQL is the
+# sql-review plugin's, installed with `tracon plugin add`, not part of
 # this image. Laptops do not use this image; they fetch the static binary.
 
 FROM docker.io/oven/bun@sha256:9114c058aeae42162ee16dd5084b95fe9473970bb6bcb5b232ab1630f0546895 AS spa
@@ -43,19 +44,47 @@ COPY . .
 COPY --from=spa /build/spa/dist spa/dist
 RUN cargo build -p tracon --release --bin tracon
 
-# buildctl, the client a pod-hosted node builds repository images with
-# (`[runtime.kubernetes.builder]`): it talks to a BuildKit daemon over mutual
-# TLS and answers that daemon's registry token requests from the node's own
-# DOCKER_CONFIG. The client only; the daemon is the deployment's. The release
-# tarball is held to its published sha256 before anything is unpacked. The node
-# image is built for linux/amd64 alone, so the tarball is that platform's.
-FROM ghcr.io/astral-sh/uv:0.9.16-python3.13-bookworm-slim@sha256:ceb1b62148bad35cf9cb899a5da44aa15774a5a74860716f0f14d451122e2051 AS buildctl
+# The release binaries the node runs, each fetched at a pinned version and held
+# to its published sha256 before anything is unpacked. The node image is built
+# for linux/amd64 alone, so every archive is that platform's. Nothing bumps these
+# pins for us: to move one, take the new release's sha256 from the checksum file
+# it publishes beside its archives (named below), confirm it against a hash of
+# the archive you download yourself, and change the version and sha256 together.
+#
+# - buildctl, the client a pod-hosted node builds repository images with
+#   (`[runtime.kubernetes.builder]`): it talks to a BuildKit daemon over mutual
+#   TLS and answers that daemon's registry token requests from the node's own
+#   DOCKER_CONFIG. The client only; the daemon is the deployment's. Checksums:
+#   the GitHub release's asset digests (github.com/moby/buildkit/releases).
+# - gh, what an approved GitHub review opens its pull request with
+#   (`publish.gh`), and what verifies a GitHub artifact attestation
+#   (`gh attestation verify`, which needs 2.49 or later; Debian bookworm's is
+#   2.23). Checksums: `gh_<version>_checksums.txt` on the release
+#   (github.com/cli/cli/releases).
+# - glab, what an approved GitLab review opens its merge request with
+#   (`publish.glab`). Debian bookworm has none. Checksums: `checksums.txt` on
+#   the release (gitlab.com/gitlab-org/cli/-/releases), whose assets are the
+#   project's generic packages.
+#
+# Both this stage and the runtime start from Debian's slim image dated before
+# the apt snapshot below (the newest such): one built after it can already hold
+# packages newer than the snapshot's, which apt then cannot install beside, so
+# the image and the snapshot date move together. The slim image has no CA
+# certificates until apt installs them, so these stages read the snapshot over
+# plain HTTP. That costs no integrity: apt holds every package to the
+# snapshot's Release file, signed with the Debian archive keys the image
+# already carries.
+FROM docker.io/library/debian:bookworm-20260824-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS tools
 ARG BUILDKIT_VERSION=v0.34.0
 ARG BUILDKIT_SHA256=14813b1fb2a40082114e6d386c6fc5e7dd5298176ce7ee1a18bc33e73e109ac3
+ARG GH_VERSION=2.105.0
+ARG GH_SHA256=79e7ab5db738c48777b696e374f8b428f0647debfb424f44d2f426370407fe2f
+ARG GLAB_VERSION=1.131.0
+ARG GLAB_SHA256=580dbca43835b47267e512476a442f6b2e8785a82b26ccacee22bd7010662b2d
 RUN rm -f /etc/apt/sources.list.d/debian.sources \
     && printf '%s\n' \
-      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20260901T000000Z bookworm main' \
-      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20260901T000000Z bookworm-security main' \
+      'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260901T000000Z bookworm main' \
+      'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20260901T000000Z bookworm-security main' \
       > /etc/apt/sources.list \
     && apt-get -o Acquire::Check-Valid-Until=false update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
@@ -66,26 +95,44 @@ RUN set -eu; \
     echo "${BUILDKIT_SHA256}  /tmp/buildkit.tar.gz" | sha256sum -c -; \
     tar -xzf /tmp/buildkit.tar.gz -C /tmp bin/buildctl; \
     install -m 0755 /tmp/bin/buildctl /usr/local/bin/buildctl; \
+    rm -rf /tmp/buildkit.tar.gz /tmp/bin; \
     /usr/local/bin/buildctl --version
+RUN set -eu; \
+    curl -fsSL -o /tmp/gh.tar.gz \
+      "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz"; \
+    echo "${GH_SHA256}  /tmp/gh.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/gh.tar.gz -C /tmp "gh_${GH_VERSION}_linux_amd64/bin/gh"; \
+    install -m 0755 "/tmp/gh_${GH_VERSION}_linux_amd64/bin/gh" /usr/local/bin/gh; \
+    rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_VERSION}_linux_amd64"; \
+    /usr/local/bin/gh --version
+RUN set -eu; \
+    curl -fsSL -o /tmp/glab.tar.gz \
+      "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_linux_amd64.tar.gz"; \
+    echo "${GLAB_SHA256}  /tmp/glab.tar.gz" | sha256sum -c -; \
+    mkdir /tmp/glab; \
+    tar -xzf /tmp/glab.tar.gz -C /tmp/glab bin/glab; \
+    install -m 0755 /tmp/glab/bin/glab /usr/local/bin/glab; \
+    rm -rf /tmp/glab.tar.gz /tmp/glab; \
+    /usr/local/bin/glab --version
 
-# The runtime is a pinned Debian bookworm: the uv image consulta's sidecar
-# needed, kept as it was when SQL moved to the sql-review plugin, though
-# nothing here runs uv any more. gh is what an approved GitHub review opens
-# its pull request with (`publish.gh`); without it the branch is pushed and
-# the request never opened. It comes from the same
-# pinned snapshot as everything else here. Bookworm has no glab, so a GitLab
-# publication still needs `publish.glab` pointed at one the deployment mounts.
-FROM ghcr.io/astral-sh/uv:0.9.16-python3.13-bookworm-slim@sha256:ceb1b62148bad35cf9cb899a5da44aa15774a5a74860716f0f14d451122e2051
+# The runtime is a pinned Debian bookworm, with git and its other apt packages
+# from the same pinned snapshot as everything else here (over HTTP, as above).
+# gh and glab are the pinned releases above, in /usr/local/bin on the image's
+# PATH, so the defaults `publish.gh = "gh"` and `publish.glab = "glab"` find
+# them; Debian's gh package is not installed. Without the forge's CLI an
+# approved review's branch is pushed and its pull or merge request never
+# opened.
+FROM docker.io/library/debian:bookworm-20260824-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 RUN rm -f /etc/apt/sources.list.d/debian.sources \
     && printf '%s\n' \
-      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20260901T000000Z bookworm main' \
-      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20260901T000000Z bookworm-security main' \
+      'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260901T000000Z bookworm main' \
+      'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20260901T000000Z bookworm-security main' \
       > /etc/apt/sources.list \
     && apt-get -o Acquire::Check-Valid-Until=false update \
-    && apt-get install -y --no-install-recommends ca-certificates git curl gh \
+    && apt-get install -y --no-install-recommends ca-certificates git curl \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/target/release/tracon /usr/local/bin/tracon
-COPY --from=buildctl /usr/local/bin/buildctl /usr/local/bin/buildctl
+COPY --from=tools /usr/local/bin/buildctl /usr/local/bin/gh /usr/local/bin/glab /usr/local/bin/
 # State and config are volumes; the deployment sets XDG_STATE_HOME=/state and
 # XDG_CONFIG_HOME=/config. Runs as uid 65532, the same uid the harness pods
 # use, so what each writes on the shared claim the other can read.

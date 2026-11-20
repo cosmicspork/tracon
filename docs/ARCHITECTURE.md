@@ -367,7 +367,12 @@ runs. `config::path_guard` holds each such key to rules for what it names
   which makes the whole volume group-writable.) A bare name skips a `PATH` entry that
   fails these rules and runs the next one that passes, and every guarded program is given
   the node's `PATH` less every such entry, and less empty and relative ones, so a program
-  that runs another (git its helpers, uv its tools) does not find a planted one.
+  that runs another (git its helpers, uv its tools) does not find a planted one. The
+  node image (`Dockerfile.node`) installs `gh`, `glab` and `buildctl` as pinned,
+  sha256-checked releases in `/usr/local/bin`, a trusted prefix owned by root, so the
+  bare defaults resolve there; its `gh` is new enough (2.49 or later) for
+  `gh attestation verify`. A node on a host runs whichever its service's `PATH` finds
+  (Homebrew's, typically), at whatever version that is.
 - **Secret files and directories** (`embed.api_key_file`,
   `runtime.kubernetes.builder.do_token_file`, `.tls_dir`, `.docker_config`): only inside
   a directory set aside for the node's secrets, `<config dir>/secrets` (on macOS inside
