@@ -25,7 +25,10 @@
 //! to share it. It is kept beside the node pod by pod affinity instead: this
 //! node's pod, by its role and its `tracon.dev/node` label (its `[boundary]
 //! resource_prefix`), so a second node in the namespace is never mistaken
-//! for it.
+//! for it. Or, with `[runtime.kubernetes.pool]`, on the pool's nodes by its
+//! node selector and tolerations; nothing below depends on sharing a
+//! machine, and a pod the cluster's autoscaler is adding a node for waits
+//! for it (`connect`).
 //!
 //! **Carrier.** The sandbox dials the node pod's address on `sandbox_port`
 //! over TLS, pinned to the node's certificate. Its NetworkPolicy
@@ -70,9 +73,10 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use k8s_openapi::api::core::v1::{
-    Affinity, Capabilities as PodCapabilities, Container, EmptyDirVolumeSource, EnvVar, HostAlias,
-    Pod, PodAffinity, PodAffinityTerm, PodDNSConfig, PodSchedulingGate, PodSecurityContext,
-    PodSpec, PodStatus, SeccompProfile, SecurityContext, Volume, VolumeMount,
+    Affinity, Capabilities as PodCapabilities, Container, EmptyDirVolumeSource, EnvVar, Event,
+    HostAlias, Pod, PodAffinity, PodAffinityTerm, PodDNSConfig, PodSchedulingGate,
+    PodSecurityContext, PodSpec, PodStatus, SeccompProfile, SecurityContext, Toleration, Volume,
+    VolumeMount,
 };
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -84,8 +88,8 @@ use tracon_sandbox::node::{SandboxConn, SandboxError, SandboxServer};
 
 use self::pod::{
     harness_status, normalize_image_id, pending_reason, pod_labels, quota_refused, refusal,
-    refusal_error, sandbox_status, KubeSpec, Refusal, Sizing, HARNESS_CONTAINER, NODE_LABEL,
-    PROBE_GATE, ROLE_LABEL, SCRATCH_MOUNT, SESSION_LABEL, SHM_VOLUME,
+    refusal_error, sandbox_status, KubeSpec, Refusal, ScaleUp, Sizing, HARNESS_CONTAINER,
+    NODE_LABEL, PROBE_GATE, ROLE_LABEL, SCRATCH_MOUNT, SESSION_LABEL, SHM_VOLUME,
 };
 use super::capabilities::{
     Capabilities, Dns, ImageIdentityKind, Privilege, Route, RuntimeSocket, Tier,
@@ -138,6 +142,9 @@ const POLL: Duration = Duration::from_millis(500);
 /// How long `image_identity` re-reads a pod whose status does not name its
 /// container's image digest yet: the kubelet posts it shortly after start.
 const IMAGE_ID_WAIT: Duration = Duration::from_secs(30);
+/// How often an unschedulable pod in a pool has its events read for what
+/// the cluster's autoscaler said of it.
+const SCALE_UP_POLL: Duration = Duration::from_secs(5);
 /// Reads in a row that may fail before a start is given up.
 const READ_FAILURES: u32 = 10;
 /// How long a connection from an address no sandbox is expected at yet is
@@ -803,6 +810,18 @@ fn sizing(shape: Shape) -> Sizing {
     }
 }
 
+/// `[runtime.kubernetes.pool] tolerations` entry as the pod spells it.
+fn toleration(t: &crate::config::KubeToleration) -> Toleration {
+    let set = |value: &str| (!value.is_empty()).then(|| value.to_string());
+    Toleration {
+        key: set(&t.key),
+        operator: set(&t.operator),
+        value: set(&t.value),
+        effect: set(&t.effect),
+        toleration_seconds: None,
+    }
+}
+
 fn failed(what: impl std::fmt::Display) -> ProviderError {
     ProviderError::Failed(what.to_string())
 }
@@ -816,9 +835,10 @@ fn refused(error: RunnerError) -> ProviderError {
 
 /// What the scheduler says of a pod it has not placed: its `PodScheduled`
 /// condition `False` with reason `Unschedulable`, for lack of room on the
-/// node's machine (affinity binds it there) or for anything else that keeps
-/// it off (a taint, a cordon). It waits rather than fails, so `connect` gives
-/// it `unschedulable_grace` before it says so.
+/// node's machine (affinity binds it there) or in its pool, or for anything
+/// else that keeps it off (a taint, a cordon). It waits rather than fails,
+/// so `connect` gives it `unschedulable_grace` before it says so, or a
+/// pool's `scale_up_grace` once the autoscaler is adding a node for it.
 fn unschedulable(status: &PodStatus) -> Option<String> {
     let condition = status.conditions.as_deref()?.iter().find(|c| {
         c.type_ == "PodScheduled"
@@ -1059,11 +1079,41 @@ impl KubeSandboxProvider {
             run_as_non_root: Some(true),
             ..Default::default()
         };
-        // This node's pod, not any node's: another in the namespace carries
-        // the role too.
-        let node_selector = LabelSelector {
-            match_labels: Some(node_pod_labels()),
-            ..Default::default()
+        let (affinity, node_selector, tolerations) = match k.pool.is_set() {
+            // On the pool's nodes of the base's architecture, whichever has
+            // room, through the scheduler (and its autoscaler).
+            true => (
+                None,
+                Some(pod::pool_selector(
+                    &k.pool,
+                    crate::boundary::registry::host_architecture(),
+                )),
+                Some(k.pool.tolerations.iter().map(toleration).collect()),
+            ),
+            // Beside the node pod, on its machine, through the scheduler
+            // rather than around it. This node's pod, not any node's:
+            // another in the namespace carries the role too.
+            false => (
+                Some(Affinity {
+                    pod_affinity: Some(PodAffinity {
+                        required_during_scheduling_ignored_during_execution: Some(vec![
+                            PodAffinityTerm {
+                                label_selector: Some(LabelSelector {
+                                    match_labels: Some(node_pod_labels()),
+                                    ..Default::default()
+                                }),
+                                namespaces: Some(vec![self.options.node_namespace.clone()]),
+                                topology_key: "kubernetes.io/hostname".into(),
+                                ..Default::default()
+                            },
+                        ]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                None,
+                None,
+            ),
         };
         Ok(Pod {
             metadata: ObjectMeta {
@@ -1088,22 +1138,9 @@ impl KubeSandboxProvider {
                     ip: "127.0.0.1".into(),
                     hostnames: Some(vec![k.gateway_host.clone()]),
                 }]),
-                // Beside the node pod, on its machine, through the scheduler
-                // rather than around it.
-                affinity: Some(Affinity {
-                    pod_affinity: Some(PodAffinity {
-                        required_during_scheduling_ignored_during_execution: Some(vec![
-                            PodAffinityTerm {
-                                label_selector: Some(node_selector),
-                                namespaces: Some(vec![self.options.node_namespace.clone()]),
-                                topology_key: "kubernetes.io/hostname".into(),
-                                ..Default::default()
-                            },
-                        ]),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }),
+                affinity,
+                node_selector,
+                tolerations,
                 scheduling_gates: gated.then(|| {
                     vec![PodSchedulingGate {
                         name: PROBE_GATE.into(),
@@ -1189,6 +1226,26 @@ impl KubeSandboxProvider {
             Ok(text) if !text.trim().is_empty() => text.trim().to_string(),
             Ok(_) => "it wrote nothing".into(),
             Err(error) => format!("its log could not be read: {error}"),
+        }
+    }
+
+    /// What the cluster's autoscaler has said of the pod `name` (of `uid`,
+    /// when known, so an earlier pod of the same name is not read), from
+    /// its events. `None` when they cannot be read: the pod is then given
+    /// the shorter grace, as where no autoscaler runs.
+    async fn scale_up_of(&self, name: &str, uid: Option<&str>) -> Option<ScaleUp> {
+        let events: Api<Event> =
+            Api::namespaced(self.client.clone(), &self.options.spec.env.namespace);
+        let mut fields = format!("involvedObject.kind=Pod,involvedObject.name={name}");
+        if let Some(uid) = uid {
+            fields.push_str(&format!(",involvedObject.uid={uid}"));
+        }
+        match events.list(&ListParams::default().fields(&fields)).await {
+            Ok(listed) => Some(pod::scale_up(&listed.items)),
+            Err(error) => {
+                tracing::warn!(sandbox = %name, %error, "could not read the pod's events for a scale-up (role.yaml grants list on events)");
+                None
+            }
         }
     }
 
@@ -1548,6 +1605,11 @@ impl SandboxProvider for KubeSandboxProvider {
         // place for the pod.
         let mut unscheduled_since: Option<tokio::time::Instant> = None;
         let mut expected: Option<Expected> = None;
+        // What the cluster's autoscaler has said of the pod, read from its
+        // events while it is unschedulable, and when last; only for a pool,
+        // which is what an autoscaler grows.
+        let mut scale_up = ScaleUp::Unsaid;
+        let mut scale_read: Option<tokio::time::Instant> = None;
         let mut failures = 0;
         let mut tick = tokio::time::interval(POLL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1593,6 +1655,7 @@ impl SandboxProvider for KubeSandboxProvider {
                             continue;
                         }
                     };
+                    let uid = pod.metadata.uid.clone();
                     let status = pod.status.unwrap_or_default();
                     if expected.is_none() {
                         let ips = pod_ips(&status);
@@ -1609,15 +1672,37 @@ impl SandboxProvider for KubeSandboxProvider {
                         Progress::Unschedulable(said) => {
                             let since = *unscheduled_since.get_or_insert_with(tokio::time::Instant::now);
                             let waited = since.elapsed();
-                            if waited >= self.options.spec.unschedulable_grace {
+                            let k = &self.options.spec;
+                            // Read again every so often, and always before
+                            // the shorter grace gives the pod up, unless a
+                            // node is already on its way.
+                            let look = k.pool.is_set()
+                                && !matches!(scale_up, ScaleUp::Triggered(_))
+                                && (waited >= k.unschedulable_grace
+                                    || scale_read.is_none_or(|at| at.elapsed() >= SCALE_UP_POLL));
+                            if look {
+                                scale_read = Some(tokio::time::Instant::now());
+                                if let Some(read) = self.scale_up_of(name, uid.as_deref()).await {
+                                    if let ScaleUp::Triggered(added) = &read {
+                                        tracing::info!(sandbox = %name, %added, "the cluster autoscaler is adding a node for this sandbox; waiting for it");
+                                    }
+                                    scale_up = read;
+                                }
+                            }
+                            let grace = match scale_up {
+                                ScaleUp::Triggered(_) => k.scale_up_grace().max(k.unschedulable_grace),
+                                _ => k.unschedulable_grace,
+                            };
+                            if waited >= grace {
                                 return Err(fail(
                                     pod::UNSCHEDULABLE,
                                     refused(pod::unschedulable_error(
                                         name,
                                         &said,
                                         pending.sizing,
-                                        &self.options.spec.resources,
+                                        &k.resources,
                                         waited,
+                                        &scale_up,
                                     )),
                                 ));
                             }

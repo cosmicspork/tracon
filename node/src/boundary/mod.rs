@@ -311,6 +311,14 @@ pub trait Backend: Send + Sync {
     async fn room(&self) -> Option<Result<crate::provider::kubernetes::room::Fit, String>> {
         None
     }
+    /// How much longer than a harness's usual start a session's sandbox may
+    /// take here before it is given up: the time a cluster's autoscaler may
+    /// take to add a node for it (`[runtime.kubernetes.pool]
+    /// scale_up_grace_secs`). Nothing where sandboxes start on a machine that
+    /// is already there.
+    fn start_allowance(&self) -> std::time::Duration {
+        std::time::Duration::ZERO
+    }
     /// `tracon setup`: make what the boundary needs exist. Idempotent.
     async fn setup(&self, cfg: &Config, rebuild: bool) -> Result<(), BoundaryError>;
     /// What the node runs on its own (`reconcile`): `setup`, touching only

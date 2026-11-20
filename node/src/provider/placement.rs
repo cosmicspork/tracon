@@ -701,6 +701,7 @@ mod tests {
                 needs_cpu: 750,
                 needs_memory: 3 * GI,
                 fits: room >= 3 * GI,
+                awaits_node: false,
             })),
             ..free(Kubernetes)
         }

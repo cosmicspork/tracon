@@ -476,6 +476,7 @@ mod tests {
             needs_cpu: 1250,
             needs_memory: 1_610_612_736,
             fits: false,
+            awaits_node: false,
         }));
         let decision = Placement::Place {
             provider: ProviderKind::DigitalOcean,

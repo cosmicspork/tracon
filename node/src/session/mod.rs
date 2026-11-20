@@ -3584,11 +3584,14 @@ impl Manager {
                     adapter: adapter.clone(),
                     spec: launch_spec.clone(),
                 });
-            let launched = tokio::time::timeout(
-                STARTUP_TIMEOUT,
-                adapter.launch(runner.as_ref(), launch_spec),
-            )
-            .await;
+            // A sandbox on this node's runtime may wait for a node to be
+            // added for it first.
+            let within = match placed.is_elsewhere() {
+                true => STARTUP_TIMEOUT,
+                false => STARTUP_TIMEOUT + self.backend.start_allowance(),
+            };
+            let launched =
+                tokio::time::timeout(within, adapter.launch(runner.as_ref(), launch_spec)).await;
             match launched {
                 Ok(Ok((handle, events))) => {
                     break (
@@ -3626,7 +3629,7 @@ impl Manager {
                     let _ = tokio::time::timeout(CLEANUP_TIMEOUT, runner.kill(&container)).await;
                     return Err(anyhow::anyhow!(
                         "harness startup timed out after {} seconds",
-                        STARTUP_TIMEOUT.as_secs()
+                        within.as_secs()
                     ));
                 }
             }

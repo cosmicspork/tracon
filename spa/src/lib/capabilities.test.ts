@@ -171,6 +171,13 @@ describe("a cluster's room", () => {
     expect(roomWords({ ...full, free_memory: 4 * 1024 ** 3, free_cpu: 2000, fits: true })).toBe(
       'the cluster has 4 Gi and 2 CPU free; a session and its checks need 1.5 Gi and 1.25 CPU',
     )
+    expect(roomWords({ ...full, free_memory: 0, free_cpu: 0, fits: true, awaits_node: true })).toBe(
+      "the sandbox pool has no node now, and the cluster's autoscaler adds one when a pod asks; a session and its checks need 1.5 Gi and 1.25 CPU",
+    )
+    expect(roomLine({ ...full, free_memory: 0, free_cpu: 0, fits: true, awaits_node: true })).toMatchObject({
+      tone: '',
+      text: 'room for a session',
+    })
     expect(roomWords({ running: 2, limit: 4 })).toBe('')
     expect(roomWords(null)).toBe('')
     expect(memoryWords(512 * 1024 * 1024)).toBe('512 Mi')
