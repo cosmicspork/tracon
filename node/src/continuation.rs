@@ -1069,6 +1069,7 @@ pub async fn carry_on(
         // The policy the old attempt ran under carries over with the work.
         on_exhaustion: store.exhaustion(&old.id)?.map(|row| row.choice()),
         told_reviews: crate::session::told_reviews(&carried),
+        project_id: None,
     };
     let row = manager.create(spec).await?;
     if suspended {

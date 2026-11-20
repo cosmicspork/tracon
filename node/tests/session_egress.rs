@@ -147,6 +147,7 @@ fn spec(repo: &str, model: &str) -> NewSession {
         harness: None,
         on_exhaustion: None,
         told_reviews: Vec::new(),
+        project_id: None,
     }
 }
 

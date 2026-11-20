@@ -133,6 +133,12 @@ pub struct NewSession {
     /// its decision delivered as usual.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub told_reviews: Vec<String>,
+    /// The project the session runs in, when it carries one on from another
+    /// session (a moved session keeps its source's). Used only when this node
+    /// has that project on the session's channel; otherwise the project is
+    /// worked out from the repository as for any session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -953,6 +959,7 @@ impl Manager {
             harness: Some(harness.to_string()),
             on_exhaustion: None,
             told_reviews: told_reviews(&carried),
+            project_id: None,
         };
         self.create(spec).await
     }
@@ -1074,6 +1081,7 @@ impl Manager {
             harness,
             on_exhaustion: choice,
             told_reviews: told,
+            project_id: None,
         };
         let row = self.create(spec).await?;
         // A suspended session's work now lives in the new one; the operator
@@ -1283,6 +1291,7 @@ impl Manager {
             harness: Some(was.harness_id.clone()),
             on_exhaustion: None,
             told_reviews: Vec::new(),
+            project_id: None,
         };
         let row = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
         self.bus.publish(Frame::Session(Box::new(row.clone())));
@@ -2374,7 +2383,20 @@ impl Manager {
         // Bank identity: the channel and the repository's remote, resolved on
         // this side of the boundary and recorded on the row for memory to key
         // on; never a checkout path.
+        let carried_project = spec
+            .project_id
+            .as_deref()
+            .map(|id| self.store.project_get(id))
+            .transpose()?
+            .flatten()
+            .filter(|project| project.channel == spec.channel);
         let (project_id, project_name, remote) = match spec.workspace_id.as_deref() {
+            // Carried on from another session (a move): the same project,
+            // as this node has it.
+            _ if carried_project.is_some() => {
+                let project = carried_project.expect("checked above");
+                (project.id, project.name, project.remote_url)
+            }
             Some(workspace_id) => {
                 let canonical = format!("workspace/{workspace_id}");
                 (
@@ -2483,7 +2505,16 @@ impl Manager {
         };
         self.store.insert_session(&row)?;
         self.store.exhaustion_choose(&id, &on_exhaustion)?;
-        if let Some(from) = spec.continued_from.as_deref() {
+        // Reviews follow a continuation on the node they are on. One from
+        // another node (a moved session) leaves its reviews where they are:
+        // the new session resubmits from the branch it was given.
+        if let Some(from) = spec.continued_from.as_deref().filter(|from| {
+            self.store
+                .get_session(from)
+                .ok()
+                .flatten()
+                .is_some_and(|row| row.node_id == self.node_id)
+        }) {
             self.take_over_reviews(from, &id, &spec.told_reviews)
                 .await?;
         }
