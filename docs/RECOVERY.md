@@ -369,7 +369,7 @@ cp node.toml node.toml.restored
 mv node.toml.failed-<ms> node.toml
 ```
 
-then restart the node (Settings, `tracon service restart`, or let the pod restart).
+then restart the node (Settings › System › Restart, `tracon service restart`, or let the pod restart).
 If it fails three more times it is restored again, with a new `node.toml.failed-<ms>`.
 
 **To stop it from restoring at all**, delete `node.toml.last-good`; with no last-good

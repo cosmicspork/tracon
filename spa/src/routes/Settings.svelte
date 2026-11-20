@@ -47,7 +47,7 @@
     status as desktopUpdateStatus,
   } from '../lib/desktop-update'
   import {
-    canRestartNode,
+    offersRecoveryRestart,
     installCli as installDesktopCli,
     nodeOwnerSummary,
     restartNode as restartDesktopNode,
@@ -536,11 +536,18 @@
   let desktopPrefsError = $state('')
   let theme = $state<Theme>(storedTheme())
 
+  // Whether the app offers its recovery restart follows whether the node
+  // answers: read again whenever the connection to it comes or goes.
+  $effect(() => {
+    void store.connected
+    if (!desktopUpdatesAvailable()) return
+    desktopSetupStatus()
+      .then((s) => (desktopSetup = s))
+      .catch(() => {})
+  })
+
   onMount(() => {
     if (desktopUpdatesAvailable()) {
-      desktopSetupStatus()
-        .then((s) => (desktopSetup = s))
-        .catch(() => {})
       desktopPreferences()
         .then((p) => (desktopPrefs = p))
         .catch((e) => (desktopPrefsError = e instanceof Error ? e.message : String(e)))
@@ -746,7 +753,7 @@
       {#if desktopSetupError}<small class="bad">{desktopSetupError}</small>{/if}
       <div class="acts">
         {#if desktopAction}<button class="btn p" onclick={runDesktopUpdate} disabled={desktopAction.disabled}>{desktopAction.label}</button>{/if}
-        {#if desktopSetup && canRestartNode(desktopSetup)}<button class="btn" class:p={desktopSetup.service_failing} disabled={desktopBusy} onclick={() => runDesktop(restartDesktopNode)}>{desktopBusy ? 'Working…' : 'Restart node'}</button>{/if}
+        {#if desktopSetup && offersRecoveryRestart(desktopSetup)}<button class="btn" class:p={desktopSetup.service_failing} disabled={desktopBusy} onclick={() => runDesktop(restartDesktopNode)}>{desktopBusy ? 'Working…' : 'Restart node'}</button>{/if}
         {#if desktopSetup?.sidecar_version && desktopSetup.cli_version !== desktopSetup.sidecar_version}<button class="btn" disabled={desktopBusy} onclick={() => runDesktop(installDesktopCli)}>Install CLI v{desktopSetup.sidecar_version}</button>{/if}
       </div>
     </Card>

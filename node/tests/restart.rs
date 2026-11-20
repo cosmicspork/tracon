@@ -791,6 +791,177 @@ async fn a_new_review_is_refused_while_a_restart_waits() {
 /// The repro the last-known-good restore was reviewed against: further
 /// `tracon serve` runs on a running node's state directory, each failing,
 /// must not count as failed starts of its file, let alone replace it.
+#[tokio::test]
+async fn a_node_with_nothing_changed_restarts_into_the_same_file() {
+    let _file = state::config_lock().await;
+    let n = node();
+    boot_from_file(&n);
+    let (s, v) = call(&n, "GET", "/api/restart", None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["config"]["keys"], json!([]), "{v}");
+    assert_eq!(v["restart"]["available"], true, "{v}");
+    let hash = v["config"]["hash"].clone();
+    assert_eq!(hash, json!(file_hash()));
+
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/admin/restart",
+        Some(json!({ "mode": "when_idle", "expected_hash": hash })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+    eventually("the restart", || {
+        n.supervisor.restarts.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(n.supervisor.restarts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn now_confirmed_during_a_wait_restarts_at_once() {
+    let _file = state::config_lock().await;
+    let n = node();
+    let mut busy = session_row("s-stuck", "n1", "personal");
+    busy.turn_active = 1;
+    n.state.store().insert_session(&busy).unwrap();
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/admin/restart",
+        Some(json!({ "mode": "when_idle", "expected_hash": file_hash() })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(n.supervisor.restarts.load(Ordering::SeqCst), 0);
+
+    // The turn is still running; `now` does not wait for it.
+    let (s, v) = call(
+        &n,
+        "POST",
+        "/api/admin/restart",
+        Some(json!({ "mode": "now", "expected_hash": file_hash(), "confirm": true })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+    assert_eq!(v["plan"]["mode"], "now", "{v}");
+    eventually("the restart", || {
+        n.supervisor.restarts.load(Ordering::SeqCst) == 1
+    })
+    .await;
+}
+
+/// The next `restart` frame on the bus, if one comes within `within`.
+async fn next_restart_frame(
+    rx: &mut tokio::sync::broadcast::Receiver<tracon::stream::Frame>,
+    within: Duration,
+) -> Option<Value> {
+    tokio::time::timeout(within, async {
+        loop {
+            match rx.recv().await {
+                Ok(tracon::stream::Frame::Restart(v)) => return v,
+                Ok(_) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(e) => panic!("the bus closed: {e}"),
+            }
+        }
+    })
+    .await
+    .ok()
+}
+
+#[tokio::test]
+async fn the_restart_frame_is_sent_again_when_running_work_changes() {
+    let _file = state::config_lock().await;
+    let n = node();
+    let manager = &n.state.manager;
+    let mut rx = manager.bus().subscribe();
+    let quick = Duration::from_millis(100);
+
+    // The first look is sent; the same look again is not.
+    tracon::restart::publish(manager).await;
+    let baseline = next_restart_frame(&mut rx, quick)
+        .await
+        .expect("the baseline frame");
+    assert_eq!(baseline["busy"]["turns"], json!([]), "{baseline}");
+    tracon::restart::publish(manager).await;
+    assert!(next_restart_frame(&mut rx, quick).await.is_none());
+
+    // A turn starts.
+    let mut row = session_row("s-live", "n1", "personal");
+    row.turn_active = 1;
+    n.state.store().insert_session(&row).unwrap();
+    tracon::restart::publish(manager).await;
+    let v = next_restart_frame(&mut rx, quick)
+        .await
+        .expect("a frame once a turn runs");
+    assert_eq!(v["busy"]["turns"], json!(["s-live"]), "{v}");
+    let closing: Vec<&str> = v["closing"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(closing, vec!["s-live"], "{v}");
+
+    // It ends.
+    n.state
+        .store()
+        .update_session(
+            "s-live",
+            SessionPatch {
+                turn_active: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    tracon::restart::publish(manager).await;
+    let v = next_restart_frame(&mut rx, quick)
+        .await
+        .expect("a frame once the turn ends");
+    assert_eq!(v["busy"]["turns"], json!([]), "{v}");
+    assert_eq!(v["closing"][0]["turn_active"], false, "{v}");
+}
+
+#[tokio::test]
+async fn the_watch_publishes_when_a_session_of_this_node_changes() {
+    let _file = state::config_lock().await;
+    let n = node();
+    let manager = n.state.manager.clone();
+    tracon::restart::publish(&manager).await;
+    let mut rx = manager.bus().subscribe();
+    let watch = tokio::spawn(tracon::restart::watch(manager.clone()));
+    // Let it subscribe before anything happens.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut row = session_row("s-watched", "n1", "personal");
+    row.turn_active = 1;
+    n.state.store().insert_session(&row).unwrap();
+    manager
+        .bus()
+        .publish(tracon::stream::Frame::Session(Box::new(row)));
+    manager.bus().publish(tracon::stream::Frame::Event {
+        seq: 1,
+        node_id: "n1".into(),
+        session_id: "s-watched".into(),
+        kind: "user_prompt".into(),
+        ref_id: None,
+        payload: json!({}),
+        at_ms: 0,
+    });
+    let v = next_restart_frame(&mut rx, Duration::from_secs(3))
+        .await
+        .expect("a restart frame within 3 s");
+    assert_eq!(v["busy"]["turns"], json!(["s-watched"]), "{v}");
+    // One look for the burst, not one per frame.
+    assert!(next_restart_frame(&mut rx, Duration::from_millis(1500))
+        .await
+        .is_none());
+    watch.abort();
+}
+
 #[test]
 fn a_second_serve_on_the_same_state_neither_counts_nor_restores() {
     let dir = state::scratch("a_second_serve_on_the_same_state");

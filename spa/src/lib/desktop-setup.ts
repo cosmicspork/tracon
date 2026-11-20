@@ -166,6 +166,11 @@ export function nodeOwnerSummary(s: SetupStatus): string {
 // that needs the node (its admin surface) can offer it then.
 export const canRestartNode = (s: SetupStatus) => s.service_installed
 
+// Settings offers the app's restart only as the recovery path: while the
+// node does not answer, or keeps exiting under its unit. A node that answers
+// is restarted from Settings › System › Restart, which drains work first.
+export const offersRecoveryRestart = (s: SetupStatus) => canRestartNode(s) && (s.owner === 'none' || s.service_failing)
+
 export function blocked(steps: SetupStep[]): boolean {
   return steps.some((s) => s.blocking && !s.done)
 }

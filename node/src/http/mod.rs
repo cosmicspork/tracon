@@ -136,7 +136,6 @@ pub fn router(state: AppState) -> Router {
             "/api/admin/maintenance/boundary-check",
             post(admin::boundary_check),
         )
-        .route("/api/admin/maintenance/restart", post(admin::restart))
         .route("/api/restart", get(admin::restart_status))
         .route(
             "/api/admin/restart",
@@ -1107,6 +1106,9 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         let manager = state.manager.clone();
         tokio::spawn(async move { manager.carry_on_after_restart().await });
     }
+    // The restart status follows the work running here as it starts and
+    // stops, so the banner and the Settings card name it live.
+    tokio::spawn(crate::restart::watch(state.manager.clone()));
     {
         let store = store.clone();
         let manager = state.manager.clone();

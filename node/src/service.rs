@@ -10,10 +10,11 @@
 //! This is primarily a host-side recipe: the CLI and desktop app are the
 //! preferred way to install and diagnose it. The operator API exposes only
 //! separately authenticated, loopback-only scheduling of these same fixed
-//! install, remove, and restart operations; it never accepts a command, path,
-//! or service name from a caller. A harness inside the boundary still cannot
-//! drive them. The one restart the node starts itself is in a container its
-//! deployment restarts on exit (`restart::EXIT_ENV`, set by the Kubernetes
+//! install and remove operations; it never accepts a command, path, or
+//! service name from a caller. A harness inside the boundary still cannot
+//! drive them. Restarting goes through `restart`, which drains work first
+//! and then uses the service's own restart. The one restart the node starts
+//! itself is in a container its deployment restarts on exit (`restart::EXIT_ENV`, set by the Kubernetes
 //! manifests): there it shuts down and exits, and the kubelet is what starts
 //! it again.
 
@@ -44,7 +45,6 @@ pub struct Diagnostics {
     pub unit_path: Option<String>,
     pub unit_installed: bool,
     pub state: ServiceState,
-    pub restart: LifecycleCapability,
     pub install: LifecycleCapability,
     pub uninstall: LifecycleCapability,
 }
@@ -376,7 +376,6 @@ pub fn diagnostics() -> Diagnostics {
         state: supervisor_state(unit_installed, container, &main_pid),
         install: lifecycle_capability(LifecycleAction::Install, &environment, &target),
         uninstall: lifecycle_capability(LifecycleAction::Uninstall, &environment, &target),
-        restart: lifecycle_capability(LifecycleAction::Restart, &environment, &target),
     }
 }
 
