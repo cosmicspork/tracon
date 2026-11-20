@@ -389,6 +389,7 @@ async fn fork_here(
         parent_session: None,
         continued_from: None,
         forked_from: Some(source.id.clone()),
+        request_id: None,
         // The source's harness goes with its model, while this node still
         // runs it; a model of the operator's own choosing picks its harness
         // by its credential.
