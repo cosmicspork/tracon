@@ -320,6 +320,8 @@ export const api = {
     context?: { documents?: string[]; memories?: string[]; note?: string }
     destination_node?: string
     delivery?: 'portable' | 'mesh'
+    /** `move` takes the candidate's session over and closes it once the receiver imports. */
+    intent?: 'handoff' | 'move'
   }) =>
     call<{ delivery: 'portable' | 'mesh_queued'; transfer: CandidateTransfer; note: string }>(
       'POST',

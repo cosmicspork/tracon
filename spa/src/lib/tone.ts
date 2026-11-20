@@ -25,6 +25,7 @@ export function sessionTone(session: Pick<Session, 'state' | 'end_reason'>): Ton
         case 'killed_user':
         case 'detached':
         case 'continued':
+        case 'moved':
         case 'node_restart':
         case 'provider_exhausted':
           return 'dim'

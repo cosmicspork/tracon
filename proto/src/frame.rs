@@ -588,6 +588,17 @@ pub enum Command {
         commit: String,
         key: String,
     },
+    /// From the node that imported a moved session's transfer package, to
+    /// the package's origin: the import is confirmed and `session_id` is the
+    /// session there that carries the work on, so the origin closes the
+    /// session the package moved. The origin checks the transfer is one it
+    /// exported as a move and that the sender may hold it. An older peer
+    /// cannot read this op and answers that it runs an older build; its
+    /// source session is then left for the operator to stop.
+    TransferImported {
+        transfer_id: String,
+        session_id: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

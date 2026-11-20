@@ -1450,6 +1450,73 @@ impl Manager {
         }
     }
 
+    /// Close a session whose work moved to `to_session` on `to_node`, which
+    /// confirmed it had imported transfer `transfer_id`. A live session ends
+    /// now; a suspended, paused or starting one is closed where it is. Its
+    /// reviews are left as they are, and its workspace is kept until gc.
+    /// `false` when it had already ended (a repeated confirmation).
+    pub async fn end_moved(
+        &self,
+        id: &str,
+        to_session: &str,
+        to_node: &str,
+        transfer_id: &str,
+    ) -> Result<bool, SessionError> {
+        let row = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
+        if row.node_id != self.node_id {
+            return Err(SessionError::Remote(row.node_id, row.channel));
+        }
+        if SessionState::from_stored(&row.state).is_terminal() {
+            return Ok(false);
+        }
+        let detail = json!({
+            "to_session": to_session,
+            "to_node": to_node,
+            "transfer_id": transfer_id,
+        });
+        self.record_event(id, ek::MOVED, detail.clone());
+        if self.send(id, Command::End(EndReason::Moved)).await.is_ok() {
+            return Ok(true);
+        }
+        if self.end_suspended(id, EndReason::Moved, detail)? {
+            return Ok(true);
+        }
+        // No supervisor: a paused session, or one still starting, which
+        // observes the terminal row as a stop.
+        let row = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
+        if SessionState::from_stored(&row.state).is_terminal() {
+            return Ok(false);
+        }
+        self.store.update_session(
+            id,
+            SessionPatch {
+                state: Some(SessionState::Closed.as_str().into()),
+                end_reason: Some(EndReason::Moved.as_str().into()),
+                ended_mono_ms: Some(0),
+                turn_active: Some(false),
+                ..Default::default()
+            },
+        )?;
+        if let Some(container) = row.container_name {
+            let runner = self.backend.runner(Vec::new());
+            let _ = tokio::time::timeout(
+                CLEANUP_TIMEOUT,
+                crate::sidecars::stop_all(runner.as_ref(), &self.store, id),
+            )
+            .await;
+            let _ = tokio::time::timeout(CLEANUP_TIMEOUT, runner.kill(&container)).await;
+        }
+        self.record_event(
+            id,
+            ek::STATE,
+            json!({ "state": "closed", "end_reason": EndReason::Moved.as_str() }),
+        );
+        if let Ok(Some(row)) = self.store.get_session(id) {
+            self.bus.publish(Frame::Session(Box::new(row)));
+        }
+        Ok(true)
+    }
+
     /// End a suspended session, which has no supervisor to end it: the row
     /// closes with `reason`, and its `state` event carries `detail` besides.
     /// `false` when it was no longer suspended.

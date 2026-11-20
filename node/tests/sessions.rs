@@ -7168,3 +7168,253 @@ async fn at_start_a_session_left_in_its_sandbox_is_carried_on_and_any_other_remo
     reattach::forget(&container);
     tracon::session::materialize::remove(&id);
 }
+
+/// A session moved here from a peer continues the peer's session across
+/// nodes: it holds the work item the peer's session holds, keeps the project
+/// the package carried, takes the budget it is given, and links back. The
+/// peer's open review stays the peer's: it is not taken over here.
+#[tokio::test]
+async fn a_moved_session_takes_over_a_peers_item_and_project_but_not_its_review() {
+    state::isolate();
+    let h = Harness::new(1000).await;
+    h.store
+        .channel_put(
+            "personal",
+            b"ring",
+            r#"{"phases":{"execute":{"requires_plan":false}}}"#,
+        )
+        .unwrap();
+    let item = tracon::corpus::work::create(
+        &h.store,
+        &Bus::new(),
+        "n1",
+        tracon::corpus::work::NewWork {
+            channel: "personal".into(),
+            project_id: None,
+            title: "move me".into(),
+            body: String::new(),
+            deps: vec![],
+            priority: 0,
+            discovered_from: None,
+            discovered_by_session: None,
+            discovered_by_lane: None,
+        },
+    )
+    .unwrap();
+    // The peer's session, as it mirrors here: running, holding the item.
+    let template = insert_session_for_item(&h.store, 777, None);
+    let mut peer = h.store.get_session(&template).unwrap().unwrap();
+    peer.id = uuid::Uuid::now_v7().to_string();
+    peer.node_id = "n2".into();
+    peer.work_item_id = Some(item.id.clone());
+    h.store.ensure_peer_node("n2").unwrap();
+    h.store.insert_session(&peer).unwrap();
+    let source = peer.id;
+    let mut review = published_review("rv-open", &source);
+    review.state = "new".into();
+    review.node_id = "n2".into();
+    h.store.insert_review(&review).unwrap();
+    h.store
+        .project_put(&tracon::store::ProjectRow {
+            id: "p-moved".into(),
+            channel: "personal".into(),
+            name: "repo".into(),
+            remote_url: Some("github.com/owner/repo".into()),
+            created_ms: now_ms(),
+        })
+        .unwrap();
+
+    let row = h
+        .manager
+        .create(tracon::session::NewSession {
+            channel: "personal".into(),
+            repo_path: String::new(),
+            branch: Some("feat/moved".into()),
+            base: None,
+            work_item_id: Some(item.id.clone()),
+            model: "m/a".into(),
+            budget_tokens: Some(777),
+            initial_prompt: Some("moved here".into()),
+            node_id: None,
+            phase: tracon::session::Phase::Execute,
+            review_id: None,
+            base_sha: None,
+            workspace_id: Some(format!("transfer-{}", uuid::Uuid::now_v7())),
+            parent_session: Some(source.clone()),
+            continued_from: Some(source.clone()),
+            harness: None,
+            on_exhaustion: None,
+            told_reviews: Vec::new(),
+            project_id: Some("p-moved".into()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(row.work_item_id.as_deref(), Some(item.id.as_str()));
+    assert_eq!(row.project_id.as_deref(), Some("p-moved"));
+    assert_eq!(row.budget_tokens, 777);
+    assert_eq!(row.continued_from.as_deref(), Some(source.as_str()));
+    assert_eq!(row.parent_session.as_deref(), Some(source.as_str()));
+    assert_eq!(
+        h.store.session_remote(&row.id).unwrap().as_deref(),
+        Some("github.com/owner/repo")
+    );
+    let review = h.store.get_review("rv-open").unwrap().unwrap();
+    assert_eq!(review.session_id.as_deref(), Some(source.as_str()));
+}
+
+/// A moved session closes once the receiver confirms its import, naming
+/// where its work went; one with no supervisor (paused here) or suspended
+/// closes where it is, and a repeated confirmation changes nothing.
+#[tokio::test]
+async fn a_moved_session_closes_naming_where_its_work_went() {
+    state::isolate();
+    let h = Harness::new(1000).await;
+    for state in ["paused", "suspended"] {
+        let id = insert_running_session(&h.store, 1000);
+        h.store
+            .update_session(&id, tracon::store::SessionPatch::state(state))
+            .unwrap();
+        assert!(h
+            .manager
+            .end_moved(&id, "s-there", "n2", "t-1")
+            .await
+            .unwrap());
+        let row = h.store.get_session(&id).unwrap().unwrap();
+        assert_eq!(row.state, "closed", "{state}");
+        assert_eq!(row.end_reason.as_deref(), Some("moved"), "{state}");
+        let moved = h
+            .store
+            .session_events_of_kind(&id, "moved")
+            .unwrap()
+            .pop()
+            .expect("a moved event");
+        assert_eq!(moved.payload["to_session"], "s-there");
+        assert_eq!(moved.payload["to_node"], "n2");
+        assert!(!h
+            .manager
+            .end_moved(&id, "s-there", "n2", "t-1")
+            .await
+            .unwrap());
+    }
+}
+
+/// A version 2 package's import recreates the real branch: the receiving
+/// workspace is on the source's branch at the source's commits, and the new
+/// session is given the export note as its first prompt. (No forge here, so
+/// the bundle carries the whole history.)
+#[tokio::test]
+async fn importing_a_package_with_history_recreates_the_branch_and_delivers_the_note() {
+    state::isolate();
+    let h = Harness::new(1000).await;
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git(&source, &["init", "-q", "-b", "work"]);
+    git(&source, &["config", "user.email", "ada@example.com"]);
+    git(&source, &["config", "user.name", "Ada"]);
+    std::fs::write(source.join("hello.txt"), "hi\n").unwrap();
+    git(&source, &["add", "-A"]);
+    git(&source, &["commit", "-qm", "first"]);
+    std::fs::write(source.join("hello.txt"), "hello\n").unwrap();
+    git(&source, &["commit", "-qam", "second"]);
+    let head = git(&source, &["rev-parse", "HEAD"]);
+    let tree = git(&source, &["rev-parse", "HEAD^{tree}"]);
+
+    let identity = proto::keys::Identity::from_seed(&[7u8; 32]);
+    h.store.channel_put("personal", b"ring", "{}").unwrap();
+    h.store
+        .node_channel_add(&identity.node_id(), "personal")
+        .unwrap();
+    let candidate_id = format!("{head}:personal");
+    h.store
+        .insert_candidate(&tracon::store::CandidateRow {
+            id: candidate_id.clone(),
+            head_sha: head.clone(),
+            tree_sha: Some(tree),
+            channel: "personal".into(),
+            owner_session_id: None,
+            source_kind: "git".into(),
+            captured_ms: 1,
+            capture_json: r#"{"materialized":true}"#.into(),
+        })
+        .unwrap();
+    h.store
+        .insert_candidate_files(
+            &candidate_id,
+            &[tracon::store::CandidateFile {
+                path: "hello.txt".into(),
+                mode: 0o100644,
+                content: b"hello\n".to_vec(),
+            }],
+        )
+        .unwrap();
+    let carried = tracon::transfers::capture_git("git", &source, &head, "work", None)
+        .await
+        .unwrap();
+    let transfer = tracon::transfers::export_with(
+        &h.store,
+        &identity,
+        &candidate_id,
+        tracon::transfers::ContextSelection {
+            note: "carry on from the second commit".into(),
+            ..Default::default()
+        },
+        None,
+        tracon::transfers::Extras {
+            git: Some(carried),
+            source: None,
+        },
+    )
+    .unwrap();
+    let (status, staged) = h
+        .call(
+            "POST",
+            "/api/transfers/stage",
+            Some(json!({ "transfer": transfer })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{staged}");
+
+    let (status, imported) = h
+        .call(
+            "POST",
+            &format!("/api/transfers/{}/import", transfer.id()),
+            Some(json!({ "confirm": true, "model": "m/a" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{imported}");
+    assert_eq!(imported["history"], json!(true));
+    assert_eq!(imported["branch"], json!("work"));
+    assert_eq!(imported["session"]["branch"], json!("work"));
+    let session_id = imported["session"]["id"].as_str().unwrap();
+    let draft = h
+        .store
+        .get_session(session_id)
+        .unwrap()
+        .unwrap()
+        .draft
+        .unwrap_or_default();
+    assert!(draft.contains("carry on from the second commit"), "{draft}");
+    assert!(draft.contains("with its commits"), "{draft}");
+
+    let workspace = imported["workspace_id"].as_str().unwrap();
+    let volume = Config::state_dir()
+        .join("local-runtime")
+        .join(tracon::workspace::volume_name(workspace));
+    assert_eq!(git(&volume, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git(&volume, &["branch", "--show-current"]), "work");
+    assert_eq!(
+        git(&volume, &["log", "--format=%an %s"]),
+        "Ada second\nAda first"
+    );
+    assert_eq!(git(&volume, &["status", "--porcelain"]), "");
+}

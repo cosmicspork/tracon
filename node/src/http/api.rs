@@ -1127,6 +1127,50 @@ pub async fn import_transfer(
         .complete_transfer_import(&id, &workspace.id, &session.id)?;
     s.store()
         .append_transfer_event(&id, "imported", Some(&workspace.id), Some(&session.id))?;
+    // A move closes its source once the import is confirmed: the origin is
+    // told, through the outbox, so an origin that is offline closes it when
+    // it is back. Without the mesh nothing can tell it, and the operator
+    // stops the source there.
+    let source_close = match moving {
+        None => None,
+        Some(source) if transfer.payload.origin_node == s.node_id => {
+            match s
+                .manager
+                .end_moved(&source.session_id, &session.id, &s.node_id, &id)
+                .await
+            {
+                Ok(_) => Some("closed"),
+                Err(error) => {
+                    tracing::warn!(transfer = %id, %error, "moved source not closed");
+                    Some("not_closed")
+                }
+            }
+        }
+        Some(_) => match s.mesh.as_ref() {
+            Some(mesh) => match mesh.send_command(
+                &transfer.payload.origin_node,
+                proto::frame::Command::TransferImported {
+                    transfer_id: id.clone(),
+                    session_id: session.id.clone(),
+                },
+            ) {
+                Ok(_) => {
+                    s.store().append_transfer_event(
+                        &id,
+                        "source_close_queued",
+                        Some(&transfer.payload.origin_node),
+                        Some(&session.id),
+                    )?;
+                    Some("queued")
+                }
+                Err(error) => {
+                    tracing::warn!(transfer = %id, %error, "origin not told of the import");
+                    Some("not_sent")
+                }
+            },
+            None => Some("not_sent"),
+        },
+    };
     Ok((
         StatusCode::CREATED,
         Json(json!({
@@ -1139,7 +1183,8 @@ pub async fn import_transfer(
             "continued_from": continued_from,
             "work_item_id": work_item_id,
             "project_id": session.project_id,
-            "source_session_changed": false,
+            "source_close": source_close,
+            "source_session_changed": source_close == Some("closed"),
         })),
     ))
 }
@@ -7553,6 +7598,75 @@ fn shares(s: &AppState, sender: &str, channel: &str) -> bool {
         .is_ok_and(|members| members.iter().any(|m| m == sender) && members.contains(&s.node_id))
 }
 
+/// A peer confirmed it imported a package this node exported as a move:
+/// close the session the package moved, naming the session that carries the
+/// work on. Only the package's destination may confirm it (any member of its
+/// channel, for a portable package with none), and only a move closes
+/// anything. A repeated confirmation changes nothing.
+async fn close_moved_source(
+    s: &AppState,
+    sender: &str,
+    transfer_id: &str,
+    session_id: &str,
+) -> ApiResult<serde_json::Value> {
+    let row = s
+        .store()
+        .transfer(transfer_id)?
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "no such transfer"))?;
+    let transfer: SignedTransfer = serde_json::from_str(&row.package_json).map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "stored transfer is corrupt",
+        )
+    })?;
+    if transfer.payload.origin_node != s.node_id {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "this transfer was not exported by this node",
+        ));
+    }
+    let allowed = match transfer.payload.target_node.as_deref() {
+        Some(target) => target == sender,
+        None => shares(s, sender, &transfer.payload.channel),
+    };
+    if !allowed {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "only the node this transfer was sent to can confirm its import",
+        ));
+    }
+    let source = transfer
+        .payload
+        .source
+        .as_ref()
+        .filter(|source| source.intent == transfers::TransferIntent::Move)
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::CONFLICT,
+                "this transfer is not a move; its source is left as it is",
+            )
+        })?;
+    if session_id.is_empty() || session_id.len() > 64 {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "the importing session id is malformed",
+        ));
+    }
+    let closed = s
+        .manager
+        .end_moved(&source.session_id, session_id, sender, transfer_id)
+        .await?;
+    if closed {
+        s.store().append_transfer_event(
+            transfer_id,
+            "source_closed",
+            Some(session_id),
+            Some(&source.session_id),
+        )?;
+    }
+    Ok(json!({ "source_session": source.session_id, "closed": closed }))
+}
+
 /// Commands other nodes forward to this one run exactly as local requests do.
 #[async_trait::async_trait]
 impl crate::mesh::forward::CommandExecutor for AppState {
@@ -7583,6 +7697,10 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                 crate::http::evidence::forwarded_candidates(self, sender, query)
             }
             C::ReviewDetail { request } => forwarded_review_detail(self, sender, request).await,
+            C::TransferImported {
+                transfer_id,
+                session_id,
+            } => close_moved_source(self, sender, &transfer_id, &session_id).await,
             // Prepared here under this node's own recipe and policy; the
             // answer is where the template stands, the rest in the hello.
             C::DoTemplatePrepare {

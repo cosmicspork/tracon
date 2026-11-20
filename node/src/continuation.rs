@@ -350,6 +350,7 @@ pub fn next_action(s: &Situation<'_>) -> NextAction {
             EndReason::PhaseDone,
             EndReason::ItemClose,
             EndReason::Continued,
+            EndReason::Moved,
         ]
         .iter()
         .any(|ok| r == ok.as_str())
@@ -374,6 +375,13 @@ pub fn next_action(s: &Situation<'_>) -> NextAction {
         return at(
             "continue",
             format!("{who} ended without a written plan; continue planning from its workspace."),
+            Some(latest),
+        );
+    }
+    if is(EndReason::Moved) {
+        return at(
+            "watch",
+            format!("{who} moved to another node, which carries the work on."),
             Some(latest),
         );
     }

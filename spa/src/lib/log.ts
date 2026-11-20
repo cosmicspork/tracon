@@ -689,6 +689,13 @@ export function eventLine(e: Event): EventLine | null {
       if (reconciled) return line('ok', ['review recorded as published', `at ${reconciled}`, 'by the operator'])
       return line(tone, [text, 'by the operator', waited !== null ? `after ${formatDuration(waited)} waiting` : ''])
     }
+    case 'moved': {
+      // The work moved to a session on another node, which confirmed its
+      // import; this session ends right after.
+      const to = str(p.to_session)
+      const name = to ? generatedName('session', to) : ''
+      return line('mark', ['moved to another node', to ? `continues as ${name}` : ''], to ? `/sessions/${to}` : undefined, name || undefined, to || undefined)
+    }
     case 'review_taken_over': {
       // The continuation took over a review the attempt before it left open
       // or sent back for changes; the link is that attempt.
