@@ -275,17 +275,10 @@ pub async fn update(
         // What was fetched was checked and staged under its own name; it is
         // not this plugin's update. Leave nothing of it behind.
         let other = staged.build.manifest.name.clone();
-        let held = s.store().plugin_get(&other)?;
-        let keep: Vec<&Build> = held
-            .iter()
-            .flat_map(|r| {
-                r.active
-                    .iter()
-                    .chain(r.previous.iter())
-                    .chain(r.pending.iter().map(|p| &p.build))
-            })
-            .collect();
-        install::prune(&Config::state_dir(), &other, &keep).map_err(InstallError::from)?;
+        let store = s.store().clone();
+        tokio::task::spawn_blocking(move || plugins::discard(&store, &Config::state_dir(), staged))
+            .await
+            .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             format!(
