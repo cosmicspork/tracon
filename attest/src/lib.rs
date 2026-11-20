@@ -3,7 +3,8 @@
 //! to a digest-pinned `gh`, which the caller supplies, so this crate holds no
 //! crypto of its own. What it does hold is the part around `gh`: fetching a
 //! bundle under a size cap, the exact arguments that say what a signature must
-//! prove, and the attestation lookup by digest a plugin install needs.
+//! prove, and the attestation lookup by digest a plugin install needs, which
+//! follows an attestation's `bundle_url` when GitHub leaves the bundle out.
 
 use std::{
     ffi::OsString,
@@ -23,6 +24,10 @@ pub const GITHUB_API: &str = "https://api.github.com";
 /// A bundle is signed data but is still bounded before `gh` parses it. The
 /// same cap bounds an attestation lookup's response, which carries bundles.
 pub const BUNDLE_MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// Where GitHub keeps the bundles an attestation lookup can name by URL
+/// instead of carrying them inline. A `bundle_url` elsewhere is not
+/// followed, unless it is on the API's own origin.
+pub const BUNDLE_HOSTS: &[&str] = &["tmaproduction.blob.core.windows.net"];
 const API_ACCEPT: &str = "application/vnd.github+json";
 const API_VERSION: &str = "2022-11-28";
 /// The verifier's stderr is carried as detail, so a runaway one is cut short.
@@ -231,14 +236,85 @@ impl Verifier {
         }
         let mut lines = String::new();
         for attestation in attestations {
-            let bundle = attestation
-                .get("bundle")
-                .filter(|bundle| bundle.is_object())
-                .ok_or("an attestation came without an inline bundle")?;
+            let bundle = match attestation.get("bundle").filter(|b| b.is_object()) {
+                Some(bundle) => bundle.clone(),
+                None => {
+                    let url = attestation
+                        .get("bundle_url")
+                        .and_then(|url| url.as_str())
+                        .ok_or("an attestation came with neither a bundle nor a bundle_url")?;
+                    let budget = BUNDLE_MAX_BYTES.saturating_sub(lines.len() as u64);
+                    self.fetch_bundle(client, api_base, url, budget).await?
+                }
+            };
             lines.push_str(&bundle.to_string());
             lines.push('\n');
+            if lines.len() as u64 > BUNDLE_MAX_BYTES {
+                return Err("the attestation bundles are larger than allowed".into());
+            }
         }
         Ok(Some(lines))
+    }
+
+    /// The bundle an attestation names by `url` instead of carrying it:
+    /// fetched only from GitHub's bundle store ([`BUNDLE_HOSTS`]) or the
+    /// API's own origin, within `max_bytes` both as fetched and once
+    /// decompressed, and decompressed from snappy when it is served so.
+    async fn fetch_bundle(
+        &self,
+        client: &reqwest::Client,
+        api_base: &str,
+        url: &str,
+        max_bytes: u64,
+    ) -> Result<serde_json::Value, String> {
+        let parsed = reqwest::Url::parse(url)
+            .map_err(|error| format!("a bundle_url is not a URL: {error}"))?;
+        let api = reqwest::Url::parse(api_base).ok();
+        let on_api_origin = api.is_some_and(|api| api.origin() == parsed.origin());
+        let on_bundle_host = parsed.scheme() == "https"
+            && parsed
+                .host_str()
+                .is_some_and(|host| BUNDLE_HOSTS.contains(&host));
+        if !on_api_origin && !on_bundle_host {
+            return Err(format!(
+                "a bundle_url names {}, which is not where GitHub keeps bundles",
+                parsed.host_str().unwrap_or("no host")
+            ));
+        }
+        let response = client
+            .get(parsed.clone())
+            .timeout(self.timeout)
+            .send()
+            .await
+            .map_err(|error| format!("bundle fetch failed: {error}"))?;
+        if !response.status().is_success() {
+            return Err(format!("bundle fetch answered {}", response.status()));
+        }
+        let snappy = parsed.path().ends_with(".sn")
+            || response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("application/x-snappy"));
+        let body = read_capped(response, max_bytes).await?;
+        let body = if snappy {
+            let length = snap::raw::decompress_len(&body)
+                .map_err(|error| format!("a bundle is not snappy-compressed: {error}"))?;
+            if length as u64 > max_bytes {
+                return Err("the bundle is larger than allowed".into());
+            }
+            snap::raw::Decoder::new()
+                .decompress_vec(&body)
+                .map_err(|error| format!("a bundle did not decompress: {error}"))?
+        } else {
+            body
+        };
+        let bundle: serde_json::Value = serde_json::from_slice(&body)
+            .map_err(|error| format!("a bundle is not JSON: {error}"))?;
+        if !bundle.is_object() {
+            return Err("a bundle is not a JSON object".into());
+        }
+        Ok(bundle)
     }
 }
 

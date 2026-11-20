@@ -20,6 +20,9 @@ hex.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["stream"] }
 serde_json.workspace = true
 sha2.workspace = true
+# GitHub serves an attestation's bundle at its `bundle_url` snappy-compressed
+# (raw block format), as `gh` reads it. Pure Rust.
+snap = "1"
 thiserror.workspace = true
 tokio.workspace = true
 
