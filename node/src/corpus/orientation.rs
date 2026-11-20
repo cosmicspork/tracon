@@ -467,10 +467,25 @@ fn push_waiting(out: &mut String, facts: &Facts) {
             true => " So do a review's required checks, running or queued for room on the node.",
             false => "",
         };
+        // What of a review or report is not brought back, said only where
+        // there is one to wait on.
+        let quiet = match facts
+            .tools
+            .iter()
+            .any(|t| t == crate::mcp::review::STATUS || t == crate::mcp::review::REPORT_STATUS)
+        {
+            true => {
+                " Not brought back, only noted at the start of your next prompt: an approval \
+                 the node publishes, an AI reviewer's approval with no findings, and a report \
+                 acknowledged without a note. With more to do once a review is approved, keep \
+                 working or keep calling `review_status` instead."
+            }
+            false => "",
+        };
         out.push_str(&format!(
             " A wait on the operator ({}) need not be polled: end your turn, the session stays \
-             open, and the outcome comes back as your next prompt.{checks} Ending your turn \
-             waits on nothing else.",
+             open, and the outcome comes back as your next prompt.{checks}{quiet} Ending your \
+             turn waits on nothing else.",
             held.join(", ")
         ));
     }
@@ -1597,6 +1612,15 @@ mod tests {
         );
         assert!(line.contains("end your turn"), "{line}");
         assert_eq!(text.matches("end your turn").count(), 1, "{text}");
+        // An approval the node publishes is not brought back, and is said so.
+        assert!(
+            line.contains("an approval the node publishes") && line.contains("keep working"),
+            "{line}"
+        );
+        assert!(
+            !told(&names(&["question_status"])).contains("approval the node publishes"),
+            "no review to be approved without review_status"
+        );
         // Checks queued for room come back the way the operator's waits do,
         // said once, beside them.
         assert!(

@@ -455,10 +455,18 @@ pub(crate) fn carried_note(carried: &[ReviewRow]) -> String {
             note.push_str(&format!(
                 "\n\nThe earlier session's {what} `{}` ({}) is still waiting on the \
                  operator. It is yours now, and their decision comes back to you as a \
-                 prompt. If you change the work, call `{submit}` with that same {key} \
-                 rather than opening a new {what}.{}",
+                 prompt, unless it leaves you nothing to do: {}. If you change the work, \
+                 call `{submit}` with that same {key} rather than opening a new {what}.{}",
                 r.id,
                 r.title,
+                if r.kind == crate::store::reports::KIND {
+                    "an acknowledgement without a note is only noted at the start of your \
+                     next prompt"
+                } else {
+                    "an approval the node publishes, or an AI reviewer's approval with no \
+                     findings, is only noted at the start of your next prompt, so with more to \
+                     do after approval keep working or keep calling review_status"
+                },
                 if r.kind == crate::store::reports::KIND {
                     ""
                 } else {
@@ -1609,6 +1617,27 @@ impl Manager {
         let old = &old;
         let waited = self.held_on(&old.id)?;
         if !self.waits().open(&old.id).is_empty() {
+            return None;
+        }
+        // Decisions that leave nothing to act on (`waits::needs_turn`) carry
+        // nothing on: an approval the node published leaves it an idle
+        // published session, which the operator continues from the
+        // continuation view like any other. Its state is recorded again
+        // without what it waited on, so it is not held any more.
+        let decided: Vec<_> = waited.iter().filter(|w| !w.is_open()).collect();
+        if !decided.is_empty() && !decided.iter().any(|w| waits::needs_turn(w)) {
+            self.record(NewEvent {
+                session_id: old.id.clone(),
+                work_item_id: None,
+                kind: ek::STATE.to_string(),
+                ref_id: None,
+                payload: json!({
+                    "state": SessionState::Suspended.as_str(),
+                    "end_reason": null,
+                }),
+                at_ms: now_ms(),
+                mono_ms: 0,
+            });
             return None;
         }
         let carried = self.store.carried_reviews(&old.id).ok()?;

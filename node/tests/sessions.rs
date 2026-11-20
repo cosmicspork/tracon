@@ -3999,6 +3999,98 @@ impl Held {
             json!({"slug": slug, "body": "# Plan\n\n1. Do it."}),
         )
     }
+
+    /// A review (or, with `kind` "report", a report) this session submitted,
+    /// waiting on the operator, with one revision for a reviewer's verdict
+    /// to be on.
+    fn submit(&self, kind: &str) -> String {
+        let id = uuid::Uuid::now_v7().to_string();
+        let mut row = published_review(&id, &self.o.row.id);
+        row.kind = kind.into();
+        row.state = "new".into();
+        row.publish_result = None;
+        // Earlier than anything recorded on it, so each change reads as one.
+        row.updated_ms = now_ms() - 1000;
+        self.o.store.insert_review(&row).unwrap();
+        self.o
+            .store
+            .conn()
+            .execute_batch(&format!(
+                "PRAGMA foreign_keys=OFF;
+                 INSERT INTO review_revision (id, review_id, candidate_id, title, body, diff,
+                     files, head_sha, context_json, created_ms)
+                 VALUES ('rev-{id}', '{id}', 'cand-{id}', 't', '', '+x', '[]', 'abc', '[]', {});
+                 PRAGMA foreign_keys=ON;",
+                now_ms() - 1000
+            ))
+            .unwrap();
+        id
+    }
+
+    /// The operator approved `review` and the node published it, as the
+    /// approve path records it once the forge took it (which needs a forge).
+    async fn approve_published(&self, review: &str) -> String {
+        let url = format!("https://github.test/me/repo/pull/{review}");
+        self.o
+            .store
+            .conn()
+            .execute(
+                &format!(
+                    "UPDATE review SET state='approved', publish_result='{url}', updated_ms={} \
+                     WHERE id='{review}'",
+                    now_ms()
+                ),
+                [],
+            )
+            .unwrap();
+        self.o.manager.wait_moved(&self.o.row.id).await;
+        url
+    }
+
+    /// A reviewer's verdict on `review`'s revision, as `review_verdict`
+    /// records it, and the submitter told the wait moved.
+    async fn verdict(&self, review: &str, verdict: &str, findings: Value, at_ms: i64) {
+        let revision = format!("rev-{review}");
+        let v = json!({
+            "verdict": verdict, "summary": format!("the reviewer says {verdict}"),
+            "findings": findings, "model": "m/reviewer", "at_ms": at_ms,
+            "revision_id": revision,
+        });
+        assert_eq!(
+            self.o
+                .store
+                .set_ai_verdict(review, &v.to_string(), Some(&revision))
+                .unwrap(),
+            tracon::store::VerdictRecorded::Recorded
+        );
+        self.o.manager.wait_moved(&self.o.row.id).await;
+    }
+
+    fn count(&self, kind: &str) -> usize {
+        self.o
+            .store
+            .events_after(&self.o.row.id, 0, 1000)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == kind)
+            .count()
+    }
+
+    /// The prompts that contain `containing`, once there are `n`.
+    async fn prompted(&self, containing: &str, n: usize) -> Vec<String> {
+        for _ in 0..1200 {
+            let found: Vec<_> = self
+                .prompts()
+                .into_iter()
+                .filter(|p| p.contains(containing))
+                .collect();
+            if found.len() >= n {
+                return found;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("no {n} prompts with {containing:?}: {:?}", self.prompts());
+    }
 }
 
 /// The live case on 0.31.1: a plan session asks the operator, polls, writes
@@ -4245,6 +4337,308 @@ async fn a_session_held_on_its_review_is_given_the_verdict() {
     assert!(prompt.contains("not this way"), "{prompt}");
     let s = h.until(|s| s.state == "closed", "closed").await;
     assert_eq!(s.end_reason.as_deref(), Some("phase_done"));
+    tracon::session::materialize::remove(&h.o.row.id);
+}
+
+// ---- news with nothing to act on starts no turn ---------------------------
+
+/// The live case on 0.54.0: the operator approved a review and the node
+/// published it, and the session was woken for a turn that had nothing to do
+/// but say so, a full cache write. Now it is recorded as told and the
+/// session carries on as that turn would have left it: running, to be put
+/// away once idle.
+#[tokio::test]
+async fn an_approval_the_node_published_starts_no_turn() {
+    state::isolate();
+    let h = Held::in_phase("quiet-approved", Phase::Execute).await;
+    let review = h.submit("pr");
+    h.until(|s| s.state == "waiting_on_you", "held on its review")
+        .await;
+    let turns = h.count("turn_end");
+
+    h.approve_published(&review).await;
+    h.until(|s| s.state == "running", "running again").await;
+    // Past the supervisor's own tick, which would bring it back too.
+    tokio::time::sleep(Duration::from_millis(5500)).await;
+    assert!(
+        !h.prompts().iter().any(|p| p.contains(&review)),
+        "{:?}",
+        h.prompts()
+    );
+    assert_eq!(h.count("turn_end"), turns, "no turn ran");
+    assert_eq!(h.session().state, "running");
+    let row = h.o.store.get_review(&review).unwrap().unwrap();
+    assert!(h
+        .o
+        .manager
+        .waits()
+        .was_told(&h.o.row.id, &tracon::session::waits::review_key(&row)));
+    tracon::session::materialize::remove(&h.o.row.id);
+}
+
+/// A finished phase waiting only on that approval ends without a prompt.
+#[tokio::test]
+async fn a_finished_phase_waiting_on_an_approval_the_node_published_ends_without_a_turn() {
+    state::isolate();
+    let h = Held::new("quiet-phase-done").await;
+    let review = h.submit("pr");
+    h.until(|s| s.state == "waiting_on_you", "held on its review")
+        .await;
+    h.write_plan().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(h.session().state, "waiting_on_you", "the phase waits too");
+    let turns = h.count("turn_end");
+
+    h.approve_published(&review).await;
+    let s = h.until(|s| s.state == "closed", "closed").await;
+    assert_eq!(s.end_reason.as_deref(), Some("phase_done"));
+    assert!(
+        !h.prompts().iter().any(|p| p.contains(&review)),
+        "{:?}",
+        h.prompts()
+    );
+    assert_eq!(h.count("turn_end"), turns, "no turn ran");
+    tracon::session::materialize::remove(&h.o.row.id);
+}
+
+/// With something else still open, the session stays held on it; the
+/// approval is said in a line at the start of the prompt that brings the
+/// other back, once.
+#[tokio::test]
+async fn an_approval_the_node_published_is_noted_with_the_next_decision() {
+    state::isolate();
+    let h = Held::in_phase("quiet-noted", Phase::Execute).await;
+    let review = h.submit("pr");
+    let asked = h
+        .tool(
+            "ask_operator",
+            json!({ "request_id": "after-approval", "question": "Tag a release?",
+                    "wait_secs": 0 }),
+        )
+        .await;
+    let question = asked["question_id"].as_str().unwrap().to_string();
+    h.until(|s| s.state == "waiting_on_you", "held").await;
+
+    let url = h.approve_published(&review).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !h.prompts().iter().any(|p| p.contains(&review)),
+        "{:?}",
+        h.prompts()
+    );
+    assert_eq!(h.session().state, "waiting_on_you");
+
+    let (status, body) = support::http::call(
+        &h.operator,
+        "POST",
+        &format!("/api/operator/questions/{question}/answer"),
+        Some(json!({ "answer": "yes, v2" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let prompt = h.delivered(&question).await;
+    assert!(prompt.contains("\"text\": \"yes, v2\""), "{prompt}");
+    assert!(
+        prompt.starts_with(&format!(
+            "Since your last turn: review `{review}` was approved and published at {url}"
+        )),
+        "{prompt}"
+    );
+    h.until(|s| s.state == "running" && s.turn_active == 0, "idle")
+        .await;
+    let noted: usize = h
+        .prompts()
+        .iter()
+        .map(|p| p.matches("approved and published").count())
+        .sum();
+    assert_eq!(noted, 1, "{:?}", h.prompts());
+    tracon::session::materialize::remove(&h.o.row.id);
+}
+
+/// An AI reviewer's approval with no findings leaves the submitter held,
+/// unwoken, with nothing recorded; its summary is still review_status's to
+/// carry.
+#[tokio::test]
+async fn an_ai_approval_with_no_findings_starts_no_turn() {
+    state::isolate();
+    let h = Held::in_phase("quiet-ai-approve", Phase::Execute).await;
+    let review = h.submit("pr");
+    h.until(|s| s.state == "waiting_on_you", "held on its review")
+        .await;
+    let states = h.count("state");
+
+    h.verdict(&review, "approve", json!([]), now_ms()).await;
+    tokio::time::sleep(Duration::from_millis(5500)).await;
+    assert!(
+        !h.prompts()
+            .iter()
+            .any(|p| p.contains("has given its verdict")),
+        "{:?}",
+        h.prompts()
+    );
+    assert_eq!(h.count("state"), states, "no state moved");
+    assert_eq!(h.session().state, "waiting_on_you");
+    let s = h
+        .tool(
+            "review_status",
+            json!({ "review_id": review, "wait_secs": 0 }),
+        )
+        .await;
+    assert_eq!(s["reviewer"]["verdict"], "approve", "{s}");
+    assert_eq!(s["reviewer"]["summary"], "the reviewer says approve", "{s}");
+    tracon::session::materialize::remove(&h.o.row.id);
+}
+
+/// What still gives the agent something to do still wakes it, once each:
+/// an AI approval with a finding, an AI request for changes, and the
+/// operator's own request for changes.
+#[tokio::test]
+async fn verdicts_with_something_to_act_on_still_wake_the_session() {
+    state::isolate();
+    let h = Held::in_phase("loud-verdicts", Phase::Execute).await;
+    let review = h.submit("pr");
+    h.until(|s| s.state == "waiting_on_you", "held on its review")
+        .await;
+
+    h.verdict(
+        &review,
+        "approve",
+        json!([{ "path": "a.txt", "line": 1, "note": "name it better" }]),
+        now_ms(),
+    )
+    .await;
+    let found = h.prompted("has given its verdict", 1).await;
+    assert!(found[0].contains("name it better"), "{found:?}");
+    h.until(
+        |s| s.state == "waiting_on_you" && s.turn_active == 0,
+        "held again",
+    )
+    .await;
+
+    h.verdict(&review, "request_changes", json!([]), now_ms() + 1)
+        .await;
+    let found = h.prompted("has given its verdict", 2).await;
+    assert!(found[1].contains("request_changes"), "{found:?}");
+    h.until(
+        |s| s.state == "waiting_on_you" && s.turn_active == 0,
+        "held again",
+    )
+    .await;
+
+    let (status, body) = support::http::call(
+        &h.operator,
+        "POST",
+        &format!("/api/reviews/{review}/verdict"),
+        Some(json!({ "verdict": "revise", "reason": "split the ledger out" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let prompt = h.delivered(&review).await;
+    assert!(prompt.contains("split the ledger out"), "{prompt}");
+    assert_eq!(h.prompted("has given its verdict", 2).await.len(), 2);
+    tracon::session::materialize::remove(&h.o.row.id);
+}
+
+/// A report acknowledged without a note records receipt only, and starts no
+/// turn; one acknowledged with a note brings the note back.
+#[tokio::test]
+async fn a_report_acknowledged_without_a_note_starts_no_turn() {
+    state::isolate();
+    let h = Held::in_phase("quiet-report", Phase::Execute).await;
+    let acknowledge = |id: String, note: Option<&'static str>| {
+        let operator = h.operator.clone();
+        async move {
+            let mut body = json!({ "verdict": "acknowledge", "head_sha": "abc1234567890" });
+            if let Some(note) = note {
+                body["reason"] = json!(note);
+            }
+            let (status, body) = support::http::call(
+                &operator,
+                "POST",
+                &format!("/api/reviews/{id}/verdict"),
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+    };
+    let report = h.submit("report");
+    h.until(|s| s.state == "waiting_on_you", "held on its report")
+        .await;
+    let turns = h.count("turn_end");
+    acknowledge(report.clone(), None).await;
+    h.until(|s| s.state == "running", "running again").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !h.prompts().iter().any(|p| p.contains(&report)),
+        "{:?}",
+        h.prompts()
+    );
+    assert_eq!(h.count("turn_end"), turns, "no turn ran");
+    let row = h.o.store.get_review(&report).unwrap().unwrap();
+    assert!(h
+        .o
+        .manager
+        .waits()
+        .was_told(&h.o.row.id, &tracon::session::waits::review_key(&row)));
+
+    let noted = h.submit("report");
+    h.until(|s| s.state == "waiting_on_you", "held on the next report")
+        .await;
+    acknowledge(noted.clone(), Some("Filed upstream as #12.")).await;
+    let prompt = h.delivered(&noted).await;
+    assert!(prompt.contains("Filed upstream as #12."), "{prompt}");
+    assert!(
+        prompt.starts_with(&format!(
+            "Since your last turn: the operator acknowledged report `{report}` without a note."
+        )),
+        "{prompt}"
+    );
+    tracon::session::materialize::remove(&h.o.row.id);
+}
+
+/// A session the node stopped under while it waited on its review, whose
+/// review is then approved and published, is not carried on as a new
+/// session: there is nothing to carry. It stays suspended as an idle
+/// published session, no longer held, for the operator to continue.
+#[tokio::test]
+async fn a_held_session_whose_review_was_published_is_not_carried_on() {
+    state::isolate();
+    let h = Held::in_phase("quiet-held", Phase::Execute).await;
+    let review = h.submit("pr");
+    h.until(|s| s.state == "waiting_on_you", "held on its review")
+        .await;
+    h.o.manager.shutdown_all().await;
+    h.until(|s| s.state == "suspended", "put away").await;
+
+    h.approve_published(&review).await;
+    let unheld = || {
+        h.o.store
+            .last_event_payload(&h.o.row.id, "state")
+            .unwrap()
+            .unwrap()
+    };
+    for _ in 0..1200 {
+        if unheld()["waiting_on"].is_null() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let state = unheld();
+    assert_eq!(state["state"], "suspended", "{state}");
+    assert!(state["waiting_on"].is_null(), "{state}");
+    h.o.manager.continue_held().await;
+    h.o.manager.continue_held().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(h.session().state, "suspended");
+    assert!(
+        !h.o.store
+            .list_sessions(None)
+            .unwrap()
+            .iter()
+            .any(|s| s.continued_from.as_deref() == Some(h.o.row.id.as_str())),
+        "nothing carried it on"
+    );
     tracon::session::materialize::remove(&h.o.row.id);
 }
 

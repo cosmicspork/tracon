@@ -175,7 +175,7 @@ pub fn held_key(entry: &Entry) -> Option<String> {
 }
 
 /// What a status tool adds when it answers a session that it is still
-/// waiting: that polling is not the only way to wait.
+/// waiting on a question: that polling is not the only way to wait.
 pub fn brought_back(in_session: bool) -> &'static str {
     if in_session {
         " Or end your turn: this session stays open while it waits, and the node brings \
@@ -183,6 +183,84 @@ pub fn brought_back(in_session: bool) -> &'static str {
     } else {
         ""
     }
+}
+
+/// What is not brought back as a prompt, because it leaves the agent
+/// nothing to act on ([`needs_turn`]).
+pub const NOT_BROUGHT_BACK: &str = "An approval the node publishes, an AI reviewer's verdict \
+     of approve with no findings, and a report acknowledged without a note are not brought \
+     back: they are recorded, and only noted at the start of your next prompt. With more \
+     to do once a review is approved, keep working or keep calling review_status rather \
+     than waiting on it.";
+
+/// [`brought_back`] for a review or a report, which says what of their
+/// outcomes is not brought back.
+pub fn brought_back_review(in_session: bool) -> String {
+    if in_session {
+        format!("{} {NOT_BROUGHT_BACK}", brought_back(true))
+    } else {
+        String::new()
+    }
+}
+
+/// Whether a decided wait gives the session something to act on, and so is
+/// brought back as a prompt. Not an AI reviewer's approval with no findings
+/// (the operator's decision is still to come), an approval the node has
+/// published (it pushed the change and opened its PR itself), or a report
+/// acknowledged without a note (which records receipt only). An open wait
+/// is not this function's to judge, and reads `true`.
+pub fn needs_turn(wait: &Wait) -> bool {
+    notice(wait).is_none()
+}
+
+/// The one line a session is told, at the start of its next prompt, of a
+/// decided wait that is not brought back on its own ([`needs_turn`]).
+pub fn notice(wait: &Wait) -> Option<String> {
+    let view = wait.decided.as_ref()?;
+    let blank = |v: &Value| v.is_null() || v.as_str().is_some_and(|s| s.trim().is_empty());
+    if wait.key.starts_with("reviewer:") {
+        let reviewer = &view["reviewer"];
+        let none = reviewer["findings"].is_null()
+            || reviewer["findings"].as_array().is_some_and(Vec::is_empty);
+        return (reviewer["verdict"] == "approve" && none).then(|| {
+            format!(
+                "the AI reviewer approved review `{}` with no findings; the operator has not \
+                 decided yet.",
+                wait.id
+            )
+        });
+    }
+    if !wait.key.starts_with("review:") {
+        return None;
+    }
+    if wait.tool == crate::mcp::review::STATUS {
+        let published = view["published"].as_str().filter(|url| !url.is_empty())?;
+        return (view["state"] == "approved").then(|| {
+            format!(
+                "review `{}` was approved and published at {published}.",
+                wait.id
+            )
+        });
+    }
+    if wait.tool == crate::mcp::review::REPORT_STATUS {
+        return (view["state"] == crate::store::reports::ACKNOWLEDGED && blank(&view["note"]))
+            .then(|| {
+                format!(
+                    "the operator acknowledged report `{}` without a note.",
+                    wait.id
+                )
+            });
+    }
+    None
+}
+
+/// What opens the next prompt after outcomes recorded without a turn: one
+/// line each.
+pub fn noticed(notices: &[String]) -> String {
+    notices
+        .iter()
+        .map(|line| format!("Since your last turn: {line}\n"))
+        .collect()
 }
 
 impl Waits {
@@ -529,6 +607,13 @@ pub fn prompt(decided: &[Wait], open: &[Wait]) -> String {
             "\nCarry on from here. When those are decided they come back to you the same \
              way, so you may end your turn rather than poll.",
         );
+        if open
+            .iter()
+            .any(|wait| wait.key.starts_with("review:") || wait.key.starts_with("checks"))
+        {
+            text.push(' ');
+            text.push_str(NOT_BROUGHT_BACK);
+        }
     }
     text
 }
@@ -605,5 +690,171 @@ mod tests {
     fn only_a_session_is_told_it_may_end_its_turn() {
         assert!(brought_back(true).contains("end your turn"));
         assert!(brought_back(false).is_empty());
+        // A question still comes back whatever its answer; a review names
+        // what of its outcomes does not.
+        assert!(!brought_back(true).contains("approval"));
+        let review = brought_back_review(true);
+        assert!(review.contains("end your turn"), "{review}");
+        assert!(
+            review.contains("An approval the node publishes"),
+            "{review}"
+        );
+        assert!(review.contains("keep calling review_status"), "{review}");
+        assert!(brought_back_review(false).is_empty());
+    }
+
+    /// Only an AI approval with no findings, an approval the node published
+    /// and a report acknowledged without a note leave the agent nothing to
+    /// act on; every other decision is brought back as a turn.
+    #[test]
+    fn only_news_with_something_to_act_on_needs_a_turn() {
+        use crate::mcp::{approvals, operator, review};
+        let decided = |key: &str, tool: &'static str, view: Value| Wait {
+            key: key.into(),
+            tool,
+            id: "r1".into(),
+            about: "feat: x".into(),
+            decided: Some(view),
+        };
+        let reviewer = |verdict: &str, findings: Value| {
+            decided(
+                "reviewer:r1:1",
+                review::STATUS,
+                json!({ "review_id": "r1", "still_waiting": true,
+                        "reviewer": { "state": "done", "verdict": verdict, "findings": findings } }),
+            )
+        };
+        let reviewed = |view: Value| decided("review:r1:approved:1", review::STATUS, view);
+        let reported =
+            |view: Value| decided("review:r1:acknowledged:1", review::REPORT_STATUS, view);
+        let cases = [
+            (
+                "reviewer approve, no findings",
+                reviewer("approve", json!([])),
+                false,
+            ),
+            (
+                "reviewer approve with a finding",
+                reviewer("approve", json!([{ "note": "cover it" }])),
+                true,
+            ),
+            (
+                "reviewer request_changes",
+                reviewer("request_changes", json!([])),
+                true,
+            ),
+            (
+                "approved and published",
+                reviewed(json!({ "state": "approved", "published": "https://forge.test/pull/1" })),
+                false,
+            ),
+            (
+                "approved, not published",
+                reviewed(json!({ "state": "approved", "published": null })),
+                true,
+            ),
+            (
+                "report acknowledged without a note",
+                reported(json!({ "state": "acknowledged", "note": null })),
+                false,
+            ),
+            (
+                "report acknowledged with a blank note",
+                reported(json!({ "state": "acknowledged", "note": "  " })),
+                false,
+            ),
+            (
+                "report acknowledged with a note",
+                reported(json!({ "state": "acknowledged", "note": "thanks, see #12" })),
+                true,
+            ),
+            (
+                "report changes requested",
+                reported(json!({ "state": "changes_requested", "notes": "more detail" })),
+                true,
+            ),
+            (
+                "review revising",
+                reviewed(json!({ "state": "changes_requested", "notes": "fix", "patch": null })),
+                true,
+            ),
+            (
+                "review rejected",
+                reviewed(json!({ "state": "rejected", "published": null, "reason": "no" })),
+                true,
+            ),
+            (
+                "publish_failed",
+                decided(
+                    "publication:r1:p1:1",
+                    review::STATUS,
+                    json!({ "state": "publish_failed", "still_waiting": true }),
+                ),
+                true,
+            ),
+            (
+                "submit_failed",
+                decided(
+                    "checks:r1:1",
+                    review::STATUS,
+                    json!({ "state": "submit_failed", "message": "tests failed" }),
+                ),
+                true,
+            ),
+            (
+                "question answered",
+                decided(
+                    "question:q1:answered",
+                    operator::QUESTION_STATUS,
+                    json!({ "state": "answered", "answer": { "text": "yes" } }),
+                ),
+                true,
+            ),
+            (
+                "approval succeeded",
+                decided(
+                    "approval:a1:succeeded",
+                    approvals::STATUS,
+                    json!({ "state": "succeeded" }),
+                ),
+                true,
+            ),
+        ];
+        for (what, wait, wakes) in cases {
+            assert_eq!(needs_turn(&wait), wakes, "{what}");
+            assert_eq!(notice(&wait).is_none(), wakes, "{what}");
+        }
+        let line = notice(&reviewed(
+            json!({ "state": "approved", "published": "https://forge.test/pull/1" }),
+        ))
+        .unwrap();
+        assert!(
+            line.contains("`r1` was approved and published at https://forge.test/pull/1"),
+            "{line}"
+        );
+        assert!(noticed(&[line]).starts_with("Since your last turn: review `r1`"));
+        // An open wait is not judged.
+        assert!(needs_turn(&wait("q1", None)));
+    }
+
+    #[test]
+    fn a_review_still_open_says_what_of_it_is_not_brought_back() {
+        let open = Wait {
+            key: "review:r1:new:1".into(),
+            tool: crate::mcp::review::STATUS,
+            id: "r1".into(),
+            about: "feat: x".into(),
+            decided: None,
+        };
+        let text = prompt(
+            &[wait("q1", Some(json!({ "state": "cancelled" })))],
+            &[open],
+        );
+        assert!(text.contains(NOT_BROUGHT_BACK), "{text}");
+        let text = prompt(
+            &[wait("q1", Some(json!({ "state": "cancelled" })))],
+            &[wait("q2", None)],
+        );
+        assert!(!text.contains(NOT_BROUGHT_BACK), "{text}");
     }
 }
