@@ -49,9 +49,9 @@
         candidate_id: candidateId.trim(),
         context: { documents: ids(documentSlugs), memories: ids(memoryIds), note },
         destination_node: destination || undefined,
-        // A selected node means direct sealed mesh delivery. The server refuses
-        // an unavailable or oversized online transfer rather than downloading
-        // or importing somewhere else.
+        // A selected node means direct sealed mesh delivery, in pieces when the
+        // package is larger than one frame. The server refuses an unavailable
+        // online transfer rather than downloading or importing somewhere else.
         delivery: destination ? 'mesh' : 'portable',
         intent: moving ? 'move' : 'handoff',
       })

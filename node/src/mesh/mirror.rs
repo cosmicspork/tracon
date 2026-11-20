@@ -203,6 +203,9 @@ impl Mirror {
             // rollups separately and a direct transfer only stages a package.
             Payload::Rollup { .. } => Applied::Unhandled("rollup"),
             Payload::CandidateTransfer { .. } => Applied::Unhandled("candidate_transfer"),
+            Payload::CandidateTransferChunk { .. } => {
+                Applied::Unhandled("candidate_transfer_chunk")
+            }
             Payload::Changes {
                 channel: c,
                 changes,

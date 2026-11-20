@@ -140,7 +140,6 @@ impl From<TransferError> for ApiError {
             | TransferError::ReceiverUnauthorized(_)
             | TransferError::DestinationUnauthorized(_)
             | TransferError::MeshUnavailable
-            | TransferError::MeshTooLarge
             | TransferError::Workspace(_) => StatusCode::CONFLICT,
             TransferError::Store(_) | TransferError::Json(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -658,7 +657,10 @@ pub async fn list_transfers(State(s): State<AppState>) -> ApiResult<Json<serde_j
             "session_id": import.and_then(|row| row.session_id),
         }));
     }
-    Ok(Json(json!({ "transfers": transfers })))
+    Ok(Json(json!({
+        "transfers": transfers,
+        "incoming": transfers::partial_deliveries(),
+    })))
 }
 
 #[derive(Deserialize)]
@@ -782,45 +784,120 @@ pub async fn export_transfer(
                     "online delivery needs one destination node",
                 )
             })?;
-            if !s
-                .store()
-                .nodes_in_channel(&transfer.payload.channel)?
-                .iter()
-                .any(|node| node == &destination)
-            {
-                return Err(TransferError::DestinationUnauthorized(
-                    transfer.payload.channel.clone(),
-                )
-                .into());
-            }
-            if transfer.serialized_len()? > transfers::MAX_MESH_TRANSFER_BYTES {
-                return Err(TransferError::MeshTooLarge.into());
-            }
-            let mesh = s.mesh.as_ref().ok_or(TransferError::MeshUnavailable)?;
-            mesh.enqueue_direct(
-                &transfer.payload.channel,
-                &destination,
-                &proto::frame::Payload::CandidateTransfer {
-                    transfer: serde_json::to_value(&transfer).map_err(|error| {
-                        ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
-                    })?,
-                },
-            )
-            .map_err(|error| ApiError::new(StatusCode::BAD_GATEWAY, error.to_string()))?;
-            s.store().append_transfer_event(
-                transfer.id(),
-                "mesh_queued",
-                Some(&destination),
-                None,
-            )?;
+            let pieces = deliver_mesh(&s, &transfer, &destination, None)?;
             Ok(Json(json!({
                 "delivery": "mesh_queued",
                 "transfer": transfer,
                 "destination_node": destination,
-                "note": "The recipient must explicitly confirm import; no session has moved.",
+                "pieces": pieces,
+                "note": if moving {
+                    "The recipient must explicitly confirm import; this session closes once it has."
+                } else {
+                    "The recipient must explicitly confirm import; no session has moved."
+                },
             })))
         }
     }
+}
+
+/// Queue a package for `destination` over the mesh: whole when it fits one
+/// frame, else in pieces (`only` sends just those pieces again). Returns how
+/// many frames were queued. The outbox is durable, so a delivery cut off by
+/// a restart carries on, and the receiver keeps the pieces it has.
+fn deliver_mesh(
+    s: &AppState,
+    transfer: &SignedTransfer,
+    destination: &str,
+    only: Option<&[u32]>,
+) -> ApiResult<usize> {
+    if !s
+        .store()
+        .nodes_in_channel(&transfer.payload.channel)?
+        .iter()
+        .any(|node| node == destination)
+    {
+        return Err(
+            TransferError::DestinationUnauthorized(transfer.payload.channel.clone()).into(),
+        );
+    }
+    let mesh = s.mesh.as_ref().ok_or(TransferError::MeshUnavailable)?;
+    let queue = |payload: &proto::frame::Payload| {
+        mesh.enqueue_direct(&transfer.payload.channel, destination, payload)
+            .map_err(|error| ApiError::new(StatusCode::BAD_GATEWAY, error.to_string()))
+    };
+    let pieces =
+        if transfer.serialized_len()? <= transfers::MAX_MESH_TRANSFER_BYTES && only.is_none() {
+            queue(&proto::frame::Payload::CandidateTransfer {
+                transfer: serde_json::to_value(transfer).map_err(|error| {
+                    ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+                })?,
+            })?;
+            1
+        } else {
+            let chunks = transfers::mesh_chunks(transfer, only)?;
+            for chunk in &chunks {
+                queue(&proto::frame::Payload::CandidateTransferChunk {
+                    transfer_id: chunk.transfer_id.clone(),
+                    index: chunk.index,
+                    count: chunk.count,
+                    sha256: chunk.sha256.clone(),
+                    data_b64: chunk.data_b64.clone(),
+                })?;
+            }
+            chunks.len()
+        };
+    s.store()
+        .append_transfer_event(transfer.id(), "mesh_queued", Some(destination), None)?;
+    Ok(pieces)
+}
+
+#[derive(Deserialize)]
+pub struct SendTransferBody {
+    destination_node: String,
+    /// Just these pieces again, as the receiver lacks them. Absent: the
+    /// whole package.
+    #[serde(default)]
+    pieces: Option<Vec<u32>>,
+}
+
+/// Send a package this node holds over the mesh again: one whose delivery
+/// was lost, or the pieces a receiver is missing. The receiver takes what it
+/// does not have yet and ignores the rest.
+pub async fn send_transfer(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<SendTransferBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let row = s
+        .store()
+        .transfer(&id)?
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "transfer not found"))?;
+    let transfer: SignedTransfer = serde_json::from_str(&row.package_json).map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "stored transfer is corrupt",
+        )
+    })?;
+    if transfer
+        .payload
+        .target_node
+        .as_deref()
+        .is_some_and(|target| target != body.destination_node)
+    {
+        return Err(TransferError::WrongTarget.into());
+    }
+    let pieces = deliver_mesh(
+        &s,
+        &transfer,
+        &body.destination_node,
+        body.pieces.as_deref(),
+    )?;
+    Ok(Json(json!({
+        "delivery": "mesh_queued",
+        "transfer_id": id,
+        "destination_node": body.destination_node,
+        "pieces": pieces,
+    })))
 }
 
 #[derive(Deserialize)]

@@ -245,6 +245,20 @@ pub enum Payload {
     CandidateTransfer {
         transfer: Value,
     },
+    /// Direct only. One piece of a [`Payload::CandidateTransfer`] package too
+    /// large for one frame: bytes `index` of `count` of the package's JSON,
+    /// with this piece's own sha256. `transfer_id` is the package's signed
+    /// sha256, which the reassembled package must verify to. The receiver
+    /// keeps the pieces it has, so a piece sent again completes it and one it
+    /// already holds changes nothing. An older peer cannot read this payload
+    /// and drops it.
+    CandidateTransferChunk {
+        transfer_id: String,
+        index: u32,
+        count: u32,
+        sha256: String,
+        data_b64: String,
+    },
     /// Direct only: credentials for the recipient's broker, each
     /// `{ "name": …, "credential": … }` in the broker's own row shape. The
     /// receiver keeps its own bindings check; a credential not bound to it is

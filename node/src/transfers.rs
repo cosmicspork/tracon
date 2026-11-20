@@ -41,7 +41,14 @@ pub const MAX_HANDOFF_NOTE_BYTES: usize = 16 * 1024;
 pub const MAX_CANDIDATE_ID_BYTES: usize = 256;
 pub const MAX_HEAD_SHA_BYTES: usize = 128;
 /// Direct mesh envelopes add authenticated encryption and base64 overhead.
+/// A package larger than this travels in pieces of `MESH_CHUNK_BYTES`.
 pub const MAX_MESH_TRANSFER_BYTES: usize = 2 * 1024 * 1024;
+/// One piece of a package sent in pieces, before base64 and sealing.
+pub const MESH_CHUNK_BYTES: usize = 1024 * 1024;
+/// The most pieces a package can be: the largest package, in pieces.
+pub const MAX_MESH_CHUNKS: u32 = (MAX_TRANSFER_BYTES / MESH_CHUNK_BYTES) as u32 + 2;
+/// Pieces of a package that never completed are dropped after this long.
+const PARTIAL_TRANSFER_TTL: std::time::Duration = std::time::Duration::from_secs(7 * 86_400);
 const SIGNING_DOMAIN: &[u8] = b"tracon/candidate-transfer/v1\0";
 
 #[derive(Debug, thiserror::Error)]
@@ -78,8 +85,6 @@ pub enum TransferError {
     ReceiverUnauthorized(String),
     #[error("online delivery is unavailable; download the portable package instead")]
     MeshUnavailable,
-    #[error("online delivery has a smaller bounded limit; download the portable package instead")]
-    MeshTooLarge,
     #[error("destination node is not currently a member of channel {0}")]
     DestinationUnauthorized(String),
     #[error("invalid transfer package: {0}")]
@@ -643,6 +648,220 @@ pub fn receive_mesh(
         store.append_transfer_event(transfer.id(), "received_mesh", None, None)?;
     }
     Ok(transfer.sha256)
+}
+
+/// One piece of a package sent over the mesh in pieces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeshChunk {
+    pub transfer_id: String,
+    pub index: u32,
+    pub count: u32,
+    pub sha256: String,
+    pub data_b64: String,
+}
+
+/// The package as the pieces a mesh delivery sends: its JSON, cut into
+/// `MESH_CHUNK_BYTES` pieces, each with its own digest. `only` sends just
+/// those pieces again (a resend of what a receiver is missing).
+pub fn mesh_chunks(
+    transfer: &SignedTransfer,
+    only: Option<&[u32]>,
+) -> Result<Vec<MeshChunk>, TransferError> {
+    let bytes = serde_json::to_vec(transfer)?;
+    if bytes.len() > MAX_TRANSFER_BYTES + MESH_CHUNK_BYTES {
+        return Err(TransferError::TooLarge);
+    }
+    let count = u32::try_from(bytes.len().div_ceil(MESH_CHUNK_BYTES)).unwrap_or(u32::MAX);
+    Ok(bytes
+        .chunks(MESH_CHUNK_BYTES)
+        .enumerate()
+        .map(|(index, piece)| (index as u32, piece))
+        .filter(|(index, _)| only.is_none_or(|only| only.contains(index)))
+        .map(|(index, piece)| MeshChunk {
+            transfer_id: transfer.sha256.clone(),
+            index,
+            count,
+            sha256: hex::encode(Sha256::digest(piece)),
+            data_b64: base64::engine::general_purpose::STANDARD.encode(piece),
+        })
+        .collect())
+}
+
+/// What one piece came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChunkOutcome {
+    /// Kept; `have` of `count` pieces are here.
+    Partial { have: u32, count: u32 },
+    /// The last piece: the package verified and is staged under its id.
+    Staged(String),
+    /// The package is already staged here; the piece is not needed.
+    AlreadyStaged,
+}
+
+fn partial_dir(transfer_id: &str, sender: &str) -> std::path::PathBuf {
+    crate::config::Config::state_dir()
+        .join("transfer-chunks")
+        .join(format!(
+            "{transfer_id}-{}",
+            sender.get(..16).unwrap_or(sender)
+        ))
+}
+
+/// Drop the pieces of packages that never completed.
+fn sweep_partials() {
+    let root = crate::config::Config::state_dir().join("transfer-chunks");
+    let Ok(entries) = fs::read_dir(&root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let stale = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age > PARTIAL_TRANSFER_TTL);
+        if stale {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// A package arriving in pieces that is not complete yet: which pieces are
+/// still missing, for the sender to send again (`POST /api/transfers/{id}/send`
+/// with those `pieces`).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PartialDelivery {
+    pub transfer_id: String,
+    /// The start of the sending node's id.
+    pub sender: String,
+    pub count: u32,
+    pub missing: Vec<u32>,
+}
+
+pub fn partial_deliveries() -> Vec<PartialDelivery> {
+    let root = crate::config::Config::state_dir().join("transfer-chunks");
+    let Ok(entries) = fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some((transfer_id, sender)) = name.split_once('-') else {
+            continue;
+        };
+        let dir = entry.path();
+        let Some(count) = fs::read_to_string(dir.join("count"))
+            .ok()
+            .and_then(|count| count.trim().parse::<u32>().ok())
+            .filter(|count| *count <= MAX_MESH_CHUNKS)
+        else {
+            continue;
+        };
+        out.push(PartialDelivery {
+            transfer_id: transfer_id.to_string(),
+            sender: sender.to_string(),
+            count,
+            missing: (0..count)
+                .filter(|index| !dir.join(format!("{index:05}")).exists())
+                .collect(),
+        });
+    }
+    out.sort_by(|a, b| a.transfer_id.cmp(&b.transfer_id));
+    out
+}
+
+/// Keep one piece of a package a peer is sending in pieces, and once every
+/// piece is here, verify and stage the package as `receive_mesh` does: its
+/// signature and its signed sha256 (which must be the `transfer_id` every
+/// piece named), its sender and its target. Pieces are kept on disk per
+/// sender, so a delivery cut off by a restart on either side completes when
+/// the rest arrive, and a piece sent again is taken once. Only a member of
+/// a channel this node holds is kept for at all.
+pub fn receive_chunk(
+    store: &Store,
+    receiver_node: &str,
+    envelope_sender: &str,
+    envelope_channel: &str,
+    chunk: MeshChunk,
+) -> Result<ChunkOutcome, TransferError> {
+    let hex64 = |value: &str| value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit());
+    if !hex64(&chunk.transfer_id)
+        || !hex64(&chunk.sha256)
+        || chunk.count == 0
+        || chunk.count > MAX_MESH_CHUNKS
+        || chunk.index >= chunk.count
+    {
+        return Err(TransferError::Invalid("malformed transfer piece".into()));
+    }
+    if store.channel_get(envelope_channel)?.is_none() {
+        return Err(TransferError::ReceiverUnauthorized(envelope_channel.into()));
+    }
+    if !store
+        .nodes_in_channel(envelope_channel)?
+        .iter()
+        .any(|node| node == envelope_sender)
+    {
+        return Err(TransferError::OriginUnauthorized(envelope_channel.into()));
+    }
+    if store.transfer(&chunk.transfer_id)?.is_some() {
+        return Ok(ChunkOutcome::AlreadyStaged);
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(chunk.data_b64.as_bytes())
+        .map_err(|_| TransferError::Invalid("bad base64 in a transfer piece".into()))?;
+    if bytes.len() > MESH_CHUNK_BYTES || hex::encode(Sha256::digest(&bytes)) != chunk.sha256 {
+        return Err(TransferError::Invalid(
+            "a transfer piece does not match its digest".into(),
+        ));
+    }
+    sweep_partials();
+    let io = |error: std::io::Error| TransferError::Workspace(error.to_string());
+    let dir = partial_dir(&chunk.transfer_id, envelope_sender);
+    fs::create_dir_all(&dir).map_err(io)?;
+    let count_file = dir.join("count");
+    match fs::read_to_string(&count_file) {
+        Ok(count) if count.trim() != chunk.count.to_string() => {
+            return Err(TransferError::Invalid(
+                "transfer pieces disagree on how many there are".into(),
+            ));
+        }
+        Ok(_) => {}
+        Err(_) => fs::write(&count_file, chunk.count.to_string()).map_err(io)?,
+    }
+    let piece = dir.join(format!("{:05}", chunk.index));
+    if !piece.exists() {
+        let partial = dir.join(format!("{:05}.part", chunk.index));
+        fs::write(&partial, &bytes).map_err(io)?;
+        fs::rename(&partial, &piece).map_err(io)?;
+    }
+    let have = (0..chunk.count)
+        .filter(|index| dir.join(format!("{index:05}")).exists())
+        .count() as u32;
+    if have < chunk.count {
+        return Ok(ChunkOutcome::Partial {
+            have,
+            count: chunk.count,
+        });
+    }
+    let mut whole = Vec::new();
+    for index in 0..chunk.count {
+        whole.extend(fs::read(dir.join(format!("{index:05}"))).map_err(io)?);
+    }
+    // The pieces are spent either way: a package that does not verify is
+    // not completed by keeping them, and a resend starts clean.
+    let _ = fs::remove_dir_all(&dir);
+    let value: Value = serde_json::from_slice(&whole)?;
+    if value["sha256"].as_str() != Some(chunk.transfer_id.as_str()) {
+        return Err(TransferError::BadDigest);
+    }
+    let id = receive_mesh(
+        store,
+        receiver_node,
+        envelope_sender,
+        envelope_channel,
+        value,
+    )?;
+    Ok(ChunkOutcome::Staged(id))
 }
 
 /// Portable imports are deliberately allowed without a source-selected target,
@@ -1695,5 +1914,137 @@ mod tests {
         );
         assert!(source.open_reviews.is_empty());
         assert_eq!(source.last_check, None);
+    }
+
+    /// A package of `bytes` of incompressible content, signed by `identity`
+    /// and sent to `receiver`, with a receiving store that holds the channel
+    /// with the origin in it.
+    fn large_package(bytes: usize) -> (SignedTransfer, Store, String) {
+        let store = Store::open_in_memory().unwrap();
+        let identity = proto::keys::Identity::from_seed(&[5u8; 32]);
+        store.channel_put("personal", b"ring", "{}").unwrap();
+        let mut content = Vec::with_capacity(bytes);
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        while content.len() < bytes {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            content.extend_from_slice(&state.to_le_bytes());
+        }
+        let files = vec![TransferFile {
+            path: "big.bin".into(),
+            mode: 0o100644,
+            content_b64: base64::engine::general_purpose::STANDARD.encode(&content),
+        }];
+        let tree = crate::git_tree::tree_sha1(&files);
+        let candidate_id = format!("{HEAD_SHA}:personal");
+        store
+            .insert_candidate(&CandidateRow {
+                id: candidate_id.clone(),
+                head_sha: HEAD_SHA.into(),
+                tree_sha: Some(tree),
+                channel: "personal".into(),
+                owner_session_id: None,
+                source_kind: "git".into(),
+                captured_ms: 1,
+                capture_json: r#"{"materialized":true}"#.into(),
+            })
+            .unwrap();
+        store
+            .insert_candidate_files(
+                &candidate_id,
+                &[CandidateFile {
+                    path: "big.bin".into(),
+                    mode: 0o100644,
+                    content,
+                }],
+            )
+            .unwrap();
+        let transfer = export(
+            &store,
+            &identity,
+            &candidate_id,
+            ContextSelection::default(),
+            Some("receiver".into()),
+        )
+        .unwrap();
+        let receiver = Store::open_in_memory().unwrap();
+        receiver.channel_put("personal", b"ring", "{}").unwrap();
+        receiver
+            .node_channel_add(&identity.node_id(), "personal")
+            .unwrap();
+        (transfer, receiver, identity.node_id())
+    }
+
+    /// A package larger than one frame arrives in pieces, in any order and
+    /// with repeats, and is staged once the last piece is in and the whole
+    /// verifies to the signed sha256. Until then, what is missing is listed
+    /// for a resend.
+    #[test]
+    fn a_large_package_arrives_in_pieces_and_resumes() {
+        let (transfer, receiver, origin) = large_package(3 * MESH_CHUNK_BYTES);
+        assert!(transfer.serialized_len().unwrap() > MAX_MESH_TRANSFER_BYTES);
+        let mut chunks = mesh_chunks(&transfer, None).unwrap();
+        assert!(chunks.len() >= 4, "{}", chunks.len());
+        let count = chunks.len() as u32;
+        let last = chunks.pop().unwrap();
+        chunks.reverse();
+        for chunk in chunks.iter().cloned().chain([chunks[0].clone()]) {
+            let outcome = receive_chunk(&receiver, "receiver", &origin, "personal", chunk).unwrap();
+            assert!(matches!(outcome, ChunkOutcome::Partial { count: c, .. } if c == count));
+        }
+        let pending = partial_deliveries()
+            .into_iter()
+            .find(|partial| partial.transfer_id == transfer.sha256)
+            .unwrap();
+        assert_eq!(pending.missing, vec![count - 1]);
+        // The resend of only what is missing completes it.
+        let resent = mesh_chunks(&transfer, Some(&[count - 1])).unwrap();
+        assert_eq!(resent, vec![last]);
+        let outcome = receive_chunk(
+            &receiver,
+            "receiver",
+            &origin,
+            "personal",
+            resent[0].clone(),
+        )
+        .unwrap();
+        assert_eq!(outcome, ChunkOutcome::Staged(transfer.sha256.clone()));
+        assert!(receiver.transfer(&transfer.sha256).unwrap().is_some());
+        assert!(!partial_deliveries()
+            .iter()
+            .any(|partial| partial.transfer_id == transfer.sha256));
+        let again = receive_chunk(
+            &receiver,
+            "receiver",
+            &origin,
+            "personal",
+            resent[0].clone(),
+        )
+        .unwrap();
+        assert_eq!(again, ChunkOutcome::AlreadyStaged);
+    }
+
+    #[test]
+    fn a_piece_is_refused_unless_it_matches_its_digest_and_comes_from_a_member() {
+        let (transfer, receiver, origin) = large_package(2 * MESH_CHUNK_BYTES);
+        let chunk = mesh_chunks(&transfer, Some(&[0])).unwrap().remove(0);
+        let mut tampered = chunk.clone();
+        tampered.data_b64 = base64::engine::general_purpose::STANDARD.encode(b"other bytes");
+        assert!(matches!(
+            receive_chunk(&receiver, "receiver", &origin, "personal", tampered),
+            Err(TransferError::Invalid(_))
+        ));
+        let stranger = "ab".repeat(32);
+        assert!(matches!(
+            receive_chunk(&receiver, "receiver", &stranger, "personal", chunk.clone()),
+            Err(TransferError::OriginUnauthorized(_))
+        ));
+        let mut beyond = chunk;
+        beyond.index = beyond.count;
+        assert!(matches!(
+            receive_chunk(&receiver, "receiver", &origin, "personal", beyond),
+            Err(TransferError::Invalid(_))
+        ));
     }
 }
