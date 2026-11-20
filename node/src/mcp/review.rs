@@ -145,7 +145,10 @@ pub fn definitions() -> Vec<Value> {
                  once: later calls carry only `findings_count`, unless you pass \
                  `include_findings: true` to have them again. That verdict is advisory: only the \
                  operator's decision publishes. On approval the node publishes the approved \
-                 text itself and returns where it landed; if that fails, it reads \
+                 text itself and returns where it landed; that approval, like a verdict of \
+                 approve with no findings, is not brought back to the session as a prompt, \
+                 so with more to do after approval keep working or keep calling this; if \
+                 that fails, it reads \
                  `state: \"publish_failed\"` with the error under `publication`, back with \
                  the operator to retry or reject. {}",
                  super::wait::pointer()
@@ -167,7 +170,8 @@ pub fn definitions() -> Vec<Value> {
             "name": REPORT_STATUS,
             "description": format!(
                 "Wait for a standalone report's operator decision. It never publishes code. An \
-                 acknowledgement records receipt only; requested changes returns notes for a \
+                 acknowledgement records receipt only, and one without a note is not brought \
+                 back to the session as a prompt; requested changes returns notes for a \
                  new submit_report with the same report_id. {}",
                 super::wait::pointer()
             ),
@@ -4848,7 +4852,7 @@ async fn report_status(
                     "Still waiting on an operator acknowledgement. The wait is capped at \
                      {} seconds; call report_status again with the same report_id.{}",
                     super::wait::cap(ctx),
-                    crate::session::waits::brought_back(ctx.session_id().is_some())
+                    crate::session::waits::brought_back_review(ctx.session_id().is_some())
                 ),
             }));
         }
@@ -4907,7 +4911,7 @@ async fn status(
                 "{said} The wait is capped at {} seconds; call review_status again with the \
                  same review_id.{}",
                 super::wait::cap(ctx),
-                crate::session::waits::brought_back(true)
+                crate::session::waits::brought_back_review(true)
             ));
             return Ok(response);
         }
@@ -5027,7 +5031,7 @@ async fn status(
                     &r,
                     failed,
                     &says,
-                    crate::session::waits::brought_back(ctx.session_id().is_some()),
+                    &crate::session::waits::brought_back_review(ctx.session_id().is_some()),
                 );
                 view["waited_secs"] = json!(waited);
                 view["reviewer"] = reviewer();
@@ -5045,7 +5049,7 @@ async fn status(
                      again with the same review_id to keep waiting.{}",
                     r.state,
                     super::wait::capped(ctx),
-                    crate::session::waits::brought_back(ctx.session_id().is_some())
+                    crate::session::waits::brought_back_review(ctx.session_id().is_some())
                 ),
             }));
         }

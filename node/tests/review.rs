@@ -3349,6 +3349,53 @@ async fn the_submitter_hears_its_reviewer_and_the_verdict_while_it_waits() {
     assert_eq!(detail["reviewer"]["revision"], 1, "{detail}");
 }
 
+/// A reviewer's approval with no findings, as `review_verdict` records it,
+/// is news the submitter has nothing to act on: it is not brought back as a
+/// prompt, and its summary is still review_status's to carry. One with a
+/// finding still is.
+#[tokio::test]
+async fn an_ai_approval_with_no_findings_is_not_brought_back() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    bind_review_model(&f);
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    let reviewer = v["review_session"]["session_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    running_reviewer(&f, &reviewer).await;
+    let v = f
+        .tool(
+            &reviewer,
+            "review_verdict",
+            json!({"verdict": "approve", "summary": "small and covered", "findings": []}),
+        )
+        .await;
+    assert_eq!(v["recorded"], true, "{v}");
+    let waits = f.manager.waits().of("s1");
+    let verdict = waits
+        .iter()
+        .find(|w| w.key.starts_with("reviewer:"))
+        .unwrap_or_else(|| panic!("{waits:?}"));
+    assert!(!tracon::session::waits::needs_turn(verdict), "{verdict:?}");
+    let line = tracon::session::waits::notice(verdict).unwrap();
+    assert!(
+        line.contains(&format!("approved review `{id}` with no findings")),
+        "{line}"
+    );
+    let s = f.status_tool(&id).await;
+    assert_eq!(s["reviewer"]["summary"], "small and covered", "{s}");
+    let message = s["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("An approval the node publishes"),
+        "{message}"
+    );
+}
+
 /// A continuation that takes over a review the reviewer has already given
 /// its verdict on is not brought that verdict as a prompt; the handoff sends
 /// it to review_status instead, so the first call there carries the findings.

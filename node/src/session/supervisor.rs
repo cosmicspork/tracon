@@ -231,6 +231,9 @@ pub struct Supervisor {
     /// Why the last decision could not be brought back, so a refusal that
     /// repeats on every tick is recorded once.
     delivery_error: Option<String>,
+    /// Outcomes recorded without a turn (`waits::needs_turn`), one line
+    /// each, to open the next prompt this session is sent.
+    notices: Vec<String>,
     /// How to start this session's harness again, for one that is
     /// `restorable`; see `with_relaunch`.
     relaunch: Option<Relaunch>,
@@ -352,6 +355,7 @@ impl Supervisor {
                 Default::default(),
             ),
             delivery_error: None,
+            notices: Vec::new(),
             relaunch: None,
             relaunches: 0,
             turn_relaunches: 0,
@@ -1057,7 +1061,9 @@ impl Supervisor {
     }
 
     /// Between turns, see to what the session waits on the operator for. A
-    /// decision it has not been told is brought back as its next prompt. A
+    /// decision it has not been told is brought back as its next prompt,
+    /// unless it leaves the agent nothing to act on (`waits::needs_turn`):
+    /// that is noted at the start of whatever prompt comes next. A
     /// wait still open holds it, as `waiting_on_you`, rather than letting it
     /// end: the agent may end its turn on an open wait, and the node owns the
     /// wait from there. With neither, a finished phase ends the session.
@@ -1084,16 +1090,26 @@ impl Supervisor {
             .of(&self.session_id)
             .into_iter()
             .partition(crate::session::waits::Wait::is_open);
-        let untold: Vec<_> = decided
+        let (wake, quiet): (Vec<_>, Vec<_>) = decided
             .into_iter()
             .filter(|w| !self.waits.was_told(&self.session_id, &w.key))
-            .collect();
-        if !untold.is_empty() {
-            let text = crate::session::waits::prompt(&untold, &open);
+            .partition(crate::session::waits::needs_turn);
+        // News the agent has nothing to act on starts no turn: it is
+        // recorded as told, and said in a line at the start of whatever
+        // prompt comes next. An AI verdict's findings are left unsent, so
+        // review_status still carries its summary.
+        for wait in &quiet {
+            self.waits.tell(&self.session_id, &wait.key);
+            if let Some(line) = crate::session::waits::notice(wait) {
+                self.notices.push(line);
+            }
+        }
+        if !wake.is_empty() {
+            let text = crate::session::waits::prompt(&wake, &open);
             match self.on_prompt(text).await {
                 Ok(()) => {
                     self.delivery_error = None;
-                    for wait in &untold {
+                    for wait in &wake {
                         self.waits.delivered(&self.session_id, wait);
                     }
                 }
@@ -1110,7 +1126,7 @@ impl Supervisor {
                         self.delivery_error = Some(error);
                     }
                     if state == SessionState::Running {
-                        self.hold(&untold);
+                        self.hold(&wake);
                     }
                 }
             }
@@ -1931,6 +1947,14 @@ impl Supervisor {
         if held {
             self.set_state(SessionState::Running, None);
         }
+        // What was recorded without a turn opens the prompt that starts one.
+        let work = match work {
+            Work::Prompt(text) if !self.notices.is_empty() => Work::Prompt(format!(
+                "{}\n{text}",
+                crate::session::waits::noticed(&std::mem::take(&mut self.notices))
+            )),
+            work => work,
+        };
         self.next_turn = self.next_turn.wrapping_add(1);
         let turn_id = self.next_turn;
         self.active_turn = Some(turn_id);
