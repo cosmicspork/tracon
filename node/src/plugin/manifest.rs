@@ -74,6 +74,11 @@ pub struct Credential {
     pub pattern: String,
     #[serde(default)]
     pub lend: Lend,
+    /// The call argument that picks the one binding a call is lent:
+    /// `<name>-<value>`, or `name` itself when the call leaves it out. Unset,
+    /// a call is lent every binding the credential matches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub select: Option<String>,
 }
 
 /// When a credential is lent to a call.
@@ -117,6 +122,12 @@ impl Credential {
     /// or one its pattern matches.
     pub fn matches(&self, binding: &str) -> bool {
         binding == self.name || crate::policy::glob(&self.pattern, binding)
+    }
+
+    /// Whether a call may be lent more than one binding of it: its pattern
+    /// matches more than its name, and no `select` picks one.
+    pub fn lends_many(&self) -> bool {
+        self.select.is_none() && self.pattern.contains('*')
     }
 }
 
@@ -174,6 +185,15 @@ fn tool_name_ok(name: &str) -> bool {
 
 fn credential_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')
+}
+
+/// A call argument's name `select` may give: what a tool's input schema
+/// names a property by, kept to name characters.
+fn argument_ok(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 fn format_ok(format: &str) -> bool {
@@ -337,6 +357,16 @@ impl Manifest {
                     ),
                 );
             }
+            if let Some(select) = &credential.select {
+                if !argument_ok(select) {
+                    return bad(
+                        &field,
+                        format!(
+                            "select {select:?} must be 1-64 letters, digits, '_' or '-': the call argument that names the binding"
+                        ),
+                    );
+                }
+            }
         }
         let mut seen = BTreeSet::new();
         for tool in &self.tools {
@@ -485,6 +515,17 @@ impl Manifest {
                     Lend::Always => "",
                 }
             ));
+            match &credential.select {
+                Some(select) => out.push_str(&format!(
+                    "  - a call is lent only the binding its `{select}` names: `{name}-<{select}>`, or `{name}` when it names none\n",
+                    name = credential.name
+                )),
+                None if credential.lends_many() => out.push_str(&format!(
+                    "  - **Warning:** every binding the channel holds matching `{}` is lent to each call, and the plugin picks one itself; it declares no `select` to lend only the one a call names\n",
+                    credential.pattern
+                )),
+                None => {}
+            }
         }
         out.push_str("\n**UI**\n\n");
         match &self.ui {
@@ -582,6 +623,18 @@ pub fn diff(old: &Manifest, new: &Manifest) -> Vec<String> {
                         credential.name,
                         was.lend.as_str(),
                         credential.lend.as_str()
+                    ));
+                }
+                if was.select != credential.select {
+                    let shown = |s: &Option<String>| match s {
+                        Some(arg) => format!("the binding `{arg}` names"),
+                        None => "every matching binding".to_string(),
+                    };
+                    lines.push(format!(
+                        "credential `{}`: a call is lent {} → {}",
+                        credential.name,
+                        shown(&was.select),
+                        shown(&credential.select)
                     ));
                 }
             }
@@ -769,6 +822,16 @@ title = "SQL"
                 "credential \"sql-read\": is declared twice",
             ),
             ("lend = \"approved\"", "lend = \"never\"", "lend"),
+            (
+                "lend = \"approved\"",
+                "lend = \"approved\"\nselect = \"a.b\"",
+                "credential \"sql-write\": select \"a.b\" must be",
+            ),
+            (
+                "lend = \"approved\"",
+                "lend = \"approved\"\nselect = \"\"",
+                "credential \"sql-write\": select",
+            ),
             ("hint = \"read\"", "hint = \"maybe\"", "hint"),
             (
                 "entry = \"ui/index.html\"",
@@ -936,5 +999,45 @@ title = "SQL"
             .contains("`sql-write` (`sql-write-*`): lent only to a call from an approved card"));
         assert!(summary.contains("SQL (`ui/index.html`)"));
         assert!(summary.contains("`db.internal:1521`"));
+    }
+
+    #[test]
+    fn the_summary_warns_of_a_pattern_lent_whole_and_says_what_select_lends() {
+        let summary = Manifest::parse(EXAMPLE).unwrap().summary();
+        assert!(
+            summary.contains(
+                "**Warning:** every binding the channel holds matching `sql-write-*` is lent to each call"
+            ),
+            "{summary}"
+        );
+        let text = EXAMPLE.replace(
+            "lend = \"approved\"",
+            "lend = \"approved\"\nselect = \"profile\"",
+        );
+        let selecting = Manifest::parse(&text).unwrap();
+        assert_eq!(selecting.credentials[1].select.as_deref(), Some("profile"));
+        let summary = selecting.summary();
+        assert!(summary.contains(
+            "a call is lent only the binding its `profile` names: `sql-write-<profile>`, or `sql-write` when it names none"
+        ), "{summary}");
+        assert!(
+            !summary.contains("matching `sql-write-*` is lent"),
+            "{summary}"
+        );
+        // `sql-read` still selects nothing.
+        assert!(
+            summary.contains("matching `sql-read-*` is lent"),
+            "{summary}"
+        );
+        // A credential that matches only its name lends one binding.
+        let exact = Manifest::parse(&EXAMPLE.replace("sql-read-*", "sql-read")).unwrap();
+        assert!(!exact.summary().contains("matching `sql-read"));
+        let old = Manifest::parse(EXAMPLE).unwrap();
+        assert!(diff(&old, &selecting).iter().any(|l| l
+            == "credential `sql-write`: a call is lent every matching binding → the binding `profile` names"));
+        // The store's round trip keeps it, and leaves it out when unset.
+        let json = serde_json::to_string(&selecting).unwrap();
+        assert_eq!(serde_json::from_str::<Manifest>(&json).unwrap(), selecting);
+        assert!(!serde_json::to_string(&old).unwrap().contains("select"));
     }
 }

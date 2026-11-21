@@ -2991,7 +2991,7 @@ pub async fn get_approval(
             .unwrap_or_default(),
         // A plugin's build, what it says the tool does and reaches, and what
         // an approved run is lent: facts about the build, not a live read.
-        "plugin": s.tools.plugin_approval_context(&a),
+        "plugin": s.tools.plugin_approval_context(&a, None),
     });
     if let Some(out) = details.as_object_mut() {
         for extra in [context, rendered].into_iter().flatten() {

@@ -891,14 +891,16 @@ impl Tools {
 
     /// What a request to a plugin's tool for `ctx` is made with: its
     /// instance, held while the request runs; the credentials its running
-    /// build declares that the channel binds, one lent only on approval
-    /// only to a call run from `approval`; who is calling; and how long it
-    /// may take. A call run from an approval is refused if the build it
-    /// was asked on is no longer the one running.
+    /// build declares that the channel binds and `args` select ([`Self::lent`]),
+    /// one lent only on approval only to a call run from `approval`; who is
+    /// calling; and how long it may take. A call run from an approval is
+    /// refused if the build it was asked on is no longer the one running,
+    /// and any call whose arguments name a binding it cannot be lent.
     async fn plugin_call_parts(
         &self,
         ctx: &CallContext,
         pt: &PluginTool,
+        args: &Value,
         approval: Option<&str>,
     ) -> Result<PluginCallParts, String> {
         use crate::plugin::context;
@@ -935,7 +937,7 @@ impl Tools {
                 ));
             }
         }
-        let credentials = self.lent(ctx, &endpoint.manifest, approval.is_some())?;
+        let credentials = self.lent(ctx, &endpoint.manifest, Some(args), approval.is_some())?;
         let caller = match &ctx.caller {
             Caller::Session(id) => context::CallerId {
                 kind: "agent",
@@ -999,7 +1001,7 @@ impl Tools {
             .session
             .get()
             .ok_or("plugins are not available on this node")?;
-        let parts = self.plugin_call_parts(ctx, pt, approval).await?;
+        let parts = self.plugin_call_parts(ctx, pt, args, approval).await?;
         let preview_token = match approval {
             Some(id) => access.store.preview_token(id).map_err(|e| e.to_string())?,
             None => None,
@@ -1032,32 +1034,37 @@ impl Tools {
             .await
     }
 
-    /// What a call to a build with `manifest` is lent, by binding: each
-    /// credential it declares that the channel binds, less those lent only
-    /// to an approved call unless this one is.
+    /// What a call to a build with `manifest` is lent, by binding: what
+    /// [`crate::plugin::lending::lending`] gives the channel's bindings, for
+    /// `args` and whether the call is `approved`, the same function the
+    /// card's "Lent on allow" reads. A call whose arguments name a binding
+    /// it cannot be lent is refused here, before anything is sent.
     fn lent(
         &self,
         ctx: &CallContext,
         manifest: &crate::plugin::manifest::Manifest,
+        args: Option<&Value>,
         approved: bool,
     ) -> Result<
         std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
         String,
     > {
-        use crate::plugin::manifest::Lend;
-        let mut credentials = std::collections::BTreeMap::new();
+        use crate::plugin::lending;
         let broker = self.broker.read().unwrap();
-        for binding in broker.available_to(&ctx.channel, &ctx.node_id) {
-            let Some(declared) = manifest.credentials.iter().find(|c| c.matches(binding)) else {
-                continue;
-            };
-            if declared.lend == Lend::Approved && !approved {
-                continue;
-            }
+        let available = broker.available_to(&ctx.channel, &ctx.node_id);
+        let lent = lending::lending(manifest, &available, args, approved);
+        if let Some(why) = lending::refusal(&lent) {
+            return Err(format!(
+                "nothing ran: plugin {} cannot be lent what this call names on channel {}: {why}",
+                manifest.name, ctx.channel
+            ));
+        }
+        let mut credentials = std::collections::BTreeMap::new();
+        for binding in lent.iter().flat_map(|l| &l.bindings) {
             let env = broker
                 .env_for(binding, &ctx.channel, &ctx.node_id)
                 .map_err(|e| e.to_string())?;
-            credentials.insert(binding.to_string(), env);
+            credentials.insert(binding.clone(), env);
         }
         Ok(credentials)
     }
@@ -1219,7 +1226,7 @@ impl Tools {
             out
         };
         let ctx = self.approval_call_context(access, approval);
-        let parts = match self.plugin_call_parts(&ctx, &pt, None).await {
+        let parts = match self.plugin_call_parts(&ctx, &pt, args, None).await {
             Ok(parts) => parts,
             Err(error) => {
                 keep(None, false);
@@ -1441,7 +1448,7 @@ impl Tools {
         };
         let endpoint = &lease.endpoint;
         let credentials = self
-            .lent(ctx, &endpoint.manifest, false)
+            .lent(ctx, &endpoint.manifest, None, false)
             .map_err(OperatorCallError::Unreachable)?;
         let caller = context::CallerId {
             kind: "operator",
@@ -1528,6 +1535,8 @@ impl Tools {
     /// when the card opens: its token replaces the one kept, so an answer
     /// naming this preview applies against what it showed. An edit an answer
     /// would refuse is refused here the same way, before the plugin is asked.
+    /// For a plugin's tool it carries the card's `plugin` context for the
+    /// edit too, so "Lent on allow" follows the edit, previews or not.
     pub async fn preview_edit(
         &self,
         approval: &crate::store::approvals::ApprovalRow,
@@ -1538,7 +1547,16 @@ impl Tools {
         if !errors.is_empty() {
             return Err(errors);
         }
-        Ok(self.approval_preview(approval, edited).await)
+        let preview = self.approval_preview(approval, edited).await;
+        // What Allow would lend the edit, from the dispatch's own function.
+        let Some(plugin) = self.plugin_approval_context(approval, Some(edited)) else {
+            return Ok(preview);
+        };
+        let mut out = preview.unwrap_or_else(|| json!({}));
+        if let Some(map) = out.as_object_mut() {
+            map.insert("plugin".into(), plugin);
+        }
+        Ok(Some(out))
     }
 
     /// The input schema a plugin's running build gave one of its tools, with
@@ -1680,10 +1698,13 @@ impl Tools {
     /// was asked on, what the plugin says the tool does and reaches, which it
     /// never decides anything by, and what the call is lent once approved.
     /// `replaced_by` names the build active now when that is another, which
-    /// an approved run is refused on.
+    /// an approved run is refused on. What is lent is computed by the
+    /// dispatch's own function, from `edited` when the operator is drafting
+    /// an edit, else from the call as asked or as it ran.
     pub fn plugin_approval_context(
         &self,
         approval: &crate::store::approvals::ApprovalRow,
+        edited: Option<&Value>,
     ) -> Option<Value> {
         let pt = self.plugin_tool(&approval.tool)?;
         let access = self.session.get()?;
@@ -1715,17 +1736,29 @@ impl Tools {
             .iter()
             .find(|t| t.name == pt.tool)
             .or_else(|| pt.manifest.tools.iter().find(|t| t.name == pt.tool))?;
+        // What Allow lends, from the call as it would run: the operator's
+        // edit while it is drafted (`edited`), what ran once decided.
+        let asked = serde_json::from_str::<Value>(&approval.arguments).unwrap_or(Value::Null);
+        let ran = approval
+            .edited_arguments
+            .as_deref()
+            .and_then(|e| serde_json::from_str::<Value>(e).ok());
+        let args = edited.or(ran.as_ref()).unwrap_or(&asked);
         let broker = self.broker.read().unwrap();
         let available = broker.available_to(&approval.channel, &approval.node_id);
-        let credentials: Vec<Value> = manifest
-            .credentials
-            .iter()
-            .map(|c| {
-                let bindings: Vec<&str> =
-                    available.iter().copied().filter(|b| c.matches(b)).collect();
-                json!({ "name": c.name, "lend": c.lend.as_str(), "bindings": bindings })
-            })
-            .collect();
+        let credentials: Vec<Value> =
+            crate::plugin::lending::lending(manifest, &available, Some(args), true)
+                .into_iter()
+                .map(|l| {
+                    json!({
+                        "name": l.credential.name,
+                        "lend": l.credential.lend.as_str(),
+                        "select": l.credential.select,
+                        "bindings": l.bindings,
+                        "refusal": l.refusal,
+                    })
+                })
+                .collect();
         // What a grant allowing exactly this call names, for a consequential
         // tool: it is asked unless one does.
         let grant_target = tool
