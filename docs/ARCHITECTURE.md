@@ -1099,7 +1099,9 @@ target has moved. The node settles that as failed, stale, not uncertain, since n
 was sent. Staleness is enforced by the plugin at dispatch. The page's display is only
 display. The preview as shown (`previewable`, `summary`, `body`, no token) is kept too,
 as `preview_shown`, and stays once the approval is decided, so its page still shows what
-was approved under "Preview you approved". Prose in a format a plugin owns is rendered by that plugin's
+was approved under "Preview you approved". The page is given it only when it is a preview
+of the call as decided (the edit, if the answer carried one), so a later preview of an
+edit nobody allowed never reads as the approved one. Prose in a format a plugin owns is rendered by that plugin's
 `tracon/format/convert`, a pure function given no context and no credentials.
 
 **Allow is held until a preview was shown.** Each preview also records, as

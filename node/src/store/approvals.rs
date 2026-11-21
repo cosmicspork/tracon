@@ -411,13 +411,16 @@ impl Store {
     }
 
     /// The plugin preview an approval's card last showed, as JSON, if its
-    /// last preview was shown: once decided, what the operator decided on.
-    pub fn preview_shown(&self, id: &str) -> Result<Option<String>> {
+    /// last preview was shown and was of the call whose arguments hash is
+    /// `for_arguments`. Once decided, asked for the call as decided, it is
+    /// what the operator decided on: a later preview of an edit the answer
+    /// did not carry (another tab's, or one Allow was not held to) is not.
+    pub fn preview_shown(&self, id: &str, for_arguments: &str) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();
         let shown = conn
             .query_row(
-                "SELECT preview_shown FROM approval WHERE id=?1",
-                [id],
+                "SELECT preview_shown FROM approval WHERE id=?1 AND preview_shown_for=?2",
+                [id, for_arguments],
                 |r| r.get::<_, Option<String>>(0),
             )
             .optional()?;
@@ -907,17 +910,17 @@ mod tests {
         store
             .insert_approval(&row("a1", "k", now_ms() + 60_000))
             .unwrap();
-        assert_eq!(store.preview_shown("a1").unwrap(), None);
+        assert_eq!(store.preview_shown("a1", "h1").unwrap(), None);
         assert!(store
             .set_preview("a1", Some("v1"), Some(shown("h1")))
             .unwrap());
         assert!(store
-            .preview_shown("a1")
+            .preview_shown("a1", "h1")
             .unwrap()
             .unwrap()
             .contains("1 row"));
         assert!(store.set_preview("a1", None, None).unwrap());
-        assert_eq!(store.preview_shown("a1").unwrap(), None);
+        assert_eq!(store.preview_shown("a1", "h1").unwrap(), None);
         assert!(store
             .set_preview("a1", Some("v1"), Some(shown("h1")))
             .unwrap());
@@ -927,11 +930,13 @@ mod tests {
         assert!(store.decide_approval("a1", &allow()).unwrap());
         assert!(!store.set_preview("a1", None, None).unwrap());
         assert!(store
-            .preview_shown("a1")
+            .preview_shown("a1", "h1")
             .unwrap()
             .unwrap()
             .contains("1 row"));
-        assert_eq!(store.preview_shown("gone").unwrap(), None);
+        // Not of the call as decided: not what was decided on.
+        assert_eq!(store.preview_shown("a1", "h2").unwrap(), None);
+        assert_eq!(store.preview_shown("gone", "h1").unwrap(), None);
     }
 
     #[test]

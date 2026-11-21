@@ -448,7 +448,7 @@
     <div class="h4">
       {allowed ? 'Preview you approved' : 'Preview you were shown'} <b>{p.summary}{p.previewable ? '' : ' · not previewable'}</b>
     </div>
-    <section class="doc">
+    <section class="doc preview">
       <article class="md">{@html render(p.body)}</article>
     </section>
   {/if}

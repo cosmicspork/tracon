@@ -2998,10 +2998,15 @@ pub async fn get_approval(
         // an approved run is lent: facts about the build, not a live read.
         "plugin": s.tools.plugin_approval_context(&a, None),
     });
-    // Once decided, the plugin preview its card last showed: what the
+    // Once decided, the plugin preview its card last showed of the call as
+    // decided (the operator's edit, if the answer carried one): what the
     // operator decided on, read-only.
     if !pending {
-        if let Some(shown) = parse(s.store().preview_shown(&id)?.as_deref()) {
+        let decided = match a.edited_arguments.as_deref() {
+            Some(edited) => crate::store::approvals::arguments_hash(edited),
+            None => a.arguments_hash(),
+        };
+        if let Some(shown) = parse(s.store().preview_shown(&id, &decided)?.as_deref()) {
             details["preview_shown"] = shown;
         }
     }

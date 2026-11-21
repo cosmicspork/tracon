@@ -98,9 +98,9 @@ export interface ApprovalDetails {
    */
   preview?: PluginPreview
   /**
-   * Once decided, the plugin preview its card last showed: what the
-   * operator decided on. Absent while it waits, and when no preview was
-   * shown.
+   * Once decided, the plugin preview its card last showed of the call as
+   * decided: what the operator decided on. Absent while it waits, and when
+   * no preview of that call was the last shown.
    */
   preview_shown?: ShownPreview | null
   /**
