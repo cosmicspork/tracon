@@ -1076,7 +1076,10 @@ token, so a process left from an earlier start cannot answer for the new one, an
 nonce and a 30-second expiry, so it cannot be replayed or carried to another call. The
 same context lends, per call, the credentials the running build declares and the
 channel binds; one marked `lend = "approved"` is withheld unless the call runs from a
-card the operator allowed. A call leases its instance, so the idle stop waits for it.
+card the operator allowed, and one with `select = "<argument>"` lends only the binding
+that argument names, refusing the call before dispatch when the channel does not bind
+it. The dispatch and the approval card's "Lent on allow" read one function
+(`plugin::lending`), from the call as it would run, an operator's edit included. A call leases its instance, so the idle stop waits for it.
 The context names its caller: kind `agent` for a session (with its id and harness) or
 an external harness (harness `external`), and kind `operator` for a route of the
 operator API calling on the operator's behalf (`Tools::call_for_operator`, today only

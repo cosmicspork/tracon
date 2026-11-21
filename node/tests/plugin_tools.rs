@@ -651,6 +651,153 @@ async fn credentials_are_lent_per_call_and_an_approved_only_one_only_when_approv
     rig.manager.plugins().shutdown().await;
 }
 
+/// The bindings each call was lent, by name, sorted.
+fn lent_names(seen: &Value) -> Vec<String> {
+    let mut names: Vec<String> = seen["meta"]["credentials"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    names.sort();
+    names
+}
+
+/// What a card says Allow lends, by binding, and why it would refuse.
+fn card_lends(context: &Value) -> (Vec<String>, Vec<String>) {
+    let credentials = context["credentials"].as_array().unwrap();
+    let bindings = credentials
+        .iter()
+        .flat_map(|c| c["bindings"].as_array().unwrap().clone())
+        .map(|b| b.as_str().unwrap().to_string())
+        .collect();
+    let refusals = credentials
+        .iter()
+        .filter_map(|c| c["refusal"].as_str().map(str::to_string))
+        .collect();
+    (bindings, refusals)
+}
+
+#[tokio::test]
+async fn a_selecting_credential_lends_only_the_profile_the_call_names() {
+    let rig = rig(
+        "select",
+        vec![unpreviewed(allow("fake", &["query"]))],
+        Policy::shipped(),
+    );
+    // The build declares `select = "profile"` on both credentials, and the
+    // channel binds two profiles of each.
+    support::plugin::install_build(
+        &rig.store,
+        &rig.state,
+        &FAKE
+            .replace("version = \"1.0.0\"", "version = \"1.1.0\"")
+            .replace(
+                "pattern = \"fake-read-*\"",
+                "pattern = \"fake-read-*\"\nselect = \"profile\"",
+            )
+            .replace(
+                "pattern = \"fake-write-*\"",
+                "pattern = \"fake-write-*\"\nselect = \"profile\"",
+            ),
+        &"5e".repeat(32),
+    );
+    rig.manager.plugins().stop_plugin("fake").await;
+    let mut bindings = String::new();
+    for name in [
+        "fake-read-tst",
+        "fake-read-prd",
+        "fake-write-tst",
+        "fake-write-prd",
+    ] {
+        bindings.push_str(&format!(
+            "[credentials.{name}]\nchannels = [\"select\"]\n[credentials.{name}.env]\nDB_USER = \"{name}\"\n\n"
+        ));
+    }
+    *rig.tools.broker.write().unwrap() = toml::from_str(&bindings).unwrap();
+    rig.listed(&rig.ctx).await;
+
+    // Allowed outright: only the read account of the profile it names.
+    let seen = echo(&rig.call("fake__query", json!({ "profile": "tst" })).await);
+    assert_eq!(lent_names(&seen), ["fake-read-tst"]);
+
+    // Asked: the card says Allow lends that profile's read and write
+    // accounts, and the approved run is lent exactly those.
+    let id = asked(
+        &rig.call("fake__describe", json!({ "profile": "tst" }))
+            .await,
+    );
+    let row = rig.store.get_approval(&id).unwrap().unwrap();
+    let card = rig.tools.plugin_approval_context(&row, None).unwrap();
+    assert_eq!(card["credentials"][0]["select"], "profile");
+    assert_eq!(
+        card_lends(&card),
+        (
+            vec!["fake-read-tst".into(), "fake-write-tst".into()],
+            vec![]
+        )
+    );
+    let seen = approved_echo(&rig.approve(&id).await);
+    assert_eq!(lent_names(&seen), ["fake-read-tst", "fake-write-tst"]);
+
+    // An operator's edit of the profile changes what the card says and what
+    // the run is lent.
+    let id = asked(
+        &rig.call("fake__describe", json!({ "profile": "tst" }))
+            .await,
+    );
+    let row = rig.store.get_approval(&id).unwrap().unwrap();
+    let edit = json!({ "profile": "prd" });
+    let previewed = rig.tools.preview_edit(&row, &edit).await.unwrap().unwrap();
+    assert_eq!(
+        card_lends(&previewed["plugin"]),
+        (
+            vec!["fake-read-prd".into(), "fake-write-prd".into()],
+            vec![]
+        )
+    );
+    rig.tools
+        .answer_approval(
+            &id,
+            OperatorAnswer {
+                option_id: tracon::adapter::types::OPTION_ALLOW_ONCE.into(),
+                arguments: Some(edit.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let seen = approved_echo(&rig.settled(&id).await);
+    assert_eq!(seen["arguments"], edit);
+    assert_eq!(lent_names(&seen), ["fake-read-prd", "fake-write-prd"]);
+
+    // A profile the channel does not bind is refused before anything is
+    // sent, naming the binding, and its card says so.
+    let calls = rig.lines("fake", "select", "calls.jsonl");
+    let out = rig.call("fake__query", json!({ "profile": "nope" })).await;
+    assert_eq!(out["isError"], true, "{out}");
+    assert!(
+        text(&out).contains("names binding fake-read-nope, which this channel does not bind"),
+        "{out}"
+    );
+    let id = asked(
+        &rig.call("fake__describe", json!({ "profile": "nope" }))
+            .await,
+    );
+    let row = rig.store.get_approval(&id).unwrap().unwrap();
+    let (lent, refusals) = card_lends(&rig.tools.plugin_approval_context(&row, None).unwrap());
+    assert!(lent.is_empty(), "{lent:?}");
+    assert_eq!(refusals.len(), 2, "{refusals:?}");
+    assert!(refusals[1].contains("fake-write-nope"), "{refusals:?}");
+    let refused = rig.approve(&id).await;
+    assert_eq!(refused.state, approvals::FAILED);
+    let reason = refused.reason.unwrap_or_default();
+    assert!(reason.contains("nothing ran"), "{reason}");
+    assert!(reason.contains("fake-read-nope"), "{reason}");
+    assert_eq!(rig.lines("fake", "select", "calls.jsonl"), calls);
+    rig.manager.plugins().shutdown().await;
+}
+
 #[tokio::test]
 async fn a_call_after_a_restart_carries_the_new_instances_token() {
     let rig = rig(
@@ -1353,7 +1500,7 @@ async fn an_approved_call_runs_only_on_the_build_its_card_showed() {
     );
     let card = |id: &str| {
         let row = rig.store.get_approval(id).unwrap().unwrap();
-        rig.tools.plugin_approval_context(&row).unwrap()
+        rig.tools.plugin_approval_context(&row, None).unwrap()
     };
     assert_eq!(card(&first)["version"], "1.0.0");
     assert_eq!(card(&first)["replaced_by"], Value::Null);

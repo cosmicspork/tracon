@@ -321,6 +321,30 @@ test("a plugin tool's card says its build, its own word on the tool, and what is
     { key: 'Lent on allow', value: 'sql-read-qa, sql-write-qa (only because you approve this card)' },
     { key: 'Grant target', value: 'plugin_call plugin:sql-review__write:ab12' },
   ])
+  // Lent by the call's profile: what the node says the run is lent, or why
+  // it would be refused; marked while it is of the call before an edit.
+  const selecting = (refusal: string | null) => ({
+    plugin: {
+      name: 'sql-review',
+      version: '0.3.0',
+      tool: 'write',
+      hint: 'write' as const,
+      consequential: true,
+      egress: [],
+      credentials: [
+        { name: 'sql-read', lend: 'always' as const, select: 'profile', bindings: refusal ? [] : ['sql-read-tst'], refusal },
+        { name: 'sql-write', lend: 'approved' as const, select: 'profile', bindings: refusal ? [] : ['sql-write-tst'] },
+      ],
+    },
+  })
+  const lentRow = (rows: { key: string; value: string }[]) => rows.find((r) => r.key === 'Lent on allow')?.value
+  expect(lentRow(pluginRows(selecting(null)))).toBe('sql-read-tst, sql-write-tst (only because you approve this card)')
+  expect(lentRow(pluginRows(selecting(null), true))).toBe(
+    'sql-read-tst, sql-write-tst (only because you approve this card) · of the call before your edit',
+  )
+  const nope = "the call's profile names binding sql-read-nope, which this channel does not bind"
+  expect(lentRow(pluginRows(selecting(nope)))).toBe(`nothing: allowing it runs nothing, because ${nope}`)
+
   const quiet = pluginRows({
     plugin: { name: 'open', version: '1.0.0', tool: 'query', hint: 'read', consequential: false, egress: [], credentials: [] },
   })
