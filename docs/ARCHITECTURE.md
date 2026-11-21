@@ -1076,7 +1076,10 @@ token, so a process left from an earlier start cannot answer for the new one, an
 nonce and a 30-second expiry, so it cannot be replayed or carried to another call. The
 same context lends, per call, the credentials the running build declares and the
 channel binds; one marked `lend = "approved"` is withheld unless the call runs from a
-card the operator allowed. A call leases its instance, so the idle stop waits for it.
+card the operator allowed, and one with `select = "<argument>"` lends only the binding
+that argument names, refusing the call before dispatch when the channel does not bind
+it. The dispatch and the approval card's "Lent on allow" read one function
+(`plugin::lending`), from the call as it would run, an operator's edit included. A call leases its instance, so the idle stop waits for it.
 The context names its caller: kind `agent` for a session (with its id and harness) or
 an external harness (harness `external`), and kind `operator` for a route of the
 operator API calling on the operator's behalf (`Tools::call_for_operator`, today only
@@ -1123,6 +1126,17 @@ inline-card answer meets it and is told to open the card; the card itself is tol
 (`allow_blocked`) and names the setting. Reject and Request changes never need a
 preview, and calls that make no card (allowed outright, node tools, `[[mcp_server]]`
 tools) never meet it.
+
+**A plugin call's card is titled in words.** `Tools::approval_title` titles a held
+plugin call with `mcp::plugin_title`: the plugin and tool, its `profile` or `key`
+argument, and the first line of its `sql`, `summary` or `body`, bounded, never the
+arguments as JSON, so bind `params` stay out of the title and the push. A shown
+preview of the call as asked (not an operator's edit) retitles the waiting approval
+with its `summary`'s first line (`mcp::preview_title`, `Store::set_approval_title`)
+and republishes the queue. Either title starts with the plugin, tool and target as the
+node read them from the call, so a summary adds words but cannot name another tool or
+profile. The policy haystack is
+`summarize`, unchanged, so a deny rule still matches `profile=<name>`.
 
 **A plugin's UI runs on an origin of its own, and speaks to its plugin as the
 operator.** `http::plugin_ui` gives each plugin whose manifest has `[ui]` a loopback

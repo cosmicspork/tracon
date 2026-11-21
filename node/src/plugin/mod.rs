@@ -14,6 +14,7 @@
 pub mod context;
 pub mod host;
 pub mod install;
+pub mod lending;
 pub mod manifest;
 pub mod supervisor;
 

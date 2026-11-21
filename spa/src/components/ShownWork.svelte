@@ -186,6 +186,17 @@
     overflow: auto;
     font: 11px/1.45 var(--mono);
   }
+  /* A wide table scrolls on its own, its words whole, rather than squeezing to a letter a column. */
+  .md :global(table) {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-wrap: normal;
+    border-collapse: collapse;
+  }
+  .md :global(th) {
+    white-space: nowrap;
+  }
   .md :global(.no-fetch) {
     color: var(--dim);
     font: 11.5px var(--mono);

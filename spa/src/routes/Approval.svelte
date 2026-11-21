@@ -58,6 +58,8 @@
   let previewedFor = $state.raw<Record<string, unknown> | null>(null)
   /** Why the edit's preview could not be asked for. */
   let previewError = $state<string | null>(null)
+  /** The arguments the plugin card's "Lent on allow" was last computed for. */
+  let lentFor = $state.raw<Record<string, unknown> | null>(null)
   /** The route this approval was opened from; a verdict goes back to it. */
   let openedFrom: string | null = null
   /** After an accepted Allow: following the run until it ends, then "Ran" a moment before leaving. */
@@ -74,6 +76,7 @@
         fields = approvalFields(schemaFor(d.input_schema, args), args, d.prose_fields, d.locked_fields)
         values = formValues(fields, args)
         previewedFor = args
+        lentFor = args
         loaded = true
       })
       .catch((e) => {
@@ -99,6 +102,7 @@
     drafts = {}
     previewedFor = null
     previewError = null
+    lentFor = null
     said = ''
     decided = false
     following = null
@@ -132,8 +136,15 @@
   const blocked = $derived(Object.keys(problems).length > 0)
   /** The preview shows the call as asked, not as edited: Allow waits for the edit's. */
   const outdated = $derived(pending && previewOutdated(details, previewedFor, edited))
+  /**
+   * "Lent on allow" is of the call as asked, not as edited: the node says
+   * what the edit lends, by the dispatch's own function, and Allow waits.
+   */
+  const lentOutdated = $derived(
+    pending && !!details?.plugin && lentFor !== null && diffArguments(lentFor, edited).length > 0,
+  )
   /** Allow, held until the call as it would run has been previewed. */
-  const allow = $derived(allowGate(details, { busy, blocked, outdated }))
+  const allow = $derived(allowGate(details, { busy, blocked, outdated: outdated || lentOutdated }))
   /** What the document shows: the operator's draft while it waits, what ran once it is decided. */
   const shown = $derived(
     pending ? edited : details?.edited_arguments ? asArguments(details.edited_arguments) : original,
@@ -219,7 +230,7 @@
   // Preview the operator's edit through the plugin once they pause, so
   // what Allow is bound to is the edit's effect, not the call as asked.
   $effect(() => {
-    if (!outdated || blocked) return
+    if ((!outdated && !lentOutdated) || blocked) return
     const args = edited
     // An answer that arrives after a later edit is not that edit's preview.
     const current = () => diffArguments(args, edited).length === 0
@@ -231,7 +242,9 @@
           previewError = null
           if (r.preview) details.preview = r.preview
           details.allow_blocked = r.allow_blocked ?? null
+          if (r.plugin) details.plugin = r.plugin
           previewedFor = args
+          lentFor = args
         })
         .catch((e) => {
           if (current()) previewError = e instanceof Error ? e.message : String(e)
@@ -401,7 +414,7 @@
       <dt>{a.state === 'expired' ? 'Expired' : 'Finished'}</dt>
       <dd class="m">{formatAge(a.finished_ms, clock.now)} ago</dd>
     {/if}
-    {#each pluginRows(details) as row (row.key)}
+    {#each pluginRows(details, lentOutdated) as row (row.key)}
       <dt>{row.key}</dt>
       <dd class="m">{row.value}</dd>
     {/each}
@@ -464,12 +477,14 @@
     </div>
   {/if}
 
-  {#if outdated && !blocked}
+  {#if (outdated || lentOutdated) && !blocked}
     <div class="banner dim" role="status">
       {#if previewError}
         your edit could not be previewed <b>· {previewError} · Allow waits for a preview of it</b>
-      {:else}
+      {:else if outdated}
         previewing your edit <b>· Allow waits for it</b>
+      {:else}
+        reading what your edit lends <b>· Allow waits for it</b>
       {/if}
     </div>
   {/if}
@@ -483,7 +498,7 @@
     <div class="h4">
       Preview <b>{p.summary}{p.previewable ? '' : ' · not previewable'}{outdated ? ' · of the call before your edit' : ''}</b>
     </div>
-    <section class="doc">
+    <section class="doc preview">
       <article class="md">{@html render(p.body)}</article>
     </section>
   {/if}
@@ -923,12 +938,35 @@
     display: block;
     overflow-x: auto;
   }
+  /*
+   * A cell keeps its words whole and a header stays on one line: a table
+   * wider than its column scrolls rather than squeezing each column to a
+   * letter, as `overflow-wrap: anywhere` above would let it.
+   */
   .md :global(th),
   .md :global(td) {
     border-bottom: 1px solid var(--s2);
     padding: 5px 10px 5px 0;
     text-align: left;
     vertical-align: top;
+    overflow-wrap: normal;
+  }
+  .md :global(th) {
+    white-space: nowrap;
+  }
+  /*
+   * A plugin's preview is mostly data (the rows a call would change), so it
+   * takes the page's width and its cells stay on one line; its prose keeps
+   * the reading measure.
+   */
+  .preview .md {
+    max-width: none;
+  }
+  .preview .md :global(td) {
+    white-space: nowrap;
+  }
+  .preview .md > :global(:not(table, pre)) {
+    max-width: 72ch;
   }
   .md :global(.mention) {
     color: var(--acc);
