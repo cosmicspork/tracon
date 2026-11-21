@@ -125,9 +125,10 @@ impl Credential {
     }
 
     /// Whether a call may be lent more than one binding of it: its pattern
-    /// matches more than its name, and no `select` picks one.
+    /// matches more than its name (a pattern that is not the name, with or
+    /// without `*`, matches the name and itself), and no `select` picks one.
     pub fn lends_many(&self) -> bool {
-        self.select.is_none() && self.pattern.contains('*')
+        self.select.is_none() && self.pattern != self.name
     }
 }
 
@@ -521,8 +522,13 @@ impl Manifest {
                     name = credential.name
                 )),
                 None if credential.lends_many() => out.push_str(&format!(
-                    "  - **Warning:** every binding the channel holds matching `{}` is lent to each call, and the plugin picks one itself; it declares no `select` to lend only the one a call names\n",
-                    credential.pattern
+                    "  - **Warning:** every binding the channel holds matching {} is lent to each call, and the plugin picks one itself; it declares no `select` to lend only the one a call names\n",
+                    // The name is lent too, when the pattern does not cover it.
+                    if crate::policy::glob(&credential.pattern, &credential.name) {
+                        format!("`{}`", credential.pattern)
+                    } else {
+                        format!("`{}` or `{}`", credential.name, credential.pattern)
+                    }
                 )),
                 None => {}
             }
@@ -1006,7 +1012,7 @@ title = "SQL"
         let summary = Manifest::parse(EXAMPLE).unwrap().summary();
         assert!(
             summary.contains(
-                "**Warning:** every binding the channel holds matching `sql-write-*` is lent to each call"
+                "**Warning:** every binding the channel holds matching `sql-write` or `sql-write-*` is lent to each call"
             ),
             "{summary}"
         );
@@ -1020,18 +1026,23 @@ title = "SQL"
         assert!(summary.contains(
             "a call is lent only the binding its `profile` names: `sql-write-<profile>`, or `sql-write` when it names none"
         ), "{summary}");
-        assert!(
-            !summary.contains("matching `sql-write-*` is lent"),
-            "{summary}"
-        );
+        assert!(!summary.contains("`sql-write-*` is lent"), "{summary}");
         // `sql-read` still selects nothing.
         assert!(
-            summary.contains("matching `sql-read-*` is lent"),
+            summary.contains("matching `sql-read` or `sql-read-*` is lent"),
             "{summary}"
         );
         // A credential that matches only its name lends one binding.
         let exact = Manifest::parse(&EXAMPLE.replace("sql-read-*", "sql-read")).unwrap();
         assert!(!exact.summary().contains("matching `sql-read"));
+        // A pattern without `*` that is not the name still lends two.
+        let two = Manifest::parse(&EXAMPLE.replace("sql-read-*", "sql-read-qa")).unwrap();
+        assert!(two
+            .summary()
+            .contains("matching `sql-read` or `sql-read-qa` is lent"));
+        // A pattern that covers the name is named alone.
+        let covers = Manifest::parse(&EXAMPLE.replace("sql-read-*", "sql-read*")).unwrap();
+        assert!(covers.summary().contains("matching `sql-read*` is lent"));
         let old = Manifest::parse(EXAMPLE).unwrap();
         assert!(diff(&old, &selecting).iter().any(|l| l
             == "credential `sql-write`: a call is lent every matching binding → the binding `profile` names"));
