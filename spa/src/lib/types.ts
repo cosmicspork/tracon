@@ -866,6 +866,45 @@ export interface PublicationView {
   recoverable: boolean
   /** Why it is not, when the outcome would otherwise allow one. */
   refusal: string | null
+  /** The step the latest attempt is on, or stopped at; absent on an older node. */
+  step?: PublicationStep | null
+  step_started_ms?: number | null
+  /** The steps the latest attempt planned, in order. */
+  steps?: PublicationStep[]
+}
+
+/**
+ * One step of a publication attempt, as the node names it. The words for
+ * each are the interface's own (`lib/publicationSteps`).
+ */
+export type PublicationStep =
+  | 'verifying'
+  | 'preparing_commit'
+  | 'inspecting_forge'
+  | 'pushing'
+  | 'confirming_push'
+  | 'opening_change'
+  | 'updating_change'
+  | 'marking_ready'
+  | 'commenting'
+  | 'published'
+
+/** Where a publication attempt stands: a `publication` frame, sent at every step. */
+export interface PublicationProgress {
+  /** The publication record's id. */
+  id: string
+  review_id: string
+  node_id: string
+  provider: string
+  branch: string
+  outcome: PublicationOutcome
+  step: PublicationStep | null
+  step_started_ms: number | null
+  steps: PublicationStep[]
+  /** Why it stopped, when it did. */
+  reason: string | null
+  /** Where it landed, once published. */
+  url: string | null
 }
 
 /**
@@ -1761,6 +1800,7 @@ export type Frame =
   | { type: 'name'; channel: string; kind: string; id: string; name: string | null }
   | ({ type: 'awake' } & AwakeState)
   | ({ type: 'restart' } & RestartStatus)
+  | ({ type: 'publication' } & PublicationProgress)
 
 export const TERMINAL_STATES: SessionState[] = ['closed', 'killed_budget', 'failed']
 
