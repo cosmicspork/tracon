@@ -425,10 +425,19 @@ impl Store {
         self.publication_set(id, "opening", None, None, None)
     }
 
-    /// It landed at `result`: the last step is `published`.
+    /// It landed at `result`: the last step is `published`. One statement, so
+    /// the step, which is only for the operator to watch, cannot fail a
+    /// publication the record already calls opened.
     pub fn publication_opened(&self, id: &str, result: &str) -> Result<()> {
-        self.publication_set(id, "opened", None, Some(result), None)?;
-        self.publication_step(id, "published")
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE publication
+                SET state='opened', result=?2, note=NULL, updated_ms=?3,
+                    step='published', step_started_ms=?3
+              WHERE id=?1",
+            params![id, result, now_ms()],
+        )?;
+        Ok(())
     }
 
     pub fn publication_failed(&self, id: &str, note: &str) -> Result<()> {

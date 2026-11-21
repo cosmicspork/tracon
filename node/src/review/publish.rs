@@ -2646,6 +2646,29 @@ encoding ISO-8859-1\n\nsubject\n";
         }
     }
 
+    /// The record's `step` is written with `as_str` and its `steps_json` with
+    /// serde: both must name each step as the interface keys its words.
+    #[test]
+    fn a_step_is_named_the_same_in_the_step_and_in_the_plan() {
+        use Step::*;
+        let all = [
+            (Verifying, "verifying"),
+            (PreparingCommit, "preparing_commit"),
+            (InspectingForge, "inspecting_forge"),
+            (Pushing, "pushing"),
+            (ConfirmingPush, "confirming_push"),
+            (OpeningChange, "opening_change"),
+            (UpdatingChange, "updating_change"),
+            (MarkingReady, "marking_ready"),
+            (Commenting, "commenting"),
+            (Published, "published"),
+        ];
+        for (step, name) in all {
+            assert_eq!(step.as_str(), name);
+            assert_eq!(serde_json::to_value(step).unwrap(), name);
+        }
+    }
+
     #[test]
     fn a_publication_plans_only_the_steps_it_will_run() {
         use Step::*;
