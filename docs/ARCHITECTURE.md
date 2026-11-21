@@ -1110,6 +1110,17 @@ inline-card answer meets it and is told to open the card; the card itself is tol
 preview, and calls that make no card (allowed outright, node tools, `[[mcp_server]]`
 tools) never meet it.
 
+**A plugin call's card is titled in words.** `Tools::approval_title` titles a held
+plugin call with `mcp::plugin_title`: the plugin and tool, its `profile` or `key`
+argument, and the first line of its `sql`, `summary` or `body`, bounded, never the
+arguments as JSON, so bind `params` stay out of the title and the push. A shown
+preview of the call as asked (not an operator's edit) retitles the waiting approval
+with its `summary`'s first line (`mcp::preview_title`, `Store::set_approval_title`)
+and republishes the queue. Either title starts with the plugin, tool and target as the
+node read them from the call, so a summary adds words but cannot name another tool or
+profile. The policy haystack is
+`summarize`, unchanged, so a deny rule still matches `profile=<name>`.
+
 **A plugin's UI runs on an origin of its own, and speaks to its plugin as the
 operator.** `http::plugin_ui` gives each plugin whose manifest has `[ui]` a loopback
 listener on a port it keeps (`[plugins] ui_port_first..ui_port_last`, recorded on its

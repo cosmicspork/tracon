@@ -676,7 +676,16 @@ upstream and writes nothing. Answer:
   "token": "{\"WRK-12\":\"2026-11-16T09:12:33.000+0000\"}" }
 ```
 
-- `summary` is the card's heading, one line. `body` is Markdown, at most 256 KiB.
+- `summary` is the card's heading, one line. A plugin call's title always starts with
+  your plugin, the tool and the call's `profile` (`on <profile>`) or `key` argument, as
+  the node reads them. Until a preview is shown, the first line of the call's `sql`,
+  `summary` or `body` argument follows, bounded; never its other arguments, so bind
+  values such as `params` stay off the card and out of the push. Once a preview of the
+  call as asked is shown, its `summary`'s first line takes that place in the queue and
+  on the page (`sql-review: write on tst · UPDATE t SET a = :v (1 row(s))`). A summary
+  that opens with the tool and its target, as jira-review's `update WRK-12 on <site>`
+  does, follows the plugin's name alone rather than repeating them. `body` is Markdown,
+  at most 256 KiB.
 - `token` (a string, at most 4,096 bytes, or `null`) is the version the preview was
   taken against: jira-review's is the proposal's `versions` as canonical JSON. The node
   keeps it with the approval and never reads it; the page sees only its hash.
