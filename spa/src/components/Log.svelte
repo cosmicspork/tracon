@@ -516,6 +516,7 @@
     display: block;
     max-width: 100%;
     overflow-x: auto;
+    overflow-wrap: normal;
     border-collapse: collapse;
   }
   .md :global(th),

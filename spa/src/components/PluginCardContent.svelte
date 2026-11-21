@@ -44,6 +44,16 @@
   .block {
     margin: 12px 0;
   }
+  /* A wide table scrolls on its own rather than widening the page. */
+  .md :global(table) {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+    border-collapse: collapse;
+  }
+  .md :global(th) {
+    white-space: nowrap;
+  }
   .bt {
     color: var(--t2);
     font-size: 12px;

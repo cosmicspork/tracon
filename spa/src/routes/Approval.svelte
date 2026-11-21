@@ -397,7 +397,7 @@
     <div class="h4">
       Preview <b>{p.summary}{p.previewable ? '' : ' · not previewable'}{outdated ? ' · of the call before your edit' : ''}</b>
     </div>
-    <section class="doc">
+    <section class="doc preview">
       <article class="md">{@html render(p.body)}</article>
     </section>
   {/if}
@@ -837,12 +837,35 @@
     display: block;
     overflow-x: auto;
   }
+  /*
+   * A cell keeps its words whole and a header stays on one line: a table
+   * wider than its column scrolls rather than squeezing each column to a
+   * letter, as `overflow-wrap: anywhere` above would let it.
+   */
   .md :global(th),
   .md :global(td) {
     border-bottom: 1px solid var(--s2);
     padding: 5px 10px 5px 0;
     text-align: left;
     vertical-align: top;
+    overflow-wrap: normal;
+  }
+  .md :global(th) {
+    white-space: nowrap;
+  }
+  /*
+   * A plugin's preview is mostly data (the rows a call would change), so it
+   * takes the page's width and its cells stay on one line; its prose keeps
+   * the reading measure.
+   */
+  .preview .md {
+    max-width: none;
+  }
+  .preview .md :global(td) {
+    white-space: nowrap;
+  }
+  .preview .md > :global(:not(table, pre)) {
+    max-width: 72ch;
   }
   .md :global(.mention) {
     color: var(--acc);
