@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.58.0](https://github.com/cosmicspork/tracon/compare/v0.57.0...v0.58.0) (2026-11-21)
+
+
+### Features
+
+* **node,spa:** show each publication step live on the Review page after Approve ([#1046](https://github.com/cosmicspork/tracon/issues/1046)) ([2cd3137](https://github.com/cosmicspork/tracon/commit/2cd31370fe5f2c248cb041469d7ef9c064dadde0))
+
+
+### Bug Fixes
+
+* **node,spa:** keep the approved preview on a decided plugin card and read its result as text ([#1044](https://github.com/cosmicspork/tracon/issues/1044)) ([a77bb14](https://github.com/cosmicspork/tracon/commit/a77bb14ecba4860d98296f365820861759ff38fe))
+* **node,spa:** lend a plugin call only the binding its arguments select ([#1045](https://github.com/cosmicspork/tracon/issues/1045)) ([dd2ed88](https://github.com/cosmicspork/tracon/commit/dd2ed8809386dca790d2972bbd74ec9eea545f51))
+* **node,spa:** show how an allowed call ended, and refuse a stale Allow up front ([#1047](https://github.com/cosmicspork/tracon/issues/1047)) ([e401e07](https://github.com/cosmicspork/tracon/commit/e401e07afcd78ec63cdaa3a2fcc694d823f43aa0))
+* **node:** title a plugin call's card by its target and preview, not its JSON arguments ([#1043](https://github.com/cosmicspork/tracon/issues/1043)) ([13f67a6](https://github.com/cosmicspork/tracon/commit/13f67a663ac6d48aab3451dd4cd05458f47b59b5))
+* **spa:** keep wide plugin preview tables on one line and let them scroll ([#1042](https://github.com/cosmicspork/tracon/issues/1042)) ([4b6b407](https://github.com/cosmicspork/tracon/commit/4b6b4071e8b813080b68d7346723b08c50e9a841))
+
 ## [0.57.0](https://github.com/cosmicspork/tracon/compare/v0.56.0...v0.57.0) (2026-11-20)
 
 
