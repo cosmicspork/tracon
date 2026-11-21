@@ -240,9 +240,43 @@ pub fn revision_intent(
 struct StoreJournal<'a> {
     store: &'a Store,
     id: &'a str,
+    /// Where each step is told as it happens (`Frame::Publication`).
+    bus: &'a crate::stream::Bus,
+}
+
+impl StoreJournal<'_> {
+    /// Tell the page where the attempt stands now, read back from the record
+    /// so the frame says exactly what a reload would.
+    fn announce(&self) {
+        match self.store.publication(self.id) {
+            Ok(Some(row)) => {
+                self.bus
+                    .publish(crate::stream::Frame::Publication(publication_progress(
+                        &row,
+                    )))
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, "could not read a publication to announce it"),
+        }
+    }
 }
 
 impl crate::review::publish::Journal for StoreJournal<'_> {
+    fn steps(&self, steps: &[crate::review::publish::Step]) {
+        let json = serde_json::to_string(steps).unwrap_or_else(|_| "[]".into());
+        match self.store.publication_steps(self.id, &json) {
+            Ok(()) => self.announce(),
+            Err(error) => tracing::warn!(%error, "could not record a publication's steps"),
+        }
+    }
+
+    fn step(&self, step: crate::review::publish::Step) {
+        match self.store.publication_step(self.id, step.as_str()) {
+            Ok(()) => self.announce(),
+            Err(error) => tracing::warn!(%error, "could not record a publication's step"),
+        }
+    }
+
     fn contacting(&self) -> Result<(), String> {
         self.store
             .publication_contacting(self.id)
@@ -264,20 +298,53 @@ impl crate::review::publish::Journal for StoreJournal<'_> {
     fn opened(&self, url: &str) -> Result<(), String> {
         self.store
             .publication_opened(self.id, url)
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        self.announce();
+        Ok(())
     }
 
     fn uncertain(&self, note: &str) {
-        if let Err(error) = self.store.publication_uncertain(self.id, note) {
-            tracing::error!(%error, "could not record an uncertain publication");
+        match self.store.publication_uncertain(self.id, note) {
+            Ok(()) => self.announce(),
+            Err(error) => tracing::error!(%error, "could not record an uncertain publication"),
         }
     }
 
     fn failed(&self, note: &str) {
-        if let Err(error) = self.store.publication_failed(self.id, note) {
-            tracing::error!(%error, "could not record a failed publication");
+        match self.store.publication_failed(self.id, note) {
+            Ok(()) => self.announce(),
+            Err(error) => tracing::error!(%error, "could not record a failed publication"),
         }
     }
+}
+
+/// Where a publication attempt stands, as the review page follows it: the
+/// step it is on (or stopped at), since when, the steps it planned, how it
+/// ended and why. The same fields are on the review's `publication.latest`
+/// (`publication_view`), so a page loaded mid-attempt starts from what a
+/// frame would have said.
+pub fn publication_progress(row: &crate::store::PublicationRow) -> serde_json::Value {
+    use crate::store::PublicationOutcome as O;
+    let outcome = row.outcome(crate::process::instance_id());
+    serde_json::json!({
+        "id": row.id,
+        "review_id": row.review_id,
+        "node_id": row.node_id,
+        "provider": row.provider,
+        "branch": row.branch,
+        "outcome": outcome,
+        "step": row.step,
+        "step_started_ms": row.step_started_ms,
+        "steps": row.steps(),
+        "reason": match outcome {
+            O::Failed | O::NotAttempted | O::Uncertain => row.note.clone(),
+            O::InProgress | O::Published => None,
+        },
+        "url": match outcome {
+            O::Published => row.result.clone(),
+            _ => None,
+        },
+    })
 }
 
 /// One publication's identity: the same review, revision, target and commit
@@ -468,6 +535,9 @@ pub fn publication_view(
         "recoverable": matches!(outcome, O::NotAttempted | O::Failed | O::Uncertain)
             && refusal.is_none(),
         "refusal": refusal,
+        "step": row.step,
+        "step_started_ms": row.step_started_ms,
+        "steps": row.steps(),
     })
 }
 
@@ -765,6 +835,7 @@ pub async fn publish_review(
     let journal = StoreJournal {
         store: ctx.store,
         id: &publication_id,
+        bus: ctx.manager.bus(),
     };
     match crate::review::publish::publish(
         ctx.broker,
@@ -1046,6 +1117,7 @@ pub async fn reconcile_publication(
     StoreJournal {
         store: ctx.store,
         id: &row.id,
+        bus: ctx.manager.bus(),
     }
     .opened(&url)
     .map_err(PublishError::External)?;

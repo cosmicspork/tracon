@@ -6,6 +6,8 @@
   import CommitMessage from '../components/CommitMessage.svelte'
   import ShownWork from '../components/ShownWork.svelte'
   import CheckDetail from '../components/CheckDetail.svelte'
+  import PublicationSteps from '../components/PublicationSteps.svelte'
+  import { fromView, latestProgress } from '../lib/publicationSteps'
   import { tick } from 'svelte'
   import CloseTask from '../components/CloseTask.svelte'
   import DirectPush from '../components/DirectPush.svelte'
@@ -126,6 +128,8 @@
   /** The branch a new change is pushed to. */
   let branchName = $state('')
   let busy = $state(false)
+  /** An approval or a retry of one is publishing from this screen now. */
+  let approving = $state(false)
   let error = $state<string | null>(null)
   /** Why the peer that owns this review would not start its reviewer, shown beside the control. */
   let reviewerRefusal = $state<string | null>(null)
@@ -351,6 +355,14 @@
   const publishing = $derived(review?.state === 'publishing')
   /** Decided and done: nothing on this screen is sent any more. */
   const closed = $derived(review !== null && (CLOSED_STATES as readonly string[]).includes(review.state))
+  /** The latest publication step this tab heard for the review, from the stream. */
+  const liveProgress = $derived(store.publications.get(id) ?? null)
+  /** Where the latest publication stands: the stream's word or the record's, whichever is newer. */
+  const progress = $derived(
+    latestProgress(liveProgress, publication?.latest ? fromView(publication.latest, id) : null),
+  )
+  /** An attempt is running, here or approved on another device: its steps show in the decision area. */
+  const publishingNow = $derived(approving || (progress?.outcome === 'in_progress' && !closed))
   /** Where the approval landed, when it reached the forge. */
   const landed = $derived(
     review?.state === 'approved'
@@ -655,11 +667,43 @@
       ?.scrollIntoView({ block: 'start', behavior: 'smooth' })
   }
 
+  // An attempt approved on another device, or before this page was opened,
+  // ends here as it ends there: the review is read again once it settles.
+  let followed: string | null = null
+  $effect(() => {
+    const p = liveProgress
+    if (!p || approving || p.outcome === 'in_progress') return
+    const key = `${p.id}:${p.outcome}:${p.step}`
+    if (key === followed) return
+    followed = key
+    void reread()
+  })
+
+  /** After a publish, the link it landed on stays in view for this long before the page moves on. */
+  const PUBLISHED_BEAT_MS = 1500
+
+  /** Leave the decided review, after a beat on the published link when the steps were showing. */
+  async function leavePublished(published: string | undefined, sessionId: string | null) {
+    if (published && liveProgress?.outcome === 'published') {
+      await new Promise((r) => setTimeout(r, PUBLISHED_BEAT_MS))
+    }
+    leaveAfterVerdict(router, {
+      reviewId: id,
+      from: openedFrom,
+      fallback: published && sessionId ? `/sessions/${sessionId}` : '/',
+    })
+  }
+
   async function decide(verdict: 'approve' | 'reject' | 'revise') {
     if (!review || publishing) return
     busy = true
     error = null
     draftSync?.stop()
+    if (verdict === 'approve') {
+      // The steps shown are this attempt's, never an earlier one's.
+      store.forgetPublication(id)
+      approving = true
+    }
     try {
       decided = true
       const res = await api.decideReview(id, {
@@ -696,11 +740,7 @@
       // The outcome is on the review and on the session, so a verdict that
       // finishes after the operator has gone to read something else leaves
       // them there rather than hauling them back.
-      leaveAfterVerdict(router, {
-        reviewId: id,
-        from: openedFrom,
-        fallback: res.published && review.session_id ? `/sessions/${review.session_id}` : '/',
-      })
+      await leavePublished(res.published, review.session_id)
     } catch (e) {
       error = e instanceof Error ? e.message : String(e)
       // Nothing was decided, so what was written is still a draft.
@@ -711,6 +751,7 @@
       if (verdict === 'approve') await reread()
     } finally {
       busy = false
+      approving = false
     }
   }
 
@@ -801,20 +842,19 @@
     if (!review || !latest) return
     busy = true
     error = null
+    store.forgetPublication(id)
+    approving = true
     try {
       decided = true
       const res = await api.recoverPublication(id, latest.id)
       await store.refetch()
-      leaveAfterVerdict(router, {
-        reviewId: id,
-        from: openedFrom,
-        fallback: res.published && review.session_id ? `/sessions/${review.session_id}` : '/',
-      })
+      await leavePublished(res.published, review.session_id)
     } catch (e) {
       error = e instanceof Error ? e.message : String(e)
       await reread()
     } finally {
       busy = false
+      approving = false
     }
   }
 
@@ -1169,11 +1209,12 @@
       changes requested <b>· waiting on the agent to resubmit · {review.verdict_reason}</b>
     </div>
   {/if}
-  {#if settled}
+  {#if settled && !publishingNow}
     <div class="banner crit">
       {OUTCOME[settled.outcome]}
       <b>· {settled.note ?? `${settled.provider} ${settled.project} · ${settled.branch}`}</b>
     </div>
+    <PublicationSteps reviewId={id} live={liveProgress} loaded={settled} />
     <div class="recover">
       {#if settled.recoverable}
         <span class="note">{settled.remedy}</span>
@@ -1185,7 +1226,7 @@
         {@render publishedAt()}
       {/if}
     </div>
-  {:else if publishing}
+  {:else if publishing && !publishingNow}
     <div class="banner crit">
       publication outcome requires reconciliation <b>· this review may have reached the forge; do not approve, revise, or reject it again</b>
     </div>
@@ -1492,6 +1533,11 @@
   <div class="decide" role="group" aria-label="Verdict">
     {#if error}
       <div class="banner crit">refused <b>· {error}</b></div>
+    {/if}
+    {#if publishingNow && !remoteOwner}
+      <!-- While approving, only this attempt's steps: the record loaded
+           before it is an earlier attempt's. -->
+      <PublicationSteps reviewId={id} live={liveProgress} loaded={approving ? null : (publication?.latest ?? null)} />
     {/if}
     {#if draftState === 'conflict'}
       <div class="banner crit draft-conflict">

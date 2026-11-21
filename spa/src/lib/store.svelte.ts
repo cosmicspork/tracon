@@ -22,6 +22,7 @@ import type {
   OperatorQuestion,
   Permission,
   ProviderInfo,
+  PublicationProgress,
   RecipeOffer,
   Queue,
   Review,
@@ -69,6 +70,8 @@ class Store {
   /** Repository recipes other nodes offered this one, every state. */
   offers = $state<RecipeOffer[]>([])
   sessions = $state<Map<string, Session>>(new Map())
+  /** The latest step of each review's publication attempt this tab heard, by review id. */
+  publications = $state<Map<string, PublicationProgress>>(new Map())
   /** Persisted events for the session that is open on screen. */
   events = $state<Event[]>([])
   openSession = $state<string | null>(null)
@@ -204,6 +207,7 @@ class Store {
       'name',
       'awake',
       'restart',
+      'publication',
     ] as const) {
       source.addEventListener(name, (m) => this.onFrame(JSON.parse((m as MessageEvent).data)))
     }
@@ -444,6 +448,13 @@ class Store {
         this.restart = frame
         break
       }
+      case 'publication': {
+        const { type: _, ...progress } = frame
+        const next = new Map(this.publications)
+        next.set(progress.review_id, progress)
+        this.publications = next
+        break
+      }
       case 'name': {
         applyOperatorName(frame.kind, frame.id, frame.name)
         break
@@ -478,6 +489,14 @@ class Store {
 
   waitingFor(sessionId: string): Permission[] {
     return this.queue.waiting.filter((p) => p.session_id === sessionId)
+  }
+
+  /** Forget what this tab heard of a review's publication, before a new attempt at it. */
+  forgetPublication(reviewId: string) {
+    if (!this.publications.has(reviewId)) return
+    const next = new Map(this.publications)
+    next.delete(reviewId)
+    this.publications = next
   }
 
   reviewsFor(sessionId: string): Review[] {

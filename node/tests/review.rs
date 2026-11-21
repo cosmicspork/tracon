@@ -9609,3 +9609,199 @@ async fn a_rejected_direct_push_surfaces_the_forges_message_and_publishes_nothin
     assert!(record.pushed_sha.is_none() && record.result.is_none());
     assert_ne!(f.store.get_review(&id).unwrap().unwrap().state, "approved");
 }
+
+// ---- each publication step, as it runs (#1040) ----
+
+/// Every `publication` frame the bus carried for `id`'s publication, in the
+/// order it carried them.
+fn publication_frames(
+    rx: &mut tokio::sync::broadcast::Receiver<tracon::stream::Frame>,
+    id: &str,
+) -> Vec<Value> {
+    let mut frames = Vec::new();
+    while let Ok(frame) = rx.try_recv() {
+        if let tracon::stream::Frame::Publication(progress) = frame {
+            if progress["review_id"] == id {
+                frames.push(progress);
+            }
+        }
+    }
+    frames
+}
+
+/// The steps the frames went through, each once, in the order they began.
+fn steps_taken(frames: &[Value]) -> Vec<String> {
+    let mut steps: Vec<String> = Vec::new();
+    for frame in frames {
+        if let Some(step) = frame["step"].as_str() {
+            if steps.last().map(String::as_str) != Some(step) {
+                steps.push(step.to_string());
+            }
+        }
+    }
+    steps
+}
+
+/// The steps the attempt said it would run, as it last said them.
+fn steps_planned(frames: &[Value]) -> Vec<String> {
+    frames
+        .iter()
+        .rev()
+        .find_map(|frame| frame["steps"].as_array().filter(|steps| !steps.is_empty()))
+        .map(|steps| {
+            steps
+                .iter()
+                .map(|s| s.as_str().unwrap().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A new pull request is pushed, the push confirmed, the change opened and
+/// the publication published, in that order, each told on the stream as it
+/// begins; the review then reads the same steps back from the record.
+#[tokio::test]
+async fn a_new_pull_request_tells_each_step_in_order_as_it_runs() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = f.submit().await;
+    let mut rx = f.manager.bus().subscribe();
+
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let frames = publication_frames(&mut rx, &id);
+    let planned = [
+        "verifying",
+        "inspecting_forge",
+        "pushing",
+        "confirming_push",
+        "opening_change",
+        "published",
+    ];
+    assert_eq!(steps_planned(&frames), planned, "{frames:?}");
+    assert_eq!(steps_taken(&frames), planned, "{frames:?}");
+    // Running until the last, published with its link at the end.
+    let (last, running) = frames.split_last().unwrap();
+    assert!(
+        running.iter().all(|f| f["outcome"] == "in_progress"),
+        "{frames:?}"
+    );
+    assert_eq!(last["outcome"], "published");
+    assert_eq!(last["url"], "https://github.test/pull/1");
+
+    let record = f.publication(&id);
+    assert_eq!(record.step.as_deref(), Some("published"));
+    assert_eq!(record.steps(), planned);
+    assert!(record.step_started_ms.is_some());
+}
+
+/// A push straight to the base opens nothing, so no step says it does.
+#[tokio::test]
+async fn a_direct_push_plans_no_change_to_open() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = review_id(&submit_direct(&f, json!({})).await);
+    let mut rx = f.manager.bus().subscribe();
+
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let frames = publication_frames(&mut rx, &id);
+    let planned = [
+        "verifying",
+        "inspecting_forge",
+        "pushing",
+        "confirming_push",
+        "published",
+    ];
+    assert_eq!(steps_planned(&frames), planned, "{frames:?}");
+    assert_eq!(steps_taken(&frames), planned, "{frames:?}");
+}
+
+/// A forge that refuses to open the change stops the attempt at
+/// `opening_change`, and the reason is beside that step on the stream, in the
+/// record and on the review page's publication.
+#[tokio::test]
+async fn a_forge_that_refuses_the_change_stops_at_opening_it_with_the_reason() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    std::fs::write(
+        f.dir.join("bin/gh"),
+        "#!/bin/sh\n\
+         echo \"ARGS: $*\" >> \"$(dirname \"$0\")/../gh.log\"\n\
+         echo 'HTTP 422: a pull request needs a reviewer it cannot have' >&2\n\
+         exit 1\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(f.dir.join("bin/gh"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+    }
+    let id = f.submit().await;
+    let mut rx = f.manager.bus().subscribe();
+
+    let (status, body) = f.approve(&id).await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+
+    let frames = publication_frames(&mut rx, &id);
+    assert_eq!(
+        steps_taken(&frames).last().map(String::as_str),
+        Some("opening_change"),
+        "{frames:?}"
+    );
+    let last = frames.last().unwrap();
+    assert_eq!(last["outcome"], "failed", "{last}");
+    assert_eq!(last["step"], "opening_change", "{last}");
+    assert!(
+        last["reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("needs a reviewer it cannot have")),
+        "{last}"
+    );
+
+    let record = f.publication(&id);
+    assert_eq!(record.state, "failed");
+    assert_eq!(record.step.as_deref(), Some("opening_change"));
+    let (status, page) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let latest = &page["publication"]["latest"];
+    assert_eq!(latest["step"], "opening_change", "{latest}");
+    assert_eq!(latest["outcome"], "failed", "{latest}");
+    assert!(latest["steps"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("opening_change")));
+}
+
+/// A recovery whose push the earlier attempt confirmed plans no push: its
+/// list starts past it.
+#[tokio::test]
+async fn a_resumed_publication_after_a_confirmed_push_plans_no_second_push() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = f.submit().await;
+    let head = f.store.get_review(&id).unwrap().unwrap().head_sha;
+    sh(
+        &f.dir.join("wt"),
+        &format!("git push -q origin {head}:refs/heads/feat/x"),
+    );
+    gh_that_lists(&f, "[]");
+    f.interrupted_attempt(&id, "opening", Some(&head));
+    let mut rx = f.manager.bus().subscribe();
+
+    let (status, body) = f.approve(&id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let frames = publication_frames(&mut rx, &id);
+    let planned = [
+        "verifying",
+        "inspecting_forge",
+        "opening_change",
+        "published",
+    ];
+    assert_eq!(steps_planned(&frames), planned, "{frames:?}");
+    assert_eq!(steps_taken(&frames), planned, "{frames:?}");
+}

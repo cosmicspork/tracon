@@ -1580,7 +1580,19 @@ change at that commit whose text differs, or more than one that matches, is not
 guessed between. A comment is recognised the same way, by its approved text.
 A forge that cannot be reached, or an answer that does not settle which change
 is this publication's, is recorded as `uncertain` rather than reported as
-either success or failure. The review screen shows the latest record as one of
+either success or failure. Beside its state, the record keeps which step the
+attempt is on (checking the reviewed commit, preparing the commit, looking at
+the forge, pushing, confirming the push, opening or updating the change,
+marking it ready, commenting, published), since when, and the steps this
+publication will run, worked out before it starts: a first commit or a direct
+push opens no change, only a squash or a reword prepares a commit, and a
+resumed attempt whose push the forge was seen to keep does not list pushing
+again. Each step is announced on the node's stream as a `publication` frame
+(not forwarded on the mesh), so the review screen ticks through them after
+Approve, shows the elapsed time of a slow one, and on a failure marks the step
+it stopped at with its reason; a page loaded mid-attempt, or on another
+device, starts from the record. The step names are a fixed set and the words
+for them are the interface's. The review screen shows the latest record as one of
 not attempted (refused before anything spoke to the forge), in progress,
 failed, uncertain or published, with its remedy, and says before approval
 whether a forge token is bound to the channel on this node — a binding, never
