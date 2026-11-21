@@ -751,6 +751,11 @@ JSON-RPC error whose `data` is `{"stale": true}` (jira-review uses code `-32002`
 node keys on `data.stale` alone). The node then fails the approval as stale rather than
 uncertain, and the agent calls again for a fresh card.
 
+The node also asks `tracon/preview` once more when the operator allows the card. If the
+token it answers differs from the one the operator read, the Allow is refused and the
+card reloads with the new preview; nothing is called. Keep your preview a pure read so
+this costs nothing, and keep the check above: a change can still land after it.
+
 The operator may edit the arguments on the card. The page then asks you for a preview of
 the call as edited, once edits pause, and that preview's token replaces the kept one; the
 operator cannot allow the call until the preview shown is of the edited call. So the

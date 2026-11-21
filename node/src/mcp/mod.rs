@@ -1196,7 +1196,6 @@ impl Tools {
         approval: &crate::store::approvals::ApprovalRow,
         args: &Value,
     ) -> Option<Value> {
-        use crate::plugin::context;
         let access = self.session.get()?;
         if approval.state != crate::store::approvals::PENDING
             || approval.node_id != access.manager.node_id()
@@ -1231,61 +1230,18 @@ impl Tools {
             }
             out
         };
-        let ctx = self.approval_call_context(access, approval);
-        let parts = match self.plugin_call_parts(&ctx, &pt, args, None).await {
-            Ok(parts) => parts,
+        let result = match self.ask_preview(access, approval, &pt, args).await {
+            Ok(Some(result)) => result,
+            Ok(None) => {
+                keep(None, None);
+                return blocked.map(|why| json!({ "allow_blocked": why }));
+            }
             Err(error) => {
                 keep(None, None);
                 return Some(refused(error));
             }
         };
-        let supervisor = access.manager.plugins();
-        let endpoint = &parts.lease.endpoint;
-        let args = pt.forwarded(args);
-        let args = args.as_ref();
-        let draft = context::Draft {
-            plugin: &pt.plugin,
-            token: &endpoint.token,
-            tool: &pt.tool,
-            arguments: args,
-            caller: &parts.caller,
-            channel: &approval.channel,
-            approval_id: None,
-            preview_token: None,
-            credentials: &parts.credentials,
-        };
         let label = format!("plugin {}", pt.plugin);
-        let answer = self
-            .upstream
-            .plugin_request(
-                endpoint,
-                &pt.plugin,
-                &approval.channel,
-                PREVIEW_METHOD,
-                || {
-                    let meta =
-                        context::build(&draft, crate::store::now_ms(), |b| supervisor.sign(b))
-                            .map_err(upstream::Failure::NotSent)?;
-                    Ok(json!({
-                        "name": pt.tool,
-                        "arguments": args,
-                        "_meta": { "tracon": meta },
-                    }))
-                },
-                parts.timeout.min(PREVIEW_TIMEOUT),
-            )
-            .await;
-        let result = match answer {
-            Ok(result) => result,
-            Err(upstream::Failure::Rpc { code, .. }) if code == upstream::METHOD_NOT_FOUND => {
-                keep(None, None);
-                return blocked.map(|why| json!({ "allow_blocked": why }));
-            }
-            Err(failure) => {
-                keep(None, None);
-                return Some(refused(failure.describe(&label)));
-            }
-        };
         match preview_shape(&result) {
             Ok(preview) => {
                 // What the operator reads, kept with the approval so its
@@ -1324,6 +1280,64 @@ impl Tools {
                     "{label} answered a preview the contract does not allow: {error}"
                 )))
             }
+        }
+    }
+
+    /// Ask the plugin behind `pt` for `tracon/preview` of `args` as
+    /// `approval`'s call would be made: what it answered, `None` when it
+    /// offers no previews, or why it gave none. Nothing is kept.
+    async fn ask_preview(
+        &self,
+        access: &SessionAccess,
+        approval: &crate::store::approvals::ApprovalRow,
+        pt: &PluginTool,
+        args: &Value,
+    ) -> Result<Option<Value>, String> {
+        use crate::plugin::context;
+        let ctx = self.approval_call_context(access, approval);
+        let parts = self.plugin_call_parts(&ctx, pt, args, None).await?;
+        let supervisor = access.manager.plugins();
+        let endpoint = &parts.lease.endpoint;
+        let args = pt.forwarded(args);
+        let args = args.as_ref();
+        let draft = context::Draft {
+            plugin: &pt.plugin,
+            token: &endpoint.token,
+            tool: &pt.tool,
+            arguments: args,
+            caller: &parts.caller,
+            channel: &approval.channel,
+            approval_id: None,
+            preview_token: None,
+            credentials: &parts.credentials,
+        };
+        let label = format!("plugin {}", pt.plugin);
+        let answer = self
+            .upstream
+            .plugin_request(
+                endpoint,
+                &pt.plugin,
+                &approval.channel,
+                PREVIEW_METHOD,
+                || {
+                    let meta =
+                        context::build(&draft, crate::store::now_ms(), |b| supervisor.sign(b))
+                            .map_err(upstream::Failure::NotSent)?;
+                    Ok(json!({
+                        "name": pt.tool,
+                        "arguments": args,
+                        "_meta": { "tracon": meta },
+                    }))
+                },
+                parts.timeout.min(PREVIEW_TIMEOUT),
+            )
+            .await;
+        match answer {
+            Ok(result) => Ok(Some(result)),
+            Err(upstream::Failure::Rpc { code, .. }) if code == upstream::METHOD_NOT_FOUND => {
+                Ok(None)
+            }
+            Err(failure) => Err(failure.describe(&label)),
         }
     }
 
@@ -3617,6 +3631,26 @@ impl Tools {
         // wrote the words.
         let edited = answer.arguments.as_ref().map(Value::to_string);
         let run_args = answer.arguments.unwrap_or(original);
+        // What the operator read was a preview taken when the card opened.
+        // Taken again now, so a target that has moved since (another card
+        // changed the same row) is refused here, before anything is
+        // decided, and the page shows the fresh preview. A preview that
+        // cannot be taken now leaves it to the plugin's own check at
+        // dispatch, which also catches a change that lands after this.
+        if let Some(kept) = preview_token.as_deref() {
+            if let Some(pt) = self.plugin_tool(&approval.tool) {
+                if let Ok(Some(fresh)) = self.ask_preview(access, &approval, &pt, &run_args).await {
+                    let token = preview_shape(&fresh).ok().and_then(|p| p.token);
+                    if token.is_some_and(|token| token != kept) {
+                        return Err(SessionError::Stale(
+                            "what this call changes moved since you read its preview; nothing \
+                             was decided. Review the fresh preview and answer again"
+                                .into(),
+                        ));
+                    }
+                }
+            }
+        }
         // Bound to the arguments read above, which are what runs unless the
         // operator rewrote them: a row changed in between is not decided.
         let decision = Decision {

@@ -20,9 +20,11 @@
   import SetupCard from '../components/SetupCard.svelte'
   import SignInBanner from '../components/SignInBanner.svelte'
   import { api } from '../lib/api'
+  import { feed, notRunLine, NOT_RUN_SHOWN } from '../lib/allowed-outcome'
   import { attention, type Thread } from '../lib/attention'
   import { defaultChannel, rememberedChannel } from '../lib/channel'
   import { clock } from '../lib/clock.svelte'
+  import { formatAge } from '../lib/format'
   import { combineLoads, hasAnswer, loadPhase } from '../lib/load'
   import { eligibleNodes, modelsForChannel } from '../lib/nodes'
   import { router } from '../lib/router.svelte'
@@ -48,6 +50,16 @@
     }),
   )
   const refreshInterventions = () => void store.refreshInterventions()
+  // Allowed calls that did not run, until each is opened: an operator who
+  // left before the run ended learns it here as well as from the toast.
+  const notRun = $derived(
+    feed(
+      (store.queue.failed ?? []).map((f) => ({ ...f, at_ms: f.finished_ms ?? 0 })),
+      store.settled,
+      store.seenOutcomes,
+      NOT_RUN_SHOWN,
+    ),
+  )
   let notifications = $state<{ notification_id: string; attempts: { device_id: string; outcome: string }[] }[]>([])
   onMount(() => {
     const refresh = () =>
@@ -233,6 +245,18 @@
 {@render lane(bay.agent, 'With the agent', 'nothing to decide until it comes back')}
 {@render lane(bay.external, 'Outside this node', 'in flight, or waiting on something to return')}
 
+{#if notRun.length}
+  <div class="h4">Allowed, didn't run <b>{notRun.length} · until you open it</b></div>
+  <div class="rows">
+    {#each notRun as o (o.id)}
+      <a class="notrun" href="/approvals/{o.id}">
+        <span>{notRunLine(o)}</span>
+        <span class="mono">{formatAge(o.at_ms, clock.now)} ago</span>
+      </a>
+    {/each}
+  </div>
+{/if}
+
 {#if notifications.length}
   <details class="deliveries">
     <summary>Notification delivery attempts</summary>
@@ -297,5 +321,21 @@
   }
   .h4 .r .lnk {
     font-size: 12.5px;
+  }
+  .notrun {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 12px;
+    background: var(--s1);
+    box-shadow: inset 2px 0 0 var(--crit);
+    color: var(--ink);
+    text-decoration: none;
+    font: 13px var(--sans);
+  }
+  .notrun .mono {
+    color: var(--dim);
+    font: 11.5px var(--mono);
+    flex: none;
   }
 </style>

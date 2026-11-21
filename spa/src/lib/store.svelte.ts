@@ -10,9 +10,11 @@ import { applyOperatorName, setOperatorNames } from './names'
 import { LOADING, refetchOnOpen, settledLoad, type LoadStatus } from './load'
 import { applySessionFrame } from './queue'
 import { allAnswered, kept, wantsLogin } from './snapshot'
+import { loadSeen, saveSeen, settledFrom, type AllowedOutcome } from './allowed-outcome'
 import type {
   ChannelInfo,
   Event,
+  ExternalEvent,
   Frame,
   AwakeState,
   MeshState,
@@ -40,6 +42,8 @@ const INTERVENTION_POLL_MS = 5000
 // app, or bringing it back from the background on a phone, always starts with
 // the stream down for a moment; that is not a lost connection.
 const STREAM_LOST_GRACE_MS = 5000
+// Outcomes of allowed calls kept from the stream, newest first.
+const MAX_SETTLED = 50
 
 type Snapshot = 'nodes' | 'mesh' | 'channels' | 'queue' | 'sessions' | 'providers'
 
@@ -77,6 +81,11 @@ class Store {
   openSession = $state<string | null>(null)
   /** Live text not yet persisted, keyed by messageId. */
   openChunks = $state<Map<string, { kind: string; text: string }>>(new Map())
+  /** How allowed calls ended, as the stream said, newest first: the
+      approval page waits on these, and the shell toasts one that did not run. */
+  settled = $state<AllowedOutcome[]>([])
+  /** Not-run outcomes this browser opened: the home feed stops listing them. */
+  seenOutcomes = $state<Set<string>>(loadSeen())
   /** Latest ephemeral status per tool call. */
   toolProgress = $state<Map<string, string>>(new Map())
   /** What a running call has printed so far, for a stream that carries it. */
@@ -211,6 +220,11 @@ class Store {
     ] as const) {
       source.addEventListener(name, (m) => this.onFrame(JSON.parse((m as MessageEvent).data)))
     }
+    // An external lane's log: read here only for how an allowed call ended.
+    source.addEventListener('external_event', (m) => {
+      const e = JSON.parse((m as MessageEvent).data) as ExternalEvent
+      this.noteSettled(settledFrom(e.kind, e.ref_id, e.payload, e.at_ms))
+    })
   }
 
   async refetch() {
@@ -365,6 +379,7 @@ class Store {
     switch (frame.type) {
       case 'event': {
         this.lastSeq = Math.max(this.lastSeq, frame.seq)
+        this.noteSettled(settledFrom(frame.kind, frame.ref_id, frame.payload, frame.at_ms, frame.session_id))
         if (frame.session_id === this.openSession) {
           if (!this.events.some((e) => e.seq === frame.seq)) {
             // Mirrored history can arrive out of order (a backfill lands after
@@ -475,6 +490,21 @@ class Store {
     } catch {
       // Keep what was shown.
     }
+  }
+
+  /** An allowed call ended: kept for whoever is waiting on it. */
+  private noteSettled(outcome: AllowedOutcome | null) {
+    if (!outcome) return
+    this.settled = [outcome, ...this.settled.filter((o) => o.id !== outcome.id)].slice(0, MAX_SETTLED)
+  }
+
+  /** The operator opened a call that did not run: the feed lets it go. */
+  markOutcomeSeen(id: string) {
+    if (this.seenOutcomes.has(id)) return
+    const next = new Set(this.seenOutcomes)
+    next.add(id)
+    this.seenOutcomes = next
+    saveSeen(next)
   }
 
   private showReconnected(delivered: number) {

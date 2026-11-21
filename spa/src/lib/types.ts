@@ -1668,6 +1668,22 @@ export interface Queue {
   promotions: Promotion[]
   running: Session[]
   ended: Session[]
+  /** Allowed calls that ended failed or uncertain in the last day, newest
+      first. Absent from an older node. */
+  failed?: FailedAllowed[]
+}
+
+/** An allowed call that did not run, or may not have, as the queue lists it. */
+export interface FailedAllowed {
+  id: string
+  tool: string
+  title: string
+  channel: string
+  session_id: string | null
+  state: 'failed' | 'uncertain'
+  reason: string | null
+  stale: boolean
+  finished_ms: number | null
 }
 
 /** A document as the node keeps it. `body` is empty in listings. */
