@@ -1276,10 +1276,14 @@ impl Tools {
         match preview_shape(&result) {
             Ok(preview) => {
                 keep(preview.token, true);
-                // The plugin's own one line titles the card, once it is of
-                // the call as asked rather than an operator's edit of it.
+                // The plugin's own one line titles the card, behind the call
+                // as the node reads it, once it is of the call as asked
+                // rather than an operator's edit of it.
                 if shown_for == approval.arguments_hash() {
-                    if let Some(title) = preview_title(&pt.plugin, preview.summary) {
+                    let asked = serde_json::from_str(&approval.arguments).unwrap_or(Value::Null);
+                    if let Some(title) =
+                        preview_title(&pt.plugin, &pt.tool, &asked, preview.summary)
+                    {
                         match access.store.set_approval_title(&approval.id, &title) {
                             Ok(true) => access.manager.publish_queue().await,
                             Ok(false) => {}
@@ -4566,27 +4570,28 @@ fn retired(name: &str) -> Option<String> {
 /// carries, in characters.
 const PLUGIN_TITLE_EXCERPT: usize = 120;
 
-/// A plugin call's card title before its preview is shown: the plugin and
-/// its tool, what it targets (its `profile` or `key` argument), and the first
-/// line of the statement or text it carries (`sql`, `summary` or `body`),
-/// bounded. Never its other arguments, so bind `params` stay off the card
-/// and out of the push.
-pub fn plugin_title(plugin: &str, tool: &str, args: &Value) -> String {
-    let text = |key: &str| {
-        args.get(key)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-    };
-    let mut title = format!("{plugin}: {tool}");
-    if let Some(profile) = text("profile").and_then(first_line) {
-        title.push_str(&format!(" on {profile}"));
-    } else if let Some(key) = text("key").and_then(first_line) {
-        title.push_str(&format!(" {key}"));
+/// What a plugin call is, as the node reads it from the call's arguments:
+/// its tool and what it targets (` on <profile>`, or its `key`). Every title
+/// of a plugin's card starts with the plugin's name and this, so the plugin's
+/// own words never stand in for which tool runs where.
+fn plugin_call(tool: &str, args: &Value) -> String {
+    let text = |key: &str| args.get(key).and_then(Value::as_str).and_then(first_line);
+    match (text("profile"), text("key")) {
+        (Some(profile), _) => format!("{tool} on {profile}"),
+        (None, Some(key)) => format!("{tool} {key}"),
+        (None, None) => tool.to_string(),
     }
+}
+
+/// A plugin call's card title before its preview is shown: the plugin and
+/// its call ([`plugin_call`]), and the first line of the statement or text
+/// it carries (`sql`, `summary` or `body`), bounded. Never its other
+/// arguments, so bind `params` stay off the card and out of the push.
+pub fn plugin_title(plugin: &str, tool: &str, args: &Value) -> String {
+    let mut title = format!("{plugin}: {}", plugin_call(tool, args));
     if let Some(line) = ["sql", "summary", "body"]
         .into_iter()
-        .find_map(|key| text(key).and_then(first_line))
+        .find_map(|key| args.get(key).and_then(Value::as_str).and_then(first_line))
     {
         title.push_str(" · ");
         title.push_str(&excerpt(line, PLUGIN_TITLE_EXCERPT));
@@ -4595,18 +4600,26 @@ pub fn plugin_title(plugin: &str, tool: &str, args: &Value) -> String {
     title
 }
 
-/// A plugin call's card title from its shown preview: the first line of the
-/// preview's `summary`, after the plugin's name unless it already starts
-/// with it. `None` for a blank summary, which leaves the title it had.
-pub fn preview_title(plugin: &str, summary: &str) -> Option<String> {
+/// A plugin call's card title from its shown preview: the plugin and its
+/// call ([`plugin_call`]), then the first line of the preview's `summary`
+/// in place of the call's own text. A summary that names its plugin first
+/// is not prefixed twice, and one that already opens with the call
+/// (jira-review's `update WRK-12 on <site>`) stands for it. `None` for a
+/// blank summary, which leaves the title it had.
+pub fn preview_title(plugin: &str, tool: &str, args: &Value, summary: &str) -> Option<String> {
     let line = first_line(summary)?;
-    let named = line
+    let line = line
         .strip_prefix(plugin)
-        .is_some_and(|rest| rest.is_empty() || rest.starts_with([':', ' ']));
-    let mut title = if named {
-        line.to_string()
-    } else {
-        format!("{plugin}: {line}")
+        .and_then(|rest| rest.strip_prefix(':').or_else(|| rest.strip_prefix(' ')))
+        .and_then(first_line)
+        .unwrap_or(line);
+    let call = plugin_call(tool, args);
+    let opens_with_call = line
+        .strip_prefix(call.as_str())
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace));
+    let mut title = match opens_with_call {
+        true => format!("{plugin}: {line}"),
+        false => format!("{plugin}: {call} · {line}"),
     };
     bound(&mut title);
     Some(title)
@@ -4950,23 +4963,57 @@ mod tests {
         );
     }
 
-    /// A shown preview's one line titles the card, after its plugin's name.
+    /// A shown preview's one line titles the card, behind the plugin and
+    /// the call as the node read it: a summary can add to the title but
+    /// not change which tool runs where.
     #[test]
     fn a_preview_summary_titles_a_plugin_call() {
+        let write = json!({ "profile": "tst", "params": { "v": "PlugTestA" }, "sql": "UPDATE t" });
+        // sql-review's summary is the statement and its rows.
+        assert_eq!(
+            preview_title(
+                "sql-review",
+                "write",
+                &write,
+                "UPDATE t SET a = :v (1 row(s))\nmore"
+            )
+            .as_deref(),
+            Some("sql-review: write on tst · UPDATE t SET a = :v (1 row(s))")
+        );
+        // jira-review's opens with the call, so it is not said twice.
+        let update = json!({ "key": "WRK-12", "summary": "New title" });
         assert_eq!(
             preview_title(
                 "jira-review",
+                "update",
+                &update,
                 "update WRK-12 on https://example.atlassian.net"
             )
             .as_deref(),
             Some("jira-review: update WRK-12 on https://example.atlassian.net")
         );
+        // A summary that names another target leaves the call's own in front.
         assert_eq!(
-            preview_title("sql-review", "sql-review: write on tst (1 row)\nmore").as_deref(),
-            Some("sql-review: write on tst (1 row)")
+            preview_title("jira-review", "update", &update, "update WRK-120 on site").as_deref(),
+            Some("jira-review: update WRK-12 · update WRK-120 on site")
         );
-        assert_eq!(preview_title("fake", " \n "), None);
-        let long = preview_title("fake", &"y".repeat(1000)).unwrap();
+        // Nor can it pose as another tool or profile.
+        assert_eq!(
+            preview_title(
+                "sql-review",
+                "write",
+                &write,
+                "sql-review: query on dev (0 rows)"
+            )
+            .as_deref(),
+            Some("sql-review: write on tst · query on dev (0 rows)")
+        );
+        assert_eq!(
+            preview_title("sql-review", "write", &write, "jira-review: update WRK-1").as_deref(),
+            Some("sql-review: write on tst · jira-review: update WRK-1")
+        );
+        assert_eq!(preview_title("fake", "describe", &json!({}), " \n "), None);
+        let long = preview_title("fake", "describe", &json!({}), &"y".repeat(1000)).unwrap();
         assert!(long.len() <= 404 && long.ends_with('…'), "{long}");
     }
 

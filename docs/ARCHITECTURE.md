@@ -1115,8 +1115,10 @@ plugin call with `mcp::plugin_title`: the plugin and tool, its `profile` or `key
 argument, and the first line of its `sql`, `summary` or `body`, bounded, never the
 arguments as JSON, so bind `params` stay out of the title and the push. A shown
 preview of the call as asked (not an operator's edit) retitles the waiting approval
-with its `summary`'s first line behind the plugin's name (`mcp::preview_title`,
-`Store::set_approval_title`) and republishes the queue. The policy haystack is
+with its `summary`'s first line (`mcp::preview_title`, `Store::set_approval_title`)
+and republishes the queue. Either title starts with the plugin, tool and target as the
+node read them from the call, so a summary adds words but cannot name another tool or
+profile. The policy haystack is
 `summarize`, unchanged, so a deny rule still matches `profile=<name>`.
 
 **A plugin's UI runs on an origin of its own, and speaks to its plugin as the

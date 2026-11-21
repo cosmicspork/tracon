@@ -775,7 +775,7 @@ async fn a_plugin_calls_card_is_titled_by_its_target_then_its_preview() {
     assert_eq!(shown["preview"]["status"], "shown", "{shown}");
     assert_eq!(
         rig.store.get_approval(&id).unwrap().unwrap().title,
-        "fake describe"
+        "fake: describe on qa · describe"
     );
     rig.manager.plugins().shutdown().await;
 }
