@@ -9,6 +9,7 @@
     approvalFields,
     asArguments,
     CALLER_ONLY,
+    contentResult,
     changedArguments,
     editProblems,
     grantsAccess,
@@ -57,6 +58,8 @@
   let previewedFor = $state.raw<Record<string, unknown> | null>(null)
   /** Why the edit's preview could not be asked for. */
   let previewError = $state<string | null>(null)
+  /** The arguments the plugin card's "Lent on allow" was last computed for. */
+  let lentFor = $state.raw<Record<string, unknown> | null>(null)
   /** The route this approval was opened from; a verdict goes back to it. */
   let openedFrom: string | null = null
 
@@ -69,6 +72,7 @@
         fields = approvalFields(schemaFor(d.input_schema, args), args, d.prose_fields, d.locked_fields)
         values = formValues(fields, args)
         previewedFor = args
+        lentFor = args
         loaded = true
       })
       .catch((e) => {
@@ -94,6 +98,7 @@
     drafts = {}
     previewedFor = null
     previewError = null
+    lentFor = null
     said = ''
     decided = false
     openedFrom = router.previous
@@ -123,8 +128,15 @@
   const blocked = $derived(Object.keys(problems).length > 0)
   /** The preview shows the call as asked, not as edited: Allow waits for the edit's. */
   const outdated = $derived(pending && previewOutdated(details, previewedFor, edited))
+  /**
+   * "Lent on allow" is of the call as asked, not as edited: the node says
+   * what the edit lends, by the dispatch's own function, and Allow waits.
+   */
+  const lentOutdated = $derived(
+    pending && !!details?.plugin && lentFor !== null && diffArguments(lentFor, edited).length > 0,
+  )
   /** Allow, held until the call as it would run has been previewed. */
-  const allow = $derived(allowGate(details, { busy, blocked, outdated }))
+  const allow = $derived(allowGate(details, { busy, blocked, outdated: outdated || lentOutdated }))
   /** What the document shows: the operator's draft while it waits, what ran once it is decided. */
   const shown = $derived(
     pending ? edited : details?.edited_arguments ? asArguments(details.edited_arguments) : original,
@@ -156,6 +168,8 @@
   )
   const result = $derived(details?.result === null || details?.result === undefined ? null : details.result)
   const rows = $derived(resultRows(result))
+  /** An MCP tool result (a plugin's): its content items, read as text. */
+  const content = $derived(contentResult(result))
   const fallback = $derived(details?.approval.session_id ? `/sessions/${details.approval.session_id}` : '/')
 
   /** A page for the preview origin's sandbox: shown as text here, never rendered. */
@@ -210,7 +224,7 @@
   // Preview the operator's edit through the plugin once they pause, so
   // what Allow is bound to is the edit's effect, not the call as asked.
   $effect(() => {
-    if (!outdated || blocked) return
+    if ((!outdated && !lentOutdated) || blocked) return
     const args = edited
     // An answer that arrives after a later edit is not that edit's preview.
     const current = () => diffArguments(args, edited).length === 0
@@ -222,7 +236,9 @@
           previewError = null
           if (r.preview) details.preview = r.preview
           details.allow_blocked = r.allow_blocked ?? null
+          if (r.plugin) details.plugin = r.plugin
           previewedFor = args
+          lentFor = args
         })
         .catch((e) => {
           if (current()) previewError = e instanceof Error ? e.message : String(e)
@@ -328,7 +344,7 @@
       <dt>{a.state === 'expired' ? 'Expired' : 'Finished'}</dt>
       <dd class="m">{formatAge(a.finished_ms, clock.now)} ago</dd>
     {/if}
-    {#each pluginRows(details) as row (row.key)}
+    {#each pluginRows(details, lentOutdated) as row (row.key)}
       <dt>{row.key}</dt>
       <dd class="m">{row.value}</dd>
     {/each}
@@ -358,7 +374,31 @@
 
   {#if !pending && result !== null}
     <div class="h4">Result <b>what the call returned</b></div>
-    {#if rows}
+    {#if content}
+      {#if content.error}
+        <div class="banner crit" role="alert">the tool reported a failure <b>· its result says so</b></div>
+      {/if}
+      {#each content.items as item, i (i)}
+        {#if item.kind === 'rows'}
+          <dl class="kv result">
+            {#each item.rows as row (row.key)}
+              <dt>{row.key}</dt>
+              <dd class="m">
+                {#if row.href}<a href={row.href} target="_blank" rel="noopener noreferrer">{row.value}</a>{:else}{row.value}{/if}
+              </dd>
+            {/each}
+          </dl>
+        {:else if item.kind === 'text'}
+          <pre class="src">{item.text}</pre>
+        {:else}
+          <pre class="src">{item.json}</pre>
+        {/if}
+      {/each}
+      <details class="request">
+        <summary>Result as the tool returned it</summary>
+        <pre>{JSON.stringify(result, null, 2)}</pre>
+      </details>
+    {:else if rows}
       <dl class="kv result">
         {#each rows as row (row.key)}
           <dt>{row.key}</dt>
@@ -378,12 +418,14 @@
     </div>
   {/if}
 
-  {#if outdated && !blocked}
+  {#if (outdated || lentOutdated) && !blocked}
     <div class="banner dim" role="status">
       {#if previewError}
         your edit could not be previewed <b>· {previewError} · Allow waits for a preview of it</b>
-      {:else}
+      {:else if outdated}
         previewing your edit <b>· Allow waits for it</b>
+      {:else}
+        reading what your edit lends <b>· Allow waits for it</b>
       {/if}
     </div>
   {/if}
@@ -397,7 +439,16 @@
     <div class="h4">
       Preview <b>{p.summary}{p.previewable ? '' : ' · not previewable'}{outdated ? ' · of the call before your edit' : ''}</b>
     </div>
-    <section class="doc">
+    <section class="doc preview">
+      <article class="md">{@html render(p.body)}</article>
+    </section>
+  {:else if !pending && details.preview_shown}
+    {@const p = details.preview_shown}
+    {@const allowed = a.state === 'running' || a.state === 'succeeded' || a.state === 'failed' || a.state === 'uncertain'}
+    <div class="h4">
+      {allowed ? 'Preview you approved' : 'Preview you were shown'} <b>{p.summary}{p.previewable ? '' : ' · not previewable'}</b>
+    </div>
+    <section class="doc preview">
       <article class="md">{@html render(p.body)}</article>
     </section>
   {/if}
@@ -837,12 +888,35 @@
     display: block;
     overflow-x: auto;
   }
+  /*
+   * A cell keeps its words whole and a header stays on one line: a table
+   * wider than its column scrolls rather than squeezing each column to a
+   * letter, as `overflow-wrap: anywhere` above would let it.
+   */
   .md :global(th),
   .md :global(td) {
     border-bottom: 1px solid var(--s2);
     padding: 5px 10px 5px 0;
     text-align: left;
     vertical-align: top;
+    overflow-wrap: normal;
+  }
+  .md :global(th) {
+    white-space: nowrap;
+  }
+  /*
+   * A plugin's preview is mostly data (the rows a call would change), so it
+   * takes the page's width and its cells stay on one line; its prose keeps
+   * the reading measure.
+   */
+  .preview .md {
+    max-width: none;
+  }
+  .preview .md :global(td) {
+    white-space: nowrap;
+  }
+  .preview .md > :global(:not(table, pre)) {
+    max-width: 72ch;
   }
   .md :global(.mention) {
     color: var(--acc);

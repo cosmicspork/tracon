@@ -891,14 +891,16 @@ impl Tools {
 
     /// What a request to a plugin's tool for `ctx` is made with: its
     /// instance, held while the request runs; the credentials its running
-    /// build declares that the channel binds, one lent only on approval
-    /// only to a call run from `approval`; who is calling; and how long it
-    /// may take. A call run from an approval is refused if the build it
-    /// was asked on is no longer the one running.
+    /// build declares that the channel binds and `args` select ([`Self::lent`]),
+    /// one lent only on approval only to a call run from `approval`; who is
+    /// calling; and how long it may take. A call run from an approval is
+    /// refused if the build it was asked on is no longer the one running,
+    /// and any call whose arguments name a binding it cannot be lent.
     async fn plugin_call_parts(
         &self,
         ctx: &CallContext,
         pt: &PluginTool,
+        args: &Value,
         approval: Option<&str>,
     ) -> Result<PluginCallParts, String> {
         use crate::plugin::context;
@@ -935,7 +937,7 @@ impl Tools {
                 ));
             }
         }
-        let credentials = self.lent(ctx, &endpoint.manifest, approval.is_some())?;
+        let credentials = self.lent(ctx, &endpoint.manifest, Some(args), approval.is_some())?;
         let caller = match &ctx.caller {
             Caller::Session(id) => context::CallerId {
                 kind: "agent",
@@ -999,7 +1001,7 @@ impl Tools {
             .session
             .get()
             .ok_or("plugins are not available on this node")?;
-        let parts = self.plugin_call_parts(ctx, pt, approval).await?;
+        let parts = self.plugin_call_parts(ctx, pt, args, approval).await?;
         let preview_token = match approval {
             Some(id) => access.store.preview_token(id).map_err(|e| e.to_string())?,
             None => None,
@@ -1032,32 +1034,37 @@ impl Tools {
             .await
     }
 
-    /// What a call to a build with `manifest` is lent, by binding: each
-    /// credential it declares that the channel binds, less those lent only
-    /// to an approved call unless this one is.
+    /// What a call to a build with `manifest` is lent, by binding: what
+    /// [`crate::plugin::lending::lending`] gives the channel's bindings, for
+    /// `args` and whether the call is `approved`, the same function the
+    /// card's "Lent on allow" reads. A call whose arguments name a binding
+    /// it cannot be lent is refused here, before anything is sent.
     fn lent(
         &self,
         ctx: &CallContext,
         manifest: &crate::plugin::manifest::Manifest,
+        args: Option<&Value>,
         approved: bool,
     ) -> Result<
         std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
         String,
     > {
-        use crate::plugin::manifest::Lend;
-        let mut credentials = std::collections::BTreeMap::new();
+        use crate::plugin::lending;
         let broker = self.broker.read().unwrap();
-        for binding in broker.available_to(&ctx.channel, &ctx.node_id) {
-            let Some(declared) = manifest.credentials.iter().find(|c| c.matches(binding)) else {
-                continue;
-            };
-            if declared.lend == Lend::Approved && !approved {
-                continue;
-            }
+        let available = broker.available_to(&ctx.channel, &ctx.node_id);
+        let lent = lending::lending(manifest, &available, args, approved);
+        if let Some(why) = lending::refusal(&lent) {
+            return Err(format!(
+                "nothing ran: plugin {} cannot be lent what this call names on channel {}: {why}",
+                manifest.name, ctx.channel
+            ));
+        }
+        let mut credentials = std::collections::BTreeMap::new();
+        for binding in lent.iter().flat_map(|l| &l.bindings) {
             let env = broker
                 .env_for(binding, &ctx.channel, &ctx.node_id)
                 .map_err(|e| e.to_string())?;
-            credentials.insert(binding.to_string(), env);
+            credentials.insert(binding.clone(), env);
         }
         Ok(credentials)
     }
@@ -1199,8 +1206,14 @@ impl Tools {
         let pt = self.plugin_tool(&approval.tool)?;
         // What Allow is held to: a preview shown of exactly this call.
         let shown_for = crate::store::approvals::arguments_hash(&args.to_string());
-        let keep = |token: Option<&str>, shown: bool| {
-            let shown = shown.then_some(shown_for.as_str());
+        let keep = |token: Option<&str>, shown: Option<&Value>| {
+            let preview = shown.map(Value::to_string);
+            let shown = preview
+                .as_deref()
+                .map(|preview| crate::store::approvals::Shown {
+                    for_arguments: &shown_for,
+                    preview,
+                });
             if let Err(error) = access.store.set_preview(&approval.id, token, shown) {
                 tracing::warn!(approval = %approval.id, %error, "a preview's token was not kept");
             }
@@ -1219,10 +1232,10 @@ impl Tools {
             out
         };
         let ctx = self.approval_call_context(access, approval);
-        let parts = match self.plugin_call_parts(&ctx, &pt, None).await {
+        let parts = match self.plugin_call_parts(&ctx, &pt, args, None).await {
             Ok(parts) => parts,
             Err(error) => {
-                keep(None, false);
+                keep(None, None);
                 return Some(refused(error));
             }
         };
@@ -1265,27 +1278,48 @@ impl Tools {
         let result = match answer {
             Ok(result) => result,
             Err(upstream::Failure::Rpc { code, .. }) if code == upstream::METHOD_NOT_FOUND => {
-                keep(None, false);
+                keep(None, None);
                 return blocked.map(|why| json!({ "allow_blocked": why }));
             }
             Err(failure) => {
-                keep(None, false);
+                keep(None, None);
                 return Some(refused(failure.describe(&label)));
             }
         };
         match preview_shape(&result) {
             Ok(preview) => {
-                keep(preview.token, true);
-                Some(json!({ "preview": {
-                    "status": "shown",
+                // What the operator reads, kept with the approval so its
+                // decided page still shows it (`preview_shown`).
+                let shown = json!({
                     "previewable": preview.previewable,
                     "summary": preview.summary,
                     "body": preview.body,
-                    "token_sha256": preview.token.map(preview_hash),
-                }}))
+                });
+                keep(preview.token, Some(&shown));
+                // The plugin's own one line titles the card, behind the call
+                // as the node reads it, once it is of the call as asked
+                // rather than an operator's edit of it.
+                if shown_for == approval.arguments_hash() {
+                    let asked = serde_json::from_str(&approval.arguments).unwrap_or(Value::Null);
+                    if let Some(title) =
+                        preview_title(&pt.plugin, &pt.tool, &asked, preview.summary)
+                    {
+                        match access.store.set_approval_title(&approval.id, &title) {
+                            Ok(true) => access.manager.publish_queue().await,
+                            Ok(false) => {}
+                            Err(error) => {
+                                tracing::warn!(approval = %approval.id, %error, "a preview's title was not kept")
+                            }
+                        }
+                    }
+                }
+                let mut out = shown;
+                out["status"] = json!("shown");
+                out["token_sha256"] = json!(preview.token.map(preview_hash));
+                Some(json!({ "preview": out }))
             }
             Err(error) => {
-                keep(None, false);
+                keep(None, None);
                 Some(refused(format!(
                     "{label} answered a preview the contract does not allow: {error}"
                 )))
@@ -1441,7 +1475,7 @@ impl Tools {
         };
         let endpoint = &lease.endpoint;
         let credentials = self
-            .lent(ctx, &endpoint.manifest, false)
+            .lent(ctx, &endpoint.manifest, None, false)
             .map_err(OperatorCallError::Unreachable)?;
         let caller = context::CallerId {
             kind: "operator",
@@ -1528,6 +1562,8 @@ impl Tools {
     /// when the card opens: its token replaces the one kept, so an answer
     /// naming this preview applies against what it showed. An edit an answer
     /// would refuse is refused here the same way, before the plugin is asked.
+    /// For a plugin's tool it carries the card's `plugin` context for the
+    /// edit too, so "Lent on allow" follows the edit, previews or not.
     pub async fn preview_edit(
         &self,
         approval: &crate::store::approvals::ApprovalRow,
@@ -1538,7 +1574,16 @@ impl Tools {
         if !errors.is_empty() {
             return Err(errors);
         }
-        Ok(self.approval_preview(approval, edited).await)
+        let preview = self.approval_preview(approval, edited).await;
+        // What Allow would lend the edit, from the dispatch's own function.
+        let Some(plugin) = self.plugin_approval_context(approval, Some(edited)) else {
+            return Ok(preview);
+        };
+        let mut out = preview.unwrap_or_else(|| json!({}));
+        if let Some(map) = out.as_object_mut() {
+            map.insert("plugin".into(), plugin);
+        }
+        Ok(Some(out))
     }
 
     /// The input schema a plugin's running build gave one of its tools, with
@@ -1680,10 +1725,13 @@ impl Tools {
     /// was asked on, what the plugin says the tool does and reaches, which it
     /// never decides anything by, and what the call is lent once approved.
     /// `replaced_by` names the build active now when that is another, which
-    /// an approved run is refused on.
+    /// an approved run is refused on. What is lent is computed by the
+    /// dispatch's own function, from `edited` when the operator is drafting
+    /// an edit, else from the call as asked or as it ran.
     pub fn plugin_approval_context(
         &self,
         approval: &crate::store::approvals::ApprovalRow,
+        edited: Option<&Value>,
     ) -> Option<Value> {
         let pt = self.plugin_tool(&approval.tool)?;
         let access = self.session.get()?;
@@ -1715,17 +1763,29 @@ impl Tools {
             .iter()
             .find(|t| t.name == pt.tool)
             .or_else(|| pt.manifest.tools.iter().find(|t| t.name == pt.tool))?;
+        // What Allow lends, from the call as it would run: the operator's
+        // edit while it is drafted (`edited`), what ran once decided.
+        let asked = serde_json::from_str::<Value>(&approval.arguments).unwrap_or(Value::Null);
+        let ran = approval
+            .edited_arguments
+            .as_deref()
+            .and_then(|e| serde_json::from_str::<Value>(e).ok());
+        let args = edited.or(ran.as_ref()).unwrap_or(&asked);
         let broker = self.broker.read().unwrap();
         let available = broker.available_to(&approval.channel, &approval.node_id);
-        let credentials: Vec<Value> = manifest
-            .credentials
-            .iter()
-            .map(|c| {
-                let bindings: Vec<&str> =
-                    available.iter().copied().filter(|b| c.matches(b)).collect();
-                json!({ "name": c.name, "lend": c.lend.as_str(), "bindings": bindings })
-            })
-            .collect();
+        let credentials: Vec<Value> =
+            crate::plugin::lending::lending(manifest, &available, Some(args), true)
+                .into_iter()
+                .map(|l| {
+                    json!({
+                        "name": l.credential.name,
+                        "lend": l.credential.lend.as_str(),
+                        "select": l.credential.select,
+                        "bindings": l.bindings,
+                        "refusal": l.refusal,
+                    })
+                })
+                .collect();
         // What a grant allowing exactly this call names, for a consequential
         // tool: it is asked unless one does.
         let grant_target = tool
@@ -3141,7 +3201,9 @@ impl Tools {
     /// [`summarize`], except that a document write says whether it creates
     /// or edits, and what, and when it changes the document's format or
     /// drops files of its bundle. A lookup that fails leaves the plain
-    /// summary rather than holding the request.
+    /// summary rather than holding the request. A plugin's tool reads as
+    /// [`plugin_title`] until its card shows a preview, whose summary then
+    /// titles it.
     async fn approval_title(&self, ctx: &CallContext, name: &str, args: &Value) -> String {
         if name == docs::DOC_EDIT {
             if let Some(access) = self.session.get() {
@@ -3165,6 +3227,9 @@ impl Tools {
                     return title;
                 }
             }
+        }
+        if let Some(pt) = self.plugin_tool(name) {
+            return plugin_title(&pt.plugin, &pt.tool, args);
         }
         summarize(name, args)
     }
@@ -4544,6 +4609,78 @@ fn retired(name: &str) -> Option<String> {
     ))
 }
 
+/// The longest excerpt of a plugin call's statement or text its title
+/// carries, in characters.
+const PLUGIN_TITLE_EXCERPT: usize = 120;
+
+/// What a plugin call is, as the node reads it from the call's arguments:
+/// its tool and what it targets (` on <profile>`, or its `key`). Every title
+/// of a plugin's card starts with the plugin's name and this, so the plugin's
+/// own words never stand in for which tool runs where.
+fn plugin_call(tool: &str, args: &Value) -> String {
+    let text = |key: &str| args.get(key).and_then(Value::as_str).and_then(first_line);
+    match (text("profile"), text("key")) {
+        (Some(profile), _) => format!("{tool} on {profile}"),
+        (None, Some(key)) => format!("{tool} {key}"),
+        (None, None) => tool.to_string(),
+    }
+}
+
+/// A plugin call's card title before its preview is shown: the plugin and
+/// its call ([`plugin_call`]), and the first line of the statement or text
+/// it carries (`sql`, `summary` or `body`), bounded. Never its other
+/// arguments, so bind `params` stay off the card and out of the push.
+pub fn plugin_title(plugin: &str, tool: &str, args: &Value) -> String {
+    let mut title = format!("{plugin}: {}", plugin_call(tool, args));
+    if let Some(line) = ["sql", "summary", "body"]
+        .into_iter()
+        .find_map(|key| args.get(key).and_then(Value::as_str).and_then(first_line))
+    {
+        title.push_str(" · ");
+        title.push_str(&excerpt(line, PLUGIN_TITLE_EXCERPT));
+    }
+    bound(&mut title);
+    title
+}
+
+/// A plugin call's card title from its shown preview: the plugin and its
+/// call ([`plugin_call`]), then the first line of the preview's `summary`
+/// in place of the call's own text. A summary that names its plugin first
+/// is not prefixed twice, and one that already opens with the call
+/// (jira-review's `update WRK-12 on <site>`) stands for it. `None` for a
+/// blank summary, which leaves the title it had.
+pub fn preview_title(plugin: &str, tool: &str, args: &Value, summary: &str) -> Option<String> {
+    let line = first_line(summary)?;
+    let line = line
+        .strip_prefix(plugin)
+        .and_then(|rest| rest.strip_prefix(':').or_else(|| rest.strip_prefix(' ')))
+        .and_then(first_line)
+        .unwrap_or(line);
+    let call = plugin_call(tool, args);
+    let opens_with_call = line
+        .strip_prefix(call.as_str())
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace));
+    let mut title = match opens_with_call {
+        true => format!("{plugin}: {line}"),
+        false => format!("{plugin}: {call} · {line}"),
+    };
+    bound(&mut title);
+    Some(title)
+}
+
+/// The first line of `text` that is not blank, trimmed.
+fn first_line(text: &str) -> Option<&str> {
+    text.lines().map(str::trim).find(|l| !l.is_empty())
+}
+
+/// `text` cut to `max` characters, marked when it was cut.
+fn excerpt(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+        None => text.to_string(),
+    }
+}
+
 /// A title cut to the length a card and a push notification carry.
 fn bound(s: &mut String) {
     if s.len() > 400 {
@@ -4820,6 +4957,107 @@ mod tests {
         assert!(
             summarize("sql-review__query", &query).starts_with("sql-review__query profile=qa {")
         );
+    }
+
+    /// A plugin call's card reads as the plugin, its tool, its target and
+    /// the first line of its statement: never its arguments as JSON, and
+    /// never its bind values.
+    #[test]
+    fn a_plugin_call_is_titled_without_its_arguments_as_json() {
+        let write = json!({
+            "operation_id": "afa-tst-plugin-write-a",
+            "params": { "v": "PlugTestA" },
+            "profile": "tst",
+            "sql": "UPDATE app4adm.adm_app_data SET first_name = :v\nWHERE app_id = 252111",
+        });
+        let title = plugin_title("sql-review", "write", &write);
+        assert_eq!(
+            title,
+            "sql-review: write on tst · UPDATE app4adm.adm_app_data SET first_name = :v"
+        );
+        assert!(
+            !title.contains('{') && !title.contains("PlugTestA"),
+            "{title}"
+        );
+        assert_eq!(
+            plugin_title(
+                "jira-review",
+                "update",
+                &json!({ "key": "WRK-12", "fields": { "summary": "secret" } })
+            ),
+            "jira-review: update WRK-12"
+        );
+        assert_eq!(
+            plugin_title(
+                "jira-review",
+                "comment",
+                &json!({ "key": "WRK-1", "body": "\n Done.\nMore" })
+            ),
+            "jira-review: comment WRK-1 · Done."
+        );
+        assert_eq!(
+            plugin_title("fake", "describe", &json!({})),
+            "fake: describe"
+        );
+        let long = plugin_title("sql-review", "query", &json!({ "sql": "x".repeat(500) }));
+        assert_eq!(
+            long,
+            format!("sql-review: query · {}…", "x".repeat(PLUGIN_TITLE_EXCERPT))
+        );
+    }
+
+    /// A shown preview's one line titles the card, behind the plugin and
+    /// the call as the node read it: a summary can add to the title but
+    /// not change which tool runs where.
+    #[test]
+    fn a_preview_summary_titles_a_plugin_call() {
+        let write = json!({ "profile": "tst", "params": { "v": "PlugTestA" }, "sql": "UPDATE t" });
+        // sql-review's summary is the statement and its rows.
+        assert_eq!(
+            preview_title(
+                "sql-review",
+                "write",
+                &write,
+                "UPDATE t SET a = :v (1 row(s))\nmore"
+            )
+            .as_deref(),
+            Some("sql-review: write on tst · UPDATE t SET a = :v (1 row(s))")
+        );
+        // jira-review's opens with the call, so it is not said twice.
+        let update = json!({ "key": "WRK-12", "summary": "New title" });
+        assert_eq!(
+            preview_title(
+                "jira-review",
+                "update",
+                &update,
+                "update WRK-12 on https://example.atlassian.net"
+            )
+            .as_deref(),
+            Some("jira-review: update WRK-12 on https://example.atlassian.net")
+        );
+        // A summary that names another target leaves the call's own in front.
+        assert_eq!(
+            preview_title("jira-review", "update", &update, "update WRK-120 on site").as_deref(),
+            Some("jira-review: update WRK-12 · update WRK-120 on site")
+        );
+        // Nor can it pose as another tool or profile.
+        assert_eq!(
+            preview_title(
+                "sql-review",
+                "write",
+                &write,
+                "sql-review: query on dev (0 rows)"
+            )
+            .as_deref(),
+            Some("sql-review: write on tst · query on dev (0 rows)")
+        );
+        assert_eq!(
+            preview_title("sql-review", "write", &write, "jira-review: update WRK-1").as_deref(),
+            Some("sql-review: write on tst · jira-review: update WRK-1")
+        );
+        assert_eq!(preview_title("fake", "describe", &json!({}), " \n "), None);
+        let long = preview_title("fake", "describe", &json!({}), &"y".repeat(1000)).unwrap();
+        assert!(long.len() <= 404 && long.ends_with('…'), "{long}");
     }
 
     /// A gated call with no prose is titled in words too, on the card and in

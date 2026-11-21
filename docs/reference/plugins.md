@@ -109,6 +109,7 @@ Top level:
 | `name` | string | required | Letters, digits, `-`, `_` or `.`; each declared once. The binding the plugin is lent by default. |
 | `pattern` | string | required | Name characters and `*`, which matches any run of characters: the other bindings it may be lent. Repeat the name to match only that binding. |
 | `lend` | `"always"` or `"approved"` | `"always"` | `"approved"` lends it only to a call run from a card the operator allowed. |
+| `select` | string | none | 1-64 letters, digits, `_` or `-`: the call argument that names the one binding a call is lent, `<name>-<value>` (`select = "profile"` with `profile: "tst"` lends `sql-read-tst`), or `name` itself when the call leaves it out. A binding the argument names that the channel does not bind refuses the call before it is sent. Without it, a call is lent every binding the credential matches. Nodes released before it refuse the key as an unknown field. |
 
 `[[tool]]`, one per tool `serve` lists:
 
@@ -633,13 +634,43 @@ verify it.
 
 ## Credentials lent per call
 
-The node lends a call each binding the channel holds that matches a credential the
-running build declares, by name or by `pattern`, as `credentials.<binding>`: that
-binding's fields as strings. A binding no declared credential matches is never lent. No
-credential is ever in the environment, so a revoked binding stops at the next call and
-one process can serve several profiles. Pick the binding from the call: jira-review's
-`profile` argument selects `jira-<profile>`, else `jira`, and answers
-`credential jira-work was not lent to this call` when it is missing.
+The node lends a call bindings the channel holds that match a credential the running
+build declares, by name or by `pattern`, as `credentials.<binding>`: that binding's
+fields as strings. A binding belongs to the first declared credential it matches, and
+one no declared credential matches is never lent. No credential is ever in the
+environment, so a revoked binding stops at the next call and one process can serve
+several profiles.
+
+**Declare `select` when a call uses one binding.** A credential with
+`select = "<argument>"` is lent to a call only as the binding that argument names:
+
+```toml
+[[credential]]
+name = "sql-write"
+pattern = "sql-write-*"
+lend = "approved"
+select = "profile"
+```
+
+An approved `sql-review__write` with `profile: "tst"` is lent `sql-write-tst` (and,
+with the same `select` on `sql-read`, `sql-read-tst`), never another profile's account.
+A call that leaves the argument out (or passes `null` or `""`) is lent `name` itself
+when the channel binds it, and nothing of that credential otherwise. A call whose
+argument names a binding the channel does not bind, one another declared credential
+owns, or that is not a string of name characters, is refused before it is sent, naming
+the binding: `nothing ran: plugin sql-review cannot be lent what this call names on
+channel work: the call's profile names binding sql-write-nope, which this channel does
+not bind`. A credential lent only on approval is not asked for on a call that is not
+approved, so a read on a profile with no write account still runs. A request from the
+plugin's own page (`tracon/ui`) carries no tool arguments, so it is lent every binding
+each credential matches.
+
+Without `select`, a call is lent every binding the credential matches, and the plugin
+picks one itself: on a channel binding eleven `sql-write-*` accounts, one approved write
+carries all eleven. The install card warns of each pattern credential declared that way.
+Either way, pick the binding from the call: jira-review's `profile` argument selects
+`jira-<profile>`, else `jira`, and answers `credential jira-work was not lent to this
+call` when it is missing.
 
 A credential declared with `lend = "approved"` is lent only to a call dispatched from a
 card the operator approved (`approval_id` set). It is withheld from a call the policy or
@@ -647,8 +678,16 @@ the `[[plugin]]` entry allowed outright, and from previews. Use it to keep a cap
 out of reach of anything but a reviewed call: sql-review's `sql-write` is the write
 account, lent only to an approved apply, while every read runs on `sql-read`.
 
-The install card lists each credential and marks those lent only on approval, and an
-update card shows a change of `lend` as `credential sql-read: lent always → approved`.
+The install card lists each credential, marks those lent only on approval, says what
+one with `select` lends, and warns of a pattern credential without one. An update card
+shows a change of `lend` as `credential sql-read: lent always → approved`, and of
+`select` as ``credential sql-write: a call is lent every matching binding → the
+binding `profile` names``.
+
+An approval card's **Lent on allow** row is computed by the same function the dispatch
+uses, from the call's arguments as they would run: when the operator edits the argument
+`select` names, the card asks the node again and Allow waits until it answers. A call
+the dispatch would refuse shows `nothing: allowing it runs nothing, because …`.
 
 ## Previews and formats
 
@@ -676,7 +715,16 @@ upstream and writes nothing. Answer:
   "token": "{\"WRK-12\":\"2026-11-16T09:12:33.000+0000\"}" }
 ```
 
-- `summary` is the card's heading, one line. `body` is Markdown, at most 256 KiB.
+- `summary` is the card's heading, one line. A plugin call's title always starts with
+  your plugin, the tool and the call's `profile` (`on <profile>`) or `key` argument, as
+  the node reads them. Until a preview is shown, the first line of the call's `sql`,
+  `summary` or `body` argument follows, bounded; never its other arguments, so bind
+  values such as `params` stay off the card and out of the push. Once a preview of the
+  call as asked is shown, its `summary`'s first line takes that place in the queue and
+  on the page (`sql-review: write on tst · UPDATE t SET a = :v (1 row(s))`). A summary
+  that opens with the tool and its target, as jira-review's `update WRK-12 on <site>`
+  does, follows the plugin's name alone rather than repeating them. `body` is Markdown,
+  at most 256 KiB.
 - `token` (a string, at most 4,096 bytes, or `null`) is the version the preview was
   taken against: jira-review's is the proposal's `versions` as canonical JSON. The node
   keeps it with the approval and never reads it; the page sees only its hash.

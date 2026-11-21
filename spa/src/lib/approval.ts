@@ -98,6 +98,12 @@ export interface ApprovalDetails {
    */
   preview?: PluginPreview
   /**
+   * Once decided, the plugin preview its card last showed of the call as
+   * decided: what the operator decided on. Absent while it waits, and when
+   * no preview of that call was the last shown.
+   */
+  preview_shown?: ShownPreview | null
+  /**
    * Why Allow is held on a plugin tool's card: the plugin offered no preview
    * of the call as it stands (none at all, or its preview failed), and its
    * `[[plugin]]` entry requires one. Names the setting that lifts it. Absent
@@ -139,21 +145,47 @@ export interface PluginCredential {
   name: string
   /** `approved`: lent only to a call from an approved card, as this one. */
   lend: 'always' | 'approved'
-  /** The channel's bindings it matches: what the run is lent. */
+  /**
+   * The call argument that picks the one binding it lends
+   * (`<name>-<value>`, or `name` when the call names none). Null or absent:
+   * every binding it matches.
+   */
+  select?: string | null
+  /**
+   * The channel's bindings an approved run is lent, from the call's
+   * arguments by the same function the dispatch uses.
+   */
   bindings: string[]
+  /**
+   * Why the run would be refused before anything is sent: the binding the
+   * call's arguments name is not bound to the channel. Null otherwise.
+   */
+  refusal?: string | null
 }
 
 /**
  * The rows a plugin tool's card adds: which build, what it says of the tool
  * and where it reaches (its own word, never checked), and the credentials an
- * approved run is lent. Empty for any other tool.
+ * approved run is lent, as the node computed them for the call as it would
+ * run. `outdated`: they are of the call before the operator's edit, until
+ * the node answers for the edit. Empty for any other tool.
  */
-export function pluginRows(details: Pick<ApprovalDetails, 'plugin'>): { key: string; value: string }[] {
+export function pluginRows(
+  details: Pick<ApprovalDetails, 'plugin'>,
+  outdated = false,
+): { key: string; value: string }[] {
   const p = details.plugin
   if (!p) return []
   const lent = p.credentials.flatMap((c) =>
     c.bindings.map((b) => (c.lend === 'approved' ? `${b} (only because you approve this card)` : b)),
   )
+  const refusal = p.credentials.find((c) => c.refusal)?.refusal
+  const lentValue = refusal
+    ? `nothing: allowing it runs nothing, because ${refusal}`
+    : lent.length > 0
+      ? lent.join(', ')
+      : 'nothing'
+  const before = outdated ? ' · of the call before your edit' : ''
   const replaced = p.replaced_by
     ? [
         {
@@ -167,7 +199,7 @@ export function pluginRows(details: Pick<ApprovalDetails, 'plugin'>): { key: str
     ...replaced,
     { key: 'Says it', value: p.consequential ? `${p.hint}s, consequential` : `${p.hint}s` },
     { key: 'Reaches', value: p.egress.length > 0 ? p.egress.join(', ') : 'declares none' },
-    { key: 'Lent on allow', value: lent.length > 0 ? lent.join(', ') : 'nothing' },
+    { key: 'Lent on allow', value: lentValue + before },
     ...(p.grant_target ? [{ key: 'Grant target', value: `plugin_call ${p.grant_target}` }] : []),
   ]
 }
@@ -193,6 +225,13 @@ export type PluginPreview =
       /** The plugin's refusal: the call can still be decided. */
       error: string
     }
+
+/** A plugin preview as the card showed it, kept with a decided approval. */
+export interface ShownPreview {
+  previewable: boolean
+  summary: string
+  body: string
+}
 
 /**
  * Whether the card's plugin preview no longer shows the call as it would
@@ -476,6 +515,37 @@ export function resultRows(result: unknown): { key: string; value: string; href:
       const value = typeof v === 'string' ? v : JSON.stringify(v)
       return { key, value, href: typeof v === 'string' && /^https?:\/\//.test(v) ? v : null }
     })
+}
+
+/** One item of a tool's MCP result content, as the page shows it. */
+export type ContentItem =
+  | { kind: 'text'; text: string }
+  /** A text item that is a JSON object: its fields as rows. */
+  | { kind: 'rows'; rows: { key: string; value: string; href: string | null }[] }
+  /** Anything but text (an image, a resource): shown as JSON. */
+  | { kind: 'other'; json: string }
+
+/**
+ * An MCP tool result (`{content: [...], isError?}`, a plugin's or an
+ * upstream server's) as items to show, or null when `result` is not one.
+ */
+export function contentResult(result: unknown): { error: boolean; items: ContentItem[] } | null {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return null
+  const r = result as Record<string, unknown>
+  if (!Array.isArray(r.content)) return null
+  const items = r.content.map((c): ContentItem => {
+    const item = c && typeof c === 'object' ? (c as Record<string, unknown>) : null
+    if (item?.type !== 'text' || typeof item.text !== 'string') return { kind: 'other', json: JSON.stringify(c, null, 2) }
+    let parsed: unknown = null
+    try {
+      parsed = JSON.parse(item.text)
+    } catch {
+      // Plain text, shown as it is.
+    }
+    const rows = resultRows(parsed)
+    return rows?.length ? { kind: 'rows', rows } : { kind: 'text', text: item.text }
+  })
+  return { error: r.isError === true, items }
 }
 
 /** The arguments the form describes. A locked field is always the agent's own. */

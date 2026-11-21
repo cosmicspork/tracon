@@ -1852,7 +1852,14 @@ const MIGRATIONS: &[&str] = &[
     CREATE UNIQUE INDEX session_request ON session(node_id, channel, request_id)
         WHERE request_id IS NOT NULL;
     "#,
-    // 86: which step an attempt at a publication is on, since when, and the
+    // 86: the plugin preview a waiting approval's card last showed, as JSON
+    // (`previewable`, `summary`, `body`), NULL when its last preview was
+    // refused, failed or not offered. Kept, like `preview_token`, once the
+    // approval is decided, so its page still shows what was approved.
+    r#"
+    ALTER TABLE approval ADD COLUMN preview_shown TEXT;
+    "#,
+    // 87: which step an attempt at a publication is on, since when, and the
     // steps it planned (a JSON array of `review::publish::Step`), for the
     // review page to show them live. A failed attempt keeps the step it
     // stopped at. NULL on every row from before.

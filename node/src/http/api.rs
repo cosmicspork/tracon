@@ -2965,6 +2965,11 @@ pub async fn get_approval(
         },
         false => None,
     };
+    // A shown preview may have retitled it.
+    let a = match context.is_some() {
+        true => s.store().get_approval(&id)?.ok_or_else(missing)?,
+        false => a,
+    };
     let shown = s.tools.presentation_for(&a.tool, args);
     // Prose in a plugin's format, rendered by its owner. The arguments stay
     // the source.
@@ -2991,8 +2996,20 @@ pub async fn get_approval(
             .unwrap_or_default(),
         // A plugin's build, what it says the tool does and reaches, and what
         // an approved run is lent: facts about the build, not a live read.
-        "plugin": s.tools.plugin_approval_context(&a),
+        "plugin": s.tools.plugin_approval_context(&a, None),
     });
+    // Once decided, the plugin preview its card last showed of the call as
+    // decided (the operator's edit, if the answer carried one): what the
+    // operator decided on, read-only.
+    if !pending {
+        let decided = match a.edited_arguments.as_deref() {
+            Some(edited) => crate::store::approvals::arguments_hash(edited),
+            None => a.arguments_hash(),
+        };
+        if let Some(shown) = parse(s.store().preview_shown(&id, &decided)?.as_deref()) {
+            details["preview_shown"] = shown;
+        }
+    }
     if let Some(out) = details.as_object_mut() {
         for extra in [context, rendered].into_iter().flatten() {
             if let Value::Object(extra) = extra {

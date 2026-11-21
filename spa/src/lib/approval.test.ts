@@ -1,9 +1,11 @@
 import { expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
 import {
   approvalArguments,
   approvalFields,
   CALLER_ONLY,
   changedArguments,
+  contentResult,
   editProblems,
   grantsAccess,
   itemSections,
@@ -142,6 +144,48 @@ test('a result reads as rows, with links where they are URLs', () => {
   ])
   expect(resultRows('done')).toBeNull()
   expect(resultRows([1])).toBeNull()
+})
+
+test("a tool's MCP result reads its text, and a JSON object's fields as rows, never escaped", () => {
+  const read = contentResult({ content: [{ type: 'text', text: '{"row_count":1,"status":"approved"}' }] })!
+  expect(read.error).toBe(false)
+  expect(read.items).toEqual([
+    {
+      kind: 'rows',
+      rows: [
+        { key: 'row_count', value: '1', href: null },
+        { key: 'status', value: 'approved', href: null },
+      ],
+    },
+  ])
+  expect(JSON.stringify(read.items)).not.toContain('\\')
+  // Plain text, and JSON that is not an object, stay text.
+  expect(contentResult({ content: [{ type: 'text', text: 'done' }, { type: 'text', text: '[1]' }] })!.items).toEqual([
+    { kind: 'text', text: 'done' },
+    { kind: 'text', text: '[1]' },
+  ])
+  // An item that is not text is shown as it came; a failure says so.
+  const failed = contentResult({ content: [{ type: 'image', data: 'x' }], isError: true })!
+  expect(failed.error).toBe(true)
+  expect(failed.items[0]!.kind).toBe('other')
+  // A result that is not an MCP one keeps the generic rows.
+  expect(contentResult({ id: 7 })).toBeNull()
+  expect(contentResult('done')).toBeNull()
+})
+
+test('a decided approval shows the preview it was decided on, read-only, and its raw result behind a disclosure', () => {
+  const page = readFileSync(new URL('../routes/Approval.svelte', import.meta.url), 'utf8')
+  const markup = page.slice(page.indexOf('</script>'))
+  const decided = markup.indexOf('{:else if !pending && details.preview_shown}')
+  expect(decided).toBeGreaterThan(-1)
+  const block = markup.slice(decided, markup.indexOf('{/if}', decided))
+  expect(block).toContain("'Preview you approved'")
+  expect(block).toContain('render(p.body)')
+  // Nothing in it to answer with.
+  expect(block).not.toContain('<button')
+  expect(block).not.toContain('<textarea')
+  expect(markup).toContain('<summary>Result as the tool returned it</summary>')
+  expect(markup).toContain('<summary>Arguments as the agent sent them</summary>')
 })
 
 test('a document write diffs the draft against the document as it stands, or as all added when new', () => {
@@ -321,6 +365,30 @@ test("a plugin tool's card says its build, its own word on the tool, and what is
     { key: 'Lent on allow', value: 'sql-read-qa, sql-write-qa (only because you approve this card)' },
     { key: 'Grant target', value: 'plugin_call plugin:sql-review__write:ab12' },
   ])
+  // Lent by the call's profile: what the node says the run is lent, or why
+  // it would be refused; marked while it is of the call before an edit.
+  const selecting = (refusal: string | null) => ({
+    plugin: {
+      name: 'sql-review',
+      version: '0.3.0',
+      tool: 'write',
+      hint: 'write' as const,
+      consequential: true,
+      egress: [],
+      credentials: [
+        { name: 'sql-read', lend: 'always' as const, select: 'profile', bindings: refusal ? [] : ['sql-read-tst'], refusal },
+        { name: 'sql-write', lend: 'approved' as const, select: 'profile', bindings: refusal ? [] : ['sql-write-tst'] },
+      ],
+    },
+  })
+  const lentRow = (rows: { key: string; value: string }[]) => rows.find((r) => r.key === 'Lent on allow')?.value
+  expect(lentRow(pluginRows(selecting(null)))).toBe('sql-read-tst, sql-write-tst (only because you approve this card)')
+  expect(lentRow(pluginRows(selecting(null), true))).toBe(
+    'sql-read-tst, sql-write-tst (only because you approve this card) · of the call before your edit',
+  )
+  const nope = "the call's profile names binding sql-read-nope, which this channel does not bind"
+  expect(lentRow(pluginRows(selecting(nope)))).toBe(`nothing: allowing it runs nothing, because ${nope}`)
+
   const quiet = pluginRows({
     plugin: { name: 'open', version: '1.0.0', tool: 'query', hint: 'read', consequential: false, egress: [], credentials: [] },
   })
