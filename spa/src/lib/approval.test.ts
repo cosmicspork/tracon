@@ -1,9 +1,11 @@
 import { expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
 import {
   approvalArguments,
   approvalFields,
   CALLER_ONLY,
   changedArguments,
+  contentResult,
   editProblems,
   grantsAccess,
   itemSections,
@@ -142,6 +144,48 @@ test('a result reads as rows, with links where they are URLs', () => {
   ])
   expect(resultRows('done')).toBeNull()
   expect(resultRows([1])).toBeNull()
+})
+
+test("a tool's MCP result reads its text, and a JSON object's fields as rows, never escaped", () => {
+  const read = contentResult({ content: [{ type: 'text', text: '{"row_count":1,"status":"approved"}' }] })!
+  expect(read.error).toBe(false)
+  expect(read.items).toEqual([
+    {
+      kind: 'rows',
+      rows: [
+        { key: 'row_count', value: '1', href: null },
+        { key: 'status', value: 'approved', href: null },
+      ],
+    },
+  ])
+  expect(JSON.stringify(read.items)).not.toContain('\\')
+  // Plain text, and JSON that is not an object, stay text.
+  expect(contentResult({ content: [{ type: 'text', text: 'done' }, { type: 'text', text: '[1]' }] })!.items).toEqual([
+    { kind: 'text', text: 'done' },
+    { kind: 'text', text: '[1]' },
+  ])
+  // An item that is not text is shown as it came; a failure says so.
+  const failed = contentResult({ content: [{ type: 'image', data: 'x' }], isError: true })!
+  expect(failed.error).toBe(true)
+  expect(failed.items[0]!.kind).toBe('other')
+  // A result that is not an MCP one keeps the generic rows.
+  expect(contentResult({ id: 7 })).toBeNull()
+  expect(contentResult('done')).toBeNull()
+})
+
+test('a decided approval shows the preview it was decided on, read-only, and its raw result behind a disclosure', () => {
+  const page = readFileSync(new URL('../routes/Approval.svelte', import.meta.url), 'utf8')
+  const markup = page.slice(page.indexOf('</script>'))
+  const decided = markup.indexOf('{:else if !pending && details.preview_shown}')
+  expect(decided).toBeGreaterThan(-1)
+  const block = markup.slice(decided, markup.indexOf('{/if}', decided))
+  expect(block).toContain("'Preview you approved'")
+  expect(block).toContain('render(p.body)')
+  // Nothing in it to answer with.
+  expect(block).not.toContain('<button')
+  expect(block).not.toContain('<textarea')
+  expect(markup).toContain('<summary>Result as the tool returned it</summary>')
+  expect(markup).toContain('<summary>Arguments as the agent sent them</summary>')
 })
 
 test('a document write diffs the draft against the document as it stands, or as all added when new', () => {

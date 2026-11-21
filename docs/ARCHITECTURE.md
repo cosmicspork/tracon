@@ -1097,7 +1097,12 @@ preview is kept. The approved dispatch signs the token into the caller context a
 `preview_token`, and the plugin applies against it, refusing with `data.stale` if its
 target has moved. The node settles that as failed, stale, not uncertain, since nothing
 was sent. Staleness is enforced by the plugin at dispatch. The page's display is only
-display. An Allow that names the preview it read is also checked as it lands:
+display. The preview as shown (`previewable`, `summary`, `body`, no token) is kept too,
+as `preview_shown`, and stays once the approval is decided, so its page still shows what
+was approved under "Preview you approved". The page is given it only when it is a preview
+of the call as decided (the edit, if the answer carried one), so a later preview of an
+edit nobody allowed never reads as the approved one.
+An Allow that names the preview it read is also checked as it lands:
 `Tools::answer_approval` asks `tracon/preview` again for the call that would run, and a
 token other than the kept one refuses the answer (`SessionError::Stale`, a `409` whose
 error has `kind: "stale"` and `stale: true`) before anything is decided, so the page
