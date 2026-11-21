@@ -1171,6 +1171,71 @@ async fn an_answer_bound_to_an_older_preview_is_refused() {
     rig.manager.plugins().shutdown().await;
 }
 
+/// The target moved after the card opened and nothing has opened it since:
+/// Allow takes the preview again, sees another token, and refuses before
+/// anything is decided, so the page can show the fresh preview.
+#[tokio::test]
+async fn an_allow_whose_fresh_preview_differs_is_refused_as_stale_and_stays_pending() {
+    let rig = rig("moved", vec![allow("fake", &["query"])], Policy::shipped());
+    rig.listed(&rig.ctx).await;
+    rig.knob("moved", "preview", "on");
+    let id = asked(&rig.call("fake__describe", json!({ "sql": "UPDATE" })).await);
+    let shown = rig.open(&id).await.unwrap();
+    let read = shown["preview"]["token_sha256"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Another card changed the same row.
+    rig.knob("moved", "version", "v2");
+    let refused = rig.allow(&id, Some(&read)).await.unwrap_err();
+    assert!(
+        matches!(refused, tracon::session::SessionError::Stale(_)),
+        "{refused:?}"
+    );
+    assert!(
+        refused.to_string().contains("nothing was decided"),
+        "{refused}"
+    );
+    let row = rig.store.get_approval(&id).unwrap().unwrap();
+    assert_eq!(row.state, approvals::PENDING);
+    assert_eq!(row.decided_ms, None);
+    // Nothing recorded: the kept preview is still the one the operator read,
+    // and nothing reached the plugin as a call.
+    assert_eq!(rig.store.preview_token(&id).unwrap().as_deref(), Some("v1"));
+    assert_eq!(rig.lines("fake", "moved", "calls.jsonl"), 0);
+    // Opened again, the card shows the fresh preview, and Allow on it runs.
+    let fresh = rig.open(&id).await.unwrap();
+    let hash = fresh["preview"]["token_sha256"].as_str().unwrap();
+    assert_eq!(hash, sha256("v2"));
+    rig.allow(&id, Some(hash)).await.unwrap();
+    let seen = approved_echo(&rig.settled(&id).await);
+    assert_eq!(seen["meta"]["preview_token"], "v2");
+    rig.manager.plugins().shutdown().await;
+}
+
+/// A preview that cannot be taken again at Allow leaves staleness to the
+/// plugin's check at dispatch: the answer is not refused for it.
+#[tokio::test]
+async fn an_allow_whose_fresh_preview_fails_is_left_to_the_dispatch_check() {
+    let rig = rig("flaky", vec![allow("fake", &["query"])], Policy::shipped());
+    rig.listed(&rig.ctx).await;
+    rig.knob("flaky", "preview", "on");
+    let id = asked(&rig.call("fake__describe", json!({ "sql": "UPDATE" })).await);
+    let shown = rig.open(&id).await.unwrap();
+    let read = shown["preview"]["token_sha256"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    rig.knob("flaky", "preview", "refuse");
+    rig.knob("flaky", "version", "v2");
+    rig.allow(&id, Some(&read)).await.unwrap();
+    let settled = rig.settled(&id).await;
+    assert_eq!(settled.state, approvals::FAILED);
+    let reason = settled.reason.as_deref().unwrap();
+    assert!(reason.starts_with(approvals::STALE_REASON), "{reason}");
+    rig.manager.plugins().shutdown().await;
+}
+
 #[tokio::test]
 async fn an_operators_edit_is_previewed_and_its_preview_is_what_allow_binds() {
     let rig = rig("edited", vec![allow("fake", &["query"])], Policy::shipped());

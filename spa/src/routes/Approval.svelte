@@ -26,6 +26,7 @@
     schemaFor,
     type ApprovalDetails,
   } from '../lib/approval'
+  import { afterAllow, didNotRun, isStale, notRunDetail, outcomeOf, RAN_MS, STALE_ALLOW } from '../lib/allowed-outcome'
   import { autogrow } from '../lib/autogrow'
   import { clock } from '../lib/clock.svelte'
   import { formatAge, formatExpiry } from '../lib/format'
@@ -62,6 +63,10 @@
   let lentFor = $state.raw<Record<string, unknown> | null>(null)
   /** The route this approval was opened from; a verdict goes back to it. */
   let openedFrom: string | null = null
+  /** After an accepted Allow: following the run until it ends, then "Ran" a moment before leaving. */
+  let following = $state<'running' | 'ran' | null>(null)
+  /** Allow was refused because the card moved: it reloaded with the fresh preview. */
+  let staleAllow = $state(false)
 
   function load() {
     return api
@@ -101,11 +106,15 @@
     lentFor = null
     said = ''
     decided = false
+    following = null
+    staleAllow = false
     openedFrom = router.previous
     void load()
     // Release on navigating away. The node's sweeper covers a client that
     // vanishes without getting here.
     return () => {
+      // A page left mid-follow stops following; the toast takes over.
+      following = null
       if (!decided) void api.releaseApproval(id).catch(() => {})
     }
   })
@@ -247,6 +256,58 @@
     return () => clearTimeout(timer)
   })
 
+  // A call that did not run, shown here: the home feed and the toast let it go.
+  $effect(() => {
+    const a = details?.approval
+    if (a && didNotRun(a)) store.markOutcomeSeen(a.id)
+  })
+
+  /**
+   * Follow an accepted Allow until the run ends: on the stream, and by
+   * reading the approval again for a node whose outcome the stream does not
+   * carry here. A call that ran shows "Ran" a moment, then the page leaves;
+   * one that did not stays, saying why; past the wait the page leaves and
+   * the shell's toast says how it ended.
+   */
+  async function follow() {
+    const mine = id
+    const started = Date.now()
+    let read = started
+    following = 'running'
+    for (;;) {
+      if (id !== mine || following === null) return
+      const a = details?.approval
+      const row =
+        a && a.id === mine && a.state !== 'pending' && a.state !== 'running'
+          ? { id: mine, tool: a.tool, state: a.state, reason: a.reason, stale: isStale(a.state, a.reason), at_ms: started }
+          : undefined
+      const next = afterAllow(outcomeOf(store.settled, mine) ?? row, Date.now() - started)
+      if (next.kind === 'running') {
+        await new Promise((r) => setTimeout(r, 250))
+        if (Date.now() - read >= 1500) {
+          read = Date.now()
+          await load()
+        }
+        continue
+      }
+      if (id !== mine) return
+      if (next.kind === 'stay') {
+        following = null
+        if (details?.approval.state === 'running') await load()
+        return
+      }
+      if (next.kind === 'ran') {
+        following = 'ran'
+        if (details?.approval.state === 'running') await load()
+        await new Promise((r) => setTimeout(r, RAN_MS))
+      }
+      if (id !== mine || following === null) return
+      following = null
+      leaveAfterVerdict(router, { prefix: '/approvals', id, from: openedFrom, fallback })
+      return
+    }
+  }
+
   function display(v: unknown): string {
     if (v === undefined || v === null || v === '') return '—'
     return typeof v === 'string' ? v : JSON.stringify(v)
@@ -265,6 +326,7 @@
     busy = true
     error = null
     refused = {}
+    staleAllow = false
     const text = said.trim()
     try {
       decided = true
@@ -279,12 +341,23 @@
         },
       )
       await store.refetch()
+      if (optionId === 'allow_once') {
+        // Accepted is not run: the page stays until the call has.
+        await load()
+        await follow()
+        return
+      }
       leaveAfterVerdict(router, { prefix: '/approvals', id, from: openedFrom, fallback })
     } catch (e) {
       decided = false
       if (e instanceof ApiError && e.status === 422 && e.fields?.length) {
         refused = problemsByField(e.fields, [...fields.map((f) => f.key), 'reason', 'notes'])
         error = 'the node refused this answer as sent; nothing was decided'
+      } else if (e instanceof ApiError && e.status === 409 && e.kind === 'stale') {
+        // What the call changes moved since the card opened: nothing was
+        // decided, and the reload shows the fresh preview.
+        staleAllow = true
+        await load()
       } else if (e instanceof ApiError && e.status === 409) {
         error = e.message
         await load()
@@ -356,9 +429,22 @@
     </div>
   {/if}
 
+  {#if following === 'running'}
+    <div class="banner dim" role="status">
+      Allowed · running <b>· waiting to see how it ends; if you leave, you are told should it not run</b>
+    </div>
+  {:else if following === 'ran'}
+    <div class="banner ok" role="status">Ran <b>· leaving in a moment</b></div>
+  {:else if staleAllow && pending}
+    <div class="banner crit" role="alert">{STALE_ALLOW} <b>· nothing was decided; the preview below is fresh</b></div>
+  {/if}
+
   {#if !pending}
     <div class="banner" class:ok={a.state === 'succeeded' || a.state === 'running'} class:crit={a.state === 'failed' || a.state === 'uncertain'} class:dim={a.state === 'rejected' || a.state === 'expired' || a.state === 'changes_requested'}>
       {outcome(a.state, a.reason)}
+      {#if notRunDetail(a.state, a.reason)}
+        <b>· {notRunDetail(a.state, a.reason)}</b>
+      {/if}
       {#if a.state === 'changes_requested' && a.operator_note}
         <i>Notes: {a.operator_note}</i>
       {:else if a.reason}

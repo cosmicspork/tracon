@@ -89,7 +89,8 @@ impl From<SessionError> for ApiError {
             SessionError::NodeRefused(_)
             | SessionError::VersionMismatch { .. }
             | SessionError::Legacy { .. }
-            | SessionError::Rejected(_) => StatusCode::CONFLICT,
+            | SessionError::Rejected(_)
+            | SessionError::Stale(_) => StatusCode::CONFLICT,
             SessionError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         ApiError(code, e.to_string())
@@ -2928,13 +2929,30 @@ pub async fn answer_permission(
     };
     match s.manager.answer(&id, answer).await {
         Ok(()) => StatusCode::OK.into_response(),
-        Err(SessionError::Unfit(fields)) => {
+        Err(e) => answer_refused(e),
+    }
+}
+
+/// An answer the node did not act on, as the page reads it: a 422 naming
+/// each field to fix, a 409 `stale` when the card moved under the operator
+/// (the page reloads it with the fresh preview and says so), or the error's
+/// own status.
+fn answer_refused(e: SessionError) -> Response {
+    match e {
+        SessionError::Unfit(fields) => {
             let code = StatusCode::UNPROCESSABLE_ENTITY;
             let message = SessionError::Unfit(fields.clone()).to_string();
             let error = json!({ "code": code.as_u16(), "message": message, "fields": fields });
             (code, Json(json!({ "error": error }))).into_response()
         }
-        Err(e) => ApiError::from(e).into_response(),
+        SessionError::Stale(message) => {
+            let code = StatusCode::CONFLICT;
+            let error = json!({
+                "code": code.as_u16(), "kind": "stale", "message": message, "stale": true,
+            });
+            (code, Json(json!({ "error": error, "stale": true }))).into_response()
+        }
+        e => ApiError::from(e).into_response(),
     }
 }
 
@@ -4973,9 +4991,35 @@ pub async fn queue(State(s): State<AppState>) -> ApiResult<Json<serde_json::Valu
     // every session the node has ever run.
     let (running, ended) = s.store().queue_sessions(20)?;
     let promotions = s.store().open_promotions()?;
+    // Allowed calls that did not run, lately: an operator who allowed one
+    // and left before it settled learns here that nothing (or not surely
+    // anything) was sent.
+    let failed: Vec<_> = s
+        .store()
+        .failed_allowed_approvals(crate::store::now_ms() - FAILED_ALLOWED_WINDOW_MS, 20)?
+        .iter()
+        .map(failed_allowed_view)
+        .collect();
     Ok(Json(json!({
-        "waiting": waiting, "reviews": reviews, "promotions": promotions, "running": running, "ended": ended
+        "waiting": waiting, "reviews": reviews, "promotions": promotions, "running": running,
+        "ended": ended, "failed": failed
     })))
+}
+
+/// How far back the home feed looks for allowed calls that did not run.
+const FAILED_ALLOWED_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// An allowed call that did not run, as the home feed lists it.
+fn failed_allowed_view(a: &crate::store::approvals::ApprovalRow) -> serde_json::Value {
+    let stale = a.state == crate::store::approvals::FAILED
+        && a.reason
+            .as_deref()
+            .is_some_and(|r| r.starts_with(crate::store::approvals::STALE_REASON));
+    json!({
+        "id": a.id, "tool": a.tool, "title": a.title, "channel": a.channel,
+        "session_id": a.session_id, "state": a.state, "reason": a.reason,
+        "stale": stale, "finished_ms": a.finished_ms,
+    })
 }
 
 /// An answer picks one of the question's choices, says something in the
@@ -9750,5 +9794,35 @@ mod usage_csv_tests {
             "work,openai-codex,gpt-5,,s1,\"'\r=1+1\",,,1,2,3,0,0,1,0.500000"
         );
         assert_eq!(lines[5], "", "every line ends in CRLF");
+    }
+}
+
+#[cfg(test)]
+mod answer_refused_tests {
+    use crate::session::SessionError;
+    use axum::http::StatusCode;
+
+    async fn body(e: SessionError) -> (StatusCode, serde_json::Value) {
+        let response = super::answer_refused(e);
+        let code = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (code, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    /// A card that moved under the operator is a 409 the page can tell from
+    /// any other conflict: it reloads with the fresh preview and says why.
+    #[tokio::test]
+    async fn a_stale_allow_is_a_409_that_says_stale() {
+        let (code, json) = body(SessionError::Stale("moved; nothing was decided".into())).await;
+        assert_eq!(code, StatusCode::CONFLICT);
+        assert_eq!(json["stale"], true);
+        assert_eq!(json["error"]["kind"], "stale");
+        assert_eq!(json["error"]["message"], "moved; nothing was decided");
+        let (code, json) = body(SessionError::Rejected("no longer waiting".into())).await;
+        assert_eq!(code, StatusCode::CONFLICT);
+        assert!(json.get("stale").is_none(), "{json}");
+        assert!(json["error"].get("kind").is_none(), "{json}");
     }
 }

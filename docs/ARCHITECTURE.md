@@ -1101,7 +1101,22 @@ display. The preview as shown (`previewable`, `summary`, `body`, no token) is ke
 as `preview_shown`, and stays once the approval is decided, so its page still shows what
 was approved under "Preview you approved". The page is given it only when it is a preview
 of the call as decided (the edit, if the answer carried one), so a later preview of an
-edit nobody allowed never reads as the approved one. Prose in a format a plugin owns is rendered by that plugin's
+edit nobody allowed never reads as the approved one.
+An Allow that names the preview it read is also checked as it lands:
+`Tools::answer_approval` asks `tracon/preview` again for the call that would run, and a
+token other than the kept one refuses the answer (`SessionError::Stale`, a `409` whose
+error has `kind: "stale"` and `stale: true`) before anything is decided, so the page
+reloads with the fresh preview. A preview that cannot be taken then leaves it to the
+dispatch check, which still catches a change landing between the two.
+
+**An accepted Allow is not a run.** The answer returns once the decision is recorded;
+the call runs after. The approval page follows it on the stream (the approval's
+`approval_settled` event, read again from the approval as a fallback) for up to 15 s:
+a call that ran shows "Ran" and the page leaves, one that failed or is uncertain keeps
+the page with what happened. Past that, or once the operator has left, the shell
+raises a toast for an allowed call that ends failed or uncertain, and `GET /api/queue`
+lists the last day's as `failed`, which the home feed shows until this browser opens
+each one. Prose in a format a plugin owns is rendered by that plugin's
 `tracon/format/convert`, a pure function given no context and no credentials.
 
 **Allow is held until a preview was shown.** Each preview also records, as

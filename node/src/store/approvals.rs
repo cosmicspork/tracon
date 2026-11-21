@@ -330,6 +330,24 @@ impl Store {
         Ok(rows)
     }
 
+    /// Allowed calls that ended failed or uncertain since `since_ms`, most
+    /// recent first, at most `limit`: what the home feed shows an operator
+    /// who allowed a call and was not there to see it not run.
+    pub fn failed_allowed_approvals(&self, since_ms: i64, limit: i64) -> Result<Vec<ApprovalRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM approval WHERE state IN (?1, ?2) AND decided_ms IS NOT NULL
+             AND finished_ms >= ?3 ORDER BY finished_ms DESC LIMIT ?4",
+        )?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![FAILED, UNCERTAIN, since_ms, limit],
+                ApprovalRow::from_row,
+            )?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
     /// The egress asks the operator allowed for `session_id`, oldest first:
     /// what a repository set up from that session is suggested to reach.
     pub fn allowed_egress_asks(&self, session_id: &str) -> Result<Vec<ApprovalRow>> {
@@ -711,6 +729,44 @@ mod tests {
             .finish_approval("a1", SUCCEEDED, Some("{}"), None)
             .unwrap();
         assert!(store.get_approval("a1").unwrap().unwrap().is_settled());
+    }
+
+    #[test]
+    fn allowed_calls_that_did_not_run_are_listed_most_recent_first() {
+        let store = Store::open_in_memory().unwrap();
+        let later = now_ms() + 60_000;
+        for (id, state) in [
+            ("ok", SUCCEEDED),
+            ("f1", FAILED),
+            ("u1", UNCERTAIN),
+            ("waits", PENDING),
+        ] {
+            store.insert_approval(&row(id, id, later)).unwrap();
+            if state != PENDING {
+                assert!(store.decide_approval(id, &allow()).unwrap());
+                store.finish_approval(id, state, None, Some("x")).unwrap();
+            }
+        }
+        store.insert_approval(&row("no", "no", later)).unwrap();
+        let refused = Decision {
+            state: REJECTED,
+            option_id: "reject_once",
+            ..Default::default()
+        };
+        assert!(store.decide_approval("no", &refused).unwrap());
+        let mut ids: Vec<String> = store
+            .failed_allowed_approvals(0, 10)
+            .unwrap()
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        ids.sort();
+        assert_eq!(ids, ["f1", "u1"]);
+        assert_eq!(store.failed_allowed_approvals(0, 1).unwrap().len(), 1);
+        assert!(store
+            .failed_allowed_approvals(now_ms() + 1_000, 10)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
