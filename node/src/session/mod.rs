@@ -678,6 +678,11 @@ pub enum SessionError {
     NoMesh,
     #[error("{0}")]
     Rejected(String),
+    /// An Allow refused because the plugin's preview, taken again as it was
+    /// answered, is not the one the operator read: what the call changes
+    /// has moved. Nothing was decided; the card shows the fresh preview.
+    #[error("{0}")]
+    Stale(String),
     /// What a new session was asked to start from is not something a
     /// session starts from: a host checkout, or a commit.
     #[error("{0}")]

@@ -22,6 +22,7 @@
   import PasskeyOffer from './components/PasskeyOffer.svelte'
   import StepUpPrompt from './components/StepUpPrompt.svelte'
   import RestartBanner from './components/RestartBanner.svelte'
+  import OutcomeToasts from './components/OutcomeToasts.svelte'
   import { attention } from './lib/attention'
   import { stashToken, tokenFromHash } from './lib/auth'
   import { approving, closeApproval, openApproval } from './lib/approving.svelte'
@@ -326,6 +327,8 @@
      offer to add one right after pairing. -->
 <StepUpPrompt />
 <PasskeyOffer />
+<!-- An allowed call that did not run, said wherever the operator is now. -->
+{#if !store.authRequired}<OutcomeToasts />{/if}
 
 <style>
   .shell { display: grid; grid-template-columns: 172px minmax(0, 1fr); min-height: 100vh; }
