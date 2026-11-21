@@ -890,6 +890,14 @@ async fn a_preview_is_shown_and_its_token_kept() {
     let seen = approved_echo(&rig.approve(&id).await);
     assert_eq!(seen["meta"]["preview_token"], "v1");
     assert_eq!(seen["meta"]["approval_id"], id.as_str());
+    // Decided, the approval keeps the preview the operator approved, for
+    // its page to show; never its token.
+    let kept: Value =
+        serde_json::from_str(&rig.store.preview_shown(&id).unwrap().unwrap()).unwrap();
+    assert_eq!(kept["summary"], "fake describe");
+    assert_eq!(kept["previewable"], true);
+    assert_eq!(kept["body"], preview["body"]);
+    assert!(kept.get("token_sha256").is_none() && kept.get("token").is_none());
     rig.manager.plugins().shutdown().await;
 }
 
@@ -1244,6 +1252,10 @@ async fn an_operators_edit_is_previewed_and_its_preview_is_what_allow_binds() {
     let seen = approved_echo(&rig.settled(&id).await);
     assert_eq!(seen["meta"]["preview_token"], "v2");
     assert_eq!(seen["arguments"], edit);
+    // What is kept to show is the edit's preview, the one approved.
+    let kept: Value =
+        serde_json::from_str(&rig.store.preview_shown(&id).unwrap().unwrap()).unwrap();
+    assert_eq!(kept["body"], second["preview"]["body"]);
     rig.manager.plugins().shutdown().await;
 }
 

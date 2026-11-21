@@ -1852,6 +1852,13 @@ const MIGRATIONS: &[&str] = &[
     CREATE UNIQUE INDEX session_request ON session(node_id, channel, request_id)
         WHERE request_id IS NOT NULL;
     "#,
+    // 86: the plugin preview a waiting approval's card last showed, as JSON
+    // (`previewable`, `summary`, `body`), NULL when its last preview was
+    // refused, failed or not offered. Kept, like `preview_token`, once the
+    // approval is decided, so its page still shows what was approved.
+    r#"
+    ALTER TABLE approval ADD COLUMN preview_shown TEXT;
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

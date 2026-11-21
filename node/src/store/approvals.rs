@@ -234,6 +234,15 @@ pub struct Decision<'a> {
     pub preview_shown_for: Option<&'a str>,
 }
 
+/// A plugin preview a card showed ([`Store::set_preview`]).
+#[derive(Debug, Clone, Copy)]
+pub struct Shown<'a> {
+    /// The arguments hash of the call it was shown for.
+    pub for_arguments: &'a str,
+    /// The preview as the page showed it, as JSON.
+    pub preview: &'a str,
+}
+
 impl Store {
     pub fn insert_approval(&self, a: &ApprovalRow) -> Result<()> {
         let conn = self.conn.lock().unwrap();
@@ -381,22 +390,38 @@ impl Store {
     }
 
     /// Keep what a waiting approval's card last previewed: the preview's
-    /// token, or none, and the arguments hash of the call it was shown for,
-    /// or none when the plugin refused, failed or offered no preview. A
-    /// decided approval keeps what it was decided on.
+    /// token, or none, the arguments hash of the call it was shown for and
+    /// the preview as shown (JSON), or none of either when the plugin
+    /// refused, failed or offered no preview. A decided approval keeps what
+    /// it was decided on.
     pub fn set_preview(
         &self,
         id: &str,
         token: Option<&str>,
-        shown_for: Option<&str>,
+        shown: Option<Shown<'_>>,
     ) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
+        let (shown_for, preview) = shown.map(|s| (s.for_arguments, s.preview)).unzip();
         let n = conn.execute(
-            "UPDATE approval SET preview_token=?2, preview_shown_for=?3
+            "UPDATE approval SET preview_token=?2, preview_shown_for=?3, preview_shown=?4
              WHERE id=?1 AND state='pending'",
-            rusqlite::params![id, token, shown_for],
+            rusqlite::params![id, token, shown_for, preview],
         )?;
         Ok(n == 1)
+    }
+
+    /// The plugin preview an approval's card last showed, as JSON, if its
+    /// last preview was shown: once decided, what the operator decided on.
+    pub fn preview_shown(&self, id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let shown = conn
+            .query_row(
+                "SELECT preview_shown FROM approval WHERE id=?1",
+                [id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        Ok(shown.flatten())
     }
 
     /// The arguments hash of the call an approval's card last showed a
@@ -842,7 +867,7 @@ mod tests {
             .insert_approval(&row("a1", "k", now_ms() + 60_000))
             .unwrap();
         assert_eq!(store.preview_shown_for("a1").unwrap(), None);
-        assert!(store.set_preview("a1", None, Some("h1")).unwrap());
+        assert!(store.set_preview("a1", None, Some(shown("h1"))).unwrap());
         assert_eq!(
             store.preview_shown_for("a1").unwrap().as_deref(),
             Some("h1")
@@ -854,7 +879,9 @@ mod tests {
             ..allow()
         };
         assert!(!store.decide_approval("a1", &bound).unwrap());
-        assert!(store.set_preview("a1", Some("v1"), Some("h1")).unwrap());
+        assert!(store
+            .set_preview("a1", Some("v1"), Some(shown("h1")))
+            .unwrap());
         assert!(store.decide_approval("a1", &bound).unwrap());
         assert!(!store.set_preview("a1", None, None).unwrap());
         assert_eq!(
@@ -862,6 +889,49 @@ mod tests {
             Some("h1")
         );
         assert_eq!(store.preview_shown_for("gone").unwrap(), None);
+    }
+
+    fn shown(for_arguments: &str) -> Shown<'_> {
+        Shown {
+            for_arguments,
+            preview: r#"{"previewable":true,"summary":"1 row","body":"UPDATE t"}"#,
+        }
+    }
+
+    /// The preview a card showed is kept with the approval, cleared by one
+    /// that was not shown, and stays as it was decided on, so the decided
+    /// page still shows what was approved.
+    #[test]
+    fn the_preview_a_card_showed_stays_once_decided() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .insert_approval(&row("a1", "k", now_ms() + 60_000))
+            .unwrap();
+        assert_eq!(store.preview_shown("a1").unwrap(), None);
+        assert!(store
+            .set_preview("a1", Some("v1"), Some(shown("h1")))
+            .unwrap());
+        assert!(store
+            .preview_shown("a1")
+            .unwrap()
+            .unwrap()
+            .contains("1 row"));
+        assert!(store.set_preview("a1", None, None).unwrap());
+        assert_eq!(store.preview_shown("a1").unwrap(), None);
+        assert!(store
+            .set_preview("a1", Some("v1"), Some(shown("h1")))
+            .unwrap());
+        // Kept apart from the row pages and peers are sent.
+        let row = store.get_approval("a1").unwrap().unwrap();
+        assert!(!serde_json::to_string(&row).unwrap().contains("1 row"));
+        assert!(store.decide_approval("a1", &allow()).unwrap());
+        assert!(!store.set_preview("a1", None, None).unwrap());
+        assert!(store
+            .preview_shown("a1")
+            .unwrap()
+            .unwrap()
+            .contains("1 row"));
+        assert_eq!(store.preview_shown("gone").unwrap(), None);
     }
 
     #[test]

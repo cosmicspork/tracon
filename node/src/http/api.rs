@@ -2998,6 +2998,13 @@ pub async fn get_approval(
         // an approved run is lent: facts about the build, not a live read.
         "plugin": s.tools.plugin_approval_context(&a, None),
     });
+    // Once decided, the plugin preview its card last showed: what the
+    // operator decided on, read-only.
+    if !pending {
+        if let Some(shown) = parse(s.store().preview_shown(&id)?.as_deref()) {
+            details["preview_shown"] = shown;
+        }
+    }
     if let Some(out) = details.as_object_mut() {
         for extra in [context, rendered].into_iter().flatten() {
             if let Value::Object(extra) = extra {

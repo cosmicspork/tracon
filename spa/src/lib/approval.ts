@@ -98,6 +98,12 @@ export interface ApprovalDetails {
    */
   preview?: PluginPreview
   /**
+   * Once decided, the plugin preview its card last showed: what the
+   * operator decided on. Absent while it waits, and when no preview was
+   * shown.
+   */
+  preview_shown?: ShownPreview | null
+  /**
    * Why Allow is held on a plugin tool's card: the plugin offered no preview
    * of the call as it stands (none at all, or its preview failed), and its
    * `[[plugin]]` entry requires one. Names the setting that lifts it. Absent
@@ -219,6 +225,13 @@ export type PluginPreview =
       /** The plugin's refusal: the call can still be decided. */
       error: string
     }
+
+/** A plugin preview as the card showed it, kept with a decided approval. */
+export interface ShownPreview {
+  previewable: boolean
+  summary: string
+  body: string
+}
 
 /**
  * Whether the card's plugin preview no longer shows the call as it would
@@ -502,6 +515,37 @@ export function resultRows(result: unknown): { key: string; value: string; href:
       const value = typeof v === 'string' ? v : JSON.stringify(v)
       return { key, value, href: typeof v === 'string' && /^https?:\/\//.test(v) ? v : null }
     })
+}
+
+/** One item of a tool's MCP result content, as the page shows it. */
+export type ContentItem =
+  | { kind: 'text'; text: string }
+  /** A text item that is a JSON object: its fields as rows. */
+  | { kind: 'rows'; rows: { key: string; value: string; href: string | null }[] }
+  /** Anything but text (an image, a resource): shown as JSON. */
+  | { kind: 'other'; json: string }
+
+/**
+ * An MCP tool result (`{content: [...], isError?}`, a plugin's or an
+ * upstream server's) as items to show, or null when `result` is not one.
+ */
+export function contentResult(result: unknown): { error: boolean; items: ContentItem[] } | null {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return null
+  const r = result as Record<string, unknown>
+  if (!Array.isArray(r.content)) return null
+  const items = r.content.map((c): ContentItem => {
+    const item = c && typeof c === 'object' ? (c as Record<string, unknown>) : null
+    if (item?.type !== 'text' || typeof item.text !== 'string') return { kind: 'other', json: JSON.stringify(c, null, 2) }
+    let parsed: unknown = null
+    try {
+      parsed = JSON.parse(item.text)
+    } catch {
+      // Plain text, shown as it is.
+    }
+    const rows = resultRows(parsed)
+    return rows?.length ? { kind: 'rows', rows } : { kind: 'text', text: item.text }
+  })
+  return { error: r.isError === true, items }
 }
 
 /** The arguments the form describes. A locked field is always the agent's own. */
