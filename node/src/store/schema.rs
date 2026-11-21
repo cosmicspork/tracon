@@ -1852,10 +1852,7 @@ const MIGRATIONS: &[&str] = &[
     CREATE UNIQUE INDEX session_request ON session(node_id, channel, request_id)
         WHERE request_id IS NOT NULL;
     "#,
-    // 86: held for a migration on another open branch; whichever lands
-    // second replaces this placeholder with its own SQL.
-    "",
-    // 87: which step an attempt at a publication is on, since when, and the
+    // 86: which step an attempt at a publication is on, since when, and the
     // steps it planned (a JSON array of `review::publish::Step`), for the
     // review page to show them live. A failed attempt keeps the step it
     // stopped at. NULL on every row from before.
