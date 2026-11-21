@@ -1859,6 +1859,15 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE approval ADD COLUMN preview_shown TEXT;
     "#,
+    // 87: which step an attempt at a publication is on, since when, and the
+    // steps it planned (a JSON array of `review::publish::Step`), for the
+    // review page to show them live. A failed attempt keeps the step it
+    // stopped at. NULL on every row from before.
+    r#"
+    ALTER TABLE publication ADD COLUMN step TEXT;
+    ALTER TABLE publication ADD COLUMN step_started_ms INTEGER;
+    ALTER TABLE publication ADD COLUMN steps_json TEXT;
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

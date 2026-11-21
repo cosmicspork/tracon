@@ -26,6 +26,12 @@
 //! retries — never new prose, which would need a fresh approval — and the
 //! second is what tells "refused before anything was attempted" from "the
 //! forge refused it" when the operator is deciding what to do next.
+//!
+//! It also keeps which step the latest attempt is on (`step`, from
+//! `review::publish::Step`), since when, and the steps it planned, so the
+//! review page shows the attempt as it runs, and the same again after a
+//! reload or on another device. That is for the operator to watch; nothing
+//! decides on it.
 
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -57,6 +63,13 @@ pub struct PublicationRow {
     pub body: Option<String>,
     pub outputs_json: Option<String>,
     pub forge_contacted: bool,
+    /// The step the latest attempt is on, or stopped at when it failed;
+    /// `published` once it opened. `None` on a row from before steps were
+    /// recorded.
+    pub step: Option<String>,
+    pub step_started_ms: Option<i64>,
+    /// The steps the latest attempt planned, as a JSON array of step names.
+    pub steps_json: Option<String>,
 }
 
 /// What a publication record means to the operator, settled from its state
@@ -104,6 +117,9 @@ impl PublicationRow {
             body: r.get("body")?,
             outputs_json: r.get("outputs_json")?,
             forge_contacted: r.get("forge_contacted")?,
+            step: r.get("step")?,
+            step_started_ms: r.get("step_started_ms")?,
+            steps_json: r.get("steps_json")?,
         })
     }
 
@@ -129,6 +145,14 @@ impl PublicationRow {
     pub fn may_have_reached_the_forge(&self) -> bool {
         self.state != "failed" || self.pushed_sha.is_some()
     }
+
+    /// The steps the latest attempt planned, by name, in order.
+    pub fn steps(&self) -> Vec<String> {
+        self.steps_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str(json).ok())
+            .unwrap_or_default()
+    }
 }
 
 /// What a publication attempt is about to do, recorded before it does it.
@@ -150,7 +174,8 @@ pub struct PublicationBegin<'a> {
 impl Store {
     /// Open (or reopen) the record for one publication. The row exists before
     /// the first side effect is attempted; a retry increments `attempts` and
-    /// keeps everything the earlier attempt observed.
+    /// keeps everything the earlier attempt observed. A new attempt starts at
+    /// `verifying`, with no steps planned yet.
     pub fn publication_begin(&self, begin: &PublicationBegin<'_>) -> Result<PublicationRow> {
         {
             let conn = self.conn.lock().unwrap();
@@ -158,10 +183,17 @@ impl Store {
                 "INSERT INTO publication
                     (id, review_id, revision_id, candidate_id, channel, node_id, provider, project,
                      base, branch, head_sha, state, attempts, instance, created_ms, updated_ms,
-                     forge_contacted)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'pending',1,?12,?13,?13,0)
+                     forge_contacted, step, step_started_ms)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'pending',1,?12,?13,?13,0,
+                         'verifying',?13)
                  ON CONFLICT(id) DO UPDATE SET
                     state=CASE WHEN publication.state='opened' THEN 'opened' ELSE 'pending' END,
+                    step=CASE WHEN publication.state='opened' THEN publication.step
+                              ELSE 'verifying' END,
+                    step_started_ms=CASE WHEN publication.state='opened'
+                              THEN publication.step_started_ms ELSE excluded.step_started_ms END,
+                    steps_json=CASE WHEN publication.state='opened' THEN publication.steps_json
+                              ELSE NULL END,
                     attempts=publication.attempts + 1,
                     instance=excluded.instance,
                     updated_ms=excluded.updated_ms",
@@ -363,6 +395,26 @@ impl Store {
         }))
     }
 
+    /// The latest attempt began `step` now.
+    pub fn publication_step(&self, id: &str, step: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE publication SET step=?2, step_started_ms=?3 WHERE id=?1",
+            params![id, step, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// The steps the latest attempt will run, as a JSON array of names.
+    pub fn publication_steps(&self, id: &str, steps_json: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE publication SET steps_json=?2 WHERE id=?1",
+            params![id, steps_json],
+        )?;
+        Ok(())
+    }
+
     pub fn publication_pushed(&self, id: &str, sha: &str) -> Result<()> {
         self.publication_set(id, "pushed", Some(sha), None, None)
     }
@@ -373,8 +425,19 @@ impl Store {
         self.publication_set(id, "opening", None, None, None)
     }
 
+    /// It landed at `result`: the last step is `published`. One statement, so
+    /// the step, which is only for the operator to watch, cannot fail a
+    /// publication the record already calls opened.
     pub fn publication_opened(&self, id: &str, result: &str) -> Result<()> {
-        self.publication_set(id, "opened", None, Some(result), None)
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE publication
+                SET state='opened', result=?2, note=NULL, updated_ms=?3,
+                    step='published', step_started_ms=?3
+              WHERE id=?1",
+            params![id, result, now_ms()],
+        )?;
+        Ok(())
     }
 
     pub fn publication_failed(&self, id: &str, note: &str) -> Result<()> {
@@ -531,6 +594,41 @@ mod tests {
             .unwrap();
         let row = store.publication("p1").unwrap().unwrap();
         assert_eq!(row.outcome("one"), PublicationOutcome::Published);
+    }
+
+    #[test]
+    fn an_attempt_starts_verifying_and_keeps_the_step_it_stopped_at() {
+        let store = Store::open_in_memory().unwrap();
+        let row = store.publication_begin(&begin("p1", "one")).unwrap();
+        assert_eq!(row.step.as_deref(), Some("verifying"));
+        assert!(row.step_started_ms.is_some());
+        store
+            .publication_steps("p1", r#"["verifying","pushing","published"]"#)
+            .unwrap();
+        store.publication_step("p1", "pushing").unwrap();
+        store
+            .publication_failed("p1", "the forge refused it")
+            .unwrap();
+        let row = store.publication("p1").unwrap().unwrap();
+        assert_eq!(row.step.as_deref(), Some("pushing"));
+        assert_eq!(row.steps(), ["verifying", "pushing", "published"]);
+        assert_eq!(row.note.as_deref(), Some("the forge refused it"));
+
+        // A retry starts over, with nothing planned until it says so.
+        let again = store.publication_begin(&begin("p1", "one")).unwrap();
+        assert_eq!(again.step.as_deref(), Some("verifying"));
+        assert!(again.steps().is_empty());
+
+        store
+            .publication_opened("p1", "https://forge/pull/1")
+            .unwrap();
+        assert_eq!(
+            store.publication("p1").unwrap().unwrap().step.as_deref(),
+            Some("published")
+        );
+        // Asking again of an opened one leaves what it reached alone.
+        let opened = store.publication_begin(&begin("p1", "two")).unwrap();
+        assert_eq!(opened.step.as_deref(), Some("published"));
     }
 
     #[test]

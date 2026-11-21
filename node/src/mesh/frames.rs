@@ -155,7 +155,8 @@ pub fn to_payloads(frame: &Frame, store: &Store, self_id: &str) -> Vec<(String, 
         | Frame::ToolUpdate { .. }
         | Frame::Mesh(_)
         | Frame::Awake(_)
-        | Frame::Restart(_) => Vec::new(),
+        | Frame::Restart(_)
+        | Frame::Publication(_) => Vec::new(),
         _ => Vec::new(),
     }
 }

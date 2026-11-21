@@ -93,6 +93,12 @@ pub enum Frame {
     /// What a restart of this node would change, and one asked for and
     /// waiting (`GET /api/restart`). This node's alone; never forwarded.
     Restart(Value),
+    /// A publication attempt moved on: the step it is on, the steps it
+    /// planned, and how it ended with why (`authority::publication_progress`).
+    /// Published at every step, so the review page shows the attempt as it
+    /// runs. This node's alone; never forwarded: a peer's review page reads
+    /// the owner's record.
+    Publication(Value),
 }
 
 impl Frame {
@@ -115,6 +121,7 @@ impl Frame {
             Frame::Questions { .. } => "questions",
             Frame::Awake(_) => "awake",
             Frame::Restart(_) => "restart",
+            Frame::Publication(_) => "publication",
         }
     }
 

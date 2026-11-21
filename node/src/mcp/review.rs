@@ -5465,6 +5465,9 @@ mod tests {
             body: None,
             outputs_json: None,
             forge_contacted: true,
+            step: None,
+            step_started_ms: None,
+            steps_json: None,
         };
         let merged = review::publish::ChangeState {
             url: "https://github.test/pull/7".into(),

@@ -492,6 +492,96 @@ pub trait Journal: Send + Sync {
     /// something has already gone wrong.
     fn uncertain(&self, note: &str);
     fn failed(&self, note: &str);
+    /// The steps this attempt will run, in order: said once before the first
+    /// one, and again when the attempt learns one of them is not needed
+    /// (the forge already holds the push, the change is not a draft). Best
+    /// effort: it is what the operator watches, never what a recovery reads.
+    fn steps(&self, _steps: &[Step]) {}
+    /// The attempt has begun `step`. Best effort, like [`Journal::steps`].
+    fn step(&self, _step: Step) {}
+}
+
+/// What a publication attempt is doing, as the review page shows it: a small
+/// fixed set, so the interface words each one itself and its wording can
+/// change without a node release. Not every publication runs every step
+/// ([`plan`]). A failed attempt keeps the step it stopped at, with the reason
+/// in the record's note.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Step {
+    /// The candidate still holds the reviewed commit and tree, read into a
+    /// fresh publisher repository.
+    Verifying,
+    /// The commit that ships is made: the squash, or the reworded commits.
+    PreparingCommit,
+    /// What the forge holds now: the change being updated, the branch, the
+    /// base a new change opens into.
+    InspectingForge,
+    Pushing,
+    /// The branch is read back to see the forge kept the push.
+    ConfirmingPush,
+    OpeningChange,
+    /// The existing change's description is replaced.
+    UpdatingChange,
+    /// The existing change, a draft, is marked ready.
+    MarkingReady,
+    Commenting,
+    Published,
+}
+
+impl Step {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Step::Verifying => "verifying",
+            Step::PreparingCommit => "preparing_commit",
+            Step::InspectingForge => "inspecting_forge",
+            Step::Pushing => "pushing",
+            Step::ConfirmingPush => "confirming_push",
+            Step::OpeningChange => "opening_change",
+            Step::UpdatingChange => "updating_change",
+            Step::MarkingReady => "marking_ready",
+            Step::Commenting => "commenting",
+            Step::Published => "published",
+        }
+    }
+}
+
+/// The steps `p` will run, worked out before it starts from what it is: a
+/// first commit or a direct push opens no change and posts no comment, an
+/// update replaces a description and marks a draft ready rather than opening
+/// one, only a squash or a reword prepares a commit, and a resumed attempt
+/// whose push the forge was seen to keep does not push again. Steps that do
+/// not apply are left out, never listed as skipped.
+pub fn plan(p: &Publication<'_>) -> Vec<Step> {
+    let mut steps = vec![Step::Verifying];
+    let rewording = p.reword.is_some_and(|reword| !reword.messages.is_empty());
+    if p.squash.is_some() || rewording {
+        steps.push(Step::PreparingCommit);
+    }
+    steps.push(Step::InspectingForge);
+    if !p.pushed {
+        steps.extend([Step::Pushing, Step::ConfirmingPush]);
+    }
+    let opens_nothing = p.target.initial || p.target.direct;
+    match &p.target.change {
+        Some(_) => {
+            if p.outputs.description.is_some() {
+                steps.push(Step::UpdatingChange);
+            }
+            // Only a draft is marked ready, and whether it is one is known
+            // once the forge is asked; the step is dropped then if not.
+            if p.ready {
+                steps.push(Step::MarkingReady);
+            }
+        }
+        None if !opens_nothing => steps.push(Step::OpeningChange),
+        None => {}
+    }
+    if p.outputs.comment.is_some() && !opens_nothing {
+        steps.push(Step::Commenting);
+    }
+    steps.push(Step::Published);
+    steps
 }
 
 /// For the unit tests below and any caller with nothing to record.
@@ -627,6 +717,9 @@ async fn attempt(
     cfg: &Config,
     p: &Publication<'_>,
 ) -> Result<String, PublishError> {
+    let mut steps = plan(p);
+    p.journal.steps(&steps);
+    p.journal.step(Step::Verifying);
     let provider = Provider::parse(&p.target.provider).ok_or(PublishError::UnknownProvider {
         provider: p.target.provider.clone(),
     })?;
@@ -766,6 +859,9 @@ async fn attempt(
 
     // What is pushed: the reviewed commit, one commit holding its tree, or
     // the reviewed commits with the approved messages.
+    if steps.contains(&Step::PreparingCommit) {
+        p.journal.step(Step::PreparingCommit);
+    }
     let pushing = match (&p.squash, &p.reword) {
         (Some(squash), _) => {
             squash_commit(cfg, &publisher, &credential, p, squash, &refname).await?
@@ -779,12 +875,16 @@ async fn attempt(
 
     // An existing change is only ever updated in place: still open, still
     // this branch of this repository into this base.
+    p.journal.step(Step::InspectingForge);
     let verified = match &p.target.change {
         Some(change) => {
             let state =
                 change_state(provider, cfg, &publisher, &env, p.target, change.number).await?;
             if let Some(refusal) = state.refusal(provider, p.target, change.number) {
                 return Err(PublishError::Target(refusal));
+            }
+            if !state.draft {
+                without(p.journal, &mut steps, &[Step::MarkingReady]);
             }
             Some(state)
         }
@@ -847,6 +947,11 @@ async fn attempt(
     match observed {
         Some(Some(ref sha)) if sha == pushing => {
             // The interrupted attempt's push did land. Nothing to repeat.
+            without(
+                p.journal,
+                &mut steps,
+                &[Step::Pushing, Step::ConfirmingPush],
+            );
             p.journal.pushed(sha).map_err(PublishError::Broker)?;
         }
         Some(found) if p.pushed => {
@@ -893,7 +998,9 @@ async fn attempt(
             let mut args = vec!["push"];
             args.extend(lease.as_deref());
             args.extend(["origin", &refspec]);
+            p.journal.step(Step::Pushing);
             publisher_git_with_credential(&cfg.publish.git, &publisher, &credential, args).await?;
+            p.journal.step(Step::ConfirmingPush);
             // A push that reports success is not evidence the forge kept it:
             // a ref-update hook can reject it after the fact, and a proxy can
             // answer for a repository that is not the one named.
@@ -929,6 +1036,7 @@ async fn attempt(
             // Replacing a description is idempotent, so a resumed attempt
             // simply says it again.
             if let Some(description) = &p.outputs.description {
+                p.journal.step(Step::UpdatingChange);
                 edit_description(
                     provider,
                     cfg,
@@ -944,6 +1052,7 @@ async fn attempt(
             // here is one the agent, its reviewer or the node's backstop
             // made while this revision was on its way.
             if p.ready && verified.as_ref().is_some_and(|state| state.draft) {
+                p.journal.step(Step::MarkingReady);
                 set_ready(
                     provider,
                     cfg,
@@ -962,6 +1071,7 @@ async fn attempt(
             // The same question for the second side effect: if an interrupted
             // attempt already opened the change, record that one rather than
             // opening another.
+            p.journal.step(Step::OpeningChange);
             let found = if p.resume {
                 existing_change(provider, cfg, &publisher, &env, p, pushing).await?
             } else {
@@ -995,10 +1105,21 @@ async fn attempt(
                  the comment; post it by hand or verify before retrying"
             )));
         }
+        p.journal.step(Step::Commenting);
         post_comment_once(provider, cfg, &publisher, &env, p, number, comment).await?;
     }
     p.journal.opened(&url).map_err(PublishError::Broker)?;
     Ok(url)
+}
+
+/// Drop steps this attempt learned it will not run, and say the shorter list
+/// again so the page does not wait on them.
+fn without(journal: &dyn Journal, steps: &mut Vec<Step>, gone: &[Step]) {
+    let before = steps.len();
+    steps.retain(|step| !gone.contains(step));
+    if steps.len() != before {
+        journal.steps(steps);
+    }
 }
 
 /// The number a forge gives a change, from its web address: the last path
@@ -2523,6 +2644,104 @@ encoding ISO-8859-1\n\nsubject\n";
             before_push: None,
             journal,
         }
+    }
+
+    /// The record's `step` is written with `as_str` and its `steps_json` with
+    /// serde: both must name each step as the interface keys its words.
+    #[test]
+    fn a_step_is_named_the_same_in_the_step_and_in_the_plan() {
+        use Step::*;
+        let all = [
+            (Verifying, "verifying"),
+            (PreparingCommit, "preparing_commit"),
+            (InspectingForge, "inspecting_forge"),
+            (Pushing, "pushing"),
+            (ConfirmingPush, "confirming_push"),
+            (OpeningChange, "opening_change"),
+            (UpdatingChange, "updating_change"),
+            (MarkingReady, "marking_ready"),
+            (Commenting, "commenting"),
+            (Published, "published"),
+        ];
+        for (step, name) in all {
+            assert_eq!(step.as_str(), name);
+            assert_eq!(serde_json::to_value(step).unwrap(), name);
+        }
+    }
+
+    #[test]
+    fn a_publication_plans_only_the_steps_it_will_run() {
+        use Step::*;
+        let (mut target, mut outputs) = approved();
+        let journal = NoJournal;
+        outputs.comment = Some("thanks".into());
+        assert_eq!(
+            plan(&publication(&target, &outputs, &journal)),
+            [
+                Verifying,
+                InspectingForge,
+                Pushing,
+                ConfirmingPush,
+                OpeningChange,
+                Commenting,
+                Published
+            ]
+        );
+
+        // A squash prepares its commit; a resumed push the forge kept is not
+        // pushed again.
+        let mut squashed = publication(&target, &outputs, &journal);
+        squashed.squash = Some(Squash {
+            onto: "base",
+            merges: None,
+            message: "feat: x",
+        });
+        squashed.pushed = true;
+        assert_eq!(
+            plan(&squashed),
+            [
+                Verifying,
+                PreparingCommit,
+                InspectingForge,
+                OpeningChange,
+                Commenting,
+                Published
+            ]
+        );
+
+        // An update replaces the description and marks a draft ready.
+        target.change = Some(ChangeRef {
+            number: 7,
+            url: String::new(),
+        });
+        outputs.comment = None;
+        assert_eq!(
+            plan(&publication(&target, &outputs, &journal)),
+            [
+                Verifying,
+                InspectingForge,
+                Pushing,
+                ConfirmingPush,
+                UpdatingChange,
+                MarkingReady,
+                Published
+            ]
+        );
+
+        // A direct push opens nothing and posts nothing.
+        target.change = None;
+        target.direct = true;
+        outputs.comment = Some("thanks".into());
+        assert_eq!(
+            plan(&publication(&target, &outputs, &journal)),
+            [
+                Verifying,
+                InspectingForge,
+                Pushing,
+                ConfirmingPush,
+                Published
+            ]
+        );
     }
 
     fn listed(url: &str, title: &str, body: &str, head: &str) -> Listed {
