@@ -1276,6 +1276,19 @@ impl Tools {
         match preview_shape(&result) {
             Ok(preview) => {
                 keep(preview.token, true);
+                // The plugin's own one line titles the card, once it is of
+                // the call as asked rather than an operator's edit of it.
+                if shown_for == approval.arguments_hash() {
+                    if let Some(title) = preview_title(&pt.plugin, preview.summary) {
+                        match access.store.set_approval_title(&approval.id, &title) {
+                            Ok(true) => access.manager.publish_queue().await,
+                            Ok(false) => {}
+                            Err(error) => {
+                                tracing::warn!(approval = %approval.id, %error, "a preview's title was not kept")
+                            }
+                        }
+                    }
+                }
                 Some(json!({ "preview": {
                     "status": "shown",
                     "previewable": preview.previewable,
@@ -3141,7 +3154,9 @@ impl Tools {
     /// [`summarize`], except that a document write says whether it creates
     /// or edits, and what, and when it changes the document's format or
     /// drops files of its bundle. A lookup that fails leaves the plain
-    /// summary rather than holding the request.
+    /// summary rather than holding the request. A plugin's tool reads as
+    /// [`plugin_title`] until its card shows a preview, whose summary then
+    /// titles it.
     async fn approval_title(&self, ctx: &CallContext, name: &str, args: &Value) -> String {
         if name == docs::DOC_EDIT {
             if let Some(access) = self.session.get() {
@@ -3165,6 +3180,9 @@ impl Tools {
                     return title;
                 }
             }
+        }
+        if let Some(pt) = self.plugin_tool(name) {
+            return plugin_title(&pt.plugin, &pt.tool, args);
         }
         summarize(name, args)
     }
@@ -4544,6 +4562,69 @@ fn retired(name: &str) -> Option<String> {
     ))
 }
 
+/// The longest excerpt of a plugin call's statement or text its title
+/// carries, in characters.
+const PLUGIN_TITLE_EXCERPT: usize = 120;
+
+/// A plugin call's card title before its preview is shown: the plugin and
+/// its tool, what it targets (its `profile` or `key` argument), and the first
+/// line of the statement or text it carries (`sql`, `summary` or `body`),
+/// bounded. Never its other arguments, so bind `params` stay off the card
+/// and out of the push.
+pub fn plugin_title(plugin: &str, tool: &str, args: &Value) -> String {
+    let text = |key: &str| {
+        args.get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+    };
+    let mut title = format!("{plugin}: {tool}");
+    if let Some(profile) = text("profile").and_then(first_line) {
+        title.push_str(&format!(" on {profile}"));
+    } else if let Some(key) = text("key").and_then(first_line) {
+        title.push_str(&format!(" {key}"));
+    }
+    if let Some(line) = ["sql", "summary", "body"]
+        .into_iter()
+        .find_map(|key| text(key).and_then(first_line))
+    {
+        title.push_str(" · ");
+        title.push_str(&excerpt(line, PLUGIN_TITLE_EXCERPT));
+    }
+    bound(&mut title);
+    title
+}
+
+/// A plugin call's card title from its shown preview: the first line of the
+/// preview's `summary`, after the plugin's name unless it already starts
+/// with it. `None` for a blank summary, which leaves the title it had.
+pub fn preview_title(plugin: &str, summary: &str) -> Option<String> {
+    let line = first_line(summary)?;
+    let named = line
+        .strip_prefix(plugin)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with([':', ' ']));
+    let mut title = if named {
+        line.to_string()
+    } else {
+        format!("{plugin}: {line}")
+    };
+    bound(&mut title);
+    Some(title)
+}
+
+/// The first line of `text` that is not blank, trimmed.
+fn first_line(text: &str) -> Option<&str> {
+    text.lines().map(str::trim).find(|l| !l.is_empty())
+}
+
+/// `text` cut to `max` characters, marked when it was cut.
+fn excerpt(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+        None => text.to_string(),
+    }
+}
+
 /// A title cut to the length a card and a push notification carry.
 fn bound(s: &mut String) {
     if s.len() > 400 {
@@ -4820,6 +4901,73 @@ mod tests {
         assert!(
             summarize("sql-review__query", &query).starts_with("sql-review__query profile=qa {")
         );
+    }
+
+    /// A plugin call's card reads as the plugin, its tool, its target and
+    /// the first line of its statement: never its arguments as JSON, and
+    /// never its bind values.
+    #[test]
+    fn a_plugin_call_is_titled_without_its_arguments_as_json() {
+        let write = json!({
+            "operation_id": "afa-tst-plugin-write-a",
+            "params": { "v": "PlugTestA" },
+            "profile": "tst",
+            "sql": "UPDATE app4adm.adm_app_data SET first_name = :v\nWHERE app_id = 252111",
+        });
+        let title = plugin_title("sql-review", "write", &write);
+        assert_eq!(
+            title,
+            "sql-review: write on tst · UPDATE app4adm.adm_app_data SET first_name = :v"
+        );
+        assert!(
+            !title.contains('{') && !title.contains("PlugTestA"),
+            "{title}"
+        );
+        assert_eq!(
+            plugin_title(
+                "jira-review",
+                "update",
+                &json!({ "key": "WRK-12", "fields": { "summary": "secret" } })
+            ),
+            "jira-review: update WRK-12"
+        );
+        assert_eq!(
+            plugin_title(
+                "jira-review",
+                "comment",
+                &json!({ "key": "WRK-1", "body": "\n Done.\nMore" })
+            ),
+            "jira-review: comment WRK-1 · Done."
+        );
+        assert_eq!(
+            plugin_title("fake", "describe", &json!({})),
+            "fake: describe"
+        );
+        let long = plugin_title("sql-review", "query", &json!({ "sql": "x".repeat(500) }));
+        assert_eq!(
+            long,
+            format!("sql-review: query · {}…", "x".repeat(PLUGIN_TITLE_EXCERPT))
+        );
+    }
+
+    /// A shown preview's one line titles the card, after its plugin's name.
+    #[test]
+    fn a_preview_summary_titles_a_plugin_call() {
+        assert_eq!(
+            preview_title(
+                "jira-review",
+                "update WRK-12 on https://example.atlassian.net"
+            )
+            .as_deref(),
+            Some("jira-review: update WRK-12 on https://example.atlassian.net")
+        );
+        assert_eq!(
+            preview_title("sql-review", "sql-review: write on tst (1 row)\nmore").as_deref(),
+            Some("sql-review: write on tst (1 row)")
+        );
+        assert_eq!(preview_title("fake", " \n "), None);
+        let long = preview_title("fake", &"y".repeat(1000)).unwrap();
+        assert!(long.len() <= 404 && long.ends_with('…'), "{long}");
     }
 
     /// A gated call with no prose is titled in words too, on the card and in

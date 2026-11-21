@@ -368,6 +368,18 @@ impl Store {
         Ok(n == 1)
     }
 
+    /// Retitle a waiting approval, as a plugin's shown preview names it.
+    /// Whether the title changed: a decided approval keeps the title it was
+    /// decided under.
+    pub fn set_approval_title(&self, id: &str, title: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE approval SET title=?2 WHERE id=?1 AND state='pending' AND title<>?2",
+            rusqlite::params![id, title],
+        )?;
+        Ok(n == 1)
+    }
+
     /// Keep what a waiting approval's card last previewed: the preview's
     /// token, or none, and the arguments hash of the call it was shown for,
     /// or none when the plugin refused, failed or offered no preview. A

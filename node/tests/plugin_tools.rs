@@ -746,6 +746,40 @@ async fn a_preview_is_shown_and_its_token_kept() {
     rig.manager.plugins().shutdown().await;
 }
 
+/// A plugin call's card is titled in words, without its arguments as JSON or
+/// its bind values, and once its preview is shown, by the preview's summary.
+#[tokio::test]
+async fn a_plugin_calls_card_is_titled_by_its_target_then_its_preview() {
+    let rig = rig("titled", vec![allow("fake", &["query"])], Policy::shipped());
+    rig.listed(&rig.ctx).await;
+    let id = asked(
+        &rig.call(
+            "fake__describe",
+            json!({
+                "profile": "qa",
+                "params": { "v": "PlugTestA" },
+                "sql": "UPDATE t SET name = :v\nWHERE id = 7",
+            }),
+        )
+        .await,
+    );
+    let title = rig.store.get_approval(&id).unwrap().unwrap().title;
+    assert_eq!(title, "fake: describe on qa · UPDATE t SET name = :v");
+    assert!(
+        !title.contains('{') && !title.contains("PlugTestA"),
+        "{title}"
+    );
+
+    rig.knob("titled", "preview", "on");
+    let shown = rig.open(&id).await.expect("a preview");
+    assert_eq!(shown["preview"]["status"], "shown", "{shown}");
+    assert_eq!(
+        rig.store.get_approval(&id).unwrap().unwrap().title,
+        "fake describe"
+    );
+    rig.manager.plugins().shutdown().await;
+}
+
 #[tokio::test]
 async fn an_approval_gone_stale_between_page_and_dispatch_fails_as_stale() {
     let rig = rig("stale", vec![allow("fake", &["query"])], Policy::shipped());

@@ -2965,6 +2965,11 @@ pub async fn get_approval(
         },
         false => None,
     };
+    // A shown preview may have retitled it.
+    let a = match context.is_some() {
+        true => s.store().get_approval(&id)?.ok_or_else(missing)?,
+        false => a,
+    };
     let shown = s.tools.presentation_for(&a.tool, args);
     // Prose in a plugin's format, rendered by its owner. The arguments stay
     // the source.

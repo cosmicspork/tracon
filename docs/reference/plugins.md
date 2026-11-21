@@ -676,7 +676,13 @@ upstream and writes nothing. Answer:
   "token": "{\"WRK-12\":\"2026-11-16T09:12:33.000+0000\"}" }
 ```
 
-- `summary` is the card's heading, one line. `body` is Markdown, at most 256 KiB.
+- `summary` is the card's heading, one line. Once a preview of the call as asked is
+  shown, its first line (after your plugin's name, unless it already starts with it)
+  becomes the approval's title in the queue and on the page. Until then the title is
+  your plugin and tool, the call's `profile` or `key` argument, and the first line of
+  its `sql`, `summary` or `body` argument, bounded; never its other arguments, so bind
+  values such as `params` stay off the card and out of the push. `body` is Markdown,
+  at most 256 KiB.
 - `token` (a string, at most 4,096 bytes, or `null`) is the version the preview was
   taken against: jira-review's is the proposal's `versions` as canonical JSON. The node
   keeps it with the approval and never reads it; the page sees only its hash.
