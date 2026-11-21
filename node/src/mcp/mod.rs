@@ -1206,8 +1206,14 @@ impl Tools {
         let pt = self.plugin_tool(&approval.tool)?;
         // What Allow is held to: a preview shown of exactly this call.
         let shown_for = crate::store::approvals::arguments_hash(&args.to_string());
-        let keep = |token: Option<&str>, shown: bool| {
-            let shown = shown.then_some(shown_for.as_str());
+        let keep = |token: Option<&str>, shown: Option<&Value>| {
+            let preview = shown.map(Value::to_string);
+            let shown = preview
+                .as_deref()
+                .map(|preview| crate::store::approvals::Shown {
+                    for_arguments: &shown_for,
+                    preview,
+                });
             if let Err(error) = access.store.set_preview(&approval.id, token, shown) {
                 tracing::warn!(approval = %approval.id, %error, "a preview's token was not kept");
             }
@@ -1229,7 +1235,7 @@ impl Tools {
         let parts = match self.plugin_call_parts(&ctx, &pt, args, None).await {
             Ok(parts) => parts,
             Err(error) => {
-                keep(None, false);
+                keep(None, None);
                 return Some(refused(error));
             }
         };
@@ -1272,17 +1278,24 @@ impl Tools {
         let result = match answer {
             Ok(result) => result,
             Err(upstream::Failure::Rpc { code, .. }) if code == upstream::METHOD_NOT_FOUND => {
-                keep(None, false);
+                keep(None, None);
                 return blocked.map(|why| json!({ "allow_blocked": why }));
             }
             Err(failure) => {
-                keep(None, false);
+                keep(None, None);
                 return Some(refused(failure.describe(&label)));
             }
         };
         match preview_shape(&result) {
             Ok(preview) => {
-                keep(preview.token, true);
+                // What the operator reads, kept with the approval so its
+                // decided page still shows it (`preview_shown`).
+                let shown = json!({
+                    "previewable": preview.previewable,
+                    "summary": preview.summary,
+                    "body": preview.body,
+                });
+                keep(preview.token, Some(&shown));
                 // The plugin's own one line titles the card, behind the call
                 // as the node reads it, once it is of the call as asked
                 // rather than an operator's edit of it.
@@ -1300,16 +1313,13 @@ impl Tools {
                         }
                     }
                 }
-                Some(json!({ "preview": {
-                    "status": "shown",
-                    "previewable": preview.previewable,
-                    "summary": preview.summary,
-                    "body": preview.body,
-                    "token_sha256": preview.token.map(preview_hash),
-                }}))
+                let mut out = shown;
+                out["status"] = json!("shown");
+                out["token_sha256"] = json!(preview.token.map(preview_hash));
+                Some(json!({ "preview": out }))
             }
             Err(error) => {
-                keep(None, false);
+                keep(None, None);
                 Some(refused(format!(
                     "{label} answered a preview the contract does not allow: {error}"
                 )))

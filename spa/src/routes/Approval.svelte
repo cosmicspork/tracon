@@ -9,6 +9,7 @@
     approvalFields,
     asArguments,
     CALLER_ONLY,
+    contentResult,
     changedArguments,
     editProblems,
     grantsAccess,
@@ -167,6 +168,8 @@
   )
   const result = $derived(details?.result === null || details?.result === undefined ? null : details.result)
   const rows = $derived(resultRows(result))
+  /** An MCP tool result (a plugin's): its content items, read as text. */
+  const content = $derived(contentResult(result))
   const fallback = $derived(details?.approval.session_id ? `/sessions/${details.approval.session_id}` : '/')
 
   /** A page for the preview origin's sandbox: shown as text here, never rendered. */
@@ -371,7 +374,31 @@
 
   {#if !pending && result !== null}
     <div class="h4">Result <b>what the call returned</b></div>
-    {#if rows}
+    {#if content}
+      {#if content.error}
+        <div class="banner crit" role="alert">the tool reported a failure <b>· its result says so</b></div>
+      {/if}
+      {#each content.items as item, i (i)}
+        {#if item.kind === 'rows'}
+          <dl class="kv result">
+            {#each item.rows as row (row.key)}
+              <dt>{row.key}</dt>
+              <dd class="m">
+                {#if row.href}<a href={row.href} target="_blank" rel="noopener noreferrer">{row.value}</a>{:else}{row.value}{/if}
+              </dd>
+            {/each}
+          </dl>
+        {:else if item.kind === 'text'}
+          <pre class="src">{item.text}</pre>
+        {:else}
+          <pre class="src">{item.json}</pre>
+        {/if}
+      {/each}
+      <details class="request">
+        <summary>Result as the tool returned it</summary>
+        <pre>{JSON.stringify(result, null, 2)}</pre>
+      </details>
+    {:else if rows}
       <dl class="kv result">
         {#each rows as row (row.key)}
           <dt>{row.key}</dt>
@@ -411,6 +438,15 @@
     {@const p = details.preview}
     <div class="h4">
       Preview <b>{p.summary}{p.previewable ? '' : ' · not previewable'}{outdated ? ' · of the call before your edit' : ''}</b>
+    </div>
+    <section class="doc preview">
+      <article class="md">{@html render(p.body)}</article>
+    </section>
+  {:else if !pending && details.preview_shown}
+    {@const p = details.preview_shown}
+    {@const allowed = a.state === 'running' || a.state === 'succeeded' || a.state === 'failed' || a.state === 'uncertain'}
+    <div class="h4">
+      {allowed ? 'Preview you approved' : 'Preview you were shown'} <b>{p.summary}{p.previewable ? '' : ' · not previewable'}</b>
     </div>
     <section class="doc preview">
       <article class="md">{@html render(p.body)}</article>
