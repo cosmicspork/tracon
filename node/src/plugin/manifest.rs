@@ -82,7 +82,8 @@ pub struct Credential {
 }
 
 /// When a credential is lent to a call.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Ordered from most to least freely lent: a later variant is stricter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Lend {
     /// To any call the channel's policy lets through.
@@ -124,6 +125,14 @@ impl Credential {
         binding == self.name || crate::policy::glob(&self.pattern, binding)
     }
 
+    /// Whether some binding name could match both: a name or the pattern of
+    /// each.
+    pub fn overlaps(&self, other: &Credential) -> bool {
+        self.matches(&other.name)
+            || other.matches(&self.name)
+            || globs_overlap(&self.pattern, &other.pattern)
+    }
+
     /// Whether a call may be lent more than one binding of it: its pattern
     /// matches more than its name (a pattern that is not the name, with or
     /// without `*`, matches the name and itself), and no `select` picks one.
@@ -146,6 +155,28 @@ impl Lend {
         match self {
             Lend::Always => "always",
             Lend::Approved => "approved",
+        }
+    }
+}
+
+/// Whether some name matches both `*` globs (`*` matching any run,
+/// including none). A glob without `*` is the one name it matches. Two that
+/// each hold a `*` share a name exactly when their literal prefixes (before
+/// the first `*`) agree, one starting the other, and so do their suffixes
+/// (after the last `*`): `P + M + N + S` matches both, where `P` and `S` are
+/// the longer prefix and suffix and `M` and `N` each glob's middle pieces in
+/// order, since each glob's first `*` takes what of `P` its own prefix
+/// leaves, and its last `*` everything up to its own suffix.
+fn globs_overlap(a: &str, b: &str) -> bool {
+    let agree = |x: &str, y: &str| x.starts_with(y) || y.starts_with(x);
+    let ends_agree = |x: &str, y: &str| x.ends_with(y) || y.ends_with(x);
+    match (a.split_once('*'), b.split_once('*')) {
+        (None, _) => crate::policy::glob(b, a),
+        (_, None) => crate::policy::glob(a, b),
+        (Some((a_prefix, _)), Some((b_prefix, _))) => {
+            let (_, a_suffix) = a.rsplit_once('*').unwrap_or_default();
+            let (_, b_suffix) = b.rsplit_once('*').unwrap_or_default();
+            agree(a_prefix, b_prefix) && ends_agree(a_suffix, b_suffix)
         }
     }
 }
@@ -367,6 +398,26 @@ impl Manifest {
                         ),
                     );
                 }
+            }
+        }
+        // A binding belongs to the first declared credential it matches, so
+        // an earlier one lent more freely would lend a later, stricter one's
+        // bindings on its own terms.
+        for (i, later) in self.credentials.iter().enumerate() {
+            if let Some(earlier) = self.credentials[..i]
+                .iter()
+                .find(|earlier| earlier.lend < later.lend && earlier.overlaps(later))
+            {
+                return Err(format!(
+                    "{FILE}: credential `{}` (`{}`) shadows `{}` (`{}`, lend = {}): declare `{}` first or narrow `{}`",
+                    earlier.name,
+                    earlier.pattern,
+                    later.name,
+                    later.pattern,
+                    later.lend.as_str(),
+                    later.name,
+                    earlier.name
+                ));
             }
         }
         let mut seen = BTreeSet::new();
@@ -887,6 +938,133 @@ title = "SQL"
             let error = refused(|text| text.replacen(from, to, 1));
             assert!(error.contains(says), "{to}: {error}");
             assert!(error.starts_with(FILE), "{error}");
+        }
+    }
+
+    /// The example with its credentials replaced by `(name, pattern, lend)`.
+    fn with_credentials(credentials: &[(&str, &str, &str)]) -> Result<Manifest, String> {
+        let (head, rest) = EXAMPLE.split_once("[[credential]]").unwrap();
+        let (_, tail) = rest.split_once("[[tool]]").unwrap();
+        let declared: String = credentials
+            .iter()
+            .map(|(name, pattern, lend)| {
+                format!("[[credential]]\nname = \"{name}\"\npattern = \"{pattern}\"\nlend = \"{lend}\"\n\n")
+            })
+            .collect();
+        Manifest::parse(&format!("{head}{declared}[[tool]]{tail}"))
+    }
+
+    #[test]
+    fn an_earlier_credential_lent_more_freely_may_not_shadow_a_later_one() {
+        let refused = with_credentials(&[
+            ("sql", "sql-*", "always"),
+            ("sql-write", "sql-write-*", "approved"),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            refused,
+            "tracon-plugin.toml: credential `sql` (`sql-*`) shadows `sql-write` (`sql-write-*`, lend = approved): declare `sql-write` first or narrow `sql`"
+        );
+        // Declared the other way round, each binding goes where it should.
+        let m = with_credentials(&[
+            ("sql-write", "sql-write-*", "approved"),
+            ("sql", "sql-*", "always"),
+        ])
+        .unwrap();
+        assert_eq!(m.credentials[0].lend, Lend::Approved);
+        // Disjoint patterns may come in any order.
+        with_credentials(&[
+            ("sql-read", "sql-read-*", "always"),
+            ("sql-write", "sql-write-*", "approved"),
+        ])
+        .unwrap();
+        // So may overlapping ones lent alike.
+        with_credentials(&[
+            ("sql", "sql-*", "approved"),
+            ("sql-write", "sql-write-*", "approved"),
+        ])
+        .unwrap();
+        // A name the earlier pattern matches is shadowed too, whatever the
+        // later pattern.
+        assert!(
+            with_credentials(&[("any", "admin", "always"), ("admin", "root-*", "approved"),])
+                .unwrap_err()
+                .contains("credential `any` (`admin`) shadows `admin`")
+        );
+        // The first earlier credential that shadows is named.
+        assert!(with_credentials(&[
+            ("read", "read-*", "always"),
+            ("everything", "*", "always"),
+            ("write", "write-*", "approved"),
+        ])
+        .unwrap_err()
+        .contains("credential `everything` (`*`) shadows `write`"));
+    }
+
+    #[test]
+    fn globs_overlap_when_some_name_matches_both() {
+        for (a, b) in [
+            ("sql-*", "sql-write-*"),
+            ("*", "anything"),
+            ("*-prod", "sql-*"),
+            ("sql-*-prod", "sql-write-*"),
+            ("a*x*b", "a*y*b"),
+            ("ab*", "*ba"),
+            ("sql-*-eu-*", "*-prod"),
+            ("same", "same"),
+            ("sql-*-prod", "sql-write-prod"),
+            ("**", "x"),
+        ] {
+            assert!(globs_overlap(a, b), "{a} {b}");
+            assert!(globs_overlap(b, a), "{b} {a}");
+        }
+        for (a, b) in [
+            ("sql-read-*", "sql-write-*"),
+            ("*-prod", "*-test"),
+            ("sql-*-prod", "sql-*-test"),
+            ("a*b*c", "x*"),
+            ("exact", "other"),
+            ("sql-*-prod", "sql-write-test"),
+            ("sql-*", "sq"),
+        ] {
+            assert!(!globs_overlap(a, b), "{a} {b}");
+            assert!(!globs_overlap(b, a), "{b} {a}");
+        }
+    }
+
+    /// Checks `globs_overlap` against a search of every short name.
+    #[test]
+    fn globs_overlap_agrees_with_trying_every_short_name() {
+        let alphabet = ["", "a", "b"];
+        let mut globs = vec![String::new()];
+        for _ in 0..4 {
+            globs = globs
+                .iter()
+                .flat_map(|g| ["a", "b", "*"].map(|c| format!("{g}{c}")))
+                .chain(globs.iter().cloned())
+                .collect();
+        }
+        globs.retain(|g| !g.is_empty());
+        globs.sort();
+        globs.dedup();
+        // Any common name is at most as long as both globs' literals
+        // together, which is under 9 here.
+        let mut names = vec![String::new()];
+        for _ in 0..8 {
+            names = names
+                .iter()
+                .flat_map(|n| alphabet.map(|c| format!("{n}{c}")))
+                .collect();
+            names.sort();
+            names.dedup();
+        }
+        for a in &globs {
+            for b in &globs {
+                let some = names
+                    .iter()
+                    .any(|n| crate::policy::glob(a, n) && crate::policy::glob(b, n));
+                assert_eq!(globs_overlap(a, b), some, "{a} {b}");
+            }
         }
     }
 

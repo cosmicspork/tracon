@@ -138,6 +138,7 @@ tracon-plugin.toml: exec: "--socket" is the node's own to pass; leave it out
 tracon-plugin.toml: tool "q__x": name must be 1-64 letters, digits, '_' or '-', without '__'
 tracon-plugin.toml: tool "<t>": sql-review__<t> is 72 characters; a tool's offered name holds at most 64
 tracon-plugin.toml: credential "sql-read": is declared twice
+tracon-plugin.toml: credential `sql` (`sql-*`) shadows `sql-write` (`sql-write-*`, lend = approved): declare `sql-write` first or narrow `sql`
 tracon-plugin.toml: egress: "db.internal:70000" is not host or host:port (port 1-65535)
 tracon-plugin.toml: formats: "markdown" is rendered by the node itself
 tracon-plugin.toml: line 5 (`colour = "red"`): unknown field `colour`, expected one of …
@@ -640,6 +641,16 @@ fields as strings. A binding belongs to the first declared credential it matches
 one no declared credential matches is never lent. No credential is ever in the
 environment, so a revoked binding stops at the next call and one process can serve
 several profiles.
+
+Because the first match wins, install refuses a manifest in which a credential is
+declared after one lent more freely (`lend = "always"` before `lend = "approved"`) that
+could match one of its bindings: the earlier one's name or `pattern` matches the later
+one's name, or some binding name matches both patterns. Declare the stricter credential
+first, or narrow the earlier pattern so the two match no name in common:
+
+```
+tracon-plugin.toml: credential `sql` (`sql-*`) shadows `sql-write` (`sql-write-*`, lend = approved): declare `sql-write` first or narrow `sql`
+```
 
 **Declare `select` when a call uses one binding.** A credential with
 `select = "<argument>"` is lent to a call only as the binding that argument names:
