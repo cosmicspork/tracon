@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.59.0](https://github.com/cosmicspork/tracon/compare/v0.58.0...v0.59.0) (2026-11-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* **node:** remove the node's last Jira and SQL code ([#1068](https://github.com/cosmicspork/tracon/issues/1068))
+
+### Features
+
+* **node,spa:** add doc_archive for agents, always asked like doc_delete ([#1065](https://github.com/cosmicspork/tracon/issues/1065)) ([51c80b7](https://github.com/cosmicspork/tracon/commit/51c80b7db6233b907f08c9ec1ded565bc3c149a7))
+
+
+### Bug Fixes
+
+* **node:** answer an unmatched /api or /mcp path with a 404 JSON error ([#1073](https://github.com/cosmicspork/tracon/issues/1073)) ([03d4ff9](https://github.com/cosmicspork/tracon/commit/03d4ff97d721f7f1cb1325611ae75b4a68a3604e))
+* **node:** ask pr_merge only at the PR's current head and show it in full ([#1062](https://github.com/cosmicspork/tracon/issues/1062)) ([fa2b8fd](https://github.com/cosmicspork/tracon/commit/fa2b8fd315de84640e59c9992ac3cf80f751e73a))
+* **node:** default the built-in providers to their current models ([#1060](https://github.com/cosmicspork/tracon/issues/1060)) ([c5fc597](https://github.com/cosmicspork/tracon/commit/c5fc597613a4c64494bc64f35c29e6cd7cf539c7))
+* **node:** lend a plugin page's request only the binding its query selects ([#1069](https://github.com/cosmicspork/tracon/issues/1069)) ([250b55c](https://github.com/cosmicspork/tracon/commit/250b55cdb1605c1a3d088861ff6eddaf252a432d))
+* **node:** list other releases' sandbox-base tags under gc --legacy ([#1066](https://github.com/cosmicspork/tracon/issues/1066)) ([c1c35fc](https://github.com/cosmicspork/tracon/commit/c1c35fcc45f85278c507dcd06f1ebc3b5a828f82))
+* **node:** name operation_id and its pattern when a consequential call is refused ([#1061](https://github.com/cosmicspork/tracon/issues/1061)) ([6d613a6](https://github.com/cosmicspork/tracon/commit/6d613a6722ac5109d0c267783a1b265fdf527bb3))
+* **node:** refuse a credential shadowed by an earlier one lent more freely ([#1067](https://github.com/cosmicspork/tracon/issues/1067)) ([cbafb4c](https://github.com/cosmicspork/tracon/commit/cbafb4c29bbb125800e537b62ac0045e1dff5876))
+* **node:** split an oversized paragraph by line and cap chunks to the embed context ([#1063](https://github.com/cosmicspork/tracon/issues/1063)) ([62441bd](https://github.com/cosmicspork/tracon/commit/62441bd41f2c928f7b6271afaab1bc8c88961bef))
+
+
+### Code Refactoring
+
+* **node:** remove the node's last Jira and SQL code ([#1068](https://github.com/cosmicspork/tracon/issues/1068)) ([1b57418](https://github.com/cosmicspork/tracon/commit/1b57418e4d7ce740ec46f33f5b0cd1310e5c6b9a))
+
 ## [0.58.0](https://github.com/cosmicspork/tracon/compare/v0.57.0...v0.58.0) (2026-11-21)
 
 
