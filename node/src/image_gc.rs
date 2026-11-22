@@ -27,7 +27,12 @@
 //! - **dangling**: an image of this node's whose tag a later build took.
 //! - **legacy**: the harness images and the layered (`-claude`, `-native`)
 //!   and superseded `-src` repository images older nodes made, which nothing
-//!   runs any more; only when asked for.
+//!   runs any more; and every stock base tag of another release left on an
+//!   image that stays (the pinned base under another release's tag, or a
+//!   base only other bases stand on), untagged rather than removed: one
+//!   verdict per tag, each with its reason, and a tag of an image an image
+//!   that is no base stands on (a live repository image) stays. Only when
+//!   asked for.
 //!
 //! Nothing a container uses (running or stopped, any node's) is removed, and
 //! nothing any remaining image is built on. An unnamed intermediate image (a
@@ -144,6 +149,9 @@ pub struct Knowledge {
     pub base_repository: Option<String>,
     /// The base this node pins, by digest; `None` until it has pinned one.
     pub pinned_base: Option<String>,
+    /// The base as `[sandbox] base_image` names it (this release's tag
+    /// unless set): the one base tag that is never another release's.
+    pub configured_base: Option<String>,
     /// Whether a superseded base is this node's to remove: pulled images carry
     /// no node's label, so only the store's default node takes them as its
     /// own.
@@ -183,7 +191,16 @@ pub struct Verdict {
     /// What removing it frees, about: its size less the nearest named image
     /// it stands on, whose layers it shares.
     pub reclaim: u64,
+    /// One tag of the image, when the verdict is about that tag alone: a
+    /// stock base tag of another release, which goes by untagging and
+    /// leaves the image.
+    pub tag: Option<String>,
 }
+
+/// Why the base this node pins stays.
+const PINNED: &str = "the stock base this node pins";
+/// Why an image something that stays is built on stays.
+const BUILT_ON: &str = "an image that stays is built on it";
 
 /// `name` less its tag (a `:` after the last `/`) or digest.
 pub fn repository_of(name: &str) -> &str {
@@ -354,6 +371,7 @@ pub fn classify(images: &[Image], k: &Knowledge) -> Vec<Verdict> {
             remove,
             reason,
             reclaim: 0,
+            tag: None,
         });
     }
 
@@ -370,7 +388,7 @@ pub fn classify(images: &[Image], k: &Knowledge) -> Vec<Verdict> {
             && image.containers == 0
             && !children[at].is_empty()
     };
-    loop {
+    let removing = loop {
         let mut removing: HashSet<usize> = verdicts
             .iter()
             .filter(|v| v.remove)
@@ -399,25 +417,123 @@ pub fn classify(images: &[Image], k: &Knowledge) -> Vec<Verdict> {
         for verdict in verdicts.iter_mut().filter(|v| v.remove) {
             if held.contains(&verdict.index) {
                 verdict.remove = false;
-                verdict.reason = "an image that stays is built on it".into();
+                verdict.reason = BUILT_ON.into();
                 changed = true;
             }
         }
         if !changed {
-            break;
+            break removing;
         }
-    }
+    };
 
     for verdict in &mut verdicts {
         verdict.reclaim = reclaim(images, &by_id, verdict.index);
     }
+    let tags = base_tags(images, k, &verdicts, &parents, &removing, pinned);
+    verdicts.extend(tags);
     verdicts.sort_by(|a, b| {
         a.class
             .cmp(&b.class)
             .then_with(|| b.remove.cmp(&a.remove))
-            .then_with(|| display_name(&images[a.index]).cmp(&display_name(&images[b.index])))
+            .then_with(|| verdict_name(images, a).cmp(&verdict_name(images, b)))
     });
     verdicts
+}
+
+/// How a list shows what `verdict` is about: its tag, or its image.
+pub fn verdict_name(images: &[Image], verdict: &Verdict) -> String {
+    match &verdict.tag {
+        Some(tag) => tag.clone(),
+        None => display_name(&images[verdict.index]),
+    }
+}
+
+/// One verdict per stock base tag of another release on a base image that
+/// stays: every tag but the configured one. A tag goes (untagged, never
+/// removed with its image) when its image stays only as the pinned base or
+/// as what other bases stand on; one of an image an image that is no base
+/// stands on stays, naming that image, and any other stays for the reason
+/// its image does.
+fn base_tags(
+    images: &[Image],
+    k: &Knowledge,
+    verdicts: &[Verdict],
+    parents: &[Vec<usize>],
+    removing: &HashSet<usize>,
+    pinned: Option<usize>,
+) -> Vec<Verdict> {
+    let is_base = |at: usize| {
+        k.base_repository.as_deref().is_some_and(|base| {
+            images[at]
+                .names
+                .iter()
+                .any(|name| repository_of(name) == base)
+        })
+    };
+    // What each image stands under, of the images that stay and are no
+    // base: the nearest one, for the reason a tag under it stays.
+    let mut under: HashMap<usize, usize> = HashMap::new();
+    for at in (0..images.len()).filter(|at| !removing.contains(at) && !is_base(*at)) {
+        let mut stack = parents[at].clone();
+        let mut seen = HashSet::new();
+        while let Some(parent) = stack.pop() {
+            if seen.insert(parent) {
+                under.entry(parent).or_insert(at);
+                stack.extend(parents[parent].iter().copied());
+            }
+        }
+    }
+    let ours = k.bases_are_ours || k.adopt_unlabelled;
+    let mut out = Vec::new();
+    for verdict in verdicts
+        .iter()
+        .filter(|v| v.class == Class::Base && !v.remove)
+    {
+        let at = verdict.index;
+        let image = &images[at];
+        let tags: Vec<&String> = image
+            .names
+            .iter()
+            .filter(|name| !name.contains('@'))
+            .filter(|name| Some(name.as_str()) != k.configured_base.as_deref())
+            .collect();
+        // The pinned base keeps the tag a start offline finds it by: with
+        // none, its tags are all it is known by, and stay.
+        let pinned_named = image
+            .names
+            .iter()
+            .any(|name| Some(name.as_str()) == k.configured_base.as_deref());
+        let goes = match verdict.reason.as_str() {
+            PINNED if Some(at) == pinned && ours && pinned_named => Ok(
+                "a tag from another release on the stock base this node pins; \
+                 untagging leaves the image",
+            ),
+            BUILT_ON => match under.get(&at) {
+                Some(above) => Err(format!("{} is built on it", display_name(&images[*above]))),
+                None => Ok(
+                    "a tag from another release; only other stock bases are built on it, \
+                     and untagging leaves them whole",
+                ),
+            },
+            why => Err(why.to_string()),
+        };
+        for tag in tags {
+            let (remove, reason) = match &goes {
+                Ok(why) if k.legacy => (true, why.to_string()),
+                Ok(why) => (false, format!("{why}; untagged only with --legacy")),
+                Err(why) => (false, why.clone()),
+            };
+            out.push(Verdict {
+                index: at,
+                class: Class::Legacy,
+                remove,
+                reason,
+                reclaim: 0,
+                tag: Some(tag.clone()),
+            });
+        }
+    }
+    out
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -464,7 +580,7 @@ fn judge(
         return keep(class, why);
     }
     if Some(at) == pinned {
-        return keep(class, "the stock base this node pins");
+        return keep(class, PINNED);
     }
     if k.now_ms - image.created_ms < GRACE_MS {
         return keep(
@@ -661,6 +777,20 @@ pub mod podman {
             .map_err(|e| e.to_string())
     }
 
+    /// What `verdict` removes: its tag alone, untagged from the image the
+    /// list saw it on (so a tag that moved since is not followed), or the
+    /// image.
+    async fn remove_verdict(images: &[Image], verdict: &Verdict) -> Result<(), String> {
+        let image = &images[verdict.index];
+        match &verdict.tag {
+            Some(tag) => crate::boundary::podman::podman(&["untag", &image.id, tag])
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+            None => remove(image).await,
+        }
+    }
+
     /// List this node's images in Podman's store and what each is, and with
     /// `apply`, remove those that go, pass after pass until one removes
     /// nothing: what a removal frees is removed in the same sweep.
@@ -685,15 +815,18 @@ pub mod podman {
             let verdicts = pass(&images, &k, &failed);
             let mut order: Vec<&Verdict> = verdicts.iter().filter(|v| v.remove).collect();
             order.sort_by_key(|v| std::cmp::Reverse(depth(&images, v.index)));
-            let mut outcome: HashMap<usize, Result<(), String>> = HashMap::new();
+            let mut outcome: HashMap<(usize, Option<String>), Result<(), String>> = HashMap::new();
             if apply {
                 for verdict in order {
-                    outcome.insert(verdict.index, remove(&images[verdict.index]).await);
+                    outcome.insert(
+                        (verdict.index, verdict.tag.clone()),
+                        remove_verdict(&images, verdict).await,
+                    );
                 }
             }
             let settled = !outcome.values().any(Result::is_ok);
             for v in verdicts {
-                let done = outcome.remove(&v.index);
+                let done = outcome.remove(&(v.index, v.tag.clone()));
                 // A pass that removed something lists only what it did; the
                 // pass that removes nothing lists what stays.
                 if done.is_none() && !settled {
@@ -703,7 +836,7 @@ pub mod podman {
                     failed.insert(images[v.index].id.clone(), error.clone());
                 }
                 swept.push(Swept {
-                    name: display_name(&images[v.index]),
+                    name: verdict_name(&images, &v),
                     class: v.class,
                     remove: v.remove,
                     reason: v.reason,
@@ -947,7 +1080,8 @@ pub mod apple {
                 }
             }
         }
-        for verdict in &mut verdicts {
+        // A tag alone frees nothing: its image stays.
+        for verdict in verdicts.iter_mut().filter(|v| v.tag.is_none()) {
             let at = verdict.index;
             verdict.reclaim = listed[at]
                 .manifests
@@ -960,7 +1094,7 @@ pub mod apple {
                 .map(|(_, size)| size)
                 .sum();
         }
-        let mut outcome: HashMap<usize, Result<(), String>> = HashMap::new();
+        let mut outcome: HashMap<(usize, Option<String>), Result<(), String>> = HashMap::new();
         if apply {
             // A snapshot before the build its label names.
             let mut order: Vec<&Verdict> = verdicts.iter().filter(|v| v.remove).collect();
@@ -970,15 +1104,27 @@ pub mod apple {
                     .contains_key(crate::sandbox_images::FROM_LABEL)
             });
             for verdict in order {
-                outcome.insert(verdict.index, remove(cli, &images[verdict.index]).await);
+                let image = &images[verdict.index];
+                // A tag alone goes by that name, the image keeping the rest.
+                let done = match &verdict.tag {
+                    Some(tag) => {
+                        let tagged = Image {
+                            names: vec![tag.clone()],
+                            ..image.clone()
+                        };
+                        remove(cli, &tagged).await
+                    }
+                    None => remove(cli, image).await,
+                };
+                outcome.insert((verdict.index, verdict.tag.clone()), done);
             }
         }
         Ok(verdicts
             .into_iter()
             .map(|v| {
-                let done = outcome.remove(&v.index);
+                let done = outcome.remove(&(v.index, v.tag.clone()));
                 Swept {
-                    name: display_name(&images[v.index]),
+                    name: verdict_name(&images, &v),
                     class: v.class,
                     remove: v.remove,
                     reason: v.reason,
@@ -1004,6 +1150,7 @@ mod tests {
             node_id: "node-a".into(),
             base_repository: Some("ghcr.io/cosmicspork/tracon-sandbox-base".into()),
             pinned_base: Some("ghcr.io/cosmicspork/tracon-sandbox-base@sha256:b2".into()),
+            configured_base: Some("ghcr.io/cosmicspork/tracon-sandbox-base:0.46.0".into()),
             bases_are_ours: true,
             kept: Vec::new(),
             legacy_repositories: vec![
@@ -1356,6 +1503,81 @@ mod tests {
         // The gateway's image is legacy only where the caller names it,
         // as `gc::legacy_repositories` does; this knowledge names none.
         assert!(!k.legacy_repositories.iter().any(|r| r.contains("gateway")));
+    }
+
+    /// The store after upgrades across releases: the pinned base also under
+    /// the tag of the release before (carried over unchanged), a base only
+    /// the pinned one stands on, one the current build stands on, and one
+    /// nothing stands on.
+    #[test]
+    fn base_tags_of_other_releases_are_legacy_one_by_one() {
+        let tag = |version: &str| format!("{BASE}:{version}");
+        let images = vec![
+            image("b46", None, &[&tag("0.46.0")], BTreeMap::new()),
+            image("b52", None, &[&tag("0.52.0")], BTreeMap::new()),
+            image("b55", None, &[&tag("0.55.0")], BTreeMap::new()),
+            image("pin", Some("b55"), &[&tag("0.57.0"), &tag("0.56.0")], {
+                BTreeMap::new()
+            }),
+            image("r-cur", Some("b52"), &[&format!("{REPO}:cur")], ours()),
+        ];
+        let mut k = knowledge();
+        k.pinned_base = Some(format!("{BASE}@sha256:pin"));
+        k.configured_base = Some(tag("0.57.0"));
+        k.kept = vec![Kept {
+            reference: format!("{REPO}@sha256:r-cur"),
+            why: "the current build of app".into(),
+        }];
+        let of = |v: &[Verdict], name: &str| -> Option<Verdict> {
+            v.iter().find(|v| v.tag.as_deref() == Some(name)).cloned()
+        };
+
+        // Without --legacy: every other release's tag listed, none goes.
+        let v = classify(&images, &k);
+        for version in ["0.52.0", "0.55.0", "0.56.0"] {
+            let t = of(&v, &tag(version)).unwrap_or_else(|| panic!("{version}: {v:#?}"));
+            assert_eq!(t.class, Class::Legacy);
+            assert!(!t.remove, "{t:?}");
+        }
+        assert!(of(&v, &tag("0.55.0")).unwrap().reason.contains("--legacy"));
+
+        k.legacy = true;
+        let v = classify(&images, &k);
+        let stale = of(&v, &tag("0.55.0")).unwrap();
+        assert!(stale.remove, "only the pinned base stands on it: {stale:?}");
+        assert!(stale.reason.contains("only other stock bases"), "{stale:?}");
+        assert_eq!(stale.reclaim, 0, "the image stays");
+        let carried = of(&v, &tag("0.56.0")).unwrap();
+        assert!(carried.remove, "another release's tag on the pinned base");
+        assert!(carried.reason.contains("pins"), "{carried:?}");
+        let live = of(&v, &tag("0.52.0")).unwrap();
+        assert!(!live.remove, "the current build stands on it: {live:?}");
+        assert_eq!(live.reason, format!("{REPO}:cur is built on it"));
+        // The tag the node pins by is no other release's.
+        assert!(of(&v, &tag("0.57.0")).is_none(), "{v:#?}");
+        let pinned = verdict(&v, &images, "pin");
+        assert!(!pinned.remove && pinned.tag.is_none());
+        // A base nothing stands on goes whole, as a base.
+        let gone = verdict(&v, &images, "b46");
+        assert!(gone.class == Class::Base && gone.remove, "{gone:?}");
+        assert!(of(&v, &tag("0.46.0")).is_none());
+        // The legacy list names each tag once.
+        let names: Vec<String> = v
+            .iter()
+            .filter(|v| v.class == Class::Legacy)
+            .map(|v| verdict_name(&images, v))
+            .collect();
+        for version in ["0.52.0", "0.55.0", "0.56.0"] {
+            assert_eq!(names.iter().filter(|n| **n == tag(version)).count(), 1);
+        }
+
+        // A node that does not take pulled bases for its own untags none.
+        k.bases_are_ours = false;
+        let v = classify(&images, &k);
+        assert!(
+            v.iter().filter(|v| v.tag.is_some()).all(|v| !v.remove),
+            "{v:#?}"
+        );
     }
 
     #[test]

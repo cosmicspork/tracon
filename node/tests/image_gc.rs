@@ -291,6 +291,7 @@ async fn a_sweep_removes_exactly_this_node_s_unused_images() {
         node_id: NODE.into(),
         base_repository: Some(BASE.into()),
         pinned_base: Some(format!("{BASE}@{}", digest_of(&format!("{BASE}:2")))),
+        configured_base: Some(format!("{BASE}:2")),
         bases_are_ours: true,
         kept: vec![
             Kept {
