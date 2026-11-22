@@ -1935,6 +1935,47 @@ async fn an_approved_merge_checks_the_head_again_when_it_runs() {
     assert_eq!(out["result"]["merged"], true, "{out}");
 }
 
+/// A merge is asked only at the pull request's current head, and its card
+/// names that head in full: a head_sha sharing only a prefix with it is
+/// refused, naming both, before any card is raised (#1049).
+#[tokio::test]
+async fn a_merge_is_asked_only_at_the_current_head_and_its_card_names_it_in_full() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let real = "bb928d2c41a0e5f6a7b8c9d0e1f2a3b4c5d6e7f8";
+    let wrong = "bb928d2c41a0ffffffffffffffffffffffffffff";
+    with_github(&h, real).await;
+    let at = |sha: &str, op: &str| json!({ "repo": "o/n", "number": 1, "head_sha": sha, "operation_id": op });
+
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call("pr_merge", at(wrong, "op-head-1")),
+    )
+    .await;
+    let (err, out) = outcome(&v);
+    assert!(err, "{out}");
+    let said = out.to_string();
+    assert!(said.contains(wrong) && said.contains(real), "{said}");
+    assert!(h.store.open_permission_views().unwrap().is_empty());
+
+    let id = ask(&h, "pr_merge", at(real, "op-head-2")).await;
+    let queue = h.store.open_permission_views().unwrap();
+    let card = queue.iter().find(|p| p.id == id).expect("a card for it");
+    assert_eq!(
+        card.title,
+        format!("pr_merge o/n#1: squash at {real}, its current head when asked")
+    );
+
+    // A head the check reads through surrounding whitespace is the head the
+    // allowed merge runs at, not one it refuses as moved.
+    let id = ask(&h, "pr_merge", at(&format!(" {real}\n"), "op-head-3")).await;
+    answer(&h, &id, json!({ "option_id": "allow_once" })).await;
+    let out = settled(&h, &id).await;
+    assert_eq!(out["state"], "succeeded", "{out}");
+    assert_eq!(out["result"]["merged"], true, "{out}");
+}
+
 /// GitHub refuses a merge whose base moved while it ran, as it does when
 /// several approved merges into one repository land together. Nothing was
 /// merged, so the approved merge is asked again at the same head and lands.
@@ -2306,11 +2347,23 @@ async fn an_external_caller_cannot_retain_into_a_session_scope() {
     assert!(out.to_string().contains("global"), "{out}");
 }
 
+/// The node's own Jira tools, before Jira was the jira-review plugin's.
+const OLD_JIRA_TOOLS: &[&str] = &[
+    "issue",
+    "issue_search",
+    "issue_transitions",
+    "issue_comment",
+    "issue_update",
+    "issue_create",
+    "issue_link",
+    "issue_transition",
+];
+
 /// Jira is the jira-review plugin's: a channel that binds a `jira` credential
-/// is offered none of the node's old Jira tools, and a call to one is refused
-/// by the name that replaced it, with nothing asked.
+/// is offered none of the node's old Jira tools, and a call to one of their
+/// names is a call to a tool the node does not have.
 #[tokio::test]
-async fn the_nodes_own_jira_tools_are_gone_and_name_the_plugins() {
+async fn the_nodes_old_jira_tool_names_are_unknown_tools() {
     state::isolate();
     let h = harness_with(enabled()).await;
     h.tools.broker.write().unwrap().put(
@@ -2328,22 +2381,19 @@ async fn the_nodes_own_jira_tools_are_gone_and_name_the_plugins() {
         },
     );
     let names = list(&h.operator, "work").await;
-    for (old, _) in tracon::mcp::RETIRED_JIRA {
+    for old in OLD_JIRA_TOOLS {
         assert!(!names.iter().any(|n| n == old), "{old} in {names:?}");
     }
-    let (_, v) = mcp(
-        &h.operator,
-        "work",
-        tool_call(
-            "issue_transition",
-            json!({ "key": "WRK-1", "transition_id": "21", "operation_id": "transition-21" }),
-        ),
-    )
-    .await;
-    let (err, out) = outcome(&v);
-    assert!(err, "{out}");
-    assert!(out.to_string().contains("jira-review__transition"), "{out}");
-    assert!(h.store.open_permission_views().unwrap().is_empty());
+    // Like any name the node has no tool for, it is not refused by name: no
+    // rule names it, so it is asked, and fails once allowed.
+    for name in ["issue_search", "no_such_tool"] {
+        let id = ask(&h, name, json!({ "jql": "project = WRK" })).await;
+        let (status, _) = answer(&h, &id, json!({ "option_id": "allow_once" })).await;
+        assert_eq!(status, StatusCode::OK);
+        let out = settled(&h, &id).await;
+        assert_eq!(out["state"], "failed", "{out}");
+        assert_eq!(out["reason"], format!("no tool named {name}"), "{out}");
+    }
 }
 
 /// A Jira approval from before the plugin still opens: its wiki markup is

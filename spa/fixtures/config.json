@@ -63,6 +63,7 @@
     "embed": {
       "base_url": "http://127.0.0.1:8080",
       "batch": 16,
+      "context_tokens": 2048,
       "dim": 1024,
       "enabled": false,
       "min_similarity": 0.45,
@@ -3121,6 +3122,22 @@
       "secret": false,
       "shape": {
         "kind": "float",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "embed.context_tokens",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "integer",
         "optional": false
       }
     },

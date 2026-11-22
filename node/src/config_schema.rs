@@ -345,6 +345,7 @@ pub const KEYS: &[KeySpec] = &[
     restart("embed.batch"),
     restart("embed.timeout_secs"),
     restart("embed.min_similarity"),
+    restart("embed.context_tokens"),
     // [external]
     restart("external.enabled"),
     restart("external.idle_timeout_secs"),
