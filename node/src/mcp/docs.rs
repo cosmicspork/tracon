@@ -1,7 +1,7 @@
 //! Documents: long, named, read deliberately. `doc_search` finds by content,
 //! `doc_read` fetches by slug, `doc_write` creates or edits in either format,
-//! and `doc_delete` removes — the last two are not named by the shipped policy,
-//! so they are asked.
+//! `doc_archive` archives or restores, and `doc_delete` removes — the last
+//! three are not named by the shipped policy, so they are asked.
 
 use serde_json::{json, Value};
 
@@ -17,6 +17,7 @@ pub const DOC_SEARCH: &str = "doc_search";
 pub const DOC_WRITE: &str = "doc_write";
 pub const DOC_EDIT: &str = "doc_edit";
 pub const DOC_DELETE: &str = "doc_delete";
+pub const DOC_ARCHIVE: &str = "doc_archive";
 
 /// What a document is written as. HTML from `doc_write` is a single-file
 /// bundle, stored, validated and served exactly as an operator's import is:
@@ -253,6 +254,30 @@ fn document_context(document: Option<&DocumentRow>) -> Value {
     })))
 }
 
+/// What a `doc_archive` asks for: `true` to archive, `false` to restore.
+/// `None` when `archived` is not a boolean, which is refused before asking.
+pub fn archived_of(args: &Value) -> Option<bool> {
+    args["archived"].as_bool()
+}
+
+/// The action a `doc_archive` card names: `archive` or `restore`.
+pub fn archive_action(args: &Value) -> &'static str {
+    match archived_of(args) {
+        Some(false) => "restore",
+        _ => "archive",
+    }
+}
+
+/// A held `doc_archive`'s title: the summary (which names the slug and the
+/// action) and the title of the document it acts on, so the operator decides
+/// on what it is, not only on its slug.
+pub fn archive_approval_title(summary: &str, document: Option<&DocumentRow>) -> String {
+    match document {
+        Some(d) => format!("{summary} · \"{}\"", d.title),
+        None => summary.to_string(),
+    }
+}
+
 /// The approval title's tail: whether the write creates the document or
 /// edits it, and for an edit the title it has now. Never the body.
 pub fn approval_title(summary: &str, document: Option<&DocumentRow>) -> String {
@@ -272,7 +297,7 @@ pub const SHOWN: &str = "shown";
 /// and again when an allowed call runs, against the arguments as allowed.
 pub fn refusal_before_asking(name: &str, args: &Value) -> Option<String> {
     let reserved = match name {
-        DOC_WRITE | DOC_EDIT | DOC_DELETE => reserved_refusal(args),
+        DOC_WRITE | DOC_EDIT | DOC_DELETE | DOC_ARCHIVE => reserved_refusal(args),
         _ => return None,
     };
     if reserved.is_some() {
@@ -296,6 +321,11 @@ pub fn refusal_before_asking(name: &str, args: &Value) -> Option<String> {
                 .to_string(),
             );
         }
+    }
+    if name == DOC_ARCHIVE && archived_of(args).is_none() {
+        return Some(
+            "archived is required: true to archive the document, false to restore it".into(),
+        );
     }
     if name == DOC_EDIT {
         if let Err(error) = edits_of(args) {
@@ -474,7 +504,7 @@ pub fn write_consequence(
     }
 }
 
-/// The call to hold for the operator: a write or delete that names no
+/// The call to hold for the operator: a write, archive or delete that names no
 /// `if_hash` gets the hash of the document as it stands now, so what runs once
 /// allowed is what the card described, and a document changed in between (an
 /// import over it, a peer's edit) conflicts instead of being replaced unseen.
@@ -599,6 +629,27 @@ pub fn definitions(kinds: &[DocKind]) -> Vec<Value> {
                     },
                 },
                 "required": ["slug", "if_hash", "edits"],
+            },
+        }),
+        json!({
+            "name": DOC_ARCHIVE,
+            "description": format!(
+                "Archive a document on this channel (`archived: true`), or restore an archived \
+                 one (`archived: false`), in either format. An archived document is kept and \
+                 still read by slug, but is left out of doc_search, the document list and the \
+                 pinned orientation; its body, hash and bundle are unchanged. Pass if_hash \
+                 (from doc_read) to refuse archiving an edit you have not seen. Shown work is \
+                 refused. The operator is always asked. {}",
+                super::aside::ASKED
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": { "type": "string" },
+                    "archived": { "type": "boolean" },
+                    "if_hash": { "type": "string" },
+                },
+                "required": ["slug", "archived"],
             },
         }),
         json!({
@@ -737,6 +788,22 @@ pub async fn call(
                 return Err(format!("no document {slug} on channel {}", ctx.channel));
             }
             Ok(json!({ "slug": slug, "deleted": true }))
+        }
+        DOC_ARCHIVE => {
+            let slug = args["slug"].as_str().unwrap_or("").trim();
+            let archived = archived_of(args).ok_or("archived must be true or false")?;
+            let doc = archive_document(
+                &access.store,
+                access.manager.bus(),
+                access.manager.node_id(),
+                &ctx.channel,
+                slug,
+                archived,
+                args["if_hash"].as_str(),
+            )
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("no document {slug} on channel {}", ctx.channel))?;
+            Ok(json!({ "slug": doc.slug, "archived": doc.archived != 0, "hash": doc.hash }))
         }
         other => Err(format!("no tool named {other}")),
     }
@@ -937,6 +1004,37 @@ pub fn delete_document(
     }
 }
 
+/// Archive or restore a document at a slug, changing nothing else: its
+/// body, hash, format and bundle stay as they are. The store path
+/// `PUT /api/docs/{channel}/{slug}` takes for `archived` without a body.
+/// `if_hash` refuses archiving a version the caller has not read.
+/// `Ok(None)` when there is no such document.
+pub fn archive_document(
+    store: &crate::store::Store,
+    bus: &crate::stream::Bus,
+    site: &str,
+    channel: &str,
+    slug: &str,
+    archived: bool,
+    if_hash: Option<&str>,
+) -> Result<Option<DocumentRow>, WriteError> {
+    if !valid_slug(slug) {
+        return Err(WriteError::Slug(slug.to_string()));
+    }
+    match store.set_document_archived_change(site, channel, slug, archived, if_hash)? {
+        DocumentWrite::Written { row, changes } => {
+            bus.publish(crate::stream::Frame::Changes {
+                channel: channel.to_string(),
+                changes,
+            });
+            Ok(Some(*row))
+        }
+        // The store answers a missing document as a conflict with nothing.
+        DocumentWrite::Conflict { hash, .. } if hash.is_empty() => Ok(None),
+        DocumentWrite::Conflict { hash, body } => Err(WriteError::Conflict { hash, body }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1062,6 +1160,78 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_doc_archive_is_refused_before_asking_without_a_boolean_archived() {
+        let refused = |args: Value| refusal_before_asking(DOC_ARCHIVE, &args);
+        for args in [
+            json!({ "slug": "plan-x" }),
+            json!({ "slug": "plan-x", "archived": "yes" }),
+        ] {
+            let why = refused(args.clone());
+            assert!(
+                why.as_deref().is_some_and(|r| r.contains("archived")),
+                "{args}: {why:?}"
+            );
+        }
+        assert!(refused(json!({ "slug": "Bad", "archived": true })).is_some());
+        let shown = refused(json!({ "slug": "shown-x", "archived": true }));
+        assert!(
+            shown.as_deref().is_some_and(|r| r.contains("show_work")),
+            "{shown:?}"
+        );
+        assert_eq!(refused(json!({ "slug": "plan-x", "archived": true })), None);
+        assert_eq!(
+            refused(json!({ "slug": "plan-x", "archived": false })),
+            None
+        );
+        assert_eq!(archive_action(&json!({ "archived": true })), "archive");
+        assert_eq!(archive_action(&json!({ "archived": false })), "restore");
+    }
+
+    /// Archiving changes the flag and nothing else, so the hash an agent
+    /// read still names the document; a stale one conflicts, and a slug with
+    /// no document behind it is none.
+    #[test]
+    fn archiving_keeps_the_body_and_hash_and_restores_by_the_same_hash() {
+        let store = crate::store::Store::open_in_memory().unwrap();
+        let bus = crate::stream::Bus::new();
+        let doc = put(&store, "plan-done", Format::Markdown, "# Done\n\nshipped");
+        let archive = |archived: bool, if_hash: Option<&str>| {
+            archive_document(
+                &store,
+                &bus,
+                "A",
+                "personal",
+                "plan-done",
+                archived,
+                if_hash,
+            )
+        };
+        assert!(matches!(
+            archive(true, Some("stale")),
+            Err(WriteError::Conflict { ref hash, .. }) if *hash == doc.hash
+        ));
+        assert_eq!(
+            store
+                .doc_get("personal", "plan-done")
+                .unwrap()
+                .unwrap()
+                .archived,
+            0
+        );
+        let archived = archive(true, Some(&doc.hash)).unwrap().unwrap();
+        assert_eq!(
+            (archived.archived, archived.hash.as_str()),
+            (1, doc.hash.as_str())
+        );
+        assert_eq!(archived.body, doc.body);
+        let restored = archive(false, Some(&doc.hash)).unwrap().unwrap();
+        assert_eq!(restored.archived, 0);
+        let missing =
+            archive_document(&store, &bus, "A", "personal", "plan-none", true, None).unwrap();
+        assert!(missing.is_none());
+    }
+
     fn put(store: &crate::store::Store, slug: &str, format: Format, body: &str) -> DocumentRow {
         let bus = crate::stream::Bus::new();
         write_document_as(
@@ -1125,8 +1295,9 @@ mod tests {
         assert_eq!(ctx["stale"], true);
     }
 
-    /// `pinned`, like `archived`, `kind`, and `title`, is operator-only: an
-    /// agent calling `doc_write` must never be able to set it.
+    /// `pinned`, like `archived`, `kind`, and `title`, is not `doc_write`'s:
+    /// an agent writing a body never sets it as a side effect. Archiving is
+    /// its own call, `doc_archive`, which the operator is always asked.
     #[test]
     fn doc_write_schema_has_no_operator_only_fields() {
         let defs = definitions(&crate::config::default_doc_kinds());

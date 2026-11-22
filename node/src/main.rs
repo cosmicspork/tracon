@@ -357,6 +357,19 @@ enum DocCommand {
         #[arg(long, default_value = "personal")]
         channel: String,
     },
+    /// Archive a document: kept, and read by slug, but out of the list,
+    /// search and the pinned orientation. Its body and hash are unchanged.
+    Archive {
+        slug: String,
+        #[arg(long, default_value = "personal")]
+        channel: String,
+    },
+    /// Restore an archived document.
+    Unarchive {
+        slug: String,
+        #[arg(long, default_value = "personal")]
+        channel: String,
+    },
     /// Mirror every Markdown document on a channel into `<slug>.md`, with
     /// archived ones under `archive/`. HTML documents are reported and skipped.
     /// A removed document's old file is removed; unrelated files remain.
@@ -3309,6 +3322,20 @@ async fn node_doc_kinds() -> Result<Vec<tracon::config::DocKind>> {
         .collect())
 }
 
+/// Archive or restore a document by its flag alone, as `doc_archive` does:
+/// `PUT /api/docs/{channel}/{slug}` with `archived` and no body.
+async fn doc_set_archived(channel: &str, slug: &str, archived: bool) -> Result<()> {
+    node_call(
+        reqwest::Method::PUT,
+        &format!("/api/docs/{channel}/{slug}"),
+        Some(serde_json::json!({ "archived": archived })),
+        None,
+    )
+    .await?;
+    println!("{} {slug}", if archived { "archived" } else { "restored" });
+    Ok(())
+}
+
 async fn doc_command(cmd: DocCommand) -> Result<()> {
     use reqwest::Method;
     match cmd {
@@ -3400,6 +3427,8 @@ async fn doc_command(cmd: DocCommand) -> Result<()> {
             println!("removed {slug}");
             Ok(())
         }
+        DocCommand::Archive { slug, channel } => doc_set_archived(&channel, &slug, true).await,
+        DocCommand::Unarchive { slug, channel } => doc_set_archived(&channel, &slug, false).await,
         DocCommand::Export { dir, channel } => {
             let v = node_call(
                 Method::GET,

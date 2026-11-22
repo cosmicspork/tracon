@@ -852,6 +852,14 @@ mod tests {
         let args = serde_json::json!({ "slug": "note-personal" });
         let d = p.decide(&tool("doc_delete", &args, "doc_delete note-personal"));
         assert_eq!(d.verdict, Verdict::Ask);
+        // Nor is archiving or restoring one.
+        let args = serde_json::json!({ "slug": "note-personal", "archived": true });
+        let d = p.decide(&tool(
+            "doc_archive",
+            &args,
+            "doc_archive note-personal · archive",
+        ));
+        assert_eq!(d.verdict, Verdict::Ask);
     }
 
     /// The shipped bundle as its version names it. A node refuses a different

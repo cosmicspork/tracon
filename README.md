@@ -1580,7 +1580,7 @@ and revoked the moment the hub loses that key.
 | `tracon mesh id\|init\|invite\|members\|remove\|admit`, `enroll` | the mesh |
 | `tracon channel create\|list\|bind\|share\|leave` | channels and their bindings |
 | `tracon credential import\|ls\|rm\|share` | what the broker holds (import is also on Settings) |
-| `tracon doc import\|ls\|get\|put [--format html]\|rm\|export\|reindex` | documents (import and export are Markdown; `put` writes either format, converting a document in place), and rebuilding the vector index from them; import, preview, replace, download, archive, and delete HTML bundles in Documents |
+| `tracon doc import\|ls\|get\|put [--format html]\|rm\|archive\|unarchive\|export\|reindex` | documents (import and export are Markdown; `put` writes either format, converting a document in place; `archive` and `unarchive` change only the flag), and rebuilding the vector index from them; import, preview, replace, download, archive, and delete HTML bundles in Documents |
 | `tracon session show <package> [--jsonl]` | read a session package offline, with no node running |
 | `tracon session archive-legacy\|reopen --harness [--model]` | put sessions from a retired harness away read-only, and carry one forward onto a supported one, on its own model unless `--model` names another |
 | `tracon session continue <id>` | carry on a session a node restart cut off, or whose harness died and was not started again, on its workspace and harness (also the session's **Continue** button) |
@@ -2287,9 +2287,16 @@ its bundle. `doc_edit` changes a Markdown document by exact-match replacements
 body; it requires `if_hash`, refuses HTML (use `doc_write`), is approved as
 `doc_write` is, and its approval shows the diff the edits make. `doc_delete` removes
 a document of either format with its bundle, is always asked, and refuses shown
-work. All three take `if_hash` from `doc_read`, across a change of format, and a
-reserved slug, an unknown format, an HTML body over the per-file limit, or a
-`doc_edit` that does not apply is refused before the call is held.
+work. `doc_archive` (`{slug, archived, if_hash?}`) archives a document, or restores
+it with `archived: false`, by the same flag-only path as `PUT /api/docs/{ch}/{slug}`
+with `archived` and no body (and `tracon doc archive|unarchive <slug>`): body, hash
+and bundle are unchanged. It is always asked, even for a working note, its card
+names the slug, the action (archive or restore) and the document's title, and it
+refuses shown work. All four take `if_hash` from `doc_read`, across a change of
+format; a held call without one is pinned to the version it was asked about. A
+reserved slug, an unknown format, an HTML body over the per-file limit, a
+`doc_archive` without a boolean `archived`, or a `doc_edit` that does not apply is
+refused before the call is held.
 
 ### Policy
 
