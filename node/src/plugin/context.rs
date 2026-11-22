@@ -36,8 +36,8 @@
 //! `preview_token` is present only on a call dispatched from an approved card
 //! whose `tracon/preview` returned a token, and absent otherwise: the plugin
 //! applies against it and refuses with `data.stale` when what it names has
-//! moved. The note `note-plugins-preview-contract` is the wire contract for
-//! it, for `tracon/preview` and for `tracon/format/convert`.
+//! moved. docs/reference/plugins.md ("Previews and formats") is the wire
+//! contract for it, for `tracon/preview` and for `tracon/format/convert`.
 
 use std::collections::BTreeMap;
 
