@@ -1,8 +1,8 @@
 # Building Tracon plugins
 
 This guide is for people writing a plugin: the manifest, the release, the process the
-node starts, and the calls it makes. Operators installing one want the README's
-[Plugins](../../README.md#plugins) section instead. Everything here is contract v1, and
+node starts, and the calls it makes. Operators installing one want
+[the plugins guide](../guides/plugins.md#plugins) instead. Everything here is contract v1, and
 the code on `main` is the authority: `node/src/plugin/` (manifest, install, supervisor,
 caller context), `node/src/mcp/upstream.rs` (the transport) and the plugin paths in
 `node/src/mcp/mod.rs`. Where this guide and the code disagree, the code wins and this
@@ -614,8 +614,8 @@ holds both plugins' vectors, copied verbatim with the commit named. Each file ha
 fixed `seed` (a raw ed25519 secret key, `SigningKey::from_bytes(seed)`, not a Tracon
 identity seed), its `public_key`, a `plugin_token` and its `instance`, `now_ms`, one
 `valid` call and context with its signing bytes and signature, a `valid_preview_token`
-case carrying `preview_token` and an `approval_id`, and refused cases each naming the
-check that must refuse it. `node/tests/plugin_contract.rs` checks the node signs exactly
+case carrying `preview_token` and an `approval_id`, and refused cases (`refused` in
+jira-review's file, `tampered` in sql-review's) each naming the check that must refuse it. `node/tests/plugin_contract.rs` checks the node signs exactly
 those bytes. Check your verifier against the same file, as sql-review's
 `tests/contract_vectors.rs` does with jira-review's, so all three agree on the bytes.
 When the wire format changes, both plugins and both fixtures change together.
@@ -824,7 +824,7 @@ against `tools/list`, and `serve` driven over a real socket (jira-review's
 Then try the shipped shape on a scratch node, never on the node you run:
 
 ```sh
-# A scratch node of its own: state, config and port (README, "A scratch node").
+# A scratch node of its own: state, config and port (docs/guides/install.md, "A scratch node").
 export TRACON_STATE_DIR=$(mktemp -d -p ~/.cache) TRACON_CONFIG_DIR=$(mktemp -d -p ~/.cache)
 export TRACON_LISTEN=127.0.0.1:7520 TRACON_URL=http://127.0.0.1:7520
 cat > "$TRACON_CONFIG_DIR/node.toml" <<TOML

@@ -23,7 +23,7 @@ pub struct Operation {
     pub what: &'static str,
     pub github: Side,
     pub gitlab: Side,
-    /// A CI write: asked, followed once it ran, and listed in the README's
+    /// A CI write: asked, followed once it ran, and listed in the sessions guide's
     /// paragraph on CI so an agent reading it knows what it can start.
     pub ci_write: bool,
 }
@@ -182,18 +182,18 @@ mod tests {
         }
     }
 
-    /// The README's CI paragraph is what an agent reads to learn what it can
+    /// The sessions guide's CI paragraph is what an agent reads to learn what it can
     /// start; one that leaves a write out has had an agent conclude it could
     /// not (#462).
     #[test]
-    fn the_readme_names_every_ci_write() {
-        let readme = include_str!("../../../README.md");
+    fn the_sessions_guide_names_every_ci_write() {
+        let guide = include_str!("../../../docs/guides/sessions.md");
         for op in OPERATIONS.iter().filter(|op| op.ci_write) {
             for side in [op.github, op.gitlab] {
                 if let Side::Tool(name) = side {
                     assert!(
-                        readme.contains(&format!("`{name}`")),
-                        "README.md does not name {name}"
+                        guide.contains(&format!("`{name}`")),
+                        "docs/guides/sessions.md does not name {name}"
                     );
                 }
             }

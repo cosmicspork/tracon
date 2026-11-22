@@ -1444,7 +1444,7 @@ impl HostRules {
 pub const PODMAN_ON_MAC: &str = "runtime.kind = \"podman\" is not supported on macOS: a Mac \
     runs its sandboxes with Apple Containerization. Set `kind = \"apple\"` under [runtime] \
     (or delete the line), install Apple's container package, and run \
-    `container system start --enable-kernel-install` once (README, \"On a Mac with Apple \
+    `container system start --enable-kernel-install` once (docs/guides/install.md, \"On a Mac with Apple \
     Containerization\")";
 
 /// Refuse a runtime the host cannot run: Podman on a Mac, whose sandboxes
@@ -1566,7 +1566,7 @@ fn refuse_retired_podman_switches(text: &str, kind: RuntimeKind) -> Result<(), S
          network but tunnels to the node, and the gateway container, harness images and \
          mounted volumes those switches kept are gone. Delete the line{} and run `tracon setup` \
          (it removes the old gateway); a [[repo]] entry with `image =`, or a Dockerfile not on \
-         `FROM ${{TRACON_SANDBOX_BASE}}`, moves to `build` steps (README, \"Starting work\"); \
+         `FROM ${{TRACON_SANDBOX_BASE}}`, moves to `build` steps (docs/guides/sessions.md, \"Repository recipes on the stock base\"); \
          `tracon gc --legacy` removes the old harness images",
         off.join(" = false, "),
         if off.len() > 1 { "s" } else { "" },
@@ -1627,7 +1627,7 @@ fn refuse_kubernetes_without_protocol(text: &str, kind: RuntimeKind) -> Result<(
          (deploy/kubernetes/base: the node's Role, its NetworkPolicies and the \
          `tracon-sandbox` policy), delete the line, and run `tracon check-boundary --deep` in \
          the node pod; a [[repo]] entry with `image =`, or a Dockerfile not on \
-         `FROM ${TRACON_SANDBOX_BASE}`, moves to `build` steps (README, \"Starting work\")"
+         `FROM ${TRACON_SANDBOX_BASE}`, moves to `build` steps (docs/guides/sessions.md, \"Repository recipes on the stock base\")"
             .into(),
     )
 }
@@ -4258,7 +4258,7 @@ mod tests {
         );
     }
 
-    /// The README's `node.toml` reference is checked, not trusted: every key it
+    /// The configuration reference's `node.toml` is checked, not trusted: every key it
     /// names must exist, and the values it shows as defaults must be them.
     #[test]
     fn a_mostly_deletion_diff_over_the_line_cap_is_within_it() {
@@ -4696,15 +4696,15 @@ mod tests {
     }
 
     #[test]
-    fn the_readme_configuration_block_is_a_valid_node_toml() {
-        let readme = include_str!("../../README.md");
-        let block = readme
+    fn the_configuration_reference_block_is_a_valid_node_toml() {
+        let reference = include_str!("../../docs/reference/configuration.md");
+        let block = reference
             .split("```toml\n")
             .nth(1)
             .and_then(|rest| rest.split("```").next())
-            .expect("README has a toml block");
-        let parsed: Config =
-            toml::from_str(block).unwrap_or_else(|e| panic!("README node.toml: {e}"));
+            .expect("the configuration reference has a toml block");
+        let parsed: Config = toml::from_str(block)
+            .unwrap_or_else(|e| panic!("configuration reference node.toml: {e}"));
         let d = Config::default();
         assert_eq!(parsed.harness.id, d.harness.id);
         assert_eq!(parsed.harness.version, d.harness.version);

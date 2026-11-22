@@ -6,8 +6,8 @@ that runs inside the boundary, like `claude`. The node supervises it and does no
 of its own.
 
 **Status: experimental.** Everything planned for it has landed (#602–#624); it stays
-experimental until it has done a week of real work (`docs/ROADMAP.md`, *The native
-harness*). It has two modes:
+experimental until it has done a week of real work (`docs/ARCHITECTURE.md`, *The
+supported configuration*). It has two modes:
 
 - **Protocol mode** (the default). The node drives it over stdin and stdout and answers a
   permission request for every tool call. The node's adapter is `node/src/adapter/native.rs`.
