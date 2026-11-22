@@ -259,6 +259,23 @@ pub struct UiRequest {
     pub body: axum::body::Bytes,
 }
 
+/// Why [`Tools::lent`] lends a call nothing, so it does not run.
+#[derive(Debug)]
+enum NotLent {
+    /// What the call names is not a binding it may be lent.
+    Refused(String),
+    /// A binding it is lent could not be read from the broker.
+    Broker(String),
+}
+
+impl From<NotLent> for String {
+    fn from(e: NotLent) -> String {
+        match e {
+            NotLent::Refused(why) | NotLent::Broker(why) => why,
+        }
+    }
+}
+
 /// The plugin's answer to a [`UiRequest`].
 #[derive(Debug)]
 pub struct UiAnswer {
@@ -950,7 +967,9 @@ impl Tools {
                 ));
             }
         }
-        let credentials = self.lent(ctx, &endpoint.manifest, Some(args), approval.is_some())?;
+        let credentials = self
+            .lent(ctx, &endpoint.manifest, args, approval.is_some())
+            .map_err(String::from)?;
         let caller = match &ctx.caller {
             Caller::Session(id) => context::CallerId {
                 kind: "agent",
@@ -1056,27 +1075,27 @@ impl Tools {
         &self,
         ctx: &CallContext,
         manifest: &crate::plugin::manifest::Manifest,
-        args: Option<&Value>,
+        args: &Value,
         approved: bool,
     ) -> Result<
         std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
-        String,
+        NotLent,
     > {
         use crate::plugin::lending;
         let broker = self.broker.read().unwrap();
         let available = broker.available_to(&ctx.channel, &ctx.node_id);
         let lent = lending::lending(manifest, &available, args, approved);
         if let Some(why) = lending::refusal(&lent) {
-            return Err(format!(
+            return Err(NotLent::Refused(format!(
                 "nothing ran: plugin {} cannot be lent what this call names on channel {}: {why}",
                 manifest.name, ctx.channel
-            ));
+            )));
         }
         let mut credentials = std::collections::BTreeMap::new();
         for binding in lent.iter().flat_map(|l| &l.bindings) {
             let env = broker
                 .env_for(binding, &ctx.channel, &ctx.node_id)
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| NotLent::Broker(e.to_string()))?;
             credentials.insert(binding.clone(), env);
         }
         Ok(credentials)
@@ -1501,9 +1520,26 @@ impl Tools {
             }
         };
         let endpoint = &lease.endpoint;
-        let credentials = self
-            .lent(ctx, &endpoint.manifest, None, false)
-            .map_err(OperatorCallError::Unreachable)?;
+        // Lent as a tool call is, by the query parameters the build's
+        // `select`s name, and never what is lent only on approval.
+        let query = request.path.split_once('?').map(|(_, q)| q);
+        let credentials = match crate::plugin::lending::page_arguments(&endpoint.manifest, query)
+            .map_err(|why| {
+                NotLent::Refused(format!(
+                    "nothing ran: plugin {plugin} cannot be lent what this request names on \
+                     channel {}: {why}",
+                    ctx.channel
+                ))
+            })
+            .and_then(|selects| self.lent(ctx, &endpoint.manifest, &selects, false))
+        {
+            Ok(credentials) => credentials,
+            Err(NotLent::Refused(why)) => {
+                gate.reason = Some(why.clone());
+                return refuse(gate, OperatorCallError::Request(why));
+            }
+            Err(NotLent::Broker(why)) => return Err(OperatorCallError::Unreachable(why)),
+        };
         let caller = context::CallerId {
             kind: "operator",
             session: None,
@@ -1801,7 +1837,7 @@ impl Tools {
         let broker = self.broker.read().unwrap();
         let available = broker.available_to(&approval.channel, &approval.node_id);
         let credentials: Vec<Value> =
-            crate::plugin::lending::lending(manifest, &available, Some(args), true)
+            crate::plugin::lending::lending(manifest, &available, args, true)
                 .into_iter()
                 .map(|l| {
                     json!({

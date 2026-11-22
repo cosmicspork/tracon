@@ -1228,6 +1228,9 @@ interface's, and its CSP lets them talk only to that origin. What the page asks 
 the method, path, body and a few headers, and adds a `tracon-context` header holding the
 same signed caller context a tool call carries, with kind `operator`, tool `tracon/ui`,
 and `arguments_sha256` the hash of `{"body_sha256", "method", "path"}` for that request.
+A credential with `select = "profile"` lends such a request only the binding its
+`?profile=` query parameter names, or the bare one without it, and one lent only on
+approval is never lent to a page.
 A page's changes must come from its own origin, and they are logged to the channel's
 external log under `/plugins/<name>/ui`; reads are not logged. `deny = ["ui"]` in the
 plugin's `[[plugin]]` entry (or a signed policy rule denying `<name>__ui`) turns its

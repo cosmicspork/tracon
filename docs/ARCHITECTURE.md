@@ -1156,7 +1156,9 @@ forwards `api/...` to the plugin's instance for the token's channel
 the same origin, only a few request headers pass (never a cookie, `Origin` or
 `Referer`), and the caller context rides in a `tracon-context` header, kind `operator`,
 tool `tracon/ui`, with `arguments_sha256` binding the method, the path as sent and the
-body's hash. Policy decides it as `<plugin>__ui`: a signed denial or the entry's `deny`
+body's hash. It is lent credentials by `plugin::lending`, as a tool call is, with each
+`select` argument read from the query parameter of that name, and never as approved.
+Policy decides it as `<plugin>__ui`: a signed denial or the entry's `deny`
 refuses it, and otherwise it runs, never held, since the operator is the one asking.
 Changes and refusals are logged to the channel's external log under the lane
 `/plugins/<name>/ui`; reads are not, so a page that polls does not fill the log. The

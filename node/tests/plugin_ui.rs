@@ -28,9 +28,10 @@ use tracon::{
 const INDEX: &str = "<!doctype html><title>pageant</title><script src=\"./app.js\"></script>";
 const APP_JS: &str = "fetch('api/things')";
 
-fn manifest(name: &str, ui: bool) -> String {
+fn manifest(name: &str, ui: bool, credentials: &str) -> String {
     let mut text =
         format!("name = \"{name}\"\nversion = \"1.0.0\"\ncontract = 1\nexec = [\"bin/{name}\"]\n");
+    text.push_str(credentials);
     if ui {
         text.push_str("\n[ui]\nentry = \"ui/index.html\"\ntitle = \"Pageant\"\n");
     }
@@ -56,6 +57,17 @@ struct Node {
 /// channel `channel`, and `entries`. Each test its own plugin name: the
 /// binary's tests share a state directory.
 async fn node(name: &str, ui: bool, channel: &str, entries: Vec<PluginEntry>) -> Node {
+    node_declaring(name, ui, channel, entries, "").await
+}
+
+/// [`node`], with the build's manifest declaring `credentials`.
+async fn node_declaring(
+    name: &str,
+    ui: bool,
+    channel: &str,
+    entries: Vec<PluginEntry>,
+    credentials: &str,
+) -> Node {
     let port = free_port();
     let h = support::harness::harness_with(Config {
         plugin: entries,
@@ -78,7 +90,7 @@ async fn node(name: &str, ui: bool, channel: &str, entries: Vec<PluginEntry>) ->
         std::fs::write(dir.join("index.html"), INDEX).unwrap();
         std::fs::write(dir.join("app.js"), APP_JS).unwrap();
     }
-    support::plugin::install(&h.store, &state, &manifest(name, ui));
+    support::plugin::install(&h.store, &state, &manifest(name, ui, credentials));
     let data = install::data_dir(&state, name).join(channel);
     std::fs::create_dir_all(&data).unwrap();
     std::fs::write(data.join("tools"), "").unwrap();
@@ -447,6 +459,137 @@ async fn api_requests_reach_the_plugin_as_the_operators_signed_and_logged() {
     assert_eq!(decided[0]["decision"], "policy_allowed");
     assert_eq!(decided[0]["outcome"], "ok");
     assert!(n.h.store.list_sessions(None).unwrap().is_empty());
+    n.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_pages_request_is_lent_only_the_binding_its_query_selects() {
+    let n = node_declaring(
+        "pantry",
+        true,
+        "pantry-ch",
+        vec![],
+        r#"
+[[credential]]
+name = "pantry-read"
+pattern = "pantry-read-*"
+select = "profile"
+
+[[credential]]
+name = "pantry-write"
+pattern = "pantry-write-*"
+lend = "approved"
+select = "profile"
+"#,
+    )
+    .await;
+    let mut bindings = String::new();
+    for name in [
+        "pantry-read",
+        "pantry-read-tst",
+        "pantry-read-prd",
+        "pantry-write-tst",
+        "pantry-write-prd",
+    ] {
+        bindings.push_str(&format!(
+            "[credentials.{name}]\nchannels = [\"pantry-ch\"]\n[credentials.{name}.env]\nDB_USER = \"{name}\"\n\n"
+        ));
+    }
+    *n.h.tools.broker.write().unwrap() = toml::from_str(&bindings).unwrap();
+    let (status, opened) = n.open("pantry", "pantry-ch").await;
+    assert_eq!(status, 200, "{opened}");
+    let token = token_of(opened["url"].as_str().unwrap());
+    let origin = format!("http://127.0.0.1:{}", n.port);
+    let lent = |a: &Answer| -> Vec<String> {
+        assert_eq!(a.status, 200, "{}", String::from_utf8_lossy(&a.body));
+        a.json()["context"]["credentials"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    };
+
+    // Selected: only that profile's read account, never another's.
+    let a = n
+        .page(
+            "pantry",
+            "GET",
+            &format!("/t/{token}/api/rows?profile=tst&limit=5"),
+            &[],
+            None,
+        )
+        .await;
+    assert_eq!(lent(&a), ["pantry-read-tst"]);
+    assert_eq!(
+        a.json()["context"]["credentials"]["pantry-read-tst"]["DB_USER"],
+        "pantry-read-tst"
+    );
+    // A change is never approved, so the approved-only write account is
+    // never lent to it, though its profile is bound.
+    let a = n
+        .page(
+            "pantry",
+            "POST",
+            &format!("/t/{token}/api/rows?profile=prd"),
+            &[
+                ("origin", origin.as_str()),
+                ("content-type", "application/json"),
+            ],
+            Some("{}"),
+        )
+        .await;
+    assert_eq!(lent(&a), ["pantry-read-prd"]);
+
+    // Absent: the bare binding only.
+    for uri in ["api/rows", "api/rows?limit=5", "api/rows?profile="] {
+        let a = n
+            .page("pantry", "GET", &format!("/t/{token}/{uri}"), &[], None)
+            .await;
+        assert_eq!(lent(&a), ["pantry-read"], "{uri}");
+    }
+
+    // Unknown: refused before the plugin is asked, naming the binding, and
+    // logged though it is a read.
+    let before = n.calls("pantry", "pantry-ch").len();
+    let a = n
+        .page(
+            "pantry",
+            "GET",
+            &format!("/t/{token}/api/rows?profile=nope"),
+            &[],
+            None,
+        )
+        .await;
+    assert_eq!(a.status, 422, "{}", String::from_utf8_lossy(&a.body));
+    let message = a.json()["error"]["message"].as_str().unwrap().to_string();
+    assert_eq!(
+        message,
+        "nothing ran: plugin pantry cannot be lent what this call names on channel pantry-ch: \
+         the call's profile names binding pantry-read-nope, which this channel does not bind"
+    );
+    let a = n
+        .page(
+            "pantry",
+            "GET",
+            &format!("/t/{token}/api/rows?profile=tst&profile=prd"),
+            &[],
+            None,
+        )
+        .await;
+    assert_eq!(a.status, 422, "{}", String::from_utf8_lossy(&a.body));
+    assert_eq!(n.calls("pantry", "pantry-ch").len(), before);
+    let refused: Vec<Value> = n
+        .log("pantry-ch")
+        .into_iter()
+        .filter(|(_, kind, p)| kind == "tool_decided" && p["decision"] == "refused")
+        .map(|(_, _, p)| p)
+        .collect();
+    assert_eq!(refused.len(), 2, "{refused:?}");
+    assert!(refused[0]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("pantry-read-nope"));
     n.shutdown().await;
 }
 

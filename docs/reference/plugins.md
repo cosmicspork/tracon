@@ -672,9 +672,25 @@ owns, or that is not a string of name characters, is refused before it is sent, 
 the binding: `nothing ran: plugin sql-review cannot be lent what this call names on
 channel work: the call's profile names binding sql-write-nope, which this channel does
 not bind`. A credential lent only on approval is not asked for on a call that is not
-approved, so a read on a profile with no write account still runs. A request from the
-plugin's own page (`tracon/ui`) carries no tool arguments, so it is lent every binding
-each credential matches.
+approved, so a read on a profile with no write account still runs.
+
+**A request from the plugin's own page (`tracon/ui`) selects by its query.** It carries
+no tool arguments, so the argument a `select` names is read from the query parameter of
+that name, percent-decoded: with `select = "profile"`, `fetch('api/rows?profile=tst')`
+is lent `sql-read-tst`, and a request without `profile` (or with `profile=`) is lent
+`sql-read` alone, when the channel binds it. A value naming a binding the channel does
+not bind, one another credential owns, or one that is not name characters, refuses the
+request with 422 before the plugin is asked, and the refusal is logged even for a read:
+`nothing ran: plugin sql-review cannot be lent what this call names on channel work: the
+call's profile names binding sql-read-nope, which this channel does not bind`. So does a
+query naming the parameter more than once. Other query parameters are yours and not
+read. A page's request is never approved, so a credential with `lend = "approved"` is
+never lent to one, whatever it selects. The query rather than a header carries the
+value because it is part of the `path` the signed context's `arguments_sha256` covers,
+so the plugin can verify what the request was lent for, and because a page can put it on
+any request, a link, `<img>`, download or `EventSource` included, none of which can set
+a header. Send it on every request that reads a selected binding: the page's own state,
+such as a chosen profile, is not remembered between requests.
 
 Without `select`, a call is lent every binding the credential matches, and the plugin
 picks one itself: on a channel binding eleven `sql-write-*` accounts, one approved write
@@ -1045,8 +1061,10 @@ A plugin whose manifest has `[ui]` gets a page in the interface's **Plugins** se
   header: the signed caller context as base64url JSON without padding, kind `operator`,
   tool `tracon/ui`, and `arguments_sha256` over `{"body_sha256", "method", "path"}` for
   that request. Verify it as you would a tool call's context, computing the arguments
-  from the request. Only `content-type`, `content-disposition` and `etag` of your answer
-  reach the page, and an answer may be at most 32 MiB.
+  from the request. Its `credentials` are lent by the query parameter each `select`
+  names (see [Credentials lent per call](#credentials-lent-per-call)). Only
+  `content-type`, `content-disposition` and `etag` of your answer reach the page, and an
+  answer may be at most 32 MiB.
 - **Policy and the log.** A request is decided as `<plugin>__ui`: a signed denial, or
   `deny = ["ui"]` in the plugin's `[[plugin]]` entry, refuses it (the files are still
   served); otherwise it runs, never held. A request that changes something must come

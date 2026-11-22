@@ -7,6 +7,10 @@
 //! matches is never lent. A credential with `select` lends a call only the
 //! binding the call's argument names (`<name>-<value>`, or `<name>` when the
 //! call names none); one without lends every binding it owns.
+//!
+//! A request from a plugin's page (`tracon/ui`) is lent by the same rule,
+//! its arguments being the query parameters named by a `select`
+//! ([`page_arguments`]).
 
 use serde_json::Value;
 
@@ -28,13 +32,12 @@ pub struct Lent<'m> {
 /// from the bindings `available` to its channel. One lent only on approval
 /// lends nothing, and refuses nothing, unless the call is `approved`.
 ///
-/// `args` is `None` for a request that is not a tool call (a plugin page's),
-/// which has no argument to select by and is lent every binding a
-/// credential owns.
+/// A plugin page's request passes the arguments [`page_arguments`] reads
+/// from it, and is never `approved`.
 pub fn lending<'m>(
     manifest: &'m Manifest,
     available: &[&str],
-    args: Option<&Value>,
+    args: &Value,
     approved: bool,
 ) -> Vec<Lent<'m>> {
     let owner = |binding: &str| manifest.credentials.iter().position(|c| c.matches(binding));
@@ -56,8 +59,8 @@ pub fn lending<'m>(
             if credential.lend == Lend::Approved && !approved {
                 return lent;
             }
-            match (&credential.select, args) {
-                (Some(select), Some(args)) => match selected(credential, select, args) {
+            match &credential.select {
+                Some(select) => match selected(credential, select, args) {
                     Ok(None) => {
                         // The call names none: the credential's own binding,
                         // when the channel binds it.
@@ -84,7 +87,7 @@ pub fn lending<'m>(
                     }
                     Err(why) => lent.refusal = Some(why),
                 },
-                _ => lent.bindings = owned.iter().map(|b| b.to_string()).collect(),
+                None => lent.bindings = owned.iter().map(|b| b.to_string()).collect(),
             }
             lent
         })
@@ -109,6 +112,38 @@ fn selected(credential: &Credential, select: &str, args: &Value) -> Result<Optio
             credential.name
         )),
     }
+}
+
+/// The arguments a request from a plugin's page selects its bindings by:
+/// for each argument a credential's `select` names, the parameter of that
+/// name in the request's `query` (percent-decoded), as a tool call would
+/// carry it. A parameter no `select` names is the plugin's own and not
+/// read; one left out names no binding, so the credential lends `name`
+/// itself. A query naming a selecting parameter more than once is refused:
+/// it would not say which binding the request is lent.
+pub fn page_arguments(manifest: &Manifest, query: Option<&str>) -> Result<Value, String> {
+    let mut args = serde_json::Map::new();
+    let selects: Vec<&str> = manifest
+        .credentials
+        .iter()
+        .filter_map(|c| c.select.as_deref())
+        .collect();
+    let pairs = url::form_urlencoded::parse(query.unwrap_or_default().as_bytes());
+    for (key, value) in pairs {
+        if !selects.contains(&key.as_ref()) {
+            continue;
+        }
+        if args
+            .insert(key.to_string(), Value::String(value.into_owned()))
+            .is_some()
+        {
+            return Err(format!(
+                "the request's query names {key} more than once: it must name at most one \
+                 binding the request is lent"
+            ));
+        }
+    }
+    Ok(Value::Object(args))
 }
 
 /// The first reason in `lent` that the call cannot run, if any.
@@ -165,7 +200,7 @@ hint = "write"
         let m = manifest(false);
         let args = json!({ "profile": "tst" });
         assert_eq!(
-            names(&lending(&m, BOUND, Some(&args), true)),
+            names(&lending(&m, BOUND, &args, true)),
             [
                 "sql-read",
                 "sql-read-tst",
@@ -175,7 +210,7 @@ hint = "write"
             ]
         );
         assert_eq!(
-            names(&lending(&m, BOUND, Some(&args), false)),
+            names(&lending(&m, BOUND, &args, false)),
             ["sql-read", "sql-read-tst", "sql-read-prd"]
         );
     }
@@ -185,27 +220,22 @@ hint = "write"
         let m = manifest(true);
         let tst = json!({ "profile": "tst", "sql": "UPDATE a" });
         assert_eq!(
-            names(&lending(&m, BOUND, Some(&tst), true)),
+            names(&lending(&m, BOUND, &tst, true)),
             ["sql-read-tst", "sql-write-tst"]
         );
-        assert_eq!(
-            names(&lending(&m, BOUND, Some(&tst), false)),
-            ["sql-read-tst"]
-        );
+        assert_eq!(names(&lending(&m, BOUND, &tst, false)), ["sql-read-tst"]);
         // Naming none: the credential's own binding, where bound.
         let none = json!({ "sql": "SELECT 1" });
-        let lent = lending(&m, BOUND, Some(&none), true);
+        let lent = lending(&m, BOUND, &none, true);
         assert_eq!(names(&lent), ["sql-read"]);
         assert_eq!(refusal(&lent), None);
-        // A page's request has no argument to select by.
-        assert_eq!(names(&lending(&m, BOUND, None, false)).len(), 3);
     }
 
     #[test]
     fn a_binding_the_channel_does_not_hold_is_refused_naming_it() {
         let m = manifest(true);
         let nope = json!({ "profile": "nope" });
-        let lent = lending(&m, BOUND, Some(&nope), true);
+        let lent = lending(&m, BOUND, &nope, true);
         assert!(names(&lent).is_empty());
         assert_eq!(
             refusal(&lent).unwrap(),
@@ -214,12 +244,12 @@ hint = "write"
         // Unapproved, the approved-only credential is not asked for.
         let read_only = json!({ "profile": "ro" });
         let bound = ["sql-read-ro", "sql-write-tst"];
-        assert_eq!(refusal(&lending(&m, &bound, Some(&read_only), false)), None);
-        assert!(refusal(&lending(&m, &bound, Some(&read_only), true))
+        assert_eq!(refusal(&lending(&m, &bound, &read_only, false)), None);
+        assert!(refusal(&lending(&m, &bound, &read_only, true))
             .unwrap()
             .contains("sql-write-ro"));
         for bad in [json!({ "profile": "a/b" }), json!({ "profile": 3 })] {
-            assert!(refusal(&lending(&m, BOUND, Some(&bad), false))
+            assert!(refusal(&lending(&m, BOUND, &bad, false))
                 .unwrap()
                 .contains("must be a string"));
         }
@@ -249,10 +279,52 @@ select = "profile"
         )
         .unwrap();
         let args = json!({ "profile": "write-tst" });
-        let lent = lending(&m, BOUND, Some(&args), false);
+        let lent = lending(&m, BOUND, &args, false);
         assert!(names(&lent).is_empty());
         assert!(refusal(&lent)
             .unwrap()
             .contains("not one credential sql may be lent"));
+    }
+
+    #[test]
+    fn a_pages_request_selects_by_the_query_parameter_a_select_names() {
+        let m = manifest(true);
+        let page = |query: Option<&str>| {
+            let args = page_arguments(&m, query)?;
+            let lent = lending(&m, BOUND, &args, false);
+            match refusal(&lent) {
+                Some(why) => Err(why),
+                None => Ok(names(&lent)),
+            }
+        };
+        // Selected: that profile's read account, never the approved-only
+        // write account, since a page's request is never approved.
+        assert_eq!(page(Some("profile=tst&limit=5")).unwrap(), ["sql-read-tst"]);
+        assert_eq!(page(Some("q=a%20b&profile=prd")).unwrap(), ["sql-read-prd"]);
+        // Absent (or empty): the bare binding only.
+        for query in [None, Some(""), Some("limit=5"), Some("profile=")] {
+            assert_eq!(page(query).unwrap(), ["sql-read"], "{query:?}");
+        }
+        // Unknown: refused, naming the binding.
+        assert_eq!(
+            page(Some("profile=nope")).unwrap_err(),
+            "the call's profile names binding sql-read-nope, which this channel does not bind"
+        );
+        assert!(page(Some("profile=a%2Fb"))
+            .unwrap_err()
+            .contains("must be a string"));
+        // Named twice: which binding is not said.
+        assert!(page(Some("profile=tst&profile=prd"))
+            .unwrap_err()
+            .contains("names profile more than once"));
+        // Without `select`, the query is not read: every binding owned,
+        // still never an approved-only one.
+        let m = manifest(false);
+        let args = page_arguments(&m, Some("profile=tst")).unwrap();
+        assert_eq!(args, json!({}));
+        assert_eq!(
+            names(&lending(&m, BOUND, &args, false)),
+            ["sql-read", "sql-read-tst", "sql-read-prd"]
+        );
     }
 }
