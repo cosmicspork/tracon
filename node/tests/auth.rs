@@ -898,7 +898,7 @@ async fn an_unknown_api_path_is_a_json_404_and_a_client_route_is_the_interface()
         assert!(
             String::from_utf8_lossy(&body)
                 .to_ascii_lowercase()
-                .contains("<html"),
+                .starts_with("<!doctype html"),
             "{path}"
         );
     }
