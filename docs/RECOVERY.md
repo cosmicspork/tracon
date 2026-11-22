@@ -217,12 +217,11 @@ another, and the pairing is checked as a session start checks it. A model the
 channel no longer offers is refused by name rather than swapped for the node's
 default, so pass `--model` to carry the work onto one it does.
 
-## SQL after consulta
+## SQL
 
-The node no longer runs SQL. The database tools are the `sql-review` plugin's
+The node runs no SQL. The database tools are the `sql-review` plugin's
 (`tracon plugin add cosmicspork/sql-review`), offered as `sql-review__query`
-and `sql-review__describe`, and the node's own read-only check (a SQL parser
-that refused anything but one `SELECT`) went with consulta.
+and `sql-review__describe`.
 
 **For SQL, the database's read-only account is the boundary**, not a parser in
 the node or in the plugin. `sql-review` classifies a statement as a read or a
@@ -231,24 +230,9 @@ the account it was given. So a credential bound as `sql-read` or
 `sql-read-<profile>` must be an account the database itself refuses writes
 from. Binding one that can write removes the only control there is.
 
-Upgrading from a node that ran consulta:
-
-- **`[consulta]` in `node.toml`** still loads and is ignored, with a warning
-  that names the plugin. Delete the table when convenient.
-- **Credentials** `consulta` and `consulta-<profile>` are renamed `sql-read`
-  and `sql-read-<profile>` the first time the new node serves, with their
-  channels, nodes and fields, and each rename is logged. A rename whose new
-  name is already taken is skipped with a warning, so nothing you put there is
-  overwritten: `tracon credential ls` shows both, and `tracon credential rm`
-  removes whichever is stale. The rename runs again at every start and does
-  nothing once no `consulta*` credential is left.
-- **The policy bundle.** The shipped agreements name the plugin's reads from
-  version 25. A node still on an older signed bundle asks for every
-  `sql-review__query` until you sign and install the new one (`tracon policy
-  sign`, then restart).
-- **A mesh in mixed versions.** A peer that has not upgraded still holds, and
-  may hand over, its copy as `consulta`; it is renamed here at the next start,
-  and on the peer once it upgrades.
+The shipped agreements name the plugin's reads from policy bundle version 25. A
+node still on an older signed bundle asks for every `sql-review__query` until you
+sign and install the new one (`tracon policy sign`, then restart).
 
 With the plugin not installed, broken, or the node down, SQL follows step 2
 above: run `sql-review --read-only` directly, with the read account from its own
@@ -264,36 +248,24 @@ nothing. Nothing needs recovering. The agent sees `stale: true` from
 `approval_status` and calls the tool again, which raises a fresh card against the
 target as it is now.
 
-## Jira after the node's Jira tools
+## Jira
 
-The node no longer talks to Jira. The tracker tools are the `jira-review` plugin's
+The node does not talk to Jira. The tracker tools are the `jira-review` plugin's
 (`tracon plugin add cosmicspork/jira-review`), offered as `jira-review__search`,
 `jira-review__issue`, `jira-review__transitions`, `jira-review__comment`,
 `jira-review__update`, `jira-review__create`, `jira-review__link` and
-`jira-review__transition`.
+`jira-review__transition`, and lent the channel's `jira` (or `jira-<profile>`)
+credential: `JIRA_URL`, `JIRA_EMAIL`, `JIRA_TOKEN`; or `JIRA_PAT` for Data Center.
 
-Upgrading from a node that had its own Jira tools:
-
-- **Credentials** need nothing. The plugin declares `jira` (and `jira-<profile>`),
-  which is the name the node's own tools used, with the same fields (`JIRA_URL`,
-  `JIRA_EMAIL`, `JIRA_TOKEN`; or `JIRA_PAT` for Data Center), so a channel that bound
-  `jira` is lent it as it stands.
-- **The old tool names** (`issue`, `issue_search`, `issue_transitions`,
-  `issue_comment`, `issue_update`, `issue_create`, `issue_link`, `issue_transition`)
-  are refused with the name that replaced each, and nothing is asked. A card for one
-  still waiting at the upgrade fails the same way if you allow it; reject it, and the
-  agent calls the plugin's tool. Past approvals still open, their wiki markup shown
-  as source.
 - **Grants.** A `ticket_transition` grant is still listed and matches nothing.
   `jira-review__transition` is consequential: each call is asked, and runs unattended
   only under a `plugin_call` grant naming that exact call, whose target its card
   shows. A new grant cannot be made for `ticket_transition`.
 - **The policy bundle.** The shipped agreements name the plugin's reads from
   version 26. A node still on an older signed bundle asks for every
-  `jira-review__search`, and the workboard's `GET /api/jira/search` answers 403,
-  until you sign and install the new one (`tracon policy sign`, then restart), or
-  add `[[plugin]] name = "jira-review"` with `allow = ["search", "issue",
-  "transitions"]` to `node.toml` meanwhile.
+  `jira-review__search` until you sign and install the new one (`tracon policy
+  sign`, then restart), or add `[[plugin]] name = "jira-review"` with `allow =
+  ["search", "issue", "transitions"]` to `node.toml` meanwhile.
 
 With the plugin not installed, broken, or the node down, run `jira-review` directly:
 its CLI reads and proposes changes with its own credential from the environment, a

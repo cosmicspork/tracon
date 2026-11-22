@@ -67,16 +67,16 @@ release in a fixed shape. The node installs and updates one only on the operator
 approval, pinned by digest; supervises one process per plugin and channel; brokers its
 tools under policy with a signed caller context; lends it credentials; and draws every
 approval card it raises. It is not an in-process runtime: a plugin is trusted code the
-operator chose, run on the host as sql-review is now. `gh` and `glab` stay built in,
-because review and publication rest on them.
+operator chose, run on the host. `gh` and `glab` stay built in, because review and
+publication rest on them.
 
 - [x] The contract, install, update and supervision, proven by moving SQL out of the node
-      into the sql-review plugin, which replaces consulta (#949, #982, #997, #1003).
+      into the sql-review plugin, which replaces consulta (#949, #982, #997, #1003, #1068).
 - [x] Jira extracted to its own repository as a standalone CLI that also ships as a
       plugin: writing tools with a preview and a staleness check, formats converted to and
       from Markdown by the plugin that owns them, and one plugin calling another through
       the node (workboard's refresh). The node's Jira module and the interface's wiki
-      renderer go (#1005, #1006, #1012, #1020).
+      renderer go (#1005, #1006, #1012, #1020, #1068).
 - [x] Approval cards raised by a plugin, with a word-diff format (hoja) (#1020, #1025).
 - [x] Plugin UIs served by the node, isolated from its origin (workboard, hoja) (#1013).
 

@@ -280,7 +280,7 @@ pub fn definitions() -> Vec<Value> {
             "inputSchema": { "type": "object", "properties": {
                 "project": { "type": "string", "description": PROJECT }, "iid": { "type": "integer" },
                 "head_sha": { "type": "string" }, "squash": { "type": "boolean" },
-                "operation_id": { "type": "string" }
+                "operation_id": super::operation_id_schema()
             }, "required": ["project", "iid", "head_sha", "operation_id"] },
         }),
         json!({
@@ -289,7 +289,7 @@ pub fn definitions() -> Vec<Value> {
             "inputSchema": { "type": "object", "properties": {
                 "project": { "type": "string", "description": PROJECT }, "pipeline_id": { "type": "integer" },
                 "job_id": { "type": "integer" }, "environment": { "type": "string" },
-                "source_sha": { "type": "string" }, "operation_id": { "type": "string" }
+                "source_sha": { "type": "string" }, "operation_id": super::operation_id_schema()
             }, "required": ["project", "pipeline_id", "job_id", "environment", "source_sha", "operation_id"] },
         }),
     ]

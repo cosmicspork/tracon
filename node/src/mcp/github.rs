@@ -319,7 +319,7 @@ pub fn definitions() -> Vec<Value> {
                     "number": { "type": "integer" },
                     "head_sha": { "type": "string", "description": "The reviewed pull request head SHA." },
                     "method": { "type": "string", "enum": ["merge", "squash", "rebase"] },
-                    "operation_id": { "type": "string", "description": "Stable idempotency id for this merge." },
+                    "operation_id": super::operation_id_schema(),
                 },
                 "required": ["repo", "number", "head_sha", "operation_id"],
             },
@@ -335,22 +335,14 @@ pub async fn call(
     args: &Value,
     before_mutation: Option<&(dyn Fn() -> Result<(), String> + Send + Sync)>,
 ) -> Result<Value, String> {
-    let env = broker
-        .read()
-        .unwrap()
-        .env_for(CREDENTIAL, &ctx.channel, &ctx.node_id)
-        .map_err(|e| e.to_string())?;
-    let token = Forge::Github
-        .token(&env)
-        .ok_or("credential gh has no GH_TOKEN")?;
-    let api = env
-        .get("GITHUB_API")
-        .map(|s| s.trim_end_matches('/').to_string())
-        .unwrap_or_else(|| "https://api.github.com".into());
+    let (token, api) = endpoint(broker, ctx)?;
     let repo = repo(args)?;
     let base = format!("{api}/repos/{repo}");
     let graphql = graphql_url(&api);
-    let gh = Client { http, token };
+    let gh = Client {
+        http,
+        token: &token,
+    };
     match name {
         PR_STATUS => {
             let n = number(args)?;
@@ -566,9 +558,12 @@ pub async fn call(
         }
         PR_MERGE => {
             let n = number(args)?;
+            // Trimmed as `merge_head_refusal` and the card read it, so a
+            // head the card was raised for is the head that is merged.
             let head_sha = args
                 .get("head_sha")
                 .and_then(Value::as_str)
+                .map(str::trim)
                 .filter(|s| s.len() >= 7)
                 .ok_or("head_sha is required")?;
             let method = args
@@ -757,6 +752,69 @@ pub async fn call(
             Ok(json!({ "runs": runs }))
         }
         other => Err(format!("no github tool named {other}")),
+    }
+}
+
+/// The channel's GitHub token and API root, from the broker.
+fn endpoint(broker: &SharedBroker, ctx: &CallContext) -> Result<(String, String), String> {
+    let env = broker
+        .read()
+        .unwrap()
+        .env_for(CREDENTIAL, &ctx.channel, &ctx.node_id)
+        .map_err(|e| e.to_string())?;
+    let token = Forge::Github
+        .token(&env)
+        .ok_or("credential gh has no GH_TOKEN")?
+        .clone();
+    let api = env
+        .get("GITHUB_API")
+        .map(|s| s.trim_end_matches('/').to_string())
+        .unwrap_or_else(|| "https://api.github.com".into());
+    Ok((token, api))
+}
+
+/// Why a `pr_merge` is refused before its card is raised: its `head_sha` is
+/// not the pull request's head as GitHub reads it now, or that head cannot be
+/// read. A card is then only ever raised for the current head, so the
+/// operator never allows a merge that could only fail when it runs (#1049).
+pub async fn merge_head_refusal(
+    broker: &SharedBroker,
+    http: &reqwest::Client,
+    ctx: &CallContext,
+    args: &Value,
+) -> Option<String> {
+    let asked = args
+        .get("head_sha")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    let read = async {
+        let (token, api) = endpoint(broker, ctx)?;
+        let (repo, n) = (repo(args)?, number(args)?);
+        let gh = Client {
+            http,
+            token: &token,
+        };
+        let pr = gh.get(&format!("{api}/repos/{repo}/pulls/{n}")).await?;
+        Ok::<_, String>((
+            format!("{repo}#{n}"),
+            pr["head"]["sha"].as_str().map(str::to_string),
+        ))
+    };
+    match read.await {
+        Ok((_, Some(head))) if head == asked => None,
+        Ok((pr, Some(head))) => Some(format!(
+            "head_sha {asked} is not the current head of {pr}, which is {head}; read the \
+             pull request again and merge the head you reviewed. Nothing was asked or run"
+        )),
+        Ok((pr, None)) => Some(format!(
+            "github gave no head for {pr}, so head_sha {asked} could not be checked. Nothing \
+             was asked or run"
+        )),
+        Err(e) => Some(format!(
+            "the pull request's current head could not be read to check head_sha {asked}: \
+             {e}. Nothing was asked or run"
+        )),
     }
 }
 
