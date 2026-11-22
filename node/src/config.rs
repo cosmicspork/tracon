@@ -1085,6 +1085,12 @@ pub struct Embed {
     /// chunks of unrelated documents score about 0.3 against each other. -1
     /// turns the floor off.
     pub min_similarity: f64,
+    /// The most tokens the endpoint embeds in one input: llama-server's
+    /// `--ctx-size` divided by its `--parallel` slots, and no more than its
+    /// `--ubatch-size`. Chunks are capped below it (`corpus::chunk::cap`), so
+    /// a document with no blank lines to split at is cut to fit rather than
+    /// sent whole and refused on every sweep.
+    pub context_tokens: usize,
 }
 
 impl Default for Embed {
@@ -1101,6 +1107,10 @@ impl Default for Embed {
             batch: 16,
             timeout_secs: 60,
             min_similarity: 0.45,
+            // Small enough for most servers as they come, and big enough
+            // that the 1600-character pieces a document is packed into fit
+            // under the cap it gives.
+            context_tokens: 2048,
         }
     }
 }
@@ -4720,6 +4730,7 @@ mod tests {
         assert_eq!(parsed.review.max_diff_lines, d.review.max_diff_lines);
         assert_eq!(parsed.embed.dim, d.embed.dim);
         assert_eq!(parsed.embed.batch, d.embed.batch);
+        assert_eq!(parsed.embed.context_tokens, d.embed.context_tokens);
         assert_eq!(
             parsed.boundary.gateway_container,
             d.boundary.gateway_container

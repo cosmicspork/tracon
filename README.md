@@ -2218,11 +2218,17 @@ dim = 1024                          # must match the model; changing it rebuilds
 batch = 16
 timeout_secs = 60
 min_similarity = 0.45               # cosine floor for a semantic match; model-dependent
+context_tokens = 2048               # tokens one input may hold: --ctx-size / --parallel, at most --ubatch-size
 ```
 
 For `[embed]`, a local `llama-server --embedding -m <model>.gguf` is enough; BGE-M3
 and Qwen3-Embedding-0.6B (which wants `pooling = last`) are the models it was built
 against. Without an endpoint, search is text-only and the Documents screen says so.
+`context_tokens` caps every chunk at 7/8 of that many bytes (a tokenizer makes no
+more tokens than bytes), so a paragraph too long for the cap is split at line ends,
+and a line too long for it is cut, rather than refused by the server on every sweep.
+Set it to what one llama-server slot holds: `--ctx-size` divided by `--parallel`,
+and no more than `--ubatch-size`.
 
 `[metrics] listen` serves `GET /metrics` in the OpenMetrics text format on a
 listener of its own: no credential, no input, nothing of the operator's API, and
