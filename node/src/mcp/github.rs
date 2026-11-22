@@ -319,7 +319,7 @@ pub fn definitions() -> Vec<Value> {
                     "number": { "type": "integer" },
                     "head_sha": { "type": "string", "description": "The reviewed pull request head SHA." },
                     "method": { "type": "string", "enum": ["merge", "squash", "rebase"] },
-                    "operation_id": { "type": "string", "description": "Stable idempotency id for this merge." },
+                    "operation_id": super::operation_id_schema(),
                 },
                 "required": ["repo", "number", "head_sha", "operation_id"],
             },
