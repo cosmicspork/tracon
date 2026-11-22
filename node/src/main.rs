@@ -125,7 +125,8 @@ enum Command {
         caches: bool,
         /// Include the images older nodes made that nothing runs any more:
         /// harness images, and layered (`-claude`, `-native`) and superseded
-        /// `-src` repository images.
+        /// `-src` repository images; and untag other releases'
+        /// `tracon-sandbox-base` tags on a base that stays.
         #[arg(long)]
         legacy: bool,
         /// Take images named as this node's that carry no owner label (made
