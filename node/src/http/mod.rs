@@ -531,7 +531,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/push/test", post(push::test))
         .route("/api/stream", get(stream::stream))
-        .fallback(spa::serve)
+        // An unmatched `/api` or `/mcp` path answers 404 JSON; everything
+        // else is the interface's (`spa::fallback`). The guard is layered
+        // outside this router, so it answers first either way.
+        .fallback(spa::fallback)
         .layer(middleware::from_fn_with_state(
             security_headers,
             security_headers_middleware,

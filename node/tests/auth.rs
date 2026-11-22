@@ -819,6 +819,119 @@ async fn the_shell_is_served_without_a_credential_but_the_api_is_not() {
     assert_eq!(s, StatusCode::UNAUTHORIZED);
 }
 
+/// One request, answered with its status, `Content-Type` and raw body, for
+/// telling the interface's HTML from the API's JSON.
+async fn fetch(
+    n: &Node,
+    method: &str,
+    uri: &str,
+    peer: &str,
+    host: &str,
+    headers: &[(&str, &str)],
+) -> (StatusCode, String, Vec<u8>) {
+    let mut b = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("host", host);
+    for (k, v) in headers {
+        b = b.header(*k, *v);
+    }
+    let mut req = b.body(Body::empty()).unwrap();
+    let addr: SocketAddr = peer.parse().unwrap();
+    req.extensions_mut().insert(ConnectInfo(addr));
+    let res = n.app.clone().oneshot(req).await.unwrap();
+    let status = res.status();
+    let media = res
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 22)
+        .await
+        .unwrap();
+    (status, media, bytes.to_vec())
+}
+
+/// A path under `/api` or `/mcp` that no route matches is a 404 in the API's
+/// error shape, not the interface's HTML; every other unmatched path is still
+/// the interface. Off the machine the guard answers first, the same for an
+/// unknown API path as for a known one, so a stranger learns nothing of which
+/// routes exist.
+#[tokio::test]
+async fn an_unknown_api_path_is_a_json_404_and_a_client_route_is_the_interface() {
+    state::isolate();
+    let n = node();
+    let here = "127.0.0.1:7420";
+
+    for (method, path) in [
+        ("GET", "/api/nope"),
+        ("POST", "/api/nope"),
+        ("GET", "/api"),
+        ("GET", "/api/nope/deeper"),
+        ("GET", "/mcp/nope"),
+    ] {
+        let (s, media, body) = fetch(&n, method, path, LOCAL, here, &[]).await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "{method} {path}");
+        assert!(
+            media.starts_with("application/json"),
+            "{method} {path}: {media}"
+        );
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            v,
+            json!({ "error": { "code": 404, "message": format!("no API route {method} {path}") } }),
+        );
+    }
+
+    // A route that exists answers as it always has.
+    let (s, media, body) = fetch(&n, "GET", "/api/health", LOCAL, here, &[]).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(media.starts_with("application/json"), "{media}");
+    assert!(serde_json::from_slice::<Value>(&body).is_ok());
+
+    // Client-side routes still load the interface.
+    for path in ["/docs/personal/some-slug", "/settings"] {
+        let (s, media, body) = fetch(&n, "GET", path, LOCAL, here, &[]).await;
+        assert_eq!(s, StatusCode::OK, "{path}");
+        assert!(media.starts_with("text/html"), "{path}: {media}");
+        assert!(
+            String::from_utf8_lossy(&body)
+                .to_ascii_lowercase()
+                .contains("<html"),
+            "{path}"
+        );
+    }
+
+    // From elsewhere without a credential: the guard's answer for an unknown
+    // API path is exactly its answer for a known one.
+    set_token(&n, "trc1.secret").await;
+    let remote = "tracon.example";
+    let (known, _, known_body) = fetch(&n, "GET", "/api/queue", REMOTE, remote, &[]).await;
+    assert_eq!(known, StatusCode::UNAUTHORIZED);
+    for (method, path) in [
+        ("GET", "/api/nope"),
+        ("POST", "/api/nope"),
+        ("GET", "/api"),
+        ("GET", "/mcp/nope"),
+        ("GET", "/mcp/external/work"),
+    ] {
+        let (s, _, body) = fetch(&n, method, path, REMOTE, remote, &[]).await;
+        assert_eq!(s, known, "{method} {path}");
+        assert_eq!(body, known_body, "{method} {path}");
+    }
+    // The shell is still public.
+    let (s, media, _) = fetch(&n, "GET", "/settings", REMOTE, remote, &[]).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(media.starts_with("text/html"), "{media}");
+
+    // With the credential, the unknown path is the 404 again.
+    let bearer = [("authorization", "Bearer trc1.secret")];
+    let (s, media, _) = fetch(&n, "GET", "/api/nope", REMOTE, remote, &bearer).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert!(media.starts_with("application/json"), "{media}");
+}
+
 /// The harness reaches its own router on its own listener. The operator guard
 /// is not on it, and neither are the operator's routes.
 #[tokio::test]
@@ -1122,10 +1235,8 @@ async fn a_request_relayed_by_a_same_host_proxy_is_not_local() {
             );
         }
         // What used to be read at the node only is an operator read now.
-        for path in ["/api/model-catalogue", "/api/mesh/enroll"] {
-            let (s, _, v) = call(&n, "GET", path, LOCAL, host, &headers, None).await;
-            assert_eq!(s, StatusCode::OK, "GET {path} via {host}: {v}");
-        }
+        let (s, _, v) = call(&n, "GET", "/api/mesh/enroll", LOCAL, host, &headers, None).await;
+        assert_eq!(s, StatusCode::OK, "GET /api/mesh/enroll via {host}: {v}");
         for (method, path, body) in gated {
             let (s, _, v) = call(&n, method, path, LOCAL, host, &headers, body.clone()).await;
             assert_eq!(s, StatusCode::FORBIDDEN, "{method} {path} via {host}: {v}");

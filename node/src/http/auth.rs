@@ -267,7 +267,10 @@ fn is_public(req: &Request) -> bool {
     if req.method() == axum::http::Method::GET && path == "/api/admin/access" {
         return true;
     }
-    req.method() == axum::http::Method::GET && !path.starts_with("/api/")
+    // The interface's shell and its deep links. Never an API-only path, even
+    // one no route matches: a stranger is answered there as for any API
+    // route, so which routes exist is not told without a credential.
+    req.method() == axum::http::Method::GET && !super::spa::api_only(path)
 }
 
 /// Headers a proxy adds to say whom it is forwarding for. A client on this
@@ -947,6 +950,25 @@ mod tests {
             axum::http::Method::GET,
             "/api/admin/mesh",
         )));
+    }
+
+    #[test]
+    fn no_api_only_path_is_public_even_one_no_route_matches() {
+        for path in [
+            "/api",
+            "/api/nope",
+            "/mcp",
+            "/mcp/nope",
+            "/mcp/external/work",
+        ] {
+            assert!(
+                !is_public(&request(axum::http::Method::GET, path)),
+                "{path}"
+            );
+        }
+        for path in ["/", "/settings", "/docs/personal/some-slug", "/apis"] {
+            assert!(is_public(&request(axum::http::Method::GET, path)), "{path}");
+        }
     }
 
     #[test]
