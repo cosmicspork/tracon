@@ -973,7 +973,7 @@ It is off until a channel names its model. Pick one under **Settings → Channel
 Review model**, beside Plan and Execute, or bind it from the command line:
 
 ```sh
-tracon channel bind work phases.review.model=anthropic/claude-opus-5
+tracon channel bind work phases.review.model=anthropic/claude-opus-5-5
 tracon channel bind work phases.review.budget_tokens=400000   # optional; else [session] budget_tokens
 ```
 
@@ -2083,7 +2083,7 @@ shape = "anthropic"                 # or "openai", "openai-codex"; the shape als
                                     # a sign-in per set of channels is held under `credential`, and
                                     # each further one under `<credential>@<channel>`
 # models = [                        # what the picker offers and tracon-agent is told; a built-in provider
-#   { id = "claude-opus-5", name = "Claude Opus 5", context = 200000, output = 64000, reasoning = true, attachment = true },
+#   { id = "claude-opus-5-5", name = "Claude Opus 5.5", context = 1000000, output = 128000, reasoning = true, attachment = true },
 #   # parallel_tools = false, reasoning_effort = "high": read by the native harness only (parallel is on by default)
 # ]                                 # left without models gets the current generation; `models = []` declares none
 # [providers.anthropic.price]
