@@ -691,9 +691,6 @@ the dispatch would refuse shows `nothing: allowing it runs nothing, because …`
 
 ## Previews and formats
 
-These follow the note `note-plugins-preview-contract`, the wire contract the node and
-both plugins were built against.
-
 ### `tracon/preview`
 
 When an approval card for one of your tools opens, the node asks what the call would do:

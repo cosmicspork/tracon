@@ -1210,8 +1210,8 @@ arguments are the card's prose; marked ones inside an array's items make it the 
 list of items. Prose in a plugin's format is shown as that plugin renders it to Markdown
 (`tracon/format/convert`, a pure function lent nothing), an edit is rendered again as
 you type, and the source is one click away. If the owner is removed or cannot answer,
-the card shows the source. The contract for previews, tokens and formats is the note
-`note-plugins-preview-contract`.
+the card shows the source. The contract for previews, tokens and formats is in
+[docs/reference/plugins.md](docs/reference/plugins.md#previews-and-formats).
 
 #### Plugin pages
 
