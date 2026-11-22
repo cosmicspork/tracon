@@ -855,7 +855,9 @@ expects of it.
 A tool marked `consequential = true` changes something the operator wants to approve
 call by call, such as moving a Jira issue. The node:
 
-- lists it with a required `operation_id` string added to its input schema, and strips
+- lists it with a required `operation_id` string added to its input schema (at least 8
+  ASCII letters, digits or dashes, `^[A-Za-z0-9-]{8,}$`; a call whose id breaks the
+  pattern is refused with an error naming `operation_id` and the pattern), and strips
   it before your plugin sees the arguments, in calls and previews alike, so you never
   need to accept it;
 - never runs it because something allows it by name: neither the signed bundle nor the

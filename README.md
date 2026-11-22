@@ -1139,7 +1139,8 @@ plugin's own name for the tool. A signed denial wins, then the entry's `deny`, t
 tool that neither names is asked. The manifest's `read`/`write` hint is shown on the card
 and never decides anything. A tool the manifest marks `consequential = true` is never
 run because something allows it by name, neither the bundle nor the entry's `allow`: the
-node adds a required `operation_id` to its schema (at least 8 letters, digits or dashes,
+node adds a required `operation_id` to its schema (at least 8 ASCII letters, digits or
+dashes and nothing else, `^[A-Za-z0-9-]{8,}$`, the same rule as `pr_merge`, `mr_merge` and `deploy`;
 kept by the node and never sent to the plugin), asks every call, and runs one
 unattended only under a `plugin_call` [grant](#granting-authority) naming that exact
 call, which its card shows. An allowed call is recorded under its `operation_id`, so
