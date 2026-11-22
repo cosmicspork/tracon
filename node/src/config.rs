@@ -302,16 +302,6 @@ fn retired_opencode_sections(text: &str) -> Vec<&'static str> {
         .collect()
 }
 
-/// Whether an older `node.toml` still has a `[consulta]` table. SQL left the
-/// node for the `sql-review` plugin, so the table is ignored, empty or not:
-/// it named the program the node used to run, and nothing reads it now.
-fn retired_consulta_section(text: &str) -> bool {
-    toml::from_str::<toml::Value>(text)
-        .ok()
-        .and_then(|value| value.get("consulta").map(toml::Value::is_table))
-        .unwrap_or(false)
-}
-
 /// What a `[qa]` table in an older `node.toml` still configures, if anything.
 /// The feature is gone and the table is ignored, but a configured target is
 /// worth one line in the log rather than silence.
@@ -3838,13 +3828,6 @@ impl Config {
                 path.display()
             );
         }
-        if retired_consulta_section(text) {
-            tracing::warn!(
-                "{}: [consulta] is ignored; SQL left the node for the sql-review plugin, so \
-                 install it with `tracon plugin add cosmicspork/sql-review` and the section can go",
-                path.display()
-            );
-        }
         if let Some(section) = retired_qa_section(text) {
             tracing::warn!(
                 "{}: [qa] is ignored; candidate QA deploys, browser runs and prototype builds were removed ({section})",
@@ -4290,18 +4273,6 @@ mod tests {
         assert_eq!(kept.review.max_diff_lines, 800);
         assert_eq!(kept.review.max_files, 60);
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_retired_consulta_section_still_loads_and_is_named() {
-        let text =
-            "[consulta]\ncommand = \"uv\"\nargs = [\"run\", \"consulta\"]\ntimeout_secs = 60\n";
-        Config::from_toml(text, Path::new("node.toml"))
-            .expect("an old [consulta] table must not stop the node");
-        assert!(retired_consulta_section(text));
-        assert!(retired_consulta_section("[consulta]\n"));
-        assert!(!retired_consulta_section("[review]\nmax_files = 1\n"));
-        assert!(!retired_consulta_section("consulta = 1\n"));
     }
 
     #[test]

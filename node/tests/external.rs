@@ -2302,11 +2302,23 @@ async fn an_external_caller_cannot_retain_into_a_session_scope() {
     assert!(out.to_string().contains("global"), "{out}");
 }
 
+/// The node's own Jira tools, before Jira was the jira-review plugin's.
+const OLD_JIRA_TOOLS: &[&str] = &[
+    "issue",
+    "issue_search",
+    "issue_transitions",
+    "issue_comment",
+    "issue_update",
+    "issue_create",
+    "issue_link",
+    "issue_transition",
+];
+
 /// Jira is the jira-review plugin's: a channel that binds a `jira` credential
-/// is offered none of the node's old Jira tools, and a call to one is refused
-/// by the name that replaced it, with nothing asked.
+/// is offered none of the node's old Jira tools, and a call to one of their
+/// names is a call to a tool the node does not have.
 #[tokio::test]
-async fn the_nodes_own_jira_tools_are_gone_and_name_the_plugins() {
+async fn the_nodes_old_jira_tool_names_are_unknown_tools() {
     state::isolate();
     let h = harness_with(enabled()).await;
     h.tools.broker.write().unwrap().put(
@@ -2324,22 +2336,19 @@ async fn the_nodes_own_jira_tools_are_gone_and_name_the_plugins() {
         },
     );
     let names = list(&h.operator, "work").await;
-    for (old, _) in tracon::mcp::RETIRED_JIRA {
+    for old in OLD_JIRA_TOOLS {
         assert!(!names.iter().any(|n| n == old), "{old} in {names:?}");
     }
-    let (_, v) = mcp(
-        &h.operator,
-        "work",
-        tool_call(
-            "issue_transition",
-            json!({ "key": "WRK-1", "transition_id": "21", "operation_id": "transition-21" }),
-        ),
-    )
-    .await;
-    let (err, out) = outcome(&v);
-    assert!(err, "{out}");
-    assert!(out.to_string().contains("jira-review__transition"), "{out}");
-    assert!(h.store.open_permission_views().unwrap().is_empty());
+    // Like any name the node has no tool for, it is not refused by name: no
+    // rule names it, so it is asked, and fails once allowed.
+    for name in ["issue_search", "no_such_tool"] {
+        let id = ask(&h, name, json!({ "jql": "project = WRK" })).await;
+        let (status, _) = answer(&h, &id, json!({ "option_id": "allow_once" })).await;
+        assert_eq!(status, StatusCode::OK);
+        let out = settled(&h, &id).await;
+        assert_eq!(out["state"], "failed", "{out}");
+        assert_eq!(out["reason"], format!("no tool named {name}"), "{out}");
+    }
 }
 
 /// A Jira approval from before the plugin still opens: its wiki markup is

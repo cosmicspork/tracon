@@ -112,9 +112,10 @@ pub enum Caller {
         /// hint, like the lane.
         wait_budget: Option<u64>,
     },
-    /// A route of the operator API calling a plugin's tool on the
-    /// operator's behalf ([`Tools::call_for_operator`]). It never raises an
-    /// approval: its calls are allowed by policy or refused.
+    /// The operator API on the operator's behalf: a plugin's page, whose
+    /// requests reach the plugin as `tracon/ui` ([`Tools::ui_for_operator`]).
+    /// It never raises an approval: its calls are allowed by policy or
+    /// refused.
     Operator {
         /// The route, which its calls are logged under in the channel's
         /// external log.
@@ -1069,9 +1070,9 @@ impl Tools {
         Ok(credentials)
     }
 
-    /// Call a plugin's tool for the operator API ([`Caller::Operator`]), or
-    /// for another plugin ([`Caller::Plugin`]): decided by the signed policy
-    /// and the operator's `[[plugin]]` entry as an agent's call is, but never
+    /// Call a plugin's tool for another plugin ([`Caller::Plugin`]), through
+    /// the socket the node serves the caller: decided by the signed policy
+    /// and the callee's `[[plugin]]` entry as an agent's call is, but never
     /// held. A call either would ask about is refused, naming how to allow
     /// it. Every call the channel can take is logged to its external log
     /// under the caller's lane, refusals included.
@@ -2159,9 +2160,6 @@ impl Tools {
             *gate = audit::Gate::node("approval-status");
             return approvals::status(access, ctx, args).await;
         }
-        if let Some(refusal) = retired(name) {
-            return Err(refusal);
-        }
         if self.is_consequential(name) && self.consequential_scope(name, args).is_none() {
             return Err(
                 "consequential calls require a valid operation_id and canonical arguments".into(),
@@ -2616,9 +2614,7 @@ impl Tools {
                         }
                     }
                 }
-                (None, None) => {
-                    Err(retired(other).unwrap_or_else(|| format!("no tool named {other}")))
-                }
+                (None, None) => Err(format!("no tool named {other}")),
             },
         };
         let result = match (name, result) {
@@ -4617,30 +4613,6 @@ pub fn approval_context(
         memory::AMEND => Ok(Some(memory::approval_context(store, channel, args)?)),
         _ => Ok(None),
     }
-}
-
-/// The node's own Jira tools, before Jira became the jira-review plugin's,
-/// and what each is called now.
-pub const RETIRED_JIRA: &[(&str, &str)] = &[
-    ("issue", "jira-review__issue"),
-    ("issue_search", "jira-review__search"),
-    ("issue_transitions", "jira-review__transitions"),
-    ("issue_comment", "jira-review__comment"),
-    ("issue_update", "jira-review__update"),
-    ("issue_create", "jira-review__create"),
-    ("issue_link", "jira-review__link"),
-    ("issue_transition", "jira-review__transition"),
-];
-
-/// Why a call to a tool the node no longer has is refused, naming the one
-/// that replaced it; `None` for any other name.
-fn retired(name: &str) -> Option<String> {
-    let (_, now) = RETIRED_JIRA.iter().find(|(old, _)| *old == name)?;
-    Some(format!(
-        "{name} is no longer the node's: Jira is the jira-review plugin's, and this is {now}, \
-         offered once the plugin is installed (tracon plugin add cosmicspork/jira-review) on a \
-         channel that binds a jira credential. Nothing was asked or run"
-    ))
 }
 
 /// The longest excerpt of a plugin call's statement or text its title

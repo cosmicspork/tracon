@@ -1130,8 +1130,7 @@ A plugin's tools are offered to execute sessions and external harnesses as
 `<plugin>__<tool>`, beside the node's own, on a channel that binds a credential the
 manifest declares (by its `name`, or a binding its `pattern` matches), or on every
 channel when it declares none. A plan session is offered only jira-review's reads
-(`search`, `issue`, `transitions`), as it was the node's own Jira reads, and a review
-session none. A call is
+(`search`, `issue`, `transitions`), and a review session none. A call is
 decided as an `[[mcp_server]]` tool's is: the signed policy first, under the `tool` kind
 and the namespaced name, then the lists in the plugin's `[[plugin]]` entry, by the
 plugin's own name for the tool. A signed denial wins, then the entry's `deny`, then its
@@ -1299,32 +1298,20 @@ is asked. The read-only account is the boundary: `sql-review` classifies a
 statement as a read or a write, but that is not a security control, so an account that
 can write is never bound as `sql-read`.
 
-This replaces the `consulta` sidecar. A `[consulta]` table left in `node.toml` still
-loads and is ignored, with a warning naming the plugin. On its first start the node
-renames credentials `consulta` and `consulta-<profile>` to `sql-read` and
-`sql-read-<profile>`, bindings and all, and logs each one; one whose new name is already
-taken is left as it is, with a warning, so you can remove whichever is stale.
-
 #### Jira
 
 The node talks to no Jira of its own either: the tracker tools are the
 [`jira-review`](https://github.com/cosmicspork/jira-review) plugin's. Install it with
 `tracon plugin add cosmicspork/jira-review`. It is lent the channel's `jira` credential
-(or `jira-<profile>`, for a call's `profile`), the same one the node's own Jira tools
-used, with the same fields: `JIRA_URL` with `JIRA_EMAIL` and `JIRA_TOKEN` for Jira
-Cloud, or `JIRA_PAT` for Data Center. A channel that bound `jira` before needs nothing
-more. The shipped working agreements (from bundle v26) run its reads unattended
+(or `jira-<profile>`, for a call's `profile`): `JIRA_URL` with `JIRA_EMAIL` and
+`JIRA_TOKEN` for Jira Cloud, or `JIRA_PAT` for Data Center. The shipped working agreements (from bundle v26) run its reads unattended
 (`jira-review__search`, `jira-review__issue`, `jira-review__transitions`); its writes
 (`update`, `comment`, `create`, `link`) are asked, each card showing the plugin's preview
 of the change, and an approved write fails as stale if the issue moved since the card
 was read. `jira-review__transition` is consequential: asked every call unless a grant
 names it. A description or comment written in Jira wiki markup is shown on the card as
-jira-review renders it, since it owns the `jira_wiki` format.
-
-This replaces the node's own `issue`, `issue_search`, `issue_transitions`,
-`issue_comment`, `issue_update`, `issue_create`, `issue_link` and `issue_transition`. A
-call to one of those names is refused with the name that replaced it, and nothing is
-asked. Past approvals of them still open, their wiki markup shown as source.
+jira-review renders it, since it owns the `jira_wiki` format. Past approvals of the
+Jira tools the node had before the plugin still open, their wiki markup shown as source.
 
 ### Asking, pinging, and complaining
 
@@ -1456,24 +1443,6 @@ independent of whether a push service accepted its notification.
 A defect in tracon itself goes to **`report_issue`** instead, and
 **`issue_report_status`** says whether the operator published it, as which
 GitHub issue, or discarded it.
-
-A local app that is not a harness can read the tracker the same way:
-`GET /api/jira/search?channel=work&jql=…&cursor=…` on the loopback operator API
-returns one page of matching issues (with `next_cursor`), and never the token. It
-calls the jira-review plugin's `search` as the operator, which lends it the
-channel's Jira credential: the call is decided by policy and logged to the
-channel's external log under the lane `/api/jira/search`. It answers 503 until
-`tracon plugin add cosmicspork/jira-review` installs the plugin, 422 on a channel
-that binds no `jira` (or `jira-*`) credential, and 403 unless the call is allowed,
-since the operator API never holds a call for approval. The shipped policy bundle
-allows it from version 26; a node still on an older signed bundle needs, until you
-sign and install the new one:
-
-```toml
-[[plugin]]
-name = "jira-review"
-allow = ["search"]
-```
 
 What it does not get is the boundary. That harness runs as you, on your
 machine: the promise here is that it never needs the credential and that every
