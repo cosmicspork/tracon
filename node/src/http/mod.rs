@@ -365,7 +365,6 @@ pub fn router(state: AppState) -> Router {
             get(api::download_workspace),
         )
         .route("/api/forge/repos", get(api::forge_repos))
-        .route("/api/jira/search", get(api::jira_search))
         .route(
             "/api/sessions",
             get(api::list_sessions).post(api::create_session),
@@ -671,19 +670,12 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
     // derived from it. `init_node` loads the same seed again below.
     let (store_key_identity, _) = crate::mesh::identity::load_or_generate()?;
     let store_key = store_key_identity.credential_store_key();
-    let mut broker = crate::broker::Broker::load(&store_key).unwrap_or_else(|e| {
+    let broker = crate::broker::Broker::load(&store_key).unwrap_or_else(|e| {
         // A broken store must not silently broker nothing: say so loudly and
         // carry on without credentials.
         tracing::error!(error = %e, "credential store could not be read; brokering nothing");
         Default::default()
     });
-    // Credentials under a name the node retired (consulta's, now the
-    // sql-review plugin's) are renamed once, here, where the node owns the
-    // store. Written back only when one moved, so a store read empty after
-    // an error above is never written over the real one.
-    if let Err(error) = broker.migrate_retired_at(&crate::broker::Broker::path(), &store_key) {
-        tracing::error!(%error, "renamed credentials could not be written back; renamed for this run only");
-    }
     let broker = broker.shared();
     {
         let b = broker.read().unwrap();

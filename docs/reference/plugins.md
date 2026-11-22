@@ -623,12 +623,12 @@ When the wire format changes, both plugins and both fixtures change together.
 
 The kind tells you who to attribute a change to; the signature is what lets you trust
 it. An `agent` call came from a session (`session` set) or from the operator's own
-harness through the external door (`harness: "external"`). An `operator` call came from
-a route of the operator API, today `GET /api/jira/search`, the workboard's search,
-which is decided by policy and the `[[plugin]]` entry like any call but never held for
-approval: one that would be asked is refused instead. A request from a plugin's own page
-is an `operator` call too (tool `tracon/ui`). A `plugin` call came from another plugin's
-`tools/call`, decided the same unheld way. A plugin that ignores the context
+harness through the external door (`harness: "external"`). An `operator` call is a
+request from the plugin's own page (tool `tracon/ui`), which the operator opened: it is
+decided by policy and the `[[plugin]]` entry as a call to `<plugin>__ui`, never held for
+approval, and runs unless one of them denies `ui`. A `plugin` call came from another
+plugin's `tools/call`, decided by policy and the callee's entry but never held: one that
+would be asked is refused instead. A plugin that ignores the context
 still runs; a plugin that records authors, or that gates writes on an approval, must
 verify it.
 

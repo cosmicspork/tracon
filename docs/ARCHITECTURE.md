@@ -87,7 +87,7 @@ no self-daemonizing, clean SIGTERM, idempotent restart. Supervision is external 
 manager, which `tracon service install` or the desktop app sets up. The node
 links no database driver: SQL is the `sql-review` plugin's, a separate static binary
 built on Oracle's pure-Rust driver, so static musl never has to carry Oracle's glibc
-client (the reason the node once ran consulta as a Python sidecar).
+client.
 
 ### Configuration
 
@@ -950,13 +950,10 @@ is the `sql-review` plugin's (`sql-review__query`, `sql-review__describe`), lent
 channel's `sql-read` or `sql-read-<profile>` credential per call. The database's
 read-only account is the boundary. `sql-review` parses a statement only to classify it
 as a read or a write, which is not a security control, so a misclassified write still
-runs on the read-only account and fails there. Credentials named for consulta (`consulta`,
-`consulta-<profile>`) are renamed once as `serve` starts (`Broker::rename_retired`),
-never over a credential already holding the new name. Jira is the `jira-review`
-plugin's the same way: the node has no Jira client, and the channel's `jira` credential
-is what the plugin's manifest declares, so it binds with no rename. The node's old Jira
-tool names (`mcp::RETIRED_JIRA`) are refused with the plugin's name for each, and their
-past approvals are presented as source (`schema::PRESENTATIONS`).
+runs on the read-only account and fails there. Jira is the `jira-review` plugin's the
+same way: the node has no Jira client, and the channel's `jira` credential is what the
+plugin's manifest declares. Past approvals of the Jira tools the node had before the
+plugin are presented as source (`schema::PRESENTATIONS`).
 
 **Consequential verbs are scoped grants, not open tools.** Merge, publish, deploy, and
 a plugin tool its manifest marks `consequential` (jira-review's `transition`) exist as
@@ -1081,12 +1078,12 @@ that argument names, refusing the call before dispatch when the channel does not
 it. The dispatch and the approval card's "Lent on allow" read one function
 (`plugin::lending`), from the call as it would run, an operator's edit included. A call leases its instance, so the idle stop waits for it.
 The context names its caller: kind `agent` for a session (with its id and harness) or
-an external harness (harness `external`), and kind `operator` for a route of the
-operator API calling on the operator's behalf (`Tools::call_for_operator`, today only
-`GET /api/jira/search`). An operator call is decided the same way but never held: one
-the decision would ask about is refused, naming the `[[plugin]]` allow that would let
-it run. Having no session, its `tool_call` and `tool_decided` rows go to the channel's
-external log under the route's path as the lane.
+an external harness (harness `external`), and kind `operator` for a request from a
+plugin's own page, sent to the plugin as `tracon/ui` (`Tools::ui_for_operator`). An
+operator call is decided as a call to `<plugin>__ui` but never held: it runs unless a
+signed rule or the `[[plugin]]` entry denies `ui`. Having no session, its `tool_call`
+and `tool_decided` rows (for a change or a refusal; reads are not logged) go to the
+channel's external log under `/plugins/<name>/ui` as the lane.
 
 **Previews bind an approval to what the operator saw.** A plugin tool's card asks the
 plugin for `tracon/preview` when it opens (`Tools::approval_preview`), as an asked call
@@ -1183,7 +1180,7 @@ for the plugin to act on. A card raised `on_behalf` of the agent call being serv
 that session's once the node has verified the context is its own signature for this
 instance and channel, so the session's wait covers it: the plugin can attribute only a
 call it was actually sent. `approval/status` waits as an agent's status call does, on the
-plugin's own cards only. `tools/call` runs through the operator API's unheld path
+plugin's own cards only. `tools/call` runs through the node's unheld path
 (`Tools::call_for_operator`) with a `Caller::Plugin`, so the signed policy and the
 callee's entry decide it, the channel's external log records it, and an ask is a refusal.
 

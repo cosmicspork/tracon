@@ -2443,19 +2443,6 @@ path = "/srv/notes"
         }
     }
 
-    /// `[consulta]` is retired: a file that still has it loads, takes an
-    /// edit of something else, and keeps the table as the operator wrote it.
-    #[test]
-    fn a_retired_consulta_table_does_not_block_an_edit() {
-        let text =
-            format!("{COMMENTED}\n[consulta]\ncommand = \"uv\"\nargs = [\"run\", \"consulta\"]\n");
-        let (_dir, path) = file(&text);
-        edit_at(&path, &store(), &[set("node_name", "other")], None, "test").unwrap();
-        let after = read(&path);
-        assert!(after.contains("[consulta]\ncommand = \"uv\""), "{after}");
-        assert!(after.contains("node_name = \"other\""), "{after}");
-    }
-
     /// A key that already broke a rule is the start's warning, not a reason
     /// to refuse an edit of something else.
     #[test]

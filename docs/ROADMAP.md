@@ -66,10 +66,11 @@ fixed shape. The node installs and updates one only on the operator's approval, 
 by digest; supervises one process per plugin and channel; brokers its tools under policy
 with a signed caller context; lends it credentials; and draws every approval card it
 raises. It is not an in-process runtime: a plugin is trusted code the operator chose,
-run on the host as consulta's sidecar is now. `gh` and `glab` stay built in, because
+run on the host. `gh` and `glab` stay built in, because
 review and publication rest on them.
 
-- [ ] The contract, install, update and supervision, proven by moving consulta out.
+- [x] The contract, install, update and supervision, proven by moving SQL out to the
+      `sql-review` plugin.
 - [ ] Jira extracted to its own repository as a standalone CLI that also ships as a
       plugin: writing tools with a preview and a staleness check, formats converted to and
       from Markdown by the plugin that owns them, and one plugin calling another through
