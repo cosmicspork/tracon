@@ -1032,7 +1032,9 @@ Marking it ready, and anything on another change, is still yours to allow.
 Submitting a new revision of a review whose change is open drafts it at once,
 and approving a revision marks it ready again. A change an authority grant
 publishes without you opens as a draft, and `pr_merge` and `mr_merge` refuse a
-draft until it is marked ready.
+draft until it is marked ready. A `pr_merge` whose `head_sha` is not the pull
+request's current head is refused before you are asked, and its card names the
+head it merges in full.
 
 ### Other MCP servers
 

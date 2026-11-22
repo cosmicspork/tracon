@@ -1931,6 +1931,39 @@ async fn an_approved_merge_checks_the_head_again_when_it_runs() {
     assert_eq!(out["result"]["merged"], true, "{out}");
 }
 
+/// A merge is asked only at the pull request's current head, and its card
+/// names that head in full: a head_sha sharing only a prefix with it is
+/// refused, naming both, before any card is raised (#1049).
+#[tokio::test]
+async fn a_merge_is_asked_only_at_the_current_head_and_its_card_names_it_in_full() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let real = "bb928d2c41a0e5f6a7b8c9d0e1f2a3b4c5d6e7f8";
+    let wrong = "bb928d2c41a0ffffffffffffffffffffffffffff";
+    with_github(&h, real).await;
+    let at = |sha: &str, op: &str| json!({ "repo": "o/n", "number": 1, "head_sha": sha, "operation_id": op });
+
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call("pr_merge", at(wrong, "op-head-1")),
+    )
+    .await;
+    let (err, out) = outcome(&v);
+    assert!(err, "{out}");
+    let said = out.to_string();
+    assert!(said.contains(wrong) && said.contains(real), "{said}");
+    assert!(h.store.open_permission_views().unwrap().is_empty());
+
+    let id = ask(&h, "pr_merge", at(real, "op-head-2")).await;
+    let queue = h.store.open_permission_views().unwrap();
+    let card = queue.iter().find(|p| p.id == id).expect("a card for it");
+    assert_eq!(
+        card.title,
+        format!("pr_merge o/n#1: squash at {real}, its current head when asked")
+    );
+}
+
 /// GitHub refuses a merge whose base moved while it ran, as it does when
 /// several approved merges into one repository land together. Nothing was
 /// merged, so the approved merge is asked again at the same head and lands.

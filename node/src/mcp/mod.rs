@@ -2227,6 +2227,15 @@ impl Tools {
                     if let Some(refusal) = self.missing_required(ctx, name, args) {
                         return Err(refusal);
                     }
+                    // A merge at a head the pull request no longer has could
+                    // only fail once allowed, so it is never asked.
+                    if name == github::PR_MERGE {
+                        if let Some(refusal) =
+                            github::merge_head_refusal(&self.broker, &self.http, ctx, args).await
+                        {
+                            return Err(refusal);
+                        }
+                    }
                     let pinned = match name {
                         docs::DOC_WRITE | docs::DOC_DELETE => self
                             .session
@@ -3244,6 +3253,13 @@ impl Tools {
         }
         if let Some(pt) = self.plugin_tool(name) {
             return plugin_title(&pt.plugin, &pt.tool, args);
+        }
+        // Asked only once `github::merge_head_refusal` read this head as the
+        // pull request's own, which the card says.
+        if name == github::PR_MERGE {
+            let mut title = format!("{}, its current head when asked", summarize(name, args));
+            bound(&mut title);
+            return title;
         }
         summarize(name, args)
     }
@@ -4812,12 +4828,13 @@ fn prose_title(name: &str, args: &Value) -> Option<String> {
             }
         }
         review::SUBMIT_REPORT => with(name.to_string(), text("title")),
+        // The whole sha: two heads that share a prefix read alike (#1049).
         github::PR_MERGE => format!(
             "{name} {}#{}: {} at {}",
             id("repo"),
             id("number"),
             text("method").unwrap_or("squash"),
-            short("head_sha")
+            id("head_sha")
         ),
         gitlab::MR_MERGE => format!(
             "{name} {}!{}: {} at {}",
@@ -5098,10 +5115,10 @@ mod tests {
     /// the push, rather than as its arguments.
     #[test]
     fn a_gated_call_is_titled_by_what_it_does() {
-        let merge = json!({ "repo": "o/n", "number": 412, "head_sha": "3e1f0a2c9b8d", "method": "squash", "operation_id": "op" });
+        let merge = json!({ "repo": "o/n", "number": 412, "head_sha": "3e1f0a2c9b8d4e5f60718293a4b5c6d7e8f90a1b", "method": "squash", "operation_id": "op" });
         assert_eq!(
             summarize(github::PR_MERGE, &merge),
-            "pr_merge o/n#412: squash at 3e1f0a2"
+            "pr_merge o/n#412: squash at 3e1f0a2c9b8d4e5f60718293a4b5c6d7e8f90a1b"
         );
         let mr = json!({ "project": "g/p", "iid": 9, "head_sha": "abcdef12", "squash": false, "operation_id": "op" });
         assert_eq!(
