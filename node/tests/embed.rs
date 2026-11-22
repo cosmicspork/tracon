@@ -466,7 +466,7 @@ async fn a_memory_is_indexed_as_one_chunk_on_its_own_channel() {
     assert!(!store.vec_search(Some("work"), &q, 5).unwrap().is_empty());
 }
 
-/// The claim the ROADMAP set as the bar for doing this at all: a question FTS
+/// The claim the roadmap set as the bar for doing this at all: a question FTS
 /// cannot answer, because it shares no words with the document that answers it.
 #[tokio::test]
 async fn a_query_fts_cannot_answer_is_answered_by_the_vector_leg() {

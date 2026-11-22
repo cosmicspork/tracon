@@ -577,7 +577,7 @@ pub fn definitions(kinds: &[DocKind]) -> Vec<Value> {
         }),
         json!({
             "name": DOC_READ,
-            "description": "Read a document by slug (for example `guide-workspace`).",
+            "description": "Read a document by its slug (`<kind>-<name>`, as doc_search returns it).",
             "inputSchema": {
                 "type": "object",
                 "properties": { "slug": { "type": "string" } },

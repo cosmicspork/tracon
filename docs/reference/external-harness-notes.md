@@ -1,7 +1,7 @@
 # The external harness, and what it costs
 
-Written during the work, alongside the `[external]` mode. What the roadmap does
-not have room for: the guarantee this mode gives up, why it was worth giving
+Written during the work, alongside the `[external]` mode. What the architecture
+does not have room for: the guarantee this mode gives up, why it was worth giving
 up, and the shapes that were not obvious until they were built.
 
 ## The gap it closes

@@ -2300,8 +2300,8 @@ mod tests {
         // And `submit` alone is not the tool's name.
         assert!(!text.contains("`submit`"), "{text}");
 
-        // Closing is not what submitting does, and the roadmap moves work
-        // further away from closing merely because a change was published.
+        // Closing is not what submitting does, and #1085 moves work further
+        // away from closing merely because a change was published.
         assert!(text.contains("Submitting is not closing"), "{text}");
         // Nor is closing the session's to do: the operator closes the item
         // once its change is merged, so the tool is not named at all.

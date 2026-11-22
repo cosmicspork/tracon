@@ -43,9 +43,10 @@ jobs:
             ci
             perf
 
-  # A roadmap edit used to wait six minutes on four builds that could not
+  # A docs edit used to wait six minutes on four builds that could not
   # notice it. The list of what counts as prose is deliberately short: the
-  # tests read README.md, docs/reference and spec/vectors, so those are code.
+  # tests read README.md, docs/guides, docs/reference and spec/vectors, so
+  # those are code.
   #
   # The jobs below are skipped by a job-level `if`, not a `paths` filter on the
   # workflow: a skipped job reports to the branch rule as passed, and a workflow

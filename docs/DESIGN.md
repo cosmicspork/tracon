@@ -1,7 +1,7 @@
 # Design
 
-Interface design record. Companion to `ARCHITECTURE.md` (the rules) and `ROADMAP.md`
-(what is to be built). The screens are the record rather than a separate wireframe
+Interface design record. Companion to `ARCHITECTURE.md` (the rules); what is to be
+built is tracked as GitHub issues. The screens are the record rather than a separate wireframe
 file: `spa/src/app.css` holds the tokens and `spa/src/routes/` the screens. The
 visual direction is **Ledger × Tonal**: Instrument Sans with Fragment Mono for every
 value, tonal surfaces with no outlines, state carried by a 3px bar and a wash, text

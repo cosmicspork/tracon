@@ -2,8 +2,8 @@
 
 The rules. This document holds the commitments, invariants, and boundaries that
 constrain everything else, with rationale where the reasoning is not obvious. It
-describes current constraints rather than implementation history. Planned changes
-to these commitments are tracked in [ROADMAP.md](ROADMAP.md).
+describes current constraints rather than implementation history. Planned work is
+tracked as [GitHub issues](https://github.com/cosmicspork/tracon/issues).
 
 `tracon`: named for terminal radar approach control. The facility sequences aircraft
 and issues clearances; it never flies one. The node supervises and gates; it never
@@ -41,6 +41,44 @@ boundary like any other harness.
 - **The corpus outlives the tooling.** Memory, docs, work items, and events use
   boring schemas with plain-text export. When the orchestration layer becomes
   obsolete, the accumulated context must survive it.
+
+## Direction
+
+- A personal agent workspace: one node is a complete installation, and the mesh is
+  optional. Independent installations, not multi-user tenancy.
+- Enforce granted authority, not mandatory work items, phases, models or review.
+- Keep untrusted execution isolated and credentials outside agent-owned state.
+- Prefer useful environments, clear evidence and human intervention over more machinery.
+- Record scoped decisions and supersede them explicitly; keep harnesses replaceable.
+- Own the data: portable, independently readable exports; no node required to inspect
+  them.
+- Optimize useful work per interruption, not agent count.
+- Keep the core accountable and personal workflows adaptable. Customizations reuse
+  isolation, scoped authority, manifests and evidence; installing code grants no
+  permission.
+- The operator's scarce work is understanding the problem and judging the result;
+  tracon's job is to take the implementation mechanics off their plate reliably.
+  Follow-through stays an optional extension of ordinary work, never process.
+- Build on the existing ledger, documents, workspace snapshots, evidence, scoped grants
+  and launch manifests. Do not replace the store, and keep any agent loop out of the
+  node: `tracon-agent` is a separate harness binary run inside the boundary.
+
+**How work is chosen.** Planned work is a GitHub issue, written ready to build: the
+defect or change, its acceptance criteria, and no open design question. A design
+question is settled before the issue is filed. An issue cites the real task, session
+or run that showed it was needed; nothing is planned from a blog post, an idea or a
+demo that was never missed on real work. Defects in the supported configuration come
+first.
+
+### The supported configuration
+
+One configuration is what daily use runs on, and what a defect has to be in to come
+first: the desktop app, on Linux with rootless Podman or on macOS with Apple
+Containerization, Claude Code as the managed harness, a single node. Everything else
+(the native harness, the Kubernetes runtime, the DigitalOcean sandbox provider, the hub
+and mesh, the installed phone app, moving work between nodes) is built and tested but
+*experimental* until that configuration is boring. The homelab node keeps running the
+hub and serving the phone.
 
 ## Topology
 
@@ -477,8 +515,8 @@ compatibility at session start, and let an unknown harness id refuse to start ra
 than fall back. A harness declares its own state layout and config files; nothing
 outside the trait may spell a harness's name.
 
-Which harness daily work runs on is a roadmap decision, not an architectural one:
-Claude Code today. The gate below is the same for both. That last rule is what made
+Which harness daily work runs on is a product decision (see The supported
+configuration), not an architectural one: Claude Code today. The gate below is the same for both. That last rule is what made
 each retirement cheap. tracon's first harness was omp, driven over the Agent Client
 Protocol; removing it at the 2026-09-13 cutover to OpenCode took the adapter, its image,
 its provider wiring and its catalogue workarounds, and nothing else. OpenCode, driven
@@ -2484,6 +2522,78 @@ Three surfaces, three answers, and the differences are the point.
   the boundary runs as the operator and could; see
   `reference/external-harness-notes.md`.
 
+## Out of scope
+
+- Multi-user tenancy or a team product.
+- Federated work marketplaces, reputation scores or agent organization charts as
+  product goals.
+- Plugins loaded into the node's process. A plugin is an executable the node
+  supervises and brokers; it never runs in the node or draws its approval surface.
+- A model or agent loop inside the node. `tracon-agent` runs its loop in the boundary,
+  as `claude` does.
+- A general-purpose multi-harness framework: a few concrete adapters behind one trait,
+  not a plugin system for harnesses.
+- Required tracon configuration files installed into project repositories, or any other
+  requirement on a repository made for tracon's sake: an endpoint or header, a seeder, a
+  tool in its image.
+- Publishing shown work to the forge.
+- A declarative browser scenario language run by the node; the agent drives the browser.
+- Intercepting TLS to attach credentials; a credential is lent only where the client
+  points at the gateway.
+- A full IDE, general file editor, or per-project editor configuration.
+- Business-domain features such as invoicing and billing.
+- Arbitrary host execution through the node API. Service and CLI installation remain an
+  explicit desktop or CLI operation; file imports use a picker or upload flow. A node
+  restart is the one lifecycle action the API takes from an administrator, fixed in
+  what it does (`POST /api/admin/restart`: drain, then the supervisor's own restart, or
+  exit for the kubelet), so `node.toml` changes apply without `kubectl exec` or a shell
+  on the host.
+
+## Current limitations
+
+- Sandboxes run on the stock base on every runtime, so a repository's toolchain is its
+  `[[repo]]` `build` steps (or a Dockerfile `FROM ${TRACON_SANDBOX_BASE}`) on
+  `tracon-sandbox-base`, and a repository with none runs on the base itself. Required
+  checks and a session of either harness run in that image, after the preparation, and
+  a session reaches the registries its repository opens to sessions (`session_egress`).
+  The image is built by Podman, by `container` on Apple, or on Kubernetes by a BuildKit
+  daemon the deployment runs (`[runtime.kubernetes.builder]`) and pushed to a registry;
+  a Kubernetes node without one builds nothing, and its repositories run on the base. A
+  superseded image is removed only when nothing still runs from it under Podman; a
+  registry's copy is deleted by digest, and frees space only when the registry's garbage
+  collection runs. No other node reuses a pushed image: each node builds and pins its
+  own ([#1094](https://github.com/cosmicspork/tracon/issues/1094)).
+- A run's dependency cache and each check's tree are copies. Where the runtime's storage
+  has no reflinks they are full copies, made once per run and once per check. Checks
+  start from the warm dependency cache made when the node builds a repository's image,
+  but keep no build output: every run of a compiled project's checks builds from nothing
+  ([#1083](https://github.com/cosmicspork/tracon/issues/1083)). Sessions keep theirs, but
+  only Cargo's is moved out of the tree; a bundler's cache inside `node_modules` lives
+  and goes with the workspace.
+- A per-client egress grant (a session's, a preparation's) filters by host, not by
+  method: a registry that accepts uploads accepts them from the client that was granted
+  it.
+- macOS releases are unsigned (the publisher holds no Apple Developer ID) and are
+  authenticated by GitHub build provenance instead, so Gatekeeper asks once on first
+  open (right-click Open, or System Settings > Privacy & Security > Open Anyway).
+- The Kubernetes backend **drops** denied egress rather than refusing it. A
+  NetworkPolicy has no reject verb and no portable CNI option turns a drop into an ICMP
+  or RST refusal, so what Podman gets from having no route out has to come from the
+  cluster. Until one that can express it is configured, a sandbox pod has no protection
+  against a tool that dials around its tunnels with no timeout of its own.
+  `check-boundary --deep` measures the same bound on both backends. It fails Podman if
+  it drops, and on Kubernetes records the drop as the runtime's limitation rather than
+  failing.
+- A skill package is text. `SKILL.md`, scripts and text assets are staged into
+  node-owned storage; a file that is not valid UTF-8 is refused at import, because the
+  node carries the contents rather than a reference to them.
+- Nothing reaches into the boundary. A provider that delivers webhooks through an
+  outbound forwarder (`stripe listen`) works with egress and a credential, and an OAuth
+  callback lands wherever the browser that followed it runs; a provider that must reach
+  a public URL has no route in.
+- What an agent shows is its own account, not verification: the node vouches for the
+  revision and the required checks, not for a screenshot.
+
 ## Data lifecycle
 
 Encrypted snapshots of the hub's volume to object storage, with a restore path that
@@ -2494,7 +2604,8 @@ logs or evidence. `[gc]` runs `tracon gc --apply` on a timer (off unless `every_
 is set), first archiving this node's own ended sessions untouched for
 `archive_ended_after_secs`, save one whose review is open or whose publication is not
 settled, as approving or publishing reads its workspace again. Settings → Data shows what the node holds per kind (rows counted from the
-store, directories measured on disk), where each kind that has a real delete is
+store, directories measured on disk; plugins by their builds, each one's data by
+channel, and its logs), where each kind that has a real delete is
 deleted, and what that delete does beyond the node; the Nodes screen carries the
 serving node's total. Documents, memories and work items delete one at a time and
 replicate the delete as a tombstone; workspaces and harness state go through Runtime
@@ -2517,8 +2628,6 @@ new session on the same workspace.
 
 1. **Tombstone semantics.** Retention is keep-and-delete-by-hand (see Data lifecycle);
    how a delete propagates across replicas is undecided and waits on the mesh work.
-2. **Stacked MR handling.** Whether the node owns restacking or feature flags on
-   trunk make stacks unnecessary. The trunk setup favors flags.
 
 ## What rots and what does not
 
