@@ -3348,13 +3348,32 @@ fn hardcoded_default_models(provider: &str) -> Vec<ModelDecl> {
     };
     match provider {
         "anthropic" => vec![
-            model("claude-opus-5", "Claude Opus 5", 200_000, 64_000, true),
-            model("claude-sonnet-5", "Claude Sonnet 5", 200_000, 64_000, true),
             model(
-                "claude-haiku-4-5",
-                "Claude Haiku 4.5",
-                200_000,
-                64_000,
+                "claude-fable-5-2",
+                "Claude Fable 5.2",
+                1_000_000,
+                128_000,
+                true,
+            ),
+            model(
+                "claude-opus-5-5",
+                "Claude Opus 5.5",
+                1_000_000,
+                128_000,
+                true,
+            ),
+            model(
+                "claude-sonnet-5-5",
+                "Claude Sonnet 5.5",
+                1_000_000,
+                128_000,
+                true,
+            ),
+            model(
+                "claude-haiku-5-5",
+                "Claude Haiku 5.5",
+                1_000_000,
+                128_000,
                 true,
             ),
         ],
@@ -5202,7 +5221,12 @@ models = [{ id = "gpt-6" }]
         assert_eq!(config.providers["anthropic"].credential, "custom-anthropic");
         assert_eq!(
             ids("anthropic"),
-            ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"]
+            [
+                "claude-fable-5-2",
+                "claude-opus-5-5",
+                "claude-sonnet-5-5",
+                "claude-haiku-5-5"
+            ]
         );
         assert_eq!(ids("openai-codex"), ["gpt-6"]);
         assert_eq!(ids("openai"), ["gpt-5.5", "gpt-5.5-codex"]);
@@ -5217,7 +5241,21 @@ models = [{ id = "gpt-6" }]
     /// other declares nothing rather than guessing.
     #[test]
     fn default_models_are_the_built_ins_and_nothing_else() {
-        assert_eq!(default_models("anthropic").len(), 3);
+        // The current Claude generation, with its real limits. Bumping a
+        // default is a one-line, reviewed change here and above.
+        let claude: Vec<_> = default_models("anthropic")
+            .into_iter()
+            .map(|m| (m.id, m.context, m.output))
+            .collect();
+        assert_eq!(
+            claude,
+            [
+                ("claude-fable-5-2".to_string(), 1_000_000, 128_000),
+                ("claude-opus-5-5".to_string(), 1_000_000, 128_000),
+                ("claude-sonnet-5-5".to_string(), 1_000_000, 128_000),
+                ("claude-haiku-5-5".to_string(), 1_000_000, 128_000),
+            ]
+        );
         assert_eq!(default_models("openai").len(), 2);
         let codex: Vec<_> = default_models("openai-codex")
             .into_iter()
