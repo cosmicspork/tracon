@@ -51,7 +51,8 @@
 //! Images on Podman and in Apple's `container` store are swept by
 //! `crate::image_gc`: only those carrying this node's owner labels, by class
 //! (superseded bases, repository images, snapshots, dangling builds, and with
-//! `--legacy` what sandbox images retired), with what each would free.
+//! `--legacy` what sandbox images retired, and the stock base tags of other
+//! releases), with what each would free.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -743,6 +744,7 @@ pub fn image_knowledge(
             crate::image_gc::repository_of(&cfg.sandbox.base_image_ref()).to_string(),
         ),
         pinned_base: crate::sandbox_images::active_base(),
+        configured_base: Some(cfg.sandbox.base_image_ref()),
         bases_are_ours: owners.prefix == crate::config::DEFAULT_RESOURCE_PREFIX,
         kept: owners.kept_images.clone(),
         legacy_repositories: legacy_repositories(cfg),

@@ -2,8 +2,9 @@
 //! scratch prefix, each standing for one thing the sweep has to tell apart
 //! (a superseded snapshot, an unused repository image, one a container uses,
 //! an unlabelled one, another node's, a dangling build, legacy images, a
-//! superseded and a pinned base), then a dry run, an apply, and an apply
-//! with `--adopt-unlabelled --legacy`, checking exactly the right ones went.
+//! superseded and a pinned base, the pinned base under an earlier release's
+//! tag too), then a dry run, an apply, and an apply with `--adopt-unlabelled
+//! --legacy`, checking exactly the right ones (and tags) went.
 //!
 //! Runs only when asked for, and pulls nothing (every image is `FROM
 //! scratch` or one of the test's own):
@@ -190,10 +191,11 @@ async fn a_sweep_removes_exactly_this_node_s_unused_images() {
         "base1",
         made.build(&format!("{BASE}:1"), "scratch", &[], false),
     );
-    id.insert(
-        "base2",
-        made.build(&format!("{BASE}:2"), "scratch", &[], false),
-    );
+    // The pinned base, first under an earlier release's tag: a release that
+    // carries the base over unchanged tags the same image again.
+    let carried = format!("{BASE}:1b");
+    id.insert("base2", made.build(&carried, "scratch", &[], false));
+    assert!(podman(&["tag", &carried, &format!("{BASE}:2")]).is_some());
     id.insert(
         "cur",
         made.build(&format!("{REPO}:cur"), &format!("{BASE}:0"), &ours, false),
@@ -291,6 +293,7 @@ async fn a_sweep_removes_exactly_this_node_s_unused_images() {
         node_id: NODE.into(),
         base_repository: Some(BASE.into()),
         pinned_base: Some(format!("{BASE}@{}", digest_of(&format!("{BASE}:2")))),
+        configured_base: Some(format!("{BASE}:2")),
         bases_are_ours: true,
         kept: vec![
             Kept {
@@ -370,6 +373,24 @@ async fn a_sweep_removes_exactly_this_node_s_unused_images() {
     assert!(find(&dry, &names["inuse"]).reason.contains("container"));
     assert!(find(&dry, &names["new"]).reason.contains("last hour"));
     assert!(find(&dry, &names["base0"]).reason.contains("built on it"));
+    // Another release's base tags: listed one by one, untagged only with
+    // --legacy, and one an image that is no base is built on stays.
+    let tag_of = |swept: &[Swept], name: &str| -> Swept {
+        swept
+            .iter()
+            .find(|s| s.class == Class::Legacy && s.name == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("{name} not listed as a tag: {swept:#?}"))
+    };
+    let it = tag_of(&dry, &carried);
+    assert!(!it.remove && it.reason.contains("--legacy"), "{it:?}");
+    let it = tag_of(&dry, &names["base0"]);
+    assert!(!it.remove && it.reason.contains("is built on it"), "{it:?}");
+    assert!(
+        !dry.iter()
+            .any(|s| s.class == Class::Legacy && s.name == names["base2"]),
+        "the configured tag is no other release's"
+    );
     assert!(
         !dry.iter().any(|s| s.name == format!("{REPO}:theirs")),
         "another node's image is not listed"
@@ -414,6 +435,11 @@ async fn a_sweep_removes_exactly_this_node_s_unused_images() {
     for (key, image) in &id {
         assert_eq!(!exists(image), gone.contains(key), "{key} ({image})");
     }
+    // The earlier release's tag went, and only the tag.
+    assert!(tag_of(&adopted, &carried).removed);
+    assert_eq!(id_of(&carried), None, "{carried} is untagged");
+    assert_eq!(id_of(&names["base2"]).as_ref(), Some(&id["base2"]));
+    assert_eq!(id_of(&names["base0"]).as_ref(), Some(&id["base0"]));
 
     // Nothing the test did not make lost an id or a name.
     let after = store_lines();
