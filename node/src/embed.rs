@@ -161,9 +161,10 @@ impl Embedder {
         body: &str,
         token: &str,
     ) -> Result<usize, EmbedError> {
+        let cap = chunk::cap(self.cfg.embed.context_tokens);
         let chunks = match table {
-            "document" => chunk::document(body),
-            _ => chunk::memory(body),
+            "document" => chunk::document(body, cap),
+            _ => chunk::memory(body, cap),
         };
         // Compare what is indexed against what the body says now. Same count,
         // same hashes, same order means nothing to do — which is what keeps a

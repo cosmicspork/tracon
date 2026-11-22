@@ -541,7 +541,7 @@ const REPO_ENV = {
       builds: [build({}), build({ id: 'b-2', kind: 'snapshot', image: 'localhost/tracon-snapshot-orbit-1a2b3c4d5e@sha256:9a0f…' })],
     },
     {
-      entry: { path: '/home/op/src/consulta', image: 'ghcr.io/op/python-toolchain@sha256:4f1a9c2e7b6d5e8a3c0f9b2d1e4a7c6b5d8e0f3a2c1b4d7e6f9a8c5b2e1d0f3a', prepare: ['uv sync --frozen'], egress: ['pypi'] },
+      entry: { path: '/home/op/src/ledger-etl', image: 'ghcr.io/op/python-toolchain@sha256:4f1a9c2e7b6d5e8a3c0f9b2d1e4a7c6b5d8e0f3a2c1b4d7e6f9a8c5b2e1d0f3a', prepare: ['uv sync --frozen'], egress: ['pypi'] },
       builds: [],
     },
   ],
@@ -1005,8 +1005,8 @@ export default [
             builds: [build({ id: 'b-3', repo_path: '/var/lib/tracon/repos/github.com/op/site', status: 'building', source_commit: 'b1e2d3c4a5f60718293a4b5c6d7e8f9012345678', finished_ms: null })],
           },
           {
-            entry: { path: '/home/op/src/consulta', dockerfile: '.devcontainer/Dockerfile', prepare: ['uv sync --frozen', 'just setup-db'], egress: ['pypi'] },
-            builds: [build({ id: 'b-4', repo_path: '/home/op/src/consulta', warnings: ['just', 'psql'] })],
+            entry: { path: '/home/op/src/ledger-etl', dockerfile: '.devcontainer/Dockerfile', prepare: ['uv sync --frozen', 'just setup-db'], egress: ['pypi'] },
+            builds: [build({ id: 'b-4', repo_path: '/home/op/src/ledger-etl', warnings: ['just', 'psql'] })],
           },
         ],
       }),

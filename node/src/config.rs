@@ -302,16 +302,6 @@ fn retired_opencode_sections(text: &str) -> Vec<&'static str> {
         .collect()
 }
 
-/// Whether an older `node.toml` still has a `[consulta]` table. SQL left the
-/// node for the `sql-review` plugin, so the table is ignored, empty or not:
-/// it named the program the node used to run, and nothing reads it now.
-fn retired_consulta_section(text: &str) -> bool {
-    toml::from_str::<toml::Value>(text)
-        .ok()
-        .and_then(|value| value.get("consulta").map(toml::Value::is_table))
-        .unwrap_or(false)
-}
-
 /// What a `[qa]` table in an older `node.toml` still configures, if anything.
 /// The feature is gone and the table is ignored, but a configured target is
 /// worth one line in the log rather than silence.
@@ -1085,6 +1075,12 @@ pub struct Embed {
     /// chunks of unrelated documents score about 0.3 against each other. -1
     /// turns the floor off.
     pub min_similarity: f64,
+    /// The most tokens the endpoint embeds in one input: llama-server's
+    /// `--ctx-size` divided by its `--parallel` slots, and no more than its
+    /// `--ubatch-size`. Chunks are capped below it (`corpus::chunk::cap`), so
+    /// a document with no blank lines to split at is cut to fit rather than
+    /// sent whole and refused on every sweep.
+    pub context_tokens: usize,
 }
 
 impl Default for Embed {
@@ -1101,6 +1097,10 @@ impl Default for Embed {
             batch: 16,
             timeout_secs: 60,
             min_similarity: 0.45,
+            // Small enough for most servers as they come, and big enough
+            // that the 1600-character pieces a document is packed into fit
+            // under the cap it gives.
+            context_tokens: 2048,
         }
     }
 }
@@ -3348,13 +3348,32 @@ fn hardcoded_default_models(provider: &str) -> Vec<ModelDecl> {
     };
     match provider {
         "anthropic" => vec![
-            model("claude-opus-5", "Claude Opus 5", 200_000, 64_000, true),
-            model("claude-sonnet-5", "Claude Sonnet 5", 200_000, 64_000, true),
             model(
-                "claude-haiku-4-5",
-                "Claude Haiku 4.5",
-                200_000,
-                64_000,
+                "claude-fable-5-2",
+                "Claude Fable 5.2",
+                1_000_000,
+                128_000,
+                true,
+            ),
+            model(
+                "claude-opus-5-5",
+                "Claude Opus 5.5",
+                1_000_000,
+                128_000,
+                true,
+            ),
+            model(
+                "claude-sonnet-5-5",
+                "Claude Sonnet 5.5",
+                1_000_000,
+                128_000,
+                true,
+            ),
+            model(
+                "claude-haiku-5-5",
+                "Claude Haiku 5.5",
+                1_000_000,
+                128_000,
                 true,
             ),
         ],
@@ -3365,7 +3384,7 @@ fn hardcoded_default_models(provider: &str) -> Vec<ModelDecl> {
         // A ChatGPT sign-in is refused the `-codex` models ("not supported
         // when using Codex with a ChatGPT account"), so the subscription's
         // fallback offers only what it will actually serve.
-        "openai-codex" => vec![model("gpt-5.5", "GPT-5.5", 400_000, 128_000, false)],
+        "openai-codex" => vec![model("gpt-6-luna", "GPT-6 Luna", 400_000, 128_000, false)],
         _ => Vec::new(),
     }
 }
@@ -3838,13 +3857,6 @@ impl Config {
                 path.display()
             );
         }
-        if retired_consulta_section(text) {
-            tracing::warn!(
-                "{}: [consulta] is ignored; SQL left the node for the sql-review plugin, so \
-                 install it with `tracon plugin add cosmicspork/sql-review` and the section can go",
-                path.display()
-            );
-        }
         if let Some(section) = retired_qa_section(text) {
             tracing::warn!(
                 "{}: [qa] is ignored; candidate QA deploys, browser runs and prototype builds were removed ({section})",
@@ -4293,18 +4305,6 @@ mod tests {
     }
 
     #[test]
-    fn a_retired_consulta_section_still_loads_and_is_named() {
-        let text =
-            "[consulta]\ncommand = \"uv\"\nargs = [\"run\", \"consulta\"]\ntimeout_secs = 60\n";
-        Config::from_toml(text, Path::new("node.toml"))
-            .expect("an old [consulta] table must not stop the node");
-        assert!(retired_consulta_section(text));
-        assert!(retired_consulta_section("[consulta]\n"));
-        assert!(!retired_consulta_section("[review]\nmax_files = 1\n"));
-        assert!(!retired_consulta_section("consulta = 1\n"));
-    }
-
-    #[test]
     fn a_retired_qa_section_still_loads_and_is_named() {
         let text = "[qa.targets.cloud-qa]\nprivate = true\n\n[qa.prototype]\nimage = \"x\"\n";
         toml::from_str::<Config>(text).expect("an old [qa] table must not stop the node");
@@ -4720,6 +4720,7 @@ mod tests {
         assert_eq!(parsed.review.max_diff_lines, d.review.max_diff_lines);
         assert_eq!(parsed.embed.dim, d.embed.dim);
         assert_eq!(parsed.embed.batch, d.embed.batch);
+        assert_eq!(parsed.embed.context_tokens, d.embed.context_tokens);
         assert_eq!(
             parsed.boundary.gateway_container,
             d.boundary.gateway_container
@@ -5202,7 +5203,12 @@ models = [{ id = "gpt-6" }]
         assert_eq!(config.providers["anthropic"].credential, "custom-anthropic");
         assert_eq!(
             ids("anthropic"),
-            ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"]
+            [
+                "claude-fable-5-2",
+                "claude-opus-5-5",
+                "claude-sonnet-5-5",
+                "claude-haiku-5-5"
+            ]
         );
         assert_eq!(ids("openai-codex"), ["gpt-6"]);
         assert_eq!(ids("openai"), ["gpt-5.5", "gpt-5.5-codex"]);
@@ -5217,15 +5223,29 @@ models = [{ id = "gpt-6" }]
     /// other declares nothing rather than guessing.
     #[test]
     fn default_models_are_the_built_ins_and_nothing_else() {
-        assert_eq!(default_models("anthropic").len(), 3);
+        // The current Claude generation, with its real limits. Bumping a
+        // default is a one-line, reviewed change here and above.
+        let claude: Vec<_> = default_models("anthropic")
+            .into_iter()
+            .map(|m| (m.id, m.context, m.output))
+            .collect();
+        assert_eq!(
+            claude,
+            [
+                ("claude-fable-5-2".to_string(), 1_000_000, 128_000),
+                ("claude-opus-5-5".to_string(), 1_000_000, 128_000),
+                ("claude-sonnet-5-5".to_string(), 1_000_000, 128_000),
+                ("claude-haiku-5-5".to_string(), 1_000_000, 128_000),
+            ]
+        );
         assert_eq!(default_models("openai").len(), 2);
         let codex: Vec<_> = default_models("openai-codex")
             .into_iter()
-            .map(|m| m.id)
+            .map(|m| (m.id, m.context, m.output))
             .collect();
         assert_eq!(
             codex,
-            ["gpt-5.5"],
+            [("gpt-6-luna".to_string(), 400_000, 128_000)],
             "a ChatGPT sign-in refuses the -codex models"
         );
         assert!(default_models("totally-unknown").is_empty());

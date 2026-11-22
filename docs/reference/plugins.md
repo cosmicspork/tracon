@@ -623,12 +623,12 @@ When the wire format changes, both plugins and both fixtures change together.
 
 The kind tells you who to attribute a change to; the signature is what lets you trust
 it. An `agent` call came from a session (`session` set) or from the operator's own
-harness through the external door (`harness: "external"`). An `operator` call came from
-a route of the operator API, today `GET /api/jira/search`, the workboard's search,
-which is decided by policy and the `[[plugin]]` entry like any call but never held for
-approval: one that would be asked is refused instead. A request from a plugin's own page
-is an `operator` call too (tool `tracon/ui`). A `plugin` call came from another plugin's
-`tools/call`, decided the same unheld way. A plugin that ignores the context
+harness through the external door (`harness: "external"`). An `operator` call is a
+request from the plugin's own page (tool `tracon/ui`), which the operator opened: it is
+decided by policy and the `[[plugin]]` entry as a call to `<plugin>__ui`, never held for
+approval, and runs unless one of them denies `ui`. A `plugin` call came from another
+plugin's `tools/call`, decided by policy and the callee's entry but never held: one that
+would be asked is refused instead. A plugin that ignores the context
 still runs; a plugin that records authors, or that gates writes on an approval, must
 verify it.
 
@@ -690,9 +690,6 @@ uses, from the call's arguments as they would run: when the operator edits the a
 the dispatch would refuse shows `nothing: allowing it runs nothing, because …`.
 
 ## Previews and formats
-
-These follow the note `note-plugins-preview-contract`, the wire contract the node and
-both plugins were built against.
 
 ### `tracon/preview`
 
@@ -855,7 +852,9 @@ expects of it.
 A tool marked `consequential = true` changes something the operator wants to approve
 call by call, such as moving a Jira issue. The node:
 
-- lists it with a required `operation_id` string added to its input schema, and strips
+- lists it with a required `operation_id` string added to its input schema (at least 8
+  ASCII letters, digits or dashes, `^[A-Za-z0-9-]{8,}$`; a call whose id breaks the
+  pattern is refused with an error naming `operation_id` and the pattern), and strips
   it before your plugin sees the arguments, in calls and previews alike, so you never
   need to accept it;
 - never runs it because something allows it by name: neither the signed bundle nor the

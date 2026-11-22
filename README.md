@@ -973,7 +973,7 @@ It is off until a channel names its model. Pick one under **Settings → Channel
 Review model**, beside Plan and Execute, or bind it from the command line:
 
 ```sh
-tracon channel bind work phases.review.model=anthropic/claude-opus-5
+tracon channel bind work phases.review.model=anthropic/claude-opus-5-5
 tracon channel bind work phases.review.budget_tokens=400000   # optional; else [session] budget_tokens
 ```
 
@@ -1032,7 +1032,9 @@ Marking it ready, and anything on another change, is still yours to allow.
 Submitting a new revision of a review whose change is open drafts it at once,
 and approving a revision marks it ready again. A change an authority grant
 publishes without you opens as a draft, and `pr_merge` and `mr_merge` refuse a
-draft until it is marked ready.
+draft until it is marked ready. A `pr_merge` whose `head_sha` is not the pull
+request's current head is refused before you are asked, and its card names the
+head it merges in full.
 
 ### Other MCP servers
 
@@ -1130,8 +1132,7 @@ A plugin's tools are offered to execute sessions and external harnesses as
 `<plugin>__<tool>`, beside the node's own, on a channel that binds a credential the
 manifest declares (by its `name`, or a binding its `pattern` matches), or on every
 channel when it declares none. A plan session is offered only jira-review's reads
-(`search`, `issue`, `transitions`), as it was the node's own Jira reads, and a review
-session none. A call is
+(`search`, `issue`, `transitions`), and a review session none. A call is
 decided as an `[[mcp_server]]` tool's is: the signed policy first, under the `tool` kind
 and the namespaced name, then the lists in the plugin's `[[plugin]]` entry, by the
 plugin's own name for the tool. A signed denial wins, then the entry's `deny`, then its
@@ -1139,7 +1140,8 @@ plugin's own name for the tool. A signed denial wins, then the entry's `deny`, t
 tool that neither names is asked. The manifest's `read`/`write` hint is shown on the card
 and never decides anything. A tool the manifest marks `consequential = true` is never
 run because something allows it by name, neither the bundle nor the entry's `allow`: the
-node adds a required `operation_id` to its schema (at least 8 letters, digits or dashes,
+node adds a required `operation_id` to its schema (at least 8 ASCII letters, digits or
+dashes and nothing else, `^[A-Za-z0-9-]{8,}$`, the same rule as `pr_merge`, `mr_merge` and `deploy`;
 kept by the node and never sent to the plugin), asks every call, and runs one
 unattended only under a `plugin_call` [grant](#granting-authority) naming that exact
 call, which its card shows. An allowed call is recorded under its `operation_id`, so
@@ -1210,8 +1212,8 @@ arguments are the card's prose; marked ones inside an array's items make it the 
 list of items. Prose in a plugin's format is shown as that plugin renders it to Markdown
 (`tracon/format/convert`, a pure function lent nothing), an edit is rendered again as
 you type, and the source is one click away. If the owner is removed or cannot answer,
-the card shows the source. The contract for previews, tokens and formats is the note
-`note-plugins-preview-contract`.
+the card shows the source. The contract for previews, tokens and formats is in
+[docs/reference/plugins.md](docs/reference/plugins.md#previews-and-formats).
 
 #### Plugin pages
 
@@ -1299,32 +1301,20 @@ is asked. The read-only account is the boundary: `sql-review` classifies a
 statement as a read or a write, but that is not a security control, so an account that
 can write is never bound as `sql-read`.
 
-This replaces the `consulta` sidecar. A `[consulta]` table left in `node.toml` still
-loads and is ignored, with a warning naming the plugin. On its first start the node
-renames credentials `consulta` and `consulta-<profile>` to `sql-read` and
-`sql-read-<profile>`, bindings and all, and logs each one; one whose new name is already
-taken is left as it is, with a warning, so you can remove whichever is stale.
-
 #### Jira
 
 The node talks to no Jira of its own either: the tracker tools are the
 [`jira-review`](https://github.com/cosmicspork/jira-review) plugin's. Install it with
 `tracon plugin add cosmicspork/jira-review`. It is lent the channel's `jira` credential
-(or `jira-<profile>`, for a call's `profile`), the same one the node's own Jira tools
-used, with the same fields: `JIRA_URL` with `JIRA_EMAIL` and `JIRA_TOKEN` for Jira
-Cloud, or `JIRA_PAT` for Data Center. A channel that bound `jira` before needs nothing
-more. The shipped working agreements (from bundle v26) run its reads unattended
+(or `jira-<profile>`, for a call's `profile`): `JIRA_URL` with `JIRA_EMAIL` and
+`JIRA_TOKEN` for Jira Cloud, or `JIRA_PAT` for Data Center. The shipped working agreements (from bundle v26) run its reads unattended
 (`jira-review__search`, `jira-review__issue`, `jira-review__transitions`); its writes
 (`update`, `comment`, `create`, `link`) are asked, each card showing the plugin's preview
 of the change, and an approved write fails as stale if the issue moved since the card
 was read. `jira-review__transition` is consequential: asked every call unless a grant
 names it. A description or comment written in Jira wiki markup is shown on the card as
-jira-review renders it, since it owns the `jira_wiki` format.
-
-This replaces the node's own `issue`, `issue_search`, `issue_transitions`,
-`issue_comment`, `issue_update`, `issue_create`, `issue_link` and `issue_transition`. A
-call to one of those names is refused with the name that replaced it, and nothing is
-asked. Past approvals of them still open, their wiki markup shown as source.
+jira-review renders it, since it owns the `jira_wiki` format. Past approvals of the
+Jira tools the node had before the plugin still open, their wiki markup shown as source.
 
 ### Asking, pinging, and complaining
 
@@ -1456,24 +1446,6 @@ independent of whether a push service accepted its notification.
 A defect in tracon itself goes to **`report_issue`** instead, and
 **`issue_report_status`** says whether the operator published it, as which
 GitHub issue, or discarded it.
-
-A local app that is not a harness can read the tracker the same way:
-`GET /api/jira/search?channel=work&jql=…&cursor=…` on the loopback operator API
-returns one page of matching issues (with `next_cursor`), and never the token. It
-calls the jira-review plugin's `search` as the operator, which lends it the
-channel's Jira credential: the call is decided by policy and logged to the
-channel's external log under the lane `/api/jira/search`. It answers 503 until
-`tracon plugin add cosmicspork/jira-review` installs the plugin, 422 on a channel
-that binds no `jira` (or `jira-*`) credential, and 403 unless the call is allowed,
-since the operator API never holds a call for approval. The shipped policy bundle
-allows it from version 26; a node still on an older signed bundle needs, until you
-sign and install the new one:
-
-```toml
-[[plugin]]
-name = "jira-review"
-allow = ["search"]
-```
 
 What it does not get is the boundary. That harness runs as you, on your
 machine: the promise here is that it never needs the credential and that every
@@ -2111,7 +2083,7 @@ shape = "anthropic"                 # or "openai", "openai-codex"; the shape als
                                     # a sign-in per set of channels is held under `credential`, and
                                     # each further one under `<credential>@<channel>`
 # models = [                        # what the picker offers and tracon-agent is told; a built-in provider
-#   { id = "claude-opus-5", name = "Claude Opus 5", context = 200000, output = 64000, reasoning = true, attachment = true },
+#   { id = "claude-opus-5-5", name = "Claude Opus 5.5", context = 1000000, output = 128000, reasoning = true, attachment = true },
 #   # parallel_tools = false, reasoning_effort = "high": read by the native harness only (parallel is on by default)
 # ]                                 # left without models gets the current generation; `models = []` declares none
 # [providers.anthropic.price]
@@ -2218,11 +2190,17 @@ dim = 1024                          # must match the model; changing it rebuilds
 batch = 16
 timeout_secs = 60
 min_similarity = 0.45               # cosine floor for a semantic match; model-dependent
+context_tokens = 2048               # tokens one input may hold: --ctx-size / --parallel, at most --ubatch-size
 ```
 
 For `[embed]`, a local `llama-server --embedding -m <model>.gguf` is enough; BGE-M3
 and Qwen3-Embedding-0.6B (which wants `pooling = last`) are the models it was built
 against. Without an endpoint, search is text-only and the Documents screen says so.
+`context_tokens` caps every chunk at 7/8 of that many bytes (a tokenizer makes no
+more tokens than bytes), so a paragraph too long for the cap is split at line ends,
+and a line too long for it is cut, rather than refused by the server on every sweep.
+Set it to what one llama-server slot holds: `--ctx-size` divided by `--parallel`,
+and no more than `--ubatch-size`.
 
 `[metrics] listen` serves `GET /metrics` in the OpenMetrics text format on a
 listener of its own: no credential, no input, nothing of the operator's API, and
