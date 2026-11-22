@@ -243,16 +243,22 @@ async fn repeated_failures_leave_it_unhealthy_until_it_is_asked_for_again() {
     let r = rig();
     r.mode("personal", "exit");
     let error = r.sup.ensure(PLUGIN, "personal").await.unwrap_err();
-    assert!(error.contains("exited with code 3"), "{error}");
     // `ensure` answers as soon as the instance reads Unhealthy, or, on a
     // runner slow enough that the four starts outlast its wait, with "still
-    // starting (last: exited with code 3)" while the last attempt is still
-    // in flight. Either way the supervisor settles on Unhealthy by itself.
+    // starting" while an attempt is still in flight (naming the last failure
+    // only once there was one). Either way the supervisor settles on
+    // Unhealthy by itself.
+    assert!(
+        error.contains("exited with code 3") || error.contains("still starting"),
+        "{error}"
+    );
     r.until("unhealthy", Duration::from_secs(30), |r| {
         r.status("personal").state == State::Unhealthy
     })
     .await;
     let status = r.status("personal");
+    let last = status.last_error.as_deref().unwrap_or_default();
+    assert!(last.contains("exited with code 3"), "{last}");
     assert_eq!(status.restarts, 3);
     // Started at once, then after 50, 100 and 200 ms.
     let starts = r.starts("personal");
