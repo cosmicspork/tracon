@@ -20,8 +20,8 @@
 //!   its title led by the plugin's name.
 //! - `tools/call` calls another plugin's tool as the plugin itself (caller
 //!   kind `plugin`), decided by the signed policy and the callee's
-//!   `[[plugin]]` entry and logged on the channel, as the operator API's
-//!   calls are: never held, so one that would be asked is refused.
+//!   `[[plugin]]` entry and logged on the channel: never held, so one that
+//!   would be asked is refused.
 
 use std::time::Duration;
 
