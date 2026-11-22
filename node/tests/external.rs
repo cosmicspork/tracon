@@ -2894,6 +2894,12 @@ async fn a_document_call_that_cannot_run_is_refused_before_it_is_held() {
         ("doc_write", json!({ "slug": "Ref X", "body": "x" }), "slug"),
         ("doc_delete", json!({ "slug": "../x" }), "slug"),
         ("doc_delete", json!({ "slug": "shown-abc" }), "show_work"),
+        ("doc_archive", json!({ "slug": "plan-x" }), "archived"),
+        (
+            "doc_archive",
+            json!({ "slug": "shown-abc", "archived": true }),
+            "show_work",
+        ),
     ] {
         let (_, v) = mcp(&h.operator, "work", tool_call(name, args)).await;
         let (err, out) = outcome(&v);
@@ -2950,6 +2956,95 @@ async fn doc_delete_is_asked_conflicts_on_a_stale_hash_and_removes_the_bundle() 
     assert_eq!(out["result"]["deleted"], true, "{out}");
     assert!(h.store.doc_get("work", "note-page").unwrap().is_none());
     assert_eq!(live_bundle_rows(&h, &html.hash), 0);
+}
+
+/// `doc_archive` is always asked, even for a working note, with a card that
+/// names the slug, the action and the document's title; it refuses a version
+/// the agent has not read, is pinned to the version it was asked about, and
+/// restores by the same hash, which archiving does not change.
+#[tokio::test]
+async fn doc_archive_is_asked_conflicts_on_a_stale_hash_and_restores() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let (_, v) = mcp(
+        &h.operator,
+        "work",
+        tool_call(
+            "doc_write",
+            json!({ "slug": "note-shipped", "body": "# Shipped work\n\ndone" }),
+        ),
+    )
+    .await;
+    let (err, out) = outcome(&v);
+    assert!(!err && out["state"] != "awaiting_operator", "{out}");
+    let hash = out["hash"].as_str().unwrap().to_string();
+
+    // A stale hash is held as asked and fails once allowed; nothing changes.
+    let id = ask(
+        &h,
+        "doc_archive",
+        json!({ "slug": "note-shipped", "archived": true, "if_hash": "stale" }),
+    )
+    .await;
+    assert_eq!(
+        h.store.get_approval(&id).unwrap().unwrap().title,
+        "doc_archive note-shipped · archive · \"Shipped work\""
+    );
+    let (status, _) = answer(&h, &id, json!({ "option_id": "allow_once" })).await;
+    assert_eq!(status, StatusCode::OK);
+    let out = settled(&h, &id).await;
+    assert_eq!(out["state"], "failed", "{out}");
+    assert!(
+        out["reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("changed since it was read")),
+        "{out}"
+    );
+    let doc = h.store.doc_get("work", "note-shipped").unwrap().unwrap();
+    assert_eq!(doc.archived, 0);
+
+    // Without an if_hash, the held call is pinned to the document as asked.
+    let id = ask(
+        &h,
+        "doc_archive",
+        json!({ "slug": "note-shipped", "archived": true }),
+    )
+    .await;
+    let row = h.store.get_approval(&id).unwrap().unwrap();
+    let held: Value = serde_json::from_str(&row.arguments).unwrap();
+    assert_eq!(held["if_hash"], hash.as_str(), "{held}");
+    let (status, _) = answer(&h, &id, json!({ "option_id": "allow_once" })).await;
+    assert_eq!(status, StatusCode::OK);
+    let out = settled(&h, &id).await;
+    assert_eq!(out["state"], "succeeded", "{out}");
+    assert_eq!(out["result"]["archived"], true, "{out}");
+    let doc = h.store.doc_get("work", "note-shipped").unwrap().unwrap();
+    assert_eq!((doc.archived, doc.hash.as_str()), (1, hash.as_str()));
+
+    // Restoring is asked as well, and names itself so.
+    let id = ask(
+        &h,
+        "doc_archive",
+        json!({ "slug": "note-shipped", "archived": false, "if_hash": hash }),
+    )
+    .await;
+    assert_eq!(
+        h.store.get_approval(&id).unwrap().unwrap().title,
+        "doc_archive note-shipped · restore · \"Shipped work\""
+    );
+    let (status, _) = answer(&h, &id, json!({ "option_id": "allow_once" })).await;
+    assert_eq!(status, StatusCode::OK);
+    let out = settled(&h, &id).await;
+    assert_eq!(out["state"], "succeeded", "{out}");
+    assert_eq!(out["result"]["archived"], false, "{out}");
+    assert_eq!(
+        h.store
+            .doc_get("work", "note-shipped")
+            .unwrap()
+            .unwrap()
+            .archived,
+        0
+    );
 }
 
 /// A working note is written unattended, but not when the write would

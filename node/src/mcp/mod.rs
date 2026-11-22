@@ -2039,11 +2039,13 @@ impl Tools {
         // A plan session's own plan document is the phase's artifact: writing
         // or editing that one slug is what the session exists to do, so it is
         // not asked.
-        // A delete, and a write that converts a document or drops files of
-        // its bundle, are always the operator's, whatever the policy says;
+        // A delete, an archive or restore, and a write that converts a
+        // document or drops files of its bundle, are always the operator's,
+        // whatever the policy says;
         // so is an amendment, which rewrites a memory in place with no
         // nightly batch behind it.
         let always_asked = name == docs::DOC_DELETE
+            || name == docs::DOC_ARCHIVE
             || name == memory::AMEND
             || name == docs::DOC_WRITE
                 && self
@@ -2228,7 +2230,7 @@ impl Tools {
                         return Err(refusal);
                     }
                     let pinned = match name {
-                        docs::DOC_WRITE | docs::DOC_DELETE => self
+                        docs::DOC_WRITE | docs::DOC_DELETE | docs::DOC_ARCHIVE => self
                             .session
                             .get()
                             .and_then(|access| docs::pinned(&access.store, &ctx.channel, args)),
@@ -2535,7 +2537,8 @@ impl Tools {
             | docs::DOC_SEARCH
             | docs::DOC_WRITE
             | docs::DOC_EDIT
-            | docs::DOC_DELETE => {
+            | docs::DOC_DELETE
+            | docs::DOC_ARCHIVE => {
                 let access = self
                     .session
                     .get()
@@ -3016,7 +3019,9 @@ impl Tools {
     fn refusal_before_asking(&self, ctx: &CallContext, name: &str, args: &Value) -> Option<String> {
         match name {
             work::WORK_UPDATE => work::refusal_before_asking(self.session.get()?, ctx, args),
-            docs::DOC_WRITE | docs::DOC_DELETE => docs::refusal_before_asking(name, args),
+            docs::DOC_WRITE | docs::DOC_DELETE | docs::DOC_ARCHIVE => {
+                docs::refusal_before_asking(name, args)
+            }
             docs::DOC_EDIT => docs::refusal_before_asking(name, args)
                 .or_else(|| docs::edit_refusal(&self.session.get()?.store, &ctx.channel, args)),
             github::RUN_DISPATCH => github::dispatch_refusal(&self.cfg.live().github, args),
@@ -3212,13 +3217,24 @@ impl Tools {
     }
 
     /// What the operator reads on the card and in the push for a held call:
-    /// [`summarize`], except that a document write says whether it creates
+    /// [`summarize`], except that a document archive names the document's
+    /// title, and a document write says whether it creates
     /// or edits, and what, and when it changes the document's format or
     /// drops files of its bundle. A lookup that fails leaves the plain
     /// summary rather than holding the request. A plugin's tool reads as
     /// [`plugin_title`] until its card shows a preview, whose summary then
     /// titles it.
     async fn approval_title(&self, ctx: &CallContext, name: &str, args: &Value) -> String {
+        if name == docs::DOC_ARCHIVE {
+            if let Some(access) = self.session.get() {
+                if let Ok(current) = docs::replaced(&access.store, &ctx.channel, args) {
+                    let mut title =
+                        docs::archive_approval_title(&summarize(name, args), current.as_ref());
+                    bound(&mut title);
+                    return title;
+                }
+            }
+        }
         if name == docs::DOC_EDIT {
             if let Some(access) = self.session.get() {
                 if let Ok(current) = docs::replaced(&access.store, &ctx.channel, args) {
@@ -4772,6 +4788,7 @@ fn prose_title(name: &str, args: &Value) -> Option<String> {
             first_line("body"),
         ),
         docs::DOC_WRITE | docs::DOC_EDIT | docs::DOC_DELETE => format!("{name} {}", id("slug")),
+        docs::DOC_ARCHIVE => format!("{name} {} · {}", id("slug"), docs::archive_action(args)),
         memory::RETAIN => with(format!("{name} {}", id("kind")), first_line("body")),
         // A memory has no name; the page shows which one beside the change.
         memory::AMEND => with(name.to_string(), first_line("reason")),
@@ -4957,6 +4974,16 @@ mod tests {
         );
         let doc = json!({ "slug": "plan-foo", "body": "# Plan" });
         assert_eq!(summarize(docs::DOC_WRITE, &doc), "doc_write plan-foo");
+        let archive = json!({ "slug": "plan-foo", "archived": true });
+        assert_eq!(
+            summarize(docs::DOC_ARCHIVE, &archive),
+            "doc_archive plan-foo · archive"
+        );
+        let restore = json!({ "slug": "plan-foo", "archived": false });
+        assert_eq!(
+            summarize(docs::DOC_ARCHIVE, &restore),
+            "doc_archive plan-foo · restore"
+        );
         let id = "0b0e29c44da42ee5fef94df7b1b9eff70b0e29c44da42ee5fef94df7b1b9eff7";
         let task = crate::names::task(id);
         assert_eq!(

@@ -98,6 +98,14 @@ const PRESENTATIONS: &[(&str, &str, &[&str], &[&str])] = &[
         &["slug", "if_hash", "edits"],
     ),
     (docs::DOC_DELETE, "markdown", &[], &["slug", "if_hash"]),
+    // Which document, which version of it, and which way: archive or
+    // restore is the call, not a detail the operator edits.
+    (
+        docs::DOC_ARCHIVE,
+        "markdown",
+        &[],
+        &["slug", "if_hash", "archived"],
+    ),
     (memory::RETAIN, "markdown", &["body"], &["kind"]),
     // Which memory is the call; the operator rewrites its body, not its target.
     (memory::AMEND, "markdown", &["body"], &["id"]),
@@ -529,6 +537,9 @@ mod tests {
         assert!(presentation("doc_delete")
             .locked_fields
             .contains(&"slug".into()));
+        assert!(presentation("doc_archive")
+            .locked_fields
+            .contains(&"archived".into()));
         assert!(presentation("doc_edit")
             .locked_fields
             .contains(&"edits".into()));

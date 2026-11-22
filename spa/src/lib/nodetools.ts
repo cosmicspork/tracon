@@ -63,6 +63,7 @@ export const NODE_TOOLS = new Set([
   'doc_search',
   'doc_write',
   'doc_edit',
+  'doc_archive',
   'doc_delete',
   'recall',
   'retain',
@@ -253,6 +254,8 @@ function callLine(tool: string, rawInput: unknown): string {
       return sp('Write document', str(a.slug))
     case 'doc_edit':
       return sp('Edit document', str(a.slug))
+    case 'doc_archive':
+      return sp(a.archived === false ? 'Restore document' : 'Archive document', str(a.slug))
     case 'doc_delete':
       return sp('Delete document', str(a.slug))
     case 'recall':

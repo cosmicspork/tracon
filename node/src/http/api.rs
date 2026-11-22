@@ -5972,8 +5972,10 @@ pub struct PutDoc {
 /// `PUT /api/docs/{channel}/{slug}` with `If-Match: <hash>` to refuse
 /// overwriting an edit not yet seen; a conflict returns 412 with the current
 /// hash and body, the editor contract the corpus inherited. A body is written
-/// in `format`, converting the document when it was the other one; an HTML
-/// document's archived or pinned flag can also change without one.
+/// in `format`, converting the document when it was the other one. A
+/// document's archived or pinned flag can also change without one, in either
+/// format, leaving its body and hash as they were (`tracon doc archive`, and
+/// the store path `doc_archive` takes).
 pub async fn put_doc(
     State(s): State<AppState>,
     Path((channel, slug)): Path<(String, String)>,
@@ -6000,20 +6002,15 @@ pub async fn put_doc(
         Ok(document) => document,
         Err(error) => return ApiError::from(error).into_response(),
     };
-    if body.body.is_none()
-        && existing
-            .as_ref()
-            .is_some_and(|document| document.format == "html")
-    {
+    if let (None, Some(document)) = (body.body.as_deref(), existing) {
         if body.archived.is_none() && body.pinned.is_none() {
             return ApiError(
                 StatusCode::BAD_REQUEST,
-                "archived or pinned is required when an HTML document body is omitted".into(),
+                "body, archived or pinned is required".into(),
             )
             .into_response();
         }
         if create_only {
-            let document = existing.expect("checked above");
             return document_conflict_response(document.hash, document.body);
         }
         let mut last_row = None;
@@ -6061,9 +6058,16 @@ pub async fn put_doc(
         return Json(json!(row)).into_response();
     }
     let Some(text) = body.body.as_deref() else {
+        if body.archived.is_some() || body.pinned.is_some() {
+            return ApiError(
+                StatusCode::NOT_FOUND,
+                format!("no document {slug} on channel {channel}"),
+            )
+            .into_response();
+        }
         return ApiError(
             StatusCode::BAD_REQUEST,
-            "body is required for Markdown documents".into(),
+            "body is required for a new document".into(),
         )
         .into_response();
     };

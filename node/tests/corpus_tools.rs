@@ -501,6 +501,65 @@ async fn an_archived_document_is_kept_but_out_of_the_list_and_search_until_asked
     assert_eq!(slugs(&list).len(), 2);
 }
 
+/// `tracon doc archive|unarchive` by the CLI's own route: the flag alone,
+/// with no body, on a Markdown document as on an HTML one. The body and
+/// hash stay as they were, so a hash read before still names the document;
+/// one that does not conflicts, and a slug with nothing there is not found.
+#[tokio::test]
+async fn a_markdown_document_is_archived_and_restored_by_its_flag_alone() {
+    state::isolate();
+    let h = harness().await;
+    let (st, written) = call_with(
+        &h.operator,
+        "PUT",
+        "/api/docs/personal/plan-shipped",
+        Some(json!({"body": "# Shipped\n\ndone"})),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{written}");
+    let put = |body: Value, if_match: Option<String>| {
+        let h = &h;
+        async move {
+            let headers: Vec<(&str, &str)> = if_match
+                .as_deref()
+                .map(|m| ("if-match", m))
+                .into_iter()
+                .collect();
+            call_with(
+                &h.operator,
+                "PUT",
+                "/api/docs/personal/plan-shipped",
+                Some(body),
+                &headers,
+            )
+            .await
+        }
+    };
+    let (st, _) = put(json!({"archived": true}), Some("stale".into())).await;
+    assert_eq!(st, StatusCode::PRECONDITION_FAILED);
+    let hash = written["hash"].as_str().unwrap().to_string();
+    let (st, v) = put(json!({"archived": true}), Some(hash.clone())).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(
+        (v["archived"].as_i64(), v["hash"].as_str()),
+        (Some(1), Some(hash.as_str()))
+    );
+    assert_eq!(v["body"], "# Shipped\n\ndone");
+    let (st, v) = put(json!({"archived": false}), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["archived"], 0);
+    let (st, _) = call_with(
+        &h.operator,
+        "PUT",
+        "/api/docs/personal/plan-none",
+        Some(json!({"archived": true})),
+        &[],
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
 /// The documents `tracon doc export` writes, by the CLI's own route: GET the
 /// list, then GET each body. This breaks if the CLI's route breaks.
 #[tokio::test]
