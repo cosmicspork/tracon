@@ -3384,7 +3384,7 @@ fn hardcoded_default_models(provider: &str) -> Vec<ModelDecl> {
         // A ChatGPT sign-in is refused the `-codex` models ("not supported
         // when using Codex with a ChatGPT account"), so the subscription's
         // fallback offers only what it will actually serve.
-        "openai-codex" => vec![model("gpt-5.5", "GPT-5.5", 400_000, 128_000, false)],
+        "openai-codex" => vec![model("gpt-6-luna", "GPT-6 Luna", 400_000, 128_000, false)],
         _ => Vec::new(),
     }
 }
@@ -5259,11 +5259,11 @@ models = [{ id = "gpt-6" }]
         assert_eq!(default_models("openai").len(), 2);
         let codex: Vec<_> = default_models("openai-codex")
             .into_iter()
-            .map(|m| m.id)
+            .map(|m| (m.id, m.context, m.output))
             .collect();
         assert_eq!(
             codex,
-            ["gpt-5.5"],
+            [("gpt-6-luna".to_string(), 400_000, 128_000)],
             "a ChatGPT sign-in refuses the -codex models"
         );
         assert!(default_models("totally-unknown").is_empty());

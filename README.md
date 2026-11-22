@@ -973,7 +973,7 @@ It is off until a channel names its model. Pick one under **Settings → Channel
 Review model**, beside Plan and Execute, or bind it from the command line:
 
 ```sh
-tracon channel bind work phases.review.model=anthropic/claude-opus-5
+tracon channel bind work phases.review.model=anthropic/claude-opus-5-5
 tracon channel bind work phases.review.budget_tokens=400000   # optional; else [session] budget_tokens
 ```
 
