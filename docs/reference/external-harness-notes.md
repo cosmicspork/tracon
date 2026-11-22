@@ -75,6 +75,18 @@ has new arguments, so it is a new `request_key` and a new approval anyway. Every
 boundary harness included; only a harness's own permission prompt (an external
 harness asking to run a command) still waits, because the harness itself does.
 
+**A call to a tool the channel does not offer is refused before policy.** A
+name that is not in what `tools/list` gives the caller (a typo, a name the node
+no longer has, a forge tool on a channel without its credential, a tool of a
+plugin that is not installed) used to reach the policy like any other, so the
+operator was asked to allow a call that could only fail once allowed. It is now
+refused at once, with no card and nothing run or kept: `no tool named <name> on
+channel <channel>; nothing was asked or run`, or, for a forge tool, the
+credential the channel lacks. A plugin's tool whose plugin is installed but not
+offered on the channel, and another server's tool that cannot be reached, keep
+their own reasons, also given before anything is asked. A session's calls and a
+plugin's node-socket `tools/call` are refused the same way.
+
 A `report_issue` draft had the same gap: nothing took its `issue_id` back, so
 an agent learned its draft was published only by searching the repository's
 issues (#362). `issue_report_status` closes it on the same wait contract,

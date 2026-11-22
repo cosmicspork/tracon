@@ -60,6 +60,22 @@ name = "query"
 hint = "read"
 "#;
 
+/// One that declares a credential, so it is offered only on a channel that
+/// binds one; no channel here does.
+const GUARDED: &str = r#"name = "guarded"
+version = "1.0.0"
+contract = 1
+exec = ["bin/guarded"]
+
+[[credential]]
+name = "guarded-read"
+pattern = "guarded-read-*"
+
+[[tool]]
+name = "query"
+hint = "read"
+"#;
+
 struct Rig {
     store: Arc<Store>,
     tools: Arc<Tools>,
@@ -100,7 +116,7 @@ fn rig(channel: &str, entries: Vec<PluginEntry>, policy: Policy) -> Rig {
         .insert_session(&support::rows::session_row(channel, &node, channel))
         .unwrap();
     let state = Config::state_dir();
-    for manifest in [CALLER, MODEST, OPEN] {
+    for manifest in [CALLER, MODEST, OPEN, GUARDED] {
         support::plugin::install(&store, &state, manifest);
     }
     for plugin in ["caller", "modest"] {
@@ -554,6 +570,77 @@ async fn a_plugin_calls_another_plugins_tool_as_itself_decided_by_policy() {
         )
         .await;
     assert_eq!(error(&out)["data"]["decision"], "denied", "{out}");
+    rig.manager.plugins().shutdown().await;
+}
+
+/// A name the channel is not offered is refused before any rule is read, on
+/// a plugin's `tools/call` as on an agent's: the tool of no installed
+/// plugin, one its plugin does not declare, and one of a plugin installed
+/// but not offered on the channel, which says why. Nothing is asked.
+#[tokio::test]
+async fn a_tool_the_channel_is_not_offered_is_refused_before_anything_is_asked() {
+    let rig = rig(
+        "p2p-unknown",
+        vec![],
+        allowing(&["caller__node", "open__query"]),
+    );
+    for name in ["absent__query", "open__nope"] {
+        let out = rig
+            .node("tools/call", json!({ "name": name, "arguments": {} }))
+            .await;
+        assert_eq!(
+            error(&out)["message"],
+            format!("no tool named {name} on channel p2p-unknown; nothing was asked or run"),
+            "{out}"
+        );
+    }
+    let out = rig
+        .node(
+            "tools/call",
+            json!({ "name": "guarded__query", "arguments": {} }),
+        )
+        .await;
+    assert_eq!(error(&out)["code"], tracon::plugin::host::REFUSED);
+    let message = error(&out)["message"].as_str().unwrap();
+    assert!(
+        message.contains("plugin guarded is not offered on channel p2p-unknown"),
+        "{out}"
+    );
+
+    // The agent's own door: the same refusal, before policy.
+    for name in ["no_such_tool", "absent__query", "guarded__query"] {
+        let out = rig.tool(name, json!({})).await;
+        assert_eq!(out["isError"], true, "{out}");
+        let text = out["content"][0]["text"].as_str().unwrap();
+        if name == "guarded__query" {
+            assert!(
+                text.contains("not offered on channel p2p-unknown"),
+                "{text}"
+            );
+        } else {
+            assert_eq!(
+                text,
+                format!("no tool named {name} on channel p2p-unknown; nothing was asked or run")
+            );
+        }
+    }
+    assert!(rig
+        .store
+        .approvals_of_session("p2p-unknown")
+        .unwrap()
+        .is_empty());
+
+    // A tool it is offered that no rule names is still asked.
+    let out = rig
+        .tool("doc_write", json!({ "slug": "notes", "body": "hello" }))
+        .await;
+    assert_eq!(out["isError"], false, "{out}");
+    let held: Value = serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(held["state"], "awaiting_operator", "{out}");
+    assert_eq!(
+        rig.store.approvals_of_session("p2p-unknown").unwrap().len(),
+        1
+    );
     rig.manager.plugins().shutdown().await;
 }
 
