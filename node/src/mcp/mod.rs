@@ -112,9 +112,10 @@ pub enum Caller {
         /// hint, like the lane.
         wait_budget: Option<u64>,
     },
-    /// A route of the operator API calling a plugin's tool on the
-    /// operator's behalf ([`Tools::call_for_operator`]). It never raises an
-    /// approval: its calls are allowed by policy or refused.
+    /// The operator API on the operator's behalf: a plugin's page, whose
+    /// requests reach the plugin as `tracon/ui` ([`Tools::ui_for_operator`]).
+    /// It never raises an approval: its calls are allowed by policy or
+    /// refused.
     Operator {
         /// The route, which its calls are logged under in the channel's
         /// external log.
@@ -358,6 +359,23 @@ impl PluginTool {
 /// The argument a consequential call is recorded and replayed under.
 const OPERATION_ID: &str = "operation_id";
 
+/// What an `operation_id` must match (after surrounding whitespace is
+/// trimmed): see [`operation_id`].
+const OPERATION_ID_PATTERN: &str = "^[A-Za-z0-9-]{8,}$";
+
+/// The `operation_id` property of every consequential tool's schema, so a
+/// caller reads the rule before it is refused by it.
+pub(crate) fn operation_id_schema() -> Value {
+    json!({
+        "type": "string",
+        "pattern": OPERATION_ID_PATTERN,
+        "description": "A stable id for this one operation: at least 8 ASCII letters, digits or \
+                        dashes, nothing else (no dots, underscores or spaces), matching \
+                        ^[A-Za-z0-9-]{8,}$. A retry with the same id and arguments returns the \
+                        outcome already recorded rather than running it again.",
+    })
+}
+
 /// `schema` with the `operation_id` a consequential plugin tool is called
 /// with: the node's argument, never sent to the plugin.
 fn with_operation_id(schema: &Value) -> Value {
@@ -368,12 +386,7 @@ fn with_operation_id(schema: &Value) -> Value {
     if !schema["properties"].is_object() {
         schema["properties"] = json!({});
     }
-    schema["properties"][OPERATION_ID] = json!({
-        "type": "string",
-        "description": "A stable id for this one operation: at least 8 letters, digits or \
-                        dashes. A retry with the same id and arguments returns the outcome \
-                        already recorded rather than running it again.",
-    });
+    schema["properties"][OPERATION_ID] = operation_id_schema();
     let mut required: Vec<Value> = schema["required"].as_array().cloned().unwrap_or_default();
     if !required.iter().any(|r| r == OPERATION_ID) {
         required.push(Value::from(OPERATION_ID));
@@ -1069,9 +1082,9 @@ impl Tools {
         Ok(credentials)
     }
 
-    /// Call a plugin's tool for the operator API ([`Caller::Operator`]), or
-    /// for another plugin ([`Caller::Plugin`]): decided by the signed policy
-    /// and the operator's `[[plugin]]` entry as an agent's call is, but never
+    /// Call a plugin's tool for another plugin ([`Caller::Plugin`]), through
+    /// the socket the node serves the caller: decided by the signed policy
+    /// and the callee's `[[plugin]]` entry as an agent's call is, but never
     /// held. A call either would ask about is refused, naming how to allow
     /// it. Every call the channel can take is logged to its external log
     /// under the caller's lane, refusals included.
@@ -2159,13 +2172,8 @@ impl Tools {
             *gate = audit::Gate::node("approval-status");
             return approvals::status(access, ctx, args).await;
         }
-        if let Some(refusal) = retired(name) {
-            return Err(refusal);
-        }
         if self.is_consequential(name) && self.consequential_scope(name, args).is_none() {
-            return Err(
-                "consequential calls require a valid operation_id and canonical arguments".into(),
-            );
+            return Err(consequential_refusal(name, args));
         }
         self.upstream_ready(ctx, name).await?;
         self.plugin_ready(ctx, name, args).await?;
@@ -2226,6 +2234,15 @@ impl Tools {
                 Verdict::Allow | Verdict::Ask => {
                     if let Some(refusal) = self.missing_required(ctx, name, args) {
                         return Err(refusal);
+                    }
+                    // A merge at a head the pull request no longer has could
+                    // only fail once allowed, so it is never asked.
+                    if name == github::PR_MERGE {
+                        if let Some(refusal) =
+                            github::merge_head_refusal(&self.broker, &self.http, ctx, args).await
+                        {
+                            return Err(refusal);
+                        }
                     }
                     let pinned = match name {
                         docs::DOC_WRITE | docs::DOC_DELETE => self
@@ -2379,9 +2396,7 @@ impl Tools {
             one_shot: approval.is_some(),
         };
         if self.is_consequential(name) && self.consequential_scope(name, args).is_none() {
-            return Err(
-                "consequential calls require a valid operation_id and canonical arguments".into(),
-            );
+            return Err(consequential_refusal(name, args));
         }
         if let Some(refusal) = self.refusal_before_asking(ctx, name, args) {
             return Err(refusal);
@@ -2616,9 +2631,7 @@ impl Tools {
                         }
                     }
                 }
-                (None, None) => {
-                    Err(retired(other).unwrap_or_else(|| format!("no tool named {other}")))
-                }
+                (None, None) => Err(format!("no tool named {other}")),
             },
         };
         let result = match (name, result) {
@@ -3244,6 +3257,13 @@ impl Tools {
         }
         if let Some(pt) = self.plugin_tool(name) {
             return plugin_title(&pt.plugin, &pt.tool, args);
+        }
+        // Asked only once `github::merge_head_refusal` read this head as the
+        // pull request's own, which the card says.
+        if name == github::PR_MERGE {
+            let mut title = format!("{}, its current head when asked", summarize(name, args));
+            bound(&mut title);
+            return title;
         }
         summarize(name, args)
     }
@@ -4285,6 +4305,48 @@ fn operation_id(args: &Value) -> Option<&str> {
         .filter(|id| id.len() >= 8 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
 }
 
+/// Why a consequential call has no scope, naming the field at fault: the
+/// `operation_id` and its pattern when that is what is wrong, otherwise the
+/// arguments that name what the call acts on.
+fn consequential_refusal(name: &str, args: &Value) -> String {
+    if operation_id(args).is_none() {
+        return match args.get(OPERATION_ID) {
+            None | Some(Value::Null) => format!(
+                "{name} requires an operation_id: at least 8 ASCII letters, digits or dashes \
+                 ({OPERATION_ID_PATTERN})"
+            ),
+            Some(Value::String(given)) => format!(
+                "{name} refused operation_id {given:?}: it must be at least 8 ASCII letters, \
+                 digits or dashes, nothing else ({OPERATION_ID_PATTERN}); a dot, underscore or \
+                 space is not allowed"
+            ),
+            Some(_) => format!(
+                "{name} refused operation_id: it must be a string of at least 8 ASCII letters, \
+                 digits or dashes ({OPERATION_ID_PATTERN})"
+            ),
+        };
+    }
+    let fields: &[&str] = match name {
+        github::PR_MERGE => &["repo (owner/name)", "number (integer)"],
+        gitlab::MR_MERGE => &["project", "iid (integer)"],
+        gitlab::DEPLOY => &[
+            "project",
+            "environment",
+            "pipeline_id (integer)",
+            "job_id (integer)",
+        ],
+        _ => &[],
+    };
+    if fields.is_empty() {
+        format!("{name} refused its arguments: they must be a JSON object")
+    } else {
+        format!(
+            "{name} refused its arguments: {} must each be given, and strings not blank",
+            fields.join(", ")
+        )
+    }
+}
+
 fn consequential(name: &str, args: &Value) -> Option<(&'static str, String, Option<String>)> {
     let string = |key| {
         args.get(key)
@@ -4619,30 +4681,6 @@ pub fn approval_context(
     }
 }
 
-/// The node's own Jira tools, before Jira became the jira-review plugin's,
-/// and what each is called now.
-pub const RETIRED_JIRA: &[(&str, &str)] = &[
-    ("issue", "jira-review__issue"),
-    ("issue_search", "jira-review__search"),
-    ("issue_transitions", "jira-review__transitions"),
-    ("issue_comment", "jira-review__comment"),
-    ("issue_update", "jira-review__update"),
-    ("issue_create", "jira-review__create"),
-    ("issue_link", "jira-review__link"),
-    ("issue_transition", "jira-review__transition"),
-];
-
-/// Why a call to a tool the node no longer has is refused, naming the one
-/// that replaced it; `None` for any other name.
-fn retired(name: &str) -> Option<String> {
-    let (_, now) = RETIRED_JIRA.iter().find(|(old, _)| *old == name)?;
-    Some(format!(
-        "{name} is no longer the node's: Jira is the jira-review plugin's, and this is {now}, \
-         offered once the plugin is installed (tracon plugin add cosmicspork/jira-review) on a \
-         channel that binds a jira credential. Nothing was asked or run"
-    ))
-}
-
 /// The longest excerpt of a plugin call's statement or text its title
 /// carries, in characters.
 const PLUGIN_TITLE_EXCERPT: usize = 120;
@@ -4812,12 +4850,13 @@ fn prose_title(name: &str, args: &Value) -> Option<String> {
             }
         }
         review::SUBMIT_REPORT => with(name.to_string(), text("title")),
+        // The whole sha: two heads that share a prefix read alike (#1049).
         github::PR_MERGE => format!(
             "{name} {}#{}: {} at {}",
             id("repo"),
             id("number"),
             text("method").unwrap_or("squash"),
-            short("head_sha")
+            id("head_sha")
         ),
         gitlab::MR_MERGE => format!(
             "{name} {}!{}: {} at {}",
@@ -5098,10 +5137,10 @@ mod tests {
     /// the push, rather than as its arguments.
     #[test]
     fn a_gated_call_is_titled_by_what_it_does() {
-        let merge = json!({ "repo": "o/n", "number": 412, "head_sha": "3e1f0a2c9b8d", "method": "squash", "operation_id": "op" });
+        let merge = json!({ "repo": "o/n", "number": 412, "head_sha": "3e1f0a2c9b8d4e5f60718293a4b5c6d7e8f90a1b", "method": "squash", "operation_id": "op" });
         assert_eq!(
             summarize(github::PR_MERGE, &merge),
-            "pr_merge o/n#412: squash at 3e1f0a2"
+            "pr_merge o/n#412: squash at 3e1f0a2c9b8d4e5f60718293a4b5c6d7e8f90a1b"
         );
         let mr = json!({ "project": "g/p", "iid": 9, "head_sha": "abcdef12", "squash": false, "operation_id": "op" });
         assert_eq!(
@@ -5214,6 +5253,58 @@ mod tests {
             .filter(|title| title.contains('{'))
             .collect();
         assert!(raw.is_empty(), "titled as JSON: {raw:?}");
+    }
+
+    /// A refused `operation_id` is named, with its pattern, and not blamed on
+    /// the other arguments; a dot is refused (it is not in the pattern) and
+    /// dashes are accepted. Every consequential schema states the pattern.
+    #[test]
+    fn a_refused_operation_id_is_named_with_its_pattern() {
+        let call = |id: &str| json!({ "repo": "o/n", "number": 11, "head_sha": "bb928d2", "method": "squash", "operation_id": id });
+        assert!(consequential(github::PR_MERGE, &call("merge-hora-7-release-0-3-0")).is_some());
+        let dotted = call("merge-hora-7-release-0.3.0");
+        assert!(consequential(github::PR_MERGE, &dotted).is_none());
+        let refusal = consequential_refusal(github::PR_MERGE, &dotted);
+        assert!(refusal.contains("operation_id"), "{refusal}");
+        assert!(refusal.contains(OPERATION_ID_PATTERN), "{refusal}");
+        assert!(refusal.contains("merge-hora-7-release-0.3.0"), "{refusal}");
+        assert!(!refusal.contains("canonical arguments"), "{refusal}");
+
+        let short = consequential_refusal(github::PR_MERGE, &call("x-1-2"));
+        assert!(short.contains(OPERATION_ID_PATTERN), "{short}");
+        let missing = consequential_refusal(
+            gitlab::DEPLOY,
+            &json!({ "project": "g/p", "pipeline_id": 1, "job_id": 2, "environment": "qa" }),
+        );
+        assert!(missing.contains("requires an operation_id"), "{missing}");
+
+        // A good id with a missing target blames the target, not the id.
+        let unscoped = json!({ "number": 11, "operation_id": "merge-hora-7" });
+        assert!(consequential(github::PR_MERGE, &unscoped).is_none());
+        let refusal = consequential_refusal(github::PR_MERGE, &unscoped);
+        assert!(!refusal.contains("operation_id"), "{refusal}");
+        assert!(refusal.contains("repo"), "{refusal}");
+
+        for tool in github::definitions()
+            .iter()
+            .chain(gitlab::definitions().iter())
+        {
+            let schema = &tool["inputSchema"]["properties"]["operation_id"];
+            if schema.is_null() {
+                continue;
+            }
+            assert_eq!(schema["pattern"], OPERATION_ID_PATTERN, "{}", tool["name"]);
+            assert!(
+                schema["description"].as_str().unwrap().contains("no dots"),
+                "{}",
+                tool["name"]
+            );
+        }
+        let plugin = with_operation_id(&json!({ "type": "object" }));
+        assert_eq!(
+            plugin["properties"]["operation_id"]["pattern"],
+            OPERATION_ID_PATTERN
+        );
     }
 
     #[test]
