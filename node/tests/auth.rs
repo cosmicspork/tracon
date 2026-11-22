@@ -869,7 +869,10 @@ async fn an_unknown_api_path_is_a_json_404_and_a_client_route_is_the_interface()
         ("POST", "/api/nope"),
         ("GET", "/api"),
         ("GET", "/api/nope/deeper"),
+        // Removed with the node's own Jira tools (#1068).
+        ("GET", "/api/jira/search"),
         ("GET", "/mcp/nope"),
+        ("POST", "/mcp/nope"),
     ] {
         let (s, media, body) = fetch(&n, method, path, LOCAL, here, &[]).await;
         assert_eq!(s, StatusCode::NOT_FOUND, "{method} {path}");
@@ -913,7 +916,9 @@ async fn an_unknown_api_path_is_a_json_404_and_a_client_route_is_the_interface()
         ("GET", "/api/nope"),
         ("POST", "/api/nope"),
         ("GET", "/api"),
+        ("GET", "/api/jira/search"),
         ("GET", "/mcp/nope"),
+        ("POST", "/mcp/nope"),
         ("GET", "/mcp/external/work"),
     ] {
         let (s, _, body) = fetch(&n, method, path, REMOTE, remote, &[]).await;
