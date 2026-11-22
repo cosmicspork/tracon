@@ -57,26 +57,28 @@ a template a peer built; each enters here when real work hits it.
 
 Needed for daily use, but not blocking it today.
 
-**Plugins, first.** Companions run beside the node today: workboard and hoja are loopback
-apps that agents reach around it, so a caller is whoever it claims to be, their approval
-cards sit in a second queue, and the operator starts their processes by hand. Brokered
-tools are compiled in, so the node carries Jira's wiki markup and Jira-specific cards. A plugin is a
-separate executable, optionally with a static UI, published as a GitHub release in a
-fixed shape. The node installs and updates one only on the operator's approval, pinned
-by digest; supervises one process per plugin and channel; brokers its tools under policy
-with a signed caller context; lends it credentials; and draws every approval card it
-raises. It is not an in-process runtime: a plugin is trusted code the operator chose,
-run on the host as consulta's sidecar is now. `gh` and `glab` stay built in, because
-review and publication rest on them.
+**Plugins, first.** Shipped in 0.53.0 to 0.57.0; `docs/reference/plugins.md` is the
+contract. Companions used to run beside the node: workboard and hoja were loopback apps
+that agents reached around it, so a caller was whoever it claimed to be, their approval
+cards sat in a second queue, and the operator started their processes by hand. Brokered
+tools were compiled in, so the node carried Jira's wiki markup and Jira-specific cards. A
+plugin is a separate executable, optionally with a static UI, published as a GitHub
+release in a fixed shape. The node installs and updates one only on the operator's
+approval, pinned by digest; supervises one process per plugin and channel; brokers its
+tools under policy with a signed caller context; lends it credentials; and draws every
+approval card it raises. It is not an in-process runtime: a plugin is trusted code the
+operator chose, run on the host as sql-review is now. `gh` and `glab` stay built in,
+because review and publication rest on them.
 
-- [ ] The contract, install, update and supervision, proven by moving consulta out.
-- [ ] Jira extracted to its own repository as a standalone CLI that also ships as a
+- [x] The contract, install, update and supervision, proven by moving SQL out of the node
+      into the sql-review plugin, which replaces consulta (#949, #982, #997, #1003).
+- [x] Jira extracted to its own repository as a standalone CLI that also ships as a
       plugin: writing tools with a preview and a staleness check, formats converted to and
       from Markdown by the plugin that owns them, and one plugin calling another through
       the node (workboard's refresh). The node's Jira module and the interface's wiki
-      renderer go.
-- [ ] Approval cards raised by a plugin, with a word-diff format (hoja).
-- [ ] Plugin UIs served by the node, isolated from its origin (workboard, hoja).
+      renderer go (#1005, #1006, #1012, #1020).
+- [x] Approval cards raised by a plugin, with a word-diff format (hoja) (#1020, #1025).
+- [x] Plugin UIs served by the node, isolated from its origin (workboard, hoja) (#1013).
 
 **Sessions and accounting**
 
@@ -146,14 +148,15 @@ hit on a real task.
       output goes back to the caller and is attached to nothing. A failed check shows on
       the review card and does not refuse the submission. A repository with no `[[repo]]`
       entry is refused with a pointer to `repo_setup_draft`.
-- [ ] **Checks start warm.** A required check still prepares from the repository's base
-      cache, so tracon's `just check` compiles the workspace twice from nothing (clippy, then
-      nextest) and runs past five minutes on this machine. The session cache (#390) is not
-      the answer: no check may build on what an agent wrote. A node-built cache of the
-      default branch, made when the repository image is built and mounted read-only, is.
-      Half of it exists: the image build warms the base cache by running `prepare` on the
-      default branch, so dependencies arrive warm. Build output does not, because the
-      warm-up never builds and checks get no `CARGO_TARGET_DIR` under `/cache`.
+- [ ] **Checks start warm.** Their dependencies do: the image build warms the base cache
+      by running `prepare` on the default branch, and since #1009 a review's preparation
+      and checks start from the snapshot's warm cache on every runtime, Kubernetes pods and
+      Apple VMs included. Their build output does not, because the warm-up never builds and
+      checks get no `CARGO_TARGET_DIR` under `/cache`, so tracon's `just check` still
+      compiles the workspace twice from nothing (clippy, then nextest) and runs past five
+      minutes on this machine. The session cache (#390) is not the answer: no check may
+      build on what an agent wrote. A node-built cache of the default branch's build
+      output, made when the repository image is built and mounted read-only, is.
 
 
 **Node data**
