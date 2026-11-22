@@ -2384,16 +2384,25 @@ async fn the_nodes_old_jira_tool_names_are_unknown_tools() {
     for old in OLD_JIRA_TOOLS {
         assert!(!names.iter().any(|n| n == old), "{old} in {names:?}");
     }
-    // Like any name the node has no tool for, it is not refused by name: no
-    // rule names it, so it is asked, and fails once allowed.
+    // Like any name the channel is not offered, it is refused at once: no
+    // card is raised and nothing runs.
     for name in ["issue_search", "no_such_tool"] {
-        let id = ask(&h, name, json!({ "jql": "project = WRK" })).await;
-        let (status, _) = answer(&h, &id, json!({ "option_id": "allow_once" })).await;
-        assert_eq!(status, StatusCode::OK);
-        let out = settled(&h, &id).await;
-        assert_eq!(out["state"], "failed", "{out}");
-        assert_eq!(out["reason"], format!("no tool named {name}"), "{out}");
+        let (_, v) = mcp(
+            &h.operator,
+            "work",
+            tool_call(name, json!({ "jql": "project = WRK" })),
+        )
+        .await;
+        let (err, out) = outcome(&v);
+        assert!(err, "{out}");
+        assert_eq!(
+            out,
+            json!(format!(
+                "no tool named {name} on channel work; nothing was asked or run"
+            ))
+        );
     }
+    assert!(h.store.open_permission_views().unwrap().is_empty());
 }
 
 /// A Jira approval from before the plugin still opens: its wiki markup is
