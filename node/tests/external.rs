@@ -1962,6 +1962,14 @@ async fn a_merge_is_asked_only_at_the_current_head_and_its_card_names_it_in_full
         card.title,
         format!("pr_merge o/n#1: squash at {real}, its current head when asked")
     );
+
+    // A head the check reads through surrounding whitespace is the head the
+    // allowed merge runs at, not one it refuses as moved.
+    let id = ask(&h, "pr_merge", at(&format!(" {real}\n"), "op-head-3")).await;
+    answer(&h, &id, json!({ "option_id": "allow_once" })).await;
+    let out = settled(&h, &id).await;
+    assert_eq!(out["state"], "succeeded", "{out}");
+    assert_eq!(out["result"]["merged"], true, "{out}");
 }
 
 /// GitHub refuses a merge whose base moved while it ran, as it does when

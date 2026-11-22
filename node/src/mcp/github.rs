@@ -558,9 +558,12 @@ pub async fn call(
         }
         PR_MERGE => {
             let n = number(args)?;
+            // Trimmed as `merge_head_refusal` and the card read it, so a
+            // head the card was raised for is the head that is merged.
             let head_sha = args
                 .get("head_sha")
                 .and_then(Value::as_str)
+                .map(str::trim)
                 .filter(|s| s.len() >= 7)
                 .ok_or("head_sha is required")?;
             let method = args
