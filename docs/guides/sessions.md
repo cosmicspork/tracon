@@ -569,6 +569,12 @@ device, bound to the revision you made it on and to the file's diff as it was th
 the agent resubmits, files it left alone stay viewed and files it changed lose the mark
 and say they changed since you viewed them. Viewed never means approved; nothing is sent
 when you mark a file, and only a verdict decides the review.
+A large review stays responsive: every file's header shows at once, and a file's diff is
+drawn only while it is near the view (and highlighted only then), one file at a time.
+Generated files (lockfiles, minified bundles, vendored or generated code, snapshots, or a
+file that says it is generated) and oversized ones (over 1,500 changed lines, or a line
+over 5,000 characters) start folded with the reason and a **Load diff** button.
+`bun scripts/diff-bench.ts` in `spa/` measures a review of a few hundred files in Chromium.
 You approve, reject with a reason, or — on a desktop — edit the diff and send it back as
 a request for changes. A request for changes is how a review comes back: the agent
 resubmits with the same `review_id`. A rejection is final: `submit_review` refuses a

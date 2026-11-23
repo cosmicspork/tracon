@@ -14,6 +14,16 @@
   // Each file is a section of its own, so what comes later (moving file to
   // file, rendering only the files in view) has one place per file to hang on.
   //
+  // A large review stays responsive: every file's header is drawn at once,
+  // but a file's editors are made only while it is near the view, one file a
+  // task, and put away again once it is far from it; the page holds a file's
+  // place at the height it will take, or took. Every live editor follows the
+  // page's scroll, so how many there are, not how big the review is, is what
+  // scrolling costs. Since
+  // the editors draw only the rows on screen, highlighting is done only for
+  // what can be seen. Generated and very large files start folded with the
+  // reason, and are drawn on "Load diff".
+  //
   // A large change is found and kept track of file by file: a filter on the
   // paths, every file folding under its header with its own counts, a step
   // to the next or previous change (also `n` and `p`), and, given `viewed`,
@@ -32,7 +42,9 @@
   import {
     contextMismatch,
     defaultMode,
+    estimatedRows,
     expand,
+    heavy,
     fileSides,
     noLines,
     parseHunks,
@@ -77,7 +89,13 @@
   // A file's sides are rebuilt only when its own diff, context or open gaps
   // change: new sides remake its editors, and opening a gap in one file must
   // not remake every other.
-  type Shown = { file: DiffFile; sides: FileSides; view: Expanded; unavailable: string | null }
+  type Shown = {
+    file: DiffFile
+    sides: FileSides
+    view: Expanded
+    unavailable: string | null
+    heavy: ReturnType<typeof heavy>
+  }
   const memo = new Map<string, { file: DiffFile; ctx: unknown; open: ReadonlySet<number>; shown: Shown }>()
   function show(file: DiffFile): Shown {
     const ctx = contexts.get(file.path) ?? null
@@ -86,7 +104,13 @@
     if (hit && hit.file === file && hit.ctx === ctx && hit.open === open) return hit.shown
     const usable = ctx && !('why' in ctx) ? ctx : null
     const view = expand(file, usable, open)
-    const shown = { file, sides: fileSides(view.file), view, unavailable: ctx && 'why' in ctx ? ctx.why : null }
+    const shown = {
+      file,
+      sides: fileSides(view.file),
+      view,
+      unavailable: ctx && 'why' in ctx ? ctx.why : null,
+      heavy: hit?.file === file ? hit.shown.heavy : heavy(file),
+    }
     memo.set(file.path, { file, ctx, open, shown })
     return shown
   }
@@ -157,9 +181,102 @@
     untrack(() => {
       open = collapsed
         ? new Set()
-        : new Set(files.map((f) => f.file.path).filter((p) => viewed?.state(p) !== 'viewed'))
+        : new Set(files.filter((f) => !f.heavy && viewed?.state(f.file.path) !== 'viewed').map((f) => f.file.path))
     })
   })
+
+  // --- drawing only what is near --------------------------------------------
+
+  /** Heavy files the reader asked to see anyway. */
+  let loaded = $state(new Set<string>())
+  /** Files whose editors may be made: they have come near the view. */
+  // A record rather than a set: each file's body reads only its own entry, so
+  // drawing one file re-renders that file, not every header of the review.
+  const drawn = $state<Record<string, true>>({})
+  const waiting: string[] = []
+  let pumping = false
+
+  /** Make the waiting files' editors one file a task, so the page answers in between. */
+  function pump() {
+    if (pumping) return
+    pumping = true
+    const next = () => {
+      const path = waiting.shift()
+      if (path === undefined) {
+        pumping = false
+        return
+      }
+      drawn[path] = true
+      setTimeout(next, 0)
+    }
+    setTimeout(next, 0)
+  }
+
+  /**
+   * The height each file's editors took when they were last put away, and
+   * what they showed then: a height is only good for the same sides, layout
+   * and wrapping.
+   */
+  const heights = new Map<string, { sides: FileSides; mode: DiffMode | null; wrap: boolean; px: number }>()
+
+  // Near is within a screen of the view, so a file is drawn before it is reached.
+  const near =
+    typeof IntersectionObserver === 'undefined'
+      ? null
+      : new IntersectionObserver(
+          (entries) => {
+            for (const e of entries) {
+              const el = e.target as HTMLElement
+              const path = el.dataset.path
+              if (!path) continue
+              if (e.isIntersecting) {
+                if (!drawn[path] && !waiting.includes(path)) waiting.push(path)
+                continue
+              }
+              const at = waiting.indexOf(path)
+              if (at >= 0) waiting.splice(at, 1)
+              if (!drawn[path]) continue
+              const body = el.querySelector<HTMLElement>(':scope > .body')
+              const sides = files.find((f) => f.file.path === path)?.sides
+              // Fractional: rounding each file's height would add up to a drift.
+              const px = body?.getBoundingClientRect().height
+              if (px && sides) heights.set(path, { sides, mode, wrap, px })
+              delete drawn[path]
+            }
+            pump()
+          },
+          { rootMargin: '100% 0px' },
+        )
+  $effect(() => () => near?.disconnect())
+
+  /** Show a heavy file's diff after all. */
+  function load(path: string) {
+    loaded = new Set(loaded).add(path)
+  }
+
+  // A file's header row, as drawn: what its whole section is before it opens.
+  // Measured from the first header on screen; its font and controls decide it.
+  let head = $state(31)
+  let measured = false
+
+  /**
+   * The height a whole file's section will take, for the layout to skip it
+   * at before it has ever been drawn: its header, and when it is open, the
+   * body its editors take or the line said in their place.
+   */
+  function intrinsic(path: string, sides: FileSides, isOpen: boolean, isHeld: boolean): number {
+    if (!isOpen) return head
+    return head + 4 + (!sides.hunks || isHeld ? 40 : placeholder(path, sides))
+  }
+
+  /** The height a file's editors will take, held until they are made. */
+  // A row of the merge view: its 12px text at CodeMirror's line height of 1.4.
+  const ROW = 16.8
+  function placeholder(path: string, sides: FileSides): number {
+    const kept = heights.get(path)
+    if (kept && kept.sides === sides && kept.mode === mode && kept.wrap === wrap) return kept.px
+    return estimatedRows(sides, mode ?? 'split') * ROW + 8
+  }
 
   // --- finding the way through ----------------------------------------------
 
@@ -203,9 +320,16 @@
   /** Where each change in an open, shown file starts on screen, top to bottom. */
   function changeTops(): { path: string; top: number }[] {
     const tops: { path: string; top: number }[] = []
-    for (const { file } of files) {
-      if (!open.has(file.path) || !matches(file.path)) continue
-      for (const top of views.get(file.path)?.changeTops() ?? []) tops.push({ path: file.path, top })
+    for (const { file, heavy: h } of files) {
+      if (!open.has(file.path) || !matches(file.path) || (h && !loaded.has(file.path))) continue
+      const view = views.get(file.path)
+      // A file not drawn yet is stepped to by its header, which draws it.
+      if (!view) {
+        const el = sections.get(file.path)
+        if (el && file.added + file.removed > 0) tops.push({ path: file.path, top: el.getBoundingClientRect().top })
+        continue
+      }
+      for (const top of view.changeTops()) tops.push({ path: file.path, top })
     }
     return tops
   }
@@ -230,10 +354,11 @@
     const target = dir > 0 ? tops.find((t) => t.top > at + 2) : tops.findLast((t) => t.top < at - 2)
     if (target) return scrollTo(target.top)
     if (dir < 0) return
-    const below = files.find(({ file }) => {
+    const below = files.find(({ file, heavy: h }) => {
       const el = sections.get(file.path)
       return (
         el &&
+        !h &&
         matches(file.path) &&
         !open.has(file.path) &&
         viewed?.state(file.path) !== 'viewed' &&
@@ -266,7 +391,21 @@
   const sections = new Map<string, HTMLElement>()
   function register(node: HTMLElement, path: string) {
     sections.set(path, node)
-    return { destroy: () => sections.delete(path) }
+    if (!measured) {
+      measured = true
+      requestAnimationFrame(() => {
+        const h = node.querySelector('summary')?.getBoundingClientRect().height
+        if (h) head = h
+      })
+    }
+    if (near) near.observe(node)
+    else drawn[path] = true
+    return {
+      destroy: () => {
+        near?.unobserve(node)
+        sections.delete(path)
+      },
+    }
   }
 
   function toggle(path: string, on: boolean) {
@@ -405,8 +544,9 @@
   {#if filter.trim() && shownCount === 0}
     <div class="empty">No file path contains “{filter.trim()}”.</div>
   {/if}
-  {#each files as { file, sides, view, unavailable } (file.path)}
+  {#each files as { file, sides, view, unavailable, heavy: h } (file.path)}
     {@const seen = viewed?.state(file.path) ?? 'unviewed'}
+    {@const held = h !== null && !loaded.has(file.path)}
     <details
       class="file"
       class:viewed={seen === 'viewed'}
@@ -415,10 +555,12 @@
       open={open.has(file.path)}
       ontoggle={(e) => toggle(file.path, (e.currentTarget as HTMLDetailsElement).open)}
       use:register={file.path}
+      style:contain-intrinsic-block-size="auto {intrinsic(file.path, sides, open.has(file.path), held)}px"
     >
       <summary>
         <span class="path">{file.path}</span>
         {#each sides.notes as n (n)}<span class="note">{n === 'binary' ? 'binary file' : n}</span>{/each}
+        {#if h}<span class="heavy-note">{h.kind === 'generated' ? 'generated' : 'large'}</span>{/if}
         {#if seen === 'changed'}<span class="changed">changed since you viewed it</span>{/if}
         {#if sides.hunks}<span class="stat"
             ><span class="add">+{file.added}</span> <span class="del">−{file.removed}</span></span
@@ -440,6 +582,13 @@
         <div class="body">
           {#if !sides.hunks}
             <div class="empty">{noLines(sides)}</div>
+          {:else if held}
+            <div class="held">
+              <span>{h?.why}: folded so the rest of the review stays quick.</span>
+              <button type="button" onclick={() => load(file.path)}>Load diff</button>
+            </div>
+          {:else if !drawn[file.path]}
+            <div class="pending" style:height="{placeholder(file.path, sides)}px"></div>
           {:else if MergeDiff && mode}
             <MergeDiff
               {sides}
@@ -590,6 +739,9 @@
   /* A file scrolled to lands below the sticky switch, not under it. */
   .file {
     scroll-margin-top: 40px;
+    /* A file far from the view is skipped by layout and paint altogether,
+       at the size it last had or (inline) the size it will have. */
+    content-visibility: auto;
   }
   summary {
     display: flex;
@@ -632,6 +784,35 @@
   .body {
     margin-top: 4px;
     min-width: 0;
+  }
+  .heavy-note {
+    color: var(--wait);
+    white-space: nowrap;
+    font-size: 11.5px;
+  }
+  .held {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    align-items: center;
+    padding: 10px 12px;
+    background: var(--s2);
+    border-radius: 4px;
+    color: var(--dim);
+    font: 12px var(--mono);
+  }
+  .held button {
+    font: 12px var(--mono);
+    padding: 3px 10px;
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    background: var(--s1);
+    color: var(--ink);
+    cursor: pointer;
+  }
+  .pending {
+    background: var(--s2);
+    border-radius: 4px;
   }
   .empty {
     padding: 10px 12px;

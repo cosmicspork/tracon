@@ -408,3 +408,51 @@ export function expand(file: DiffFile, context: Context | null, open: ReadonlySe
   const lines = [...meta, ...out.flatMap((o) => [header(o), ...o.lines]), '']
   return { file: { ...file, lines }, gaps: out.map((o) => o.gap), tail }
 }
+
+// --- files too heavy to open by default ------------------------------------
+//
+// A lockfile, a minified bundle or a change of thousands of lines is rarely
+// what a review turns on, and drawing one costs more than the rest of the
+// review together. Such a file starts folded with the reason, and its diff is
+// drawn only when the reader asks.
+
+/** Paths a tool writes rather than a person: lockfiles, bundles, generated code. */
+const GENERATED: [RegExp, string][] = [
+  [/(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|Cargo\.lock|go\.sum|poetry\.lock|uv\.lock|Pipfile\.lock|composer\.lock|Gemfile\.lock|flake\.lock|Package\.resolved|pubspec\.lock|mix\.lock)$/, 'lockfile'],
+  [/\.min\.(js|css|mjs)$|\.(js|css)\.map$/, 'minified or a source map'],
+  [/(^|\/)(dist|vendor|node_modules|third_party)\//, 'vendored or built output'],
+  [/(\.pb\.go|_pb2(_grpc)?\.pyi?|\.pb\.(cc|h)|\.g\.dart|\.generated\.[a-z]+|\.gen\.[a-z]+)$/, 'generated code'],
+  [/(^|\/)__snapshots__\/|\.snap$/, 'test snapshots'],
+]
+/** What a generated file says about itself in its first lines. */
+const SAYS_GENERATED = /@generated|\bcode generated\b.*\bdo not edit\b|\bauto-?generated\b|\bdo not edit\b.*\bgenerated\b/i
+
+/** A file of more changed lines than this starts folded. */
+export const LARGE_LINES = 1500
+/** A file with a line longer than this starts folded: it is minified, or data. */
+export const LONG_LINE = 5000
+
+/** Why a file starts folded with its diff not drawn, or null when it opens like any other. */
+export function heavy(file: DiffFile): { kind: 'generated' | 'large'; why: string } | null {
+  for (const [re, what] of GENERATED) if (re.test(file.path)) return { kind: 'generated', why: `Generated file (${what})` }
+  let seen = 0
+  let longest = 0
+  for (const line of file.lines) {
+    if (line.length > longest) longest = line.length
+    if (seen < 8 && (line.startsWith('+') || line.startsWith(' ')) && !line.startsWith('+++')) {
+      seen++
+      if (SAYS_GENERATED.test(line)) return { kind: 'generated', why: 'Generated file (it says so in its first lines)' }
+    }
+  }
+  const changed = file.added + file.removed
+  if (changed > LARGE_LINES) return { kind: 'large', why: `Large diff: ${changed.toLocaleString('en')} changed lines` }
+  if (longest > LONG_LINE) return { kind: 'large', why: `Very long lines: one is ${longest.toLocaleString('en')} characters` }
+  return null
+}
+
+/** Rows a file's merge view will take, before it is drawn: what its place is held at. */
+export function estimatedRows(sides: Pick<FileSides, 'bLines' | 'blocks'>, mode: DiffMode): number {
+  let rows = sides.bLines.length
+  for (const k of sides.blocks) rows += mode === 'split' ? Math.max(0, k.aN - k.bN) : k.aN
+  return rows
+}
