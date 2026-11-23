@@ -272,6 +272,14 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
                                     # default branch's preparation when the image is built, and to
                                     # nothing else. Needs `dockerfile` or `build`; each credential must also list
                                     # this repository, or a `group/**` above it, in its own `repos`
+# service_volumes = ["postgres"]    # catalogue services whose data this repository keeps between
+                                    # sessions: each gets a volume of its own, mounted writable at
+                                    # /var/lib/tracon-services/<name> in every session's sandbox on every
+                                    # runtime, and taken back when the sandbox ends, after its services
+                                    # stop. A service not named starts empty in each session. Only the
+                                    # operator resets one (Settings → System → Service data,
+                                    # `tracon repo reset-volume`); a sweep removes it with the
+                                    # repository's data once no entry names the repository
 
 # [upstreams]                       # credentials the node attaches to requests for one declared host,
                                     # so the client never holds them (see "Attaching a credential
@@ -425,7 +433,10 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
                                     # boundary, checks against its .sha256 and manifest, and keeps in
                                     # <state>/bundles/browser/<chrome>/<arch>, removing other Chromes.
                                     # Otherwise an absolute path to a directory of binaries for this
-                                    # host (one <version>/<arch> of scripts/browser-bundle.sh, say).
+                                    # host (one <version>/<arch> of scripts/browser-bundle.sh, say, or
+                                    # of scripts/database-bundle.sh for `postgres` on 5432 and `redis`
+                                    # on 6379, whose `run` keeps its data in $TRACON_SERVICE_DATA when
+                                    # the repository keeps it: see `service_volumes` under [[repo]]).
                                     # Set at the node only
 # command = []                      # arguments after `run`
 # port = 9222                       # where the session reaches it
@@ -434,7 +445,9 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
                                     # counts it failed
 # run = []                          # what to start; default /opt/tracon-services/<name>/run,
                                     # followed by `command`
-# env = {}                          # environment added to the sandbox's own
+# env = {}                          # environment added to the sandbox's own, and
+                                    # TRACON_SERVICE_DATA=/var/lib/tracon-services/<name>, which exists
+                                    # only when the session's repository keeps the service's data
 # restart = "on-failure"            # "never", "on-failure" or "always"; a restart is not a failure
 
 # [[mcp_server]]                    # an MCP server outside the node (streamable HTTP). Sessions see

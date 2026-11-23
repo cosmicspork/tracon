@@ -53,7 +53,9 @@ pub fn definitions_for(names: &[&str], offered: &str) -> Vec<Value> {
                  more. It runs until the session ends; starting it again is harmless. A \
                  browser exposes the Chrome DevTools Protocol, which Playwright's \
                  `connectOverCDP` or a browser MCP can drive; screenshots it takes can be \
-                 shown with show_work. Offered here: {offered}."
+                 shown with show_work. A database (postgres, redis) starts empty unless \
+                 this repository keeps its data between sessions, which the operator \
+                 decides: the result's `data` says which. Offered here: {offered}."
             ),
             "inputSchema": {
                 "type": "object",

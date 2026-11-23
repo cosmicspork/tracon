@@ -2190,6 +2190,8 @@ export interface RepoEntry {
   prepare: string[]
   egress: string[]
   session_egress?: boolean
+  /** Catalogue services whose data this repository keeps between sessions. */
+  service_volumes?: string[]
   /** How this repository's commits reach the forge. Not edited here. */
   commits?: 'squash' | 'keep'
   /** Its commit-subject and branch rules. Not edited here. */
@@ -2369,6 +2371,22 @@ export interface EnrollStatus {
 }
 
 /** One runtime volume or state directory, and what a storage sweep makes of it. */
+/** A repository's persistent volume for one catalogue service
+ *  (`GET /api/maintenance/service-volumes`). */
+export interface ServiceVolume {
+  volume: string
+  repo: string
+  service: string
+  created_ms: number
+  /** When a session last mounted it. */
+  used_ms: number
+  bytes: number
+  /** A running session holds it: a reset waits for that session to end. */
+  live: boolean
+  /** The repository's entry still names the service. */
+  mounted: boolean
+}
+
 /** One kind of data a node holds (`GET /api/maintenance/data`). */
 export interface Holding {
   kind: string

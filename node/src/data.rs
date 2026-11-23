@@ -211,19 +211,37 @@ const KINDS: &[Kind] = &[
     },
 ];
 
+/// A repository's persistent data for a catalogue service
+/// (`crate::service_volume`): counted by its rows, weighed by its trees
+/// where the node keeps its sandboxes' files.
+const SERVICE_DATA: Kind = Kind {
+    kind: "service_data",
+    label: "Service data",
+    unit: "volume",
+    tables: &["service_volume"],
+    dirs: &[],
+    delete: Some(Delete {
+        path: "/settings#system",
+        label: "System › Service data, reset one at a time, or tracon repo reset-volume",
+    }),
+    propagation: "This node only. Kept between sessions until reset; removed with its repository's data by the [gc] schedule or tracon gc once no [[repo]] entry names the repository.",
+};
+
 /// What the node holds now. Walks the state directories, so call it off
-/// the async runtime.
-pub fn inventory(store: &Store) -> Result<Inventory, crate::store::StoreError> {
-    inventory_in(store, &Config::state_dir())
+/// the async runtime. `files_root` is where the node keeps its sandboxes'
+/// trees (`runner::sandbox_files`), which holds the service volumes.
+pub fn inventory(store: &Store, files_root: &Path) -> Result<Inventory, crate::store::StoreError> {
+    inventory_in(store, &Config::state_dir(), files_root)
 }
 
 pub fn inventory_in(
     store: &Store,
     state_dir: &Path,
+    files_root: &Path,
 ) -> Result<Inventory, crate::store::StoreError> {
     let mut holdings = Vec::new();
     let mut on_disk = 0;
-    for kind in KINDS {
+    for kind in KINDS.iter().chain([&SERVICE_DATA]) {
         let mut count = 0;
         let mut bytes = 0;
         for (i, table) in kind.tables.iter().enumerate() {
@@ -240,6 +258,13 @@ pub fn inventory_in(
             }
             bytes += size;
             on_disk += size;
+        }
+        if kind.kind == SERVICE_DATA.kind {
+            for row in store.service_volumes()? {
+                let size = size(&files_root.join(&row.volume));
+                bytes += size;
+                on_disk += size;
+            }
         }
         holdings.push(Holding {
             kind: kind.kind,
@@ -274,6 +299,11 @@ fn directory(path: &Path) -> (i64, i64) {
     (count, bytes)
 }
 
+/// What the files under `path` take, without following links out of it.
+pub fn tree_bytes(path: &Path) -> i64 {
+    size(path)
+}
+
 fn size(path: &Path) -> i64 {
     let Ok(meta) = std::fs::symlink_metadata(path) else {
         return 0;
@@ -304,7 +334,17 @@ mod tests {
         std::fs::write(dir.path().join("plugins/data/p/personal/db"), [0u8; 40]).unwrap();
         std::fs::create_dir_all(dir.path().join("stash/r1/e1/data")).unwrap();
         std::fs::write(dir.path().join("stash/r1/e1/data/shot.png"), [0u8; 60]).unwrap();
-        let inventory = inventory_in(&store, dir.path()).unwrap();
+        std::fs::create_dir_all(dir.path().join("sandbox-files/tracon-svcdata-a")).unwrap();
+        std::fs::write(
+            dir.path().join("sandbox-files/tracon-svcdata-a/PG_VERSION"),
+            [0u8; 7],
+        )
+        .unwrap();
+        store
+            .service_volume_used("tracon-svcdata-a", "/r", "postgres", 1)
+            .unwrap();
+        let inventory =
+            inventory_in(&store, dir.path(), &dir.path().join("sandbox-files")).unwrap();
         let kinds: Vec<&str> = inventory.holdings.iter().map(|h| h.kind).collect();
         assert_eq!(
             kinds,
@@ -319,26 +359,33 @@ mod tests {
                 "workspaces",
                 "harness",
                 "stash",
-                "plugins"
+                "plugins",
+                "service_data"
             ]
         );
+        // A repository's service data is counted by its volumes and weighs
+        // what its trees take.
+        let service_data = &inventory.holdings[11];
+        assert_eq!(service_data.count, 1);
+        assert!(service_data.bytes >= 7, "{}", service_data.bytes);
         let workspaces = &inventory.holdings[7];
         assert_eq!((workspaces.count, workspaces.bytes), (2, 100));
-        // Plugins are counted by their rows, and weigh their files too.
         // The stash is counted by repository, and weighs what it keeps.
         let stash = &inventory.holdings[9];
         assert_eq!((stash.count, stash.bytes), (1, 60));
+        // Plugins are counted by their rows, and weigh their files too.
         let plugins = &inventory.holdings[10];
         assert_eq!((plugins.count, plugins.bytes), (0, 40));
         assert_eq!(
             inventory.total_bytes,
-            inventory.database_bytes + 200,
+            inventory.database_bytes + 207,
             "the total is the database and the directories"
         );
         // Each table a kind names is one the schema has: a renamed table
         // would otherwise weigh nothing, silently.
         let missing: Vec<&str> = KINDS
             .iter()
+            .chain([&SERVICE_DATA])
             .flat_map(|k| k.tables.iter().copied())
             .filter(|t| !store.has_table(t))
             .collect();
@@ -352,6 +399,7 @@ mod tests {
                 "workspaces",
                 "harness",
                 "plugins",
+                "service_data",
             ]
             .contains(&holding.kind);
             assert_eq!(deletable, named, "{}", holding.kind);

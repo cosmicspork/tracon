@@ -3930,6 +3930,22 @@ impl Manager {
         let mut mounts = scratch.mounts;
         materialize::own_state(&mut mounts, &scratch.volume);
         mounts.push(workspace.mount(SANDBOX_WORKDIR, false));
+        // The repository's services' data, kept between its sessions where
+        // its `[[repo]]` entry asks (`crate::service_volume`): a tree the
+        // node keeps, sent in over the files channel on every runtime,
+        // DigitalOcean's included, and taken back when the sandbox ends.
+        if let Some(origin) = origin.as_deref() {
+            let files = self
+                .backend
+                .sandbox_files_store()
+                .unwrap_or_else(crate::runner::sandbox_files::FilesStore::for_node);
+            mounts.extend(crate::service_volume::session_mounts(
+                &self.cfg,
+                &self.store,
+                &files,
+                origin,
+            ));
+        }
         // A session whose pod this node's runtime cannot schedule is placed
         // again with that runtime counted full, once: on to DigitalOcean
         // where it may go (or the operator asked), else ended with the

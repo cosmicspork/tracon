@@ -1407,7 +1407,21 @@ runs a headless browser unattended and asks about anything else. Loopback is onl
 session's if the service binds nothing wider, so the release's browser bundle starts
 Chrome on 127.0.0.1 directly, and the `browser` workflow smoke-tests each bundle,
 upstream base bumps included. An entry that is only an image, which once ran as a
-container beside the sandbox, is refused at load. The service's `service` events on
+container beside the sandbox, is refused at load. Postgres and Redis are catalogue
+services like any other, from bundles `scripts/database-bundle.sh` assembles (the
+`databases` workflow smoke-tests both on both architectures). Each starts empty in a
+session unless the session's repository keeps its data: a `[[repo]]` entry's
+`service_volumes` gives each named service a volume of its own for that repository
+(`<prefix>-svcdata-<hash>`, recorded in `service_volume`), a tree the node keeps and
+sends into the sandbox at `/var/lib/tracon-services/<name>` on every runtime, the
+service's `run` finding it through `TRACON_SERVICE_DATA`. It is taken back only when the
+sandbox ends, after the sandbox's services have been stopped, so what comes back is a
+cleanly stopped database rather than files copied mid-write; with two sessions on a
+repository at once, the one that ends last is what the next finds. No tool a session has
+resets one: the operator does (Settings › System › Service data, `tracon repo
+reset-volume`), refused while a session holds it, and a sweep removes it with the
+repository's builds once no entry names the repository. It is counted in the data
+inventory as Service data. The service's `service` events on
 the session are how every path that removes the session's sandbox (its end, a kill, a
 restart's reconciliation) finds and stops its services first. A session's pause stops
 neither the sandbox nor its services today; both run until the session ends. What a repository asks of

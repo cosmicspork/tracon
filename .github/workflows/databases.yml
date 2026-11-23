@@ -1,0 +1,60 @@
+name: databases
+
+# The `postgres` and `redis` catalogue services' bundles, which a sandbox's
+# supervisor runs: assembled and smoke-tested on the stock base's own base
+# image for both architectures, each on its own kind of runner, on every PR
+# that touches them (Dependabot's upstream bumps included). The smoke test
+# checks each keeps its data in a kept directory across a stop and a start,
+# and starts empty without one.
+on:
+  pull_request:
+    paths:
+      - containers/postgres/**
+      - containers/redis/**
+      - scripts/database-bundle.sh
+      - scripts/database-bundle-smoke.sh
+      - containers/sandbox-base/Containerfile
+      - .github/workflows/databases.yml
+  push:
+    branches: [main]
+    paths:
+      - containers/postgres/**
+      - containers/redis/**
+      - scripts/database-bundle.sh
+      - scripts/database-bundle-smoke.sh
+      - containers/sandbox-base/Containerfile
+      - .github/workflows/databases.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: databases-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [postgres, redis]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            os: ubuntu-24.04
+          - arch: arm64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Podman
+        run: command -v podman || { sudo apt-get update && sudo apt-get install -y podman; }
+
+      - name: Assemble
+        run: scripts/database-bundle.sh --service ${{ matrix.service }} --arch ${{ matrix.arch }} --out services
+
+      - name: Smoke test on the base's base image
+        run: scripts/database-bundle-smoke.sh ${{ matrix.service }} services/*/${{ matrix.arch }}

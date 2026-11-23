@@ -657,6 +657,7 @@ mod tests {
             commits: Some(crate::config::Commits::Keep),
             style: None,
             warn_direct: Some(false),
+            service_volumes: vec!["postgres".into()],
         }
     }
 
@@ -675,6 +676,7 @@ mod tests {
             "prepare_credentials",
             "commits",
             "warn_direct",
+            "service_volumes",
             "path",
         ] {
             assert!(!text.contains(leaked), "{leaked} leaked into {text}");

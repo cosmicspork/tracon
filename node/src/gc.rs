@@ -17,6 +17,9 @@
 //! `tracon-check-<run>` to a check run, as `tracon-prep-…`, `tracon-warm-…`,
 //! a setup trial's `tracon-try-…` and a `fetch_branch`'s bundle
 //! `tracon-fetch-…` are to the run that made them;
+//! `tracon-svcdata-<hash>` to a repository's catalogue service
+//! (`crate::service_volume`): kept while a `[[repo]]` entry names the
+//! repository, and otherwise gone with the repository's data;
 //! `tracon-cache-<hash>` — a repository's base cache, or as
 //! `tracon-cache-r-<hash>` its sessions' build cache — to nobody (it is
 //! rebuilt on demand, so it goes only when asked for). The
@@ -119,6 +122,21 @@ pub struct Owners {
     /// The file names under `bundles/` of the tars of the bundles this node
     /// serves now (`crate::provider::kubernetes::served_tar_name`).
     pub served_tars: HashSet<String>,
+    /// Each repository's service volumes (`crate::service_volume`), by
+    /// volume name, with whether the node still builds for the repository:
+    /// a volume whose repository is retired goes with the repository's
+    /// data.
+    pub service_volumes: std::collections::HashMap<String, ServiceVolumeOwner>,
+}
+
+/// Whose data a service volume is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceVolumeOwner {
+    pub repo: String,
+    pub service: String,
+    /// A `[[repo]]` entry still names the repository (or it is a managed
+    /// clone).
+    pub current: bool,
 }
 
 impl Default for Owners {
@@ -137,6 +155,7 @@ impl Default for Owners {
             kept_images: Vec::new(),
             retired_repositories: HashSet::new(),
             served_tars: HashSet::new(),
+            service_volumes: std::collections::HashMap::new(),
         }
     }
 }
@@ -197,6 +216,21 @@ impl Owners {
             }
         }
         owners.kept_images = kept_images(store, &owners)?;
+        owners.service_volumes = store
+            .service_volumes()?
+            .into_iter()
+            .map(|row| {
+                let current = repository_is_current(repos, Path::new(&row.repo_path));
+                (
+                    row.volume,
+                    ServiceVolumeOwner {
+                        repo: row.repo_path,
+                        service: row.service,
+                        current,
+                    },
+                )
+            })
+            .collect();
         Ok(owners)
     }
 }
@@ -394,6 +428,30 @@ pub fn classify_volume(name: &str, created_ms: Option<i64>, owners: &Owners) -> 
                 false,
                 "dependency cache; included only when caches are asked for",
             )
+        };
+    }
+    if name.starts_with("svcdata-") {
+        let full = format!("{}-{name}", owners.prefix);
+        return match owners.service_volumes.get(&full) {
+            None => verdict(
+                false,
+                "a service's data that no repository is recorded for; kept",
+            ),
+            Some(owner) if owner.current => verdict(
+                false,
+                format!(
+                    "{}'s {} data, kept between its sessions; only the operator resets it",
+                    owner.repo, owner.service
+                ),
+            ),
+            Some(owner) => verdict(
+                true,
+                format!(
+                    "{}'s {} data; no [[repo]] entry names the repository, so it goes with the \
+                     repository's data",
+                    owner.repo, owner.service
+                ),
+            ),
         };
     }
     if name.starts_with("provider-") {
@@ -885,6 +943,12 @@ pub async fn sweep(
             let lock = crate::workspace::volume_lock(&item.name);
             let _guard = lock.lock().await;
             match backend.remove_volume(&item.name).await {
+                Ok(()) if crate::runner::sandbox_files::is_service_data(&item.name) => {
+                    item.removed = true;
+                    if let Err(error) = store.forget_service_volume(&item.name) {
+                        tracing::warn!(volume = %item.name, %error, "could not forget a removed service volume");
+                    }
+                }
                 Ok(()) => item.removed = true,
                 Err(error) => {
                     failed_volumes.insert(item.name.clone());
@@ -1119,6 +1183,53 @@ mod tests {
         assert!(classify_volume("tracon-cache-abc", None, &o).0);
         assert!(classify_volume("tracon-cache-r-abc", None, &o).0);
         assert!(classify_volume("tracon-provider-anthropic", None, &o).0);
+    }
+
+    /// A repository's service data stays while the repository has an entry,
+    /// whatever else is asked for, and goes with the repository's data once
+    /// none names it.
+    #[test]
+    fn a_service_volume_goes_only_with_its_repositorys_data() {
+        let mut o = owners();
+        o.caches = true;
+        let owner = |current| ServiceVolumeOwner {
+            repo: "/src/app".into(),
+            service: "postgres".into(),
+            current,
+        };
+        o.service_volumes
+            .insert("tracon-svcdata-kept".into(), owner(true));
+        o.service_volumes
+            .insert("tracon-svcdata-retired".into(), owner(false));
+        let (remove, reason) = classify_volume("tracon-svcdata-kept", None, &o);
+        assert!(!remove, "{reason}");
+        assert!(reason.contains("only the operator resets it"), "{reason}");
+        let (remove, reason) = classify_volume("tracon-svcdata-retired", None, &o);
+        assert!(remove, "{reason}");
+        assert!(
+            reason.contains("goes with the repository's data"),
+            "{reason}"
+        );
+        // One no row names is never guessed at.
+        assert!(!classify_volume("tracon-svcdata-unknown", None, &o).0);
+    }
+
+    #[test]
+    fn owners_say_whether_a_service_volumes_repository_is_current() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .service_volume_used("tracon-svcdata-a", "/src/app", "postgres", 1)
+            .unwrap();
+        store
+            .service_volume_used("tracon-svcdata-b", "/src/gone", "redis", 1)
+            .unwrap();
+        let repos = vec![crate::config::Repo {
+            path: "/src/app".into(),
+            ..Default::default()
+        }];
+        let owners = Owners::read(&store, "n1", false, &repos).unwrap();
+        assert!(owners.service_volumes["tracon-svcdata-a"].current);
+        assert!(!owners.service_volumes["tracon-svcdata-b"].current);
     }
 
     /// A second node on the same container host names its volumes with its

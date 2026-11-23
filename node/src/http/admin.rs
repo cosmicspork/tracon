@@ -680,13 +680,110 @@ pub async fn storage_schedule() -> Json<Value> {
     Json(scheduled())
 }
 
+/// Where this node keeps its sandboxes' trees, the service volumes among
+/// them.
+fn service_files(s: &AppState) -> crate::runner::sandbox_files::FilesStore {
+    s.manager
+        .backend()
+        .sandbox_files_store()
+        .unwrap_or_else(crate::runner::sandbox_files::FilesStore::for_node)
+}
+
+/// `GET /api/maintenance/service-volumes`: each repository's persistent
+/// volume for a catalogue service, what it weighs and whether a session
+/// holds it now.
+pub async fn service_volumes(State(s): State<AppState>) -> ApiResult<Json<Value>> {
+    let store = s.store().clone();
+    let cfg = s.cfg.clone();
+    let files = service_files(&s);
+    let volumes =
+        tokio::task::spawn_blocking(move || crate::service_volume::list(&cfg, &store, &files))
+            .await
+            .map_err(|error| {
+                ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+            })??;
+    Ok(Json(json!({ "volumes": volumes })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResetServiceVolume {
+    /// The volume, as the listing names it; or `repo` and `service`.
+    #[serde(default)]
+    pub volume: Option<String>,
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
+    pub service: Option<String>,
+}
+
+/// `POST /api/maintenance/service-volumes/reset`: remove a repository's
+/// data for one service, so its next session starts the service empty. At
+/// the node only, as the storage sweep is: no session's tool reaches it.
+/// Refused while a running session holds the volume.
+pub async fn reset_service_volume(
+    _local: Loopback,
+    State(s): State<AppState>,
+    Json(body): Json<ResetServiceVolume>,
+) -> ApiResult<Json<Value>> {
+    let volume = match (body.volume, body.repo, body.service) {
+        (Some(volume), _, _) => volume,
+        (None, Some(repo), Some(service)) => {
+            crate::service_volume::find(s.store(), &repo, &service)?.ok_or_else(|| {
+                ApiError::new(
+                    StatusCode::NOT_FOUND,
+                    format!("no {service} volume for repository {repo} on this node"),
+                )
+            })?
+        }
+        _ => {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "name the volume, or the repository and the service",
+            ))
+        }
+    };
+    let held = s.store().service_volume(&volume)?.ok_or_else(|| {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            format!("no service volume {volume} on this node"),
+        )
+    })?;
+    if crate::runner::sandbox_files::is_live(&volume) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            format!(
+                "a running session on {} holds its {} data; reset it once that session has ended",
+                held.repo_path, held.service
+            ),
+        ));
+    }
+    crate::service_volume::reset(
+        s.manager.backend().as_ref(),
+        s.store(),
+        &service_files(&s),
+        &volume,
+    )
+    .await
+    .map_err(|error| ApiError::new(StatusCode::CONFLICT, error))?;
+    tracing::info!(%volume, repo = %held.repo_path, service = %held.service, "the operator reset a service's data");
+    Ok(Json(json!({
+        "reset": volume,
+        "repo": held.repo_path,
+        "service": held.service,
+    })))
+}
+
 /// `GET /api/maintenance/data`: what this node holds, kind by kind, how
 /// much it weighs, and where each kind that can be deleted is deleted.
 pub async fn data(State(s): State<AppState>) -> ApiResult<Json<crate::data::Inventory>> {
     let store = s.store().clone();
-    let inventory = tokio::task::spawn_blocking(move || crate::data::inventory(&store))
-        .await
-        .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
+    let files = service_files(&s);
+    let inventory =
+        tokio::task::spawn_blocking(move || crate::data::inventory(&store, files.root()))
+            .await
+            .map_err(|error| {
+                ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+            })??;
     Ok(Json(inventory))
 }
 

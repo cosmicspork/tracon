@@ -76,6 +76,7 @@ pub use policy_rollouts::*;
 pub use publication::*;
 pub use records::*;
 pub use repo_image::*;
+pub use services::ServiceVolumeRow;
 pub use transfers::*;
 
 pub struct Store {
