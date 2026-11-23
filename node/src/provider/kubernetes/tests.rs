@@ -719,6 +719,7 @@ fn a_pod_the_scheduler_has_no_room_for_is_unschedulable() {
         &k.resources,
         Duration::from_secs(61),
         &pod::ScaleUp::Unsaid,
+        false,
     ) else {
         panic!("not a refusal");
     };
@@ -892,15 +893,21 @@ async fn a_pool_places_sandbox_pods_by_its_selector_and_tolerations() {
 /// A pod in a pool the scheduler has no place for, while it does: its
 /// condition, and the pod's events from `events`.
 fn pending_in_pool(events: serde_json::Value) -> axum::Router {
+    scheduled_after(None, events)
+}
+
+/// A pod the scheduler has no place for until `scheduled` has passed (from
+/// the router's making; never for `None`), and running from then on; the
+/// pod's events from `events`.
+fn scheduled_after(scheduled: Option<Duration>, events: serde_json::Value) -> axum::Router {
+    let made = tokio::time::Instant::now();
     axum::Router::new()
         .route(
             "/api/v1/namespaces/tracon-node/pods/tracon-c-1",
-            axum::routing::get(|| async {
-                axum::Json(serde_json::json!({
-                    "apiVersion": "v1",
-                    "kind": "Pod",
-                    "metadata": {"name": "tracon-c-1", "namespace": "tracon-node", "uid": "u-1"},
-                    "status": {
+            axum::routing::get(move || async move {
+                let status = match scheduled.is_some_and(|after| made.elapsed() >= after) {
+                    true => serde_json::json!({"phase": "Running"}),
+                    false => serde_json::json!({
                         "phase": "Pending",
                         "conditions": [{
                             "type": "PodScheduled",
@@ -908,7 +915,13 @@ fn pending_in_pool(events: serde_json::Value) -> axum::Router {
                             "reason": "Unschedulable",
                             "message": "0/1 nodes are available: 1 node(s) didn't match Pod's node affinity/selector.",
                         }],
-                    },
+                    }),
+                };
+                axum::Json(serde_json::json!({
+                    "apiVersion": "v1",
+                    "kind": "Pod",
+                    "metadata": {"name": "tracon-c-1", "namespace": "tracon-node", "uid": "u-1"},
+                    "status": status,
                 }))
             }),
         )
@@ -1010,8 +1023,7 @@ async fn a_pod_waits_for_the_node_the_autoscaler_adds_up_to_its_grace() {
 }
 
 /// One the autoscaler will not add a node for (the pool is at its largest)
-/// is full, after the usual grace, and says why; so is one in a pool with no
-/// autoscaler at all.
+/// is full, after the usual grace, and says why.
 #[tokio::test(start_paused = true)]
 async fn a_pod_the_autoscaler_will_not_place_is_given_up_after_the_usual_grace() {
     let (waited, message) = given_up(serde_json::json!([event(
@@ -1032,11 +1044,93 @@ async fn a_pod_the_autoscaler_will_not_place_is_given_up_after_the_usual_grace()
         message.contains("[runtime.kubernetes] unschedulable_grace_secs"),
         "{message}"
     );
+}
 
+/// A pod in a pool the autoscaler has said nothing of (a pool at zero
+/// whose autoscaler takes its time, or none at all) is waited on for the
+/// pool's `scale_up_grace_secs` from the start, not the usual grace, and
+/// the refusal says that it said nothing and which key set the wait.
+#[tokio::test(start_paused = true)]
+async fn a_pod_in_a_pool_the_autoscaler_says_nothing_of_waits_the_scale_up_grace() {
     let (waited, message) = given_up(serde_json::json!([])).await;
+    assert!(waited >= Duration::from_secs(600), "{waited:?}");
+    assert!(waited < Duration::from_secs(606), "{waited:?}");
+    assert!(
+        message.contains("the cluster autoscaler reported no scale-up for it"),
+        "{message}"
+    );
+    assert!(
+        message.contains("[runtime.kubernetes.pool] scale_up_grace_secs"),
+        "{message}"
+    );
+}
+
+/// How a pod that the scheduler places after `scheduled`, with nothing
+/// from the autoscaler before then, ends: in a pool (`pooled`) or not.
+async fn scheduled_late(scheduled: Duration, pooled: bool) -> (Duration, ProviderError) {
+    let mut options = options();
+    options.listen = "127.0.0.1:0".parse().unwrap();
+    options.spec.unschedulable_grace = Duration::from_secs(60);
+    if pooled {
+        options.spec.pool = pool();
+    }
+    let provider = KubeSandboxProvider::new(
+        kube::Client::new(
+            scheduled_after(Some(scheduled), serde_json::json!([])),
+            "tracon-node",
+        ),
+        options,
+    );
+    let identity = tracon_sandbox::tls::NodeIdentity::generate().unwrap();
+    let server =
+        SandboxServer::new(&identity, tracon_sandbox::node::ServerOptions::default()).unwrap();
+    let begun = tokio::time::Instant::now();
+    let error = provider
+        .connect(
+            &Handle("tracon-c-1".into()),
+            &server,
+            Duration::from_secs(30),
+        )
+        .await
+        .err()
+        .expect("no sandbox dials in");
+    (begun.elapsed(), error)
+}
+
+/// A pod in a pool that is unschedulable for longer than the usual grace,
+/// with no word from the autoscaler, is still waited on, and starts once a
+/// node takes it: what it then waits for is its sandbox's connection
+/// (which no sandbox makes here), not a place.
+#[tokio::test(start_paused = true)]
+async fn a_pod_in_a_pool_scheduled_after_the_usual_grace_starts() {
+    let (waited, error) = scheduled_late(Duration::from_secs(180), true).await;
+    let ProviderError::Failed(message) = &error else {
+        panic!("{error}");
+    };
+    assert!(
+        message.contains("tracon-c-1 did not connect within 30 s"),
+        "{message}"
+    );
+    assert!(waited >= Duration::from_secs(210), "{waited:?}");
+    assert!(waited < Duration::from_secs(216), "{waited:?}");
+}
+
+/// Without a pool, the same pod is given up at the usual grace, before the
+/// scheduler would have placed it.
+#[tokio::test(start_paused = true)]
+async fn without_a_pool_a_pod_scheduled_after_the_usual_grace_is_given_up() {
+    let (waited, error) = scheduled_late(Duration::from_secs(180), false).await;
+    let ProviderError::Refused { reason, message } = &error else {
+        panic!("{error}");
+    };
+    assert_eq!(*reason, pod::UNSCHEDULABLE);
+    assert!(
+        message.contains("[runtime.kubernetes] unschedulable_grace_secs"),
+        "{message}"
+    );
+    assert!(!message.contains("autoscaler"), "{message}");
     assert!(waited >= Duration::from_secs(60), "{waited:?}");
     assert!(waited < Duration::from_secs(66), "{waited:?}");
-    assert!(!message.contains("autoscaler"), "{message}");
 }
 
 /// A connection is handed only to the run expected at its address, whether

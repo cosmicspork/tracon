@@ -2217,11 +2217,14 @@ pub struct KubePool {
     /// Taints a sandbox pod tolerates, as Kubernetes spells a toleration:
     /// the pool's own `NoSchedule` taint, which keeps everything else off it.
     pub tolerations: Vec<KubeToleration>,
-    /// How long a sandbox pod the cluster autoscaler is adding a node for
-    /// (its `TriggeredScaleUp` event) may stay unschedulable before the
-    /// node gives it up, in place of `unschedulable_grace_secs`: a new node
-    /// takes minutes to boot and join. Bounded by `start_timeout_secs`, which
-    /// still applies.
+    /// How long a sandbox pod in the pool may stay unschedulable before the
+    /// node gives it up, in place of `unschedulable_grace_secs`, counted
+    /// from when it was first unschedulable: a new node takes minutes to
+    /// boot and join, and an autoscaler may say nothing of the pod for a
+    /// while. Only a `NotTriggerScaleUp` from the cluster autoscaler (no node
+    /// it could add would take the pod) gives it up after
+    /// `unschedulable_grace_secs` instead. Bounded by `start_timeout_secs`,
+    /// which still applies.
     pub scale_up_grace_secs: u64,
 }
 

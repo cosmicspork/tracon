@@ -852,12 +852,14 @@ carry the pool's node selector (and the base's architecture, `kubernetes.io/arch
 tolerations in place of the affinity to the node pod, so sessions and checks run on
 nodes of their own; nothing a sandbox reaches is tied to a machine (the bundle, the
 supervisor's dial and the token are bound to pod addresses, the policies to labels). A
-pool the cluster's autoscaler sizes from zero changes what "no place" means: while the
-pod is `Unschedulable` the provider reads its events every few seconds, and a
-`TriggeredScaleUp` turns the grace into `scale_up_grace_secs` (10 minutes), sticky
-from then on, since a new node takes minutes to boot and join; a `NotTriggerScaleUp`,
-or no word at all, leaves `unschedulable_grace_secs`, and the refusal carries what the
-autoscaler said. Either way the refusal is `unschedulable`, so checks queue on it as
+pool the cluster's autoscaler sizes from zero changes what "no place" means: a pod in
+the pool gets `scale_up_grace_secs` (10 minutes) from when it was first
+`Unschedulable`, since a new node takes minutes to boot and join and an autoscaler may
+not say anything of the pod for over a minute. While it waits the provider reads its
+events every few seconds: a `TriggeredScaleUp` is logged and keeps the long grace,
+sticky from then on; a `NotTriggerScaleUp` (no node it could add would take the pod)
+cuts it back to `unschedulable_grace_secs`. The refusal carries what the autoscaler
+said, or that it reported no scale-up. Either way the refusal is `unschedulable`, so checks queue on it as
 they do on a full machine. A session's start bound grows by the same allowance
 (`Backend::start_allowance`). The `runtime` check refuses a pool of another
 architecture than the pinned base, by its selector or its nodes' labels.
