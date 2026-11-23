@@ -25,14 +25,55 @@ use crate::store::plugins::{Build, Pending, PluginRow, REMOVED};
 use crate::store::Store;
 use install::{InstallError, Staged};
 
-/// Whether a channel that may use the credentials `available` is offered
-/// the plugin's tools: it binds one the manifest declares, by name or
-/// pattern, or the plugin declares none.
-pub fn offered(manifest: &manifest::Manifest, available: &[&str]) -> bool {
-    manifest.credentials.is_empty()
+/// Whether `channel`, which may use the credentials `available`, is
+/// offered the plugin: its `[[plugin]]` entry's `channels`, when set, lists
+/// the channel, and the channel binds a credential the manifest declares,
+/// by name or pattern, or the plugin declares none.
+pub fn offered(
+    manifest: &manifest::Manifest,
+    entry: Option<&crate::config::PluginEntry>,
+    channel: &str,
+    available: &[&str],
+) -> bool {
+    unoffered(manifest, entry, channel, available).is_none()
+}
+
+/// Why the plugin is not offered on `channel` ([`offered`]), as a caller
+/// is told it; `None` when it is.
+pub fn unoffered(
+    manifest: &manifest::Manifest,
+    entry: Option<&crate::config::PluginEntry>,
+    channel: &str,
+    available: &[&str],
+) -> Option<String> {
+    let plugin = &manifest.name;
+    if let Some(listed) = entry.and_then(|e| e.channels.as_ref()) {
+        if !listed.iter().any(|c| c == channel) {
+            let lists = match listed.is_empty() {
+                true => "lists no channel".to_string(),
+                false => format!("lists only {}", listed.join(", ")),
+            };
+            return Some(format!(
+                "plugin {plugin} is not offered on channel {channel}: its [[plugin]] channels in node.toml {lists}"
+            ));
+        }
+    }
+    let bound = manifest.credentials.is_empty()
         || available
             .iter()
-            .any(|binding| manifest.credentials.iter().any(|c| c.matches(binding)))
+            .any(|binding| manifest.credentials.iter().any(|c| c.matches(binding)));
+    if bound {
+        return None;
+    }
+    let declared: Vec<&str> = manifest
+        .credentials
+        .iter()
+        .map(|c| c.pattern.as_str())
+        .collect();
+    Some(format!(
+        "plugin {plugin} is not offered on channel {channel}: it needs a credential matching {} bound to it",
+        declared.join(" or ")
+    ))
 }
 
 /// What the plugin is called to a person or a session: its `[ui]` title,
@@ -735,13 +776,43 @@ mod tests {
     #[test]
     fn a_plugin_is_offered_to_a_channel_binding_a_credential_it_declares() {
         let m = manifest::Manifest::parse(manifest::tests::EXAMPLE).unwrap();
-        assert!(offered(&m, &["github", "sql-read"]));
-        assert!(offered(&m, &["sql-write-prod"]));
-        assert!(!offered(&m, &["github", "sql-readx"]));
-        assert!(!offered(&m, &[]));
+        assert!(offered(&m, None, "work", &["github", "sql-read"]));
+        assert!(offered(&m, None, "work", &["sql-write-prod"]));
+        assert!(!offered(&m, None, "work", &["github", "sql-readx"]));
+        assert!(!offered(&m, None, "work", &[]));
         let mut open = m.clone();
         open.credentials.clear();
-        assert!(offered(&open, &[]));
+        assert!(offered(&open, None, "work", &[]));
+    }
+
+    #[test]
+    fn an_entrys_channels_narrow_the_credential_rule_and_an_empty_list_offers_none() {
+        let m = manifest::Manifest::parse(manifest::tests::EXAMPLE).unwrap();
+        let mut open = m.clone();
+        open.credentials.clear();
+        let entry = |channels: Option<&[&str]>| crate::config::PluginEntry {
+            name: m.name.clone(),
+            channels: channels.map(|c| c.iter().map(|c| c.to_string()).collect()),
+            ..Default::default()
+        };
+        // Unset: the credential rule alone, as before.
+        let unset = entry(None);
+        assert!(offered(&open, Some(&unset), "personal", &[]));
+        // Listed: only there, and still only where a declared credential is bound.
+        let work = entry(Some(&["work"]));
+        assert!(offered(&open, Some(&work), "work", &[]));
+        let why = unoffered(&open, Some(&work), "personal", &[]).unwrap();
+        assert!(
+            why.contains("[[plugin]] channels in node.toml lists only work"),
+            "{why}"
+        );
+        assert!(offered(&m, Some(&work), "work", &["sql-read"]));
+        let why = unoffered(&m, Some(&work), "work", &[]).unwrap();
+        assert!(why.contains("needs a credential matching"), "{why}");
+        // Empty: nowhere.
+        let none = entry(Some(&[]));
+        let why = unoffered(&open, Some(&none), "work", &[]).unwrap();
+        assert!(why.contains("lists no channel"), "{why}");
     }
 
     #[test]

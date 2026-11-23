@@ -75,10 +75,20 @@ fn row_view(s: &AppState, row: &PluginRow) -> Value {
         .into_iter()
         .filter(|i| i.plugin == row.name)
         .collect();
+    let live = s.cfg.live();
+    let entry = live.plugin.iter().find(|p| p.name == row.name);
+    let offered_on: Option<Vec<String>> = row.active.as_ref().map(|build| {
+        node_channels(s)
+            .into_iter()
+            .filter(|channel| unoffered(s, &row.name, build, channel).is_none())
+            .collect()
+    });
     json!({
         "name": row.name,
         "repo": row.repo,
         "state": row.state,
+        "channels": entry.and_then(|e| e.channels.as_ref()),
+        "offered_on": offered_on,
         "active": active,
         "previous": row.previous.as_ref().map(build_view),
         "pending": pending,
@@ -122,6 +132,29 @@ fn card_channel(s: &AppState, named: Option<&str>) -> ApiResult<String> {
         ));
     }
     Ok(channel)
+}
+
+/// Why `build` of plugin `name` is not offered on `channel`
+/// ([`plugins::unoffered`]); `None` when it is.
+fn unoffered(s: &AppState, name: &str, build: &Build, channel: &str) -> Option<String> {
+    let live = s.cfg.live();
+    let entry = live.plugin.iter().find(|p| p.name == name);
+    let broker = s.tools.broker.read().unwrap();
+    plugins::unoffered(
+        &build.manifest,
+        entry,
+        channel,
+        &broker.available_to(channel, &s.node_id),
+    )
+}
+
+/// The channels this node has: those it holds, or, holding none yet, the
+/// channels a fresh node starts with.
+fn node_channels(s: &AppState) -> Vec<String> {
+    match s.store().channel_list() {
+        Ok(known) if !known.is_empty() => known.into_iter().map(|c| c.name).collect(),
+        _ => DEFAULT_CHANNELS.iter().map(|c| c.to_string()).collect(),
+    }
 }
 
 /// Whether the node has `channel`: one it holds, or, holding none yet, one
@@ -412,6 +445,10 @@ pub async fn restart(
                 format!("no channel {channel} on this node"),
             ));
         }
+        let build = s.store().plugin_get(&name)?.and_then(|row| row.active);
+        if let Some(why) = build.and_then(|b| unoffered(&s, &name, &b, &channel)) {
+            return Err(ApiError::new(StatusCode::FORBIDDEN, why));
+        }
         supervisor.ensure(&name, &channel).await
     };
     let Some(status) = instance(supervisor) else {
@@ -470,17 +507,8 @@ pub async fn ui(
             format!("plugin {name} has no UI"),
         ));
     };
-    let offered = {
-        let broker = s.tools.broker.read().unwrap();
-        plugins::offered(&build.manifest, &broker.available_to(&channel, &s.node_id))
-    };
-    if !offered {
-        return Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            format!(
-                "plugin {name} is not offered on channel {channel}: it needs a credential it declares bound to the channel"
-            ),
-        ));
+    if let Some(why) = unoffered(&s, &name, &build, &channel) {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, why));
     }
     let live = s.cfg.live();
     let ports = live.plugins.ui_ports();

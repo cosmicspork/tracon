@@ -1630,3 +1630,89 @@ async fn an_approved_call_runs_only_on_the_build_its_card_showed() {
     assert_eq!(rig.lines("fake", "rebuilt", "calls.jsonl"), calls + 1);
     rig.manager.plugins().shutdown().await;
 }
+
+#[tokio::test]
+async fn an_entrys_channels_narrow_where_a_plugin_is_offered_and_started() {
+    let entry = |name: &str, channels: &[&str]| PluginEntry {
+        name: name.into(),
+        channels: Some(channels.iter().map(|c| c.to_string()).collect()),
+        ..Default::default()
+    };
+    // `open` declares no credential: listed for `narrow` only. `fake` is
+    // bound only on `narrow` and listed only for `narrow-bare`: offered
+    // nowhere, the two rules taken together.
+    let rig = rig(
+        "narrow",
+        vec![entry("open", &["narrow"]), entry("fake", &["narrow-bare"])],
+        Policy::shipped(),
+    );
+    let tools = rig.listed(&rig.ctx).await;
+    assert!(tools.iter().any(|t| t == "open__query"), "{tools:?}");
+    assert!(tools.iter().all(|t| !t.starts_with("fake__")), "{tools:?}");
+    let bare = rig.listed(&rig.bare).await;
+    assert!(bare.iter().all(|t| !t.contains("__")), "{bare:?}");
+
+    for (ctx, name) in [(&rig.ctx, "fake__query"), (&rig.bare, "open__query")] {
+        let out = rig.call_as(ctx, name, json!({ "sql": "SELECT 1" })).await;
+        assert_eq!(out["isError"], true, "{name}: {out}");
+        assert!(text(&out).contains("[[plugin]] channels"), "{name}: {out}");
+    }
+    // A format the plugin owns is not converted where it is not offered.
+    let refused = rig
+        .tools
+        .convert("narrow", "fake_wiki", "markdown", "h1. T")
+        .await
+        .unwrap_err();
+    assert!(refused.contains("[[plugin]] channels"), "{refused}");
+
+    // Neither listing, call nor conversion started an instance where its
+    // plugin is not offered.
+    let running: Vec<(String, String)> = rig
+        .manager
+        .plugins()
+        .status()
+        .into_iter()
+        .map(|i| (i.plugin, i.channel))
+        .collect();
+    assert_eq!(running, [("open".to_string(), "narrow".to_string())]);
+    rig.manager.plugins().shutdown().await;
+}
+
+#[tokio::test]
+async fn a_card_held_when_its_plugins_channels_narrow_previews_and_runs_nothing() {
+    let rig = rig(
+        "narrowed",
+        vec![unpreviewed(allow("fake", &["query"]))],
+        Policy::shipped(),
+    );
+    rig.listed(&rig.ctx).await;
+    let id = asked(&rig.call("fake__describe", json!({ "sql": "x" })).await);
+    rig.manager.plugins().shutdown().await;
+
+    let path = rig.state.join("narrowed-node.toml");
+    let text = "[[plugin]]\nname = \"fake\"\nallow = [\"query\"]\nrequire_preview = false\nchannels = []\n";
+    std::fs::write(&path, text).unwrap();
+    let newer: Config = toml::from_str(text).unwrap();
+    rig.tools.cfg.apply_live_at(
+        &path,
+        &newer,
+        &tracon::config::edit::file_hash(&path).unwrap(),
+    );
+    assert!(rig
+        .listed(&rig.ctx)
+        .await
+        .iter()
+        .all(|t| !t.starts_with("fake__")));
+    let shown = rig.open(&id).await.expect("the card says why");
+    assert_eq!(shown["preview"]["status"], "refused", "{shown}");
+    let why = shown["preview"]["error"].as_str().unwrap();
+    assert!(why.contains("lists no channel"), "{why}");
+    let settled = rig.approve(&id).await;
+    assert_eq!(settled.state, approvals::FAILED, "{settled:?}");
+    assert_eq!(rig.lines("fake", "narrowed", "calls.jsonl"), 0);
+    // The instance the call was asked on was stopped above; nothing since
+    // started it again.
+    let fake = rig.status("fake", "narrowed");
+    assert_eq!((fake.state, fake.pid), (State::Stopped, None));
+    rig.manager.plugins().shutdown().await;
+}

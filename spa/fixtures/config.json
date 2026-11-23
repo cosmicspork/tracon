@@ -2601,6 +2601,24 @@
     },
     {
       "admin": true,
+      "apply": "live",
+      "array": "plugin",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "plugin.channels",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "item": "string",
+        "kind": "list",
+        "optional": true
+      }
+    },
+    {
+      "admin": true,
       "apply": "restart",
       "editable": true,
       "editable_at_node": true,

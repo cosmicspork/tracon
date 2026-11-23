@@ -67,8 +67,9 @@ update**, which raises the same update card on the channel picked in the card's 
 and **Roll back to `<previous>`**, which asks in the page first. That works from the
 PWA on a node you reach through the hub, with a passkey confirming the rollback.
 Installing and removing stay with `tracon plugin`.
-`tracon plugin ls` lists what is installed, the version before it, and any build waiting
-on a card. It also lists each tool of the active build and how a call to it is answered
+`tracon plugin ls` lists what is installed, the version before it, any build waiting
+on a card, and the channels it is offered on now (with its `[[plugin]] channels`, when
+set). It also lists each tool of the active build and how a call to it is answered
 now (runs, asked or refused) and by which rule. That answer is the signed policy's on a
 channel no rule is scoped to, with the plugin's `[[plugin]]` entry applied. Settings ›
 Plugins shows the same.
@@ -104,7 +105,13 @@ node restart waits for running plugin processes as it waits for turns.
 A plugin's tools are offered to execute sessions and external harnesses as
 `<plugin>__<tool>`, beside the node's own, on a channel that binds a credential the
 manifest declares (by its `name`, or a binding its `pattern` matches), or on every
-channel when it declares none. A plan session is offered only jira-review's reads
+channel when it declares none. To keep a plugin to the channels you use it on, list them
+in its entry's `channels`: it is then offered only there, still only where its
+credentials are bound, and `channels = []` offers it nowhere. On any other channel its
+tools are not listed, a call is refused naming the setting, its page and card previews
+are refused, prose in a format it owns is shown as written, and no process of it is
+started. The change applies without a restart; a process already running on a channel
+you drop stops once it has been idle for its timeout. A plan session is offered only jira-review's reads
 (`search`, `issue`, `transitions`), and a review session none. A call is
 decided as an `[[mcp_server]]` tool's is: the signed policy first, under the `tool` kind
 and the namespaced name, then the lists in the plugin's `[[plugin]]` entry, by the
@@ -130,6 +137,7 @@ deny = ["drop_*"]
 timeout_secs = 120              # one call; 0 or unset is 60
 idle_timeout_secs = 900
 # require_preview = false       # allow its cards without a shown preview (default true)
+# channels = ["work"]           # offered only here; unset is every channel its credentials allow
 ```
 
 Each call carries a caller context in `params._meta.tracon`: the plugin and tool, a hash

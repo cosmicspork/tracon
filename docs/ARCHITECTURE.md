@@ -1098,7 +1098,11 @@ offered.
 
 **A plugin's tools are brokered as another server's are, with an attested caller.**
 They are listed as `<plugin>__<tool>` to a channel that binds a credential the manifest
-declares, and a call is decided by `upstream::decide` under an `Entry` for the plugin:
+declares (any channel, for one that declares none) and that the `[[plugin]]` entry's
+`channels`, when set, lists. That one rule (`plugin::offered`) also holds calls, pages,
+previews and the dispatch of an approved card; format conversion, which is lent nothing,
+is held to `channels` alone. Either way a plugin never runs on a channel the operator
+left out. A call is decided by `upstream::decide` under an `Entry` for the plugin:
 the signed policy by the namespaced name, a signed denial dominating, then the
 `[[plugin]]` entry's deny, ask and allow, whose allow widens nothing without a trusted
 bundle; a tool neither names is asked. The manifest's hint is shown and never read by

@@ -2401,6 +2401,11 @@ export interface PluginSummary {
   instances: PluginInstance[]
   /** The active build's tools; empty while none is active, and from an older node. */
   tools?: PluginTool[]
+  /** Its `[[plugin]]` entry's `channels`: `null` when unset, so every channel its credentials allow. */
+  channels?: string[] | null
+  /** The node's channels it is offered on now, by both rules; `null` with no active build,
+      absent from an older node. */
+  offered_on?: string[] | null
 }
 
 /** One build of a plugin, as `GET /api/plugins` names it. */

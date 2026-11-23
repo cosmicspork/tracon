@@ -722,21 +722,21 @@ impl Tools {
                     .definitions(&self.cfg.live().mcp_server, channel, &available),
             );
             // So are a plugin's: what it lists once started, for a channel
-            // that binds a credential it declares.
-            out.extend(self.plugin_definitions(&available));
+            // it is offered on.
+            out.extend(self.plugin_definitions(channel, &available));
         }
         out
     }
 
-    /// The tools of every active plugin offered to a channel that may use
+    /// The tools of every active plugin offered to `channel`, which may use
     /// `available`, as their builds last listed them. A plugin not started
     /// yet, or refused at its start, offers nothing.
-    fn plugin_definitions(&self, available: &[&str]) -> Vec<Value> {
+    fn plugin_definitions(&self, channel: &str, available: &[&str]) -> Vec<Value> {
         let Some(access) = self.session.get() else {
             return Vec::new();
         };
         let mut out = Vec::new();
-        for (name, build) in self.active_plugins(available) {
+        for (name, build) in self.active_plugins(channel, available) {
             let Some(listed) = access
                 .manager
                 .plugins()
@@ -782,7 +782,7 @@ impl Tools {
         let broker = self.broker.read().unwrap();
         let available = broker.available_to(channel, node_id);
         let mut out: Vec<(String, String)> = self
-            .active_plugins(&available)
+            .active_plugins(channel, &available)
             .into_iter()
             .map(|(name, build)| {
                 let label = crate::plugin::display_name(&build.manifest)
@@ -802,12 +802,18 @@ impl Tools {
         out
     }
 
-    /// Every installed plugin's active build, by name, offered to a channel
-    /// that may use `available`.
-    fn active_plugins(&self, available: &[&str]) -> Vec<(String, crate::store::plugins::Build)> {
+    /// Every installed plugin's active build, by name, offered to `channel`,
+    /// which may use `available`.
+    fn active_plugins(
+        &self,
+        channel: &str,
+        available: &[&str],
+    ) -> Vec<(String, crate::store::plugins::Build)> {
         let Some(access) = self.session.get() else {
             return Vec::new();
         };
+        let live = self.cfg.live();
+        let entry = |name: &str| live.plugin.iter().find(|p| p.name == name);
         access
             .store
             .plugins_list()
@@ -815,7 +821,9 @@ impl Tools {
             .into_iter()
             .filter(|row| row.state != crate::store::plugins::REMOVED)
             .filter_map(|row| Some((row.name, row.active?)))
-            .filter(|(_, build)| crate::plugin::offered(&build.manifest, available))
+            .filter(|(name, build)| {
+                crate::plugin::offered(&build.manifest, entry(name), channel, available)
+            })
             .collect()
     }
 
@@ -829,7 +837,7 @@ impl Tools {
         let names: Vec<String> = {
             let broker = self.broker.read().unwrap();
             let available = broker.available_to(channel, node_id);
-            self.active_plugins(&available)
+            self.active_plugins(channel, &available)
                 .into_iter()
                 .map(|(name, _)| name)
                 .collect()
@@ -909,32 +917,22 @@ impl Tools {
         self.plugin_reachable(ctx, name, args).await
     }
 
-    /// Whether the plugin `manifest` describes is offered on the caller's
-    /// channel: the channel binds a credential it declares, or it declares
-    /// none.
+    /// Whether `plugin`, as `manifest` describes it, is offered on the
+    /// caller's channel ([`crate::plugin::offered`]).
     fn plugin_offered(
         &self,
         ctx: &CallContext,
         plugin: &str,
         manifest: &crate::plugin::manifest::Manifest,
     ) -> Result<(), String> {
-        let offered = {
-            let broker = self.broker.read().unwrap();
-            crate::plugin::offered(manifest, &broker.available_to(&ctx.channel, &ctx.node_id))
-        };
-        if offered {
-            return Ok(());
+        let live = self.cfg.live();
+        let entry = live.plugin.iter().find(|p| p.name == plugin);
+        let broker = self.broker.read().unwrap();
+        let available = broker.available_to(&ctx.channel, &ctx.node_id);
+        match crate::plugin::unoffered(manifest, entry, &ctx.channel, &available) {
+            Some(why) => Err(why),
+            None => Ok(()),
         }
-        let declared: Vec<&str> = manifest
-            .credentials
-            .iter()
-            .map(|c| c.pattern.as_str())
-            .collect();
-        Err(format!(
-            "plugin {plugin} is not offered on channel {}: it needs a credential matching {} bound to it",
-            ctx.channel,
-            declared.join(" or ")
-        ))
     }
 
     /// Whether an offered plugin tool's call can be made: its arguments can
@@ -984,6 +982,9 @@ impl Tools {
             .session
             .get()
             .ok_or("plugins are not available on this node")?;
+        // Held again here, not only when the call was asked: a card allowed
+        // after the operator narrowed the plugin's channels starts nothing.
+        self.plugin_offered(ctx, &pt.plugin, &pt.manifest)?;
         let supervisor = access.manager.plugins();
         let lease = supervisor
             .lease(&pt.plugin, &ctx.channel)
@@ -1756,6 +1757,18 @@ impl Tools {
             })
             .map(|row| row.name)
             .ok_or_else(|| format!("no installed plugin owns the format {format}"))?;
+        // Conversion lends nothing, so the credential rule does not hold it;
+        // the operator's channels do, as no instance runs where they say none
+        // may.
+        let live = self.cfg.live();
+        if let Some(entry) = live.plugin.iter().find(|p| p.name == owner) {
+            if !entry.allows_channel(channel) {
+                return Err(format!(
+                    "plugin {owner}, which owns the format {format}, is not offered on channel \
+                     {channel}: its [[plugin]] channels in node.toml do not list it"
+                ));
+            }
+        }
         let lease = access
             .manager
             .plugins()

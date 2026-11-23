@@ -1734,6 +1734,9 @@ async fn plugin_command(command: PluginCommand) -> Result<()> {
                     row["name"].as_str().unwrap_or("?"),
                     row["repo"].as_str().unwrap_or("?"),
                 );
+                if let Some(line) = offered_line(row) {
+                    println!("  {line}");
+                }
                 for tool in row["tools"].as_array().into_iter().flatten() {
                     println!("  {}", plugin_tool_line(tool));
                 }
@@ -1864,6 +1867,29 @@ async fn plugin_command(command: PluginCommand) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Where an installed plugin is offered, in `tracon plugin ls`: `offered
+/// on: personal, work`, with `(channels = [...])` when its `[[plugin]]`
+/// entry narrows it. `None` from a node too old to say, or for a plugin with
+/// no active build.
+fn offered_line(row: &serde_json::Value) -> Option<String> {
+    let names = |v: &serde_json::Value| -> Option<Vec<String>> {
+        v.as_array().map(|a| {
+            a.iter()
+                .filter_map(|c| c.as_str().map(str::to_string))
+                .collect()
+        })
+    };
+    let offered = names(&row["offered_on"])?;
+    let mut line = match offered.is_empty() {
+        true => "offered on: no channel".to_string(),
+        false => format!("offered on: {}", offered.join(", ")),
+    };
+    if let Some(listed) = names(&row["channels"]) {
+        line.push_str(&format!(" (channels = [{}])", listed.join(", ")));
+    }
+    Some(line)
 }
 
 /// One of a plugin's tools in `tracon plugin ls`: how a call to it is
@@ -4791,8 +4817,27 @@ fn shell_quote(value: &str) -> String {
 mod tests {
     use super::plugin_tool_line;
     use super::resolve_prefix;
-    use super::{awaited_build, build_started, AwaitedBuild};
+    use super::{awaited_build, build_started, offered_line, AwaitedBuild};
     use serde_json::json;
+
+    /// Where a plugin is offered, with the entry's channels when they narrow
+    /// it, and nothing from a node too old to say.
+    #[test]
+    fn a_plugin_says_where_it_is_offered() {
+        assert_eq!(
+            offered_line(&json!({ "offered_on": ["personal", "work"], "channels": null })),
+            Some("offered on: personal, work".into())
+        );
+        assert_eq!(
+            offered_line(&json!({ "offered_on": [], "channels": [] })),
+            Some("offered on: no channel (channels = [])".into())
+        );
+        assert_eq!(
+            offered_line(&json!({ "offered_on": ["work"], "channels": ["work", "gone"] })),
+            Some("offered on: work (channels = [work, gone])".into())
+        );
+        assert_eq!(offered_line(&json!({ "name": "old" })), None);
+    }
 
     /// Each of a plugin's tools says how a call to it is answered, and by
     /// which rule when one decides it.

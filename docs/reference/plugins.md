@@ -379,7 +379,11 @@ Sessions see each tool as `<plugin>__<tool>`, described as `[plugin <name>]
 <description>` (at most 2,000 characters). The input schema is passed through as an
 object schema; a `required` that is not a list is dropped. A plugin's tools are offered
 on a channel that binds a credential the manifest declares, by name or pattern, or on
-every channel when it declares none. Execute sessions and external harnesses are offered
+every channel when it declares none. The operator can narrow that with `channels` in the
+plugin's `[[plugin]]` entry: set, the plugin is offered only on the channels it lists
+that the credential rule also allows, and an empty list offers it nowhere. On a channel
+it is not offered, nothing of it runs: its tools are not listed, its pages, previews and
+format conversions are refused, and no process is started. Execute sessions and external harnesses are offered
 them. Plan sessions are offered only the reads the node names for planning
 (`jira-review__search`, `jira-review__issue` and `jira-review__transitions`); review
 sessions none.
@@ -391,9 +395,11 @@ The node decides each call before the plugin sees it, exactly as for an
 before policy is read, with nothing asked or run: a plugin that is not installed, or a
 tool its manifest does not declare, is refused as `no tool named <name> on channel
 <channel>; nothing was asked or run`, and a plugin installed but not offered on the
-channel says so (`plugin <name> is not offered on channel <channel>: it needs a
-credential matching …`). This holds for an agent's call and a plugin's `tools/call`
-alike. Then:
+channel says why (`plugin <name> is not offered on channel <channel>: it needs a
+credential matching …`, or `…: its [[plugin]] channels in node.toml lists only …`). This
+holds for an agent's call and a plugin's `tools/call` alike, and again when an approved
+card is run, so a card held while the operator narrowed the plugin's channels runs
+nothing. Then:
 
 1. The signed policy bundle, under the `tool` kind and the namespaced name
    (`sql-review__query`). A signed denial wins over everything.
@@ -828,8 +834,11 @@ plugin with it can be installed. The node renders prose in it by asking the owne
 
 Answer `{ "text": "# Title" }`. `to` is `markdown` (from your format) or your format
 (from Markdown). It is a pure function: no caller context, no credentials, nothing
-upstream, at most 1 MiB each way, within 5 seconds. Anything else is `-32602`. If the
-owner is removed or cannot answer, the card shows the source.
+upstream, at most 1 MiB each way, within 5 seconds. Anything else is `-32602`. The node
+asks the owner's instance on the card's channel, so a conversion is lent nothing and is
+not held to the credential rule, but it is refused on a channel the owner's `[[plugin]]
+channels` leaves out. If the owner is removed, cannot answer, or is not run on that
+channel, the card shows the source.
 
 ## Testing a plugin against a node
 
