@@ -1886,8 +1886,11 @@ Invariants on top of the wire:
 
 - **A node speaks only for itself.** Mirrored rows naming another node than the
   verified sender are dropped and counted.
-- **Receiver-owned presence.** `is_self`, `reachable`, and last-seen are set by the
-  receiver, never believed from the sender.
+- **Hub-observed presence.** `is_self` is set by the receiver; `reachable` and
+  last-seen come from the hub's member list (a peer is connected while it holds its
+  events stream, and seen at its last authenticated request), never from anything
+  the peer sends. A hello is the peer's description only, sent when it changes and
+  at least every 30 minutes, so an idle mesh carries no traffic for presence.
 - **Commands execute as local requests.** A command for a session or provider
   another node owns is sealed to the owner and runs there under the owner's own
   policy, store, and subprocesses; only the ack travels back. A provider sign-in's

@@ -4,7 +4,9 @@
 
 Nodes see each other through the hub — an always-on relay that routes sealed frames
 and can read none of them. A hub outage costs latency, never work: local sessions
-continue and queued items deliver when it returns.
+continue and queued items deliver when it returns. A peer shows as reachable while
+the hub sees it connected; the hub tells every node the moment one comes or goes,
+so nodes do not announce themselves on a timer.
 
 ```sh
 # the hub, once, somewhere always-on (also ghcr.io/cosmicspork/tracon-hub)

@@ -287,9 +287,11 @@ impl Mirror {
         // notifications, so nothing in it may reorder or hide text.
         row.name = super::recipe::without_hidden(&row.name);
         row.is_self = 0;
-        row.reachable = 1;
-        row.last_seen_ms = Some(now_ms());
         let known = self.store.get_node(sender).ok().flatten();
+        // Presence is the hub's word, kept as the member list last gave it:
+        // a peer's own frames never mark it reachable or seen.
+        row.reachable = known.as_ref().map_or(0, |k| k.reachable);
+        row.last_seen_ms = known.as_ref().and_then(|k| k.last_seen_ms);
         if self.store.put_node(&row).is_err() {
             return Applied::Malformed;
         }

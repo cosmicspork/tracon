@@ -556,7 +556,7 @@ warn_direct = true                  # warn when a review pushes straight to its 
 
 [mesh]
 # hub_url = "https://hub.example.com"   # set by tracon mesh init / enroll
-heartbeat_secs = 60
+heartbeat_secs = 60                 # a hello when something changed; snapshots every 10th; the member list every 5th
 poll_secs = 30
 command_timeout_secs = 15
 # stream_open_timeout_secs = 30     # an owner stream that has not answered its open is closed, never re-sent

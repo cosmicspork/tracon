@@ -1963,9 +1963,12 @@ async fn a_failed_read_of_a_peers_review_is_retried_when_the_peer_returns() {
     // As A leaves it after asking B while B was away.
     a.client
         .defer_reread(&id, tracon::store::now_ms() + 3_600_000);
-    a.store.set_reachable(&bi, false).unwrap();
+    a.client.note_hub_presence(&bi, false);
+    assert!(!a.client.peer_reachable(&bi));
 
-    b.client.hello().await.unwrap();
+    // B returns when the hub lists it connected again; what B itself says
+    // has no part in it.
+    a.client.note_hub_presence(&bi, true);
 
     wait_for("A to read the review again from B once B returns", || {
         a.store

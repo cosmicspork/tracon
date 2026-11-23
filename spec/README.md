@@ -91,6 +91,8 @@ informational; ordering is the hub's per-channel sequence.
 Channel names match `^[a-z0-9@._-]{1,64}$`. `@mesh` is the channel every node is
 a member of. A frame may be at most 4 MiB serialized.
 
+Presence is the hub's alone: a node counts a peer reachable while the hub is up and lists the peer `connected`, and no frame a peer sends changes that. A `hello` is the node's description, sent when it changes (the boundary check's time aside), at least every 30 minutes, and again after the hub returns.
+
 Payload kinds (JSON, discriminated on `kind`): `hello`, `snapshot`, `session`,
 `event`, `queue`, `review`, `review_update` (direct only), `questions`, `node`,
 `command`, `ack`, `events_request`,
@@ -283,8 +285,8 @@ See `hub/` and `docs/ARCHITECTURE.md` (Mesh frames). Summary:
 | `GET /health`, `GET /v0/info` | none | probes; contract version and limits |
 | `POST /v0/frames` | member of the frame's channel; key = sender | append; returns `{seq}` |
 | `GET /v0/frames?channel&after&limit` | member | page; `410 {oldest}` when behind retention |
-| `GET /v0/events` | member | SSE pokes, no payload |
-| `GET /v0/members` | member | routing metadata |
+| `GET /v0/events` | member | SSE pokes, no payload: `frames` (pull), `members` (a member connected or disconnected; read the list again), `sync` (pokes were lost; do both). Holding one is what makes a member connected |
+| `GET /v0/members` | member | routing metadata, and each member's presence as the hub sees it: `connected` (holds an events stream) and `last_seen_ms` (its last authenticated request as a member since the hub started). Presence is never stored with the member |
 | `PUT /v0/enroll/{code}` | member | open a slot |
 | `POST /v0/enroll/{code}` | none, rate-limited; `binding_sig` must prove the pair | fill it (public keys and a name); returns `{inviter}`, the node id that opened the slot |
 | `GET /v0/enroll/{code}` | slot creator | fetch and delete |

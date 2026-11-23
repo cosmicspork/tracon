@@ -184,12 +184,14 @@ async fn pair_with(
     a.client.hello().await.unwrap();
     b.client.hello().await.unwrap();
     let (ai, bi) = (a.id.node_id(), b.id.node_id());
+    // Reachable is the hub's word and can come before B's hello is pulled;
+    // the name only comes with the hello.
     wait_for("A to see B", || {
         a.store
             .get_node(&bi)
             .ok()
             .flatten()
-            .is_some_and(|n| n.reachable == 1)
+            .is_some_and(|n| n.reachable == 1 && n.name == "beta")
     })
     .await;
     wait_for("B to see A in the mesh", || {
@@ -823,7 +825,7 @@ async fn an_older_or_absent_peer_is_named_and_nothing_is_queued() {
     assert_eq!(r.kind(), "unreachable", "{}", r.body);
     assert_eq!(a.client.snapshot().queued, queued);
 
-    // Present by its last hello, on an older build, and silent.
+    // Listed connected by the hub, on an older build, and silent.
     let mut row = a.store.get_node(&gi).unwrap().unwrap();
     row.app_version = Some("0.0.1".into());
     a.store.put_node(&row).unwrap();

@@ -348,6 +348,80 @@ async fn frame_pages_are_bounded_by_bytes() {
     assert!(v["frames"][1]["envelope"].is_null());
 }
 
+/// A member is connected while it holds an events stream, the member list says
+/// so, and every member is poked to read the list again when that changes.
+#[tokio::test]
+async fn presence_comes_from_open_event_streams() {
+    use tokio_stream::StreamExt;
+    let (a, b, _) = ids();
+    let h = hub_with(&[(&a, &[MESH_CHANNEL]), (&b, &[MESH_CHANNEL])]);
+    let listed = |v: &Value, id: &Identity| {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["node_id"] == id.node_id())
+            .cloned()
+            .unwrap()
+    };
+    let (st, v) = s(&h, &b, "GET", "/v0/members", "").await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(listed(&v, &a)["connected"], false);
+    assert!(listed(&v, &a)["last_seen_ms"].is_null());
+    assert_eq!(listed(&v, &b)["connected"], false);
+    assert!(listed(&v, &b)["last_seen_ms"].is_i64());
+
+    // B listens; its own first stream pokes it too.
+    let res = h
+        .app
+        .clone()
+        .oneshot(signed(&b, "GET", "/v0/events", "", now()))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let mut b_events = res.into_body().into_data_stream();
+    let mut next_event = async || {
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(5), b_events.next())
+            .await
+            .expect("an event in time")
+            .unwrap()
+            .unwrap();
+        String::from_utf8(chunk.to_vec()).unwrap()
+    };
+    assert!(next_event().await.contains("event: members"));
+
+    // A connects: B hears of it and the list shows it.
+    let a_stream = h
+        .app
+        .clone()
+        .oneshot(signed(&a, "GET", "/v0/events", "", now()))
+        .await
+        .unwrap();
+    assert!(next_event().await.contains("event: members"));
+    let (_, v) = s(&h, &b, "GET", "/v0/members", "").await;
+    assert_eq!(listed(&v, &a)["connected"], true);
+    assert!(listed(&v, &a)["last_seen_ms"].is_i64());
+    assert_eq!(listed(&v, &b)["connected"], true);
+    // Presence is the hub's view, never written into the member record.
+    let stored = h.members.get(&a.node_id()).unwrap().unwrap();
+    assert!(!serde_json::to_value(&stored)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .contains_key("connected"));
+
+    // A's stream goes: B hears of it and the list shows it.
+    drop(a_stream);
+    assert!(next_event().await.contains("event: members"));
+    let (_, v) = s(&h, &b, "GET", "/v0/members", "").await;
+    assert_eq!(listed(&v, &a)["connected"], false);
+    assert!(listed(&v, &a)["last_seen_ms"].is_i64());
+
+    // A frame still pokes `frames`.
+    let (st, _) = s(&h, &a, "POST", "/v0/frames", &frame(&a, MESH_CHANNEL)).await;
+    assert_eq!(st, StatusCode::CREATED);
+    assert!(next_event().await.contains("event: frames"));
+}
+
 /// One member wins a version; the others are told who holds it, and a
 /// stranger cannot claim at all.
 #[tokio::test]
