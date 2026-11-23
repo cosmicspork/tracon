@@ -15,9 +15,16 @@ import type { PluginSummary } from '../../lib/types'
 
 const here = fileURLToPath(new URL('.', import.meta.url))
 
+// With \`#peers\`, the node knows a peer to administer from here.
 const harness = `
   <script>
     import Plugins from ${JSON.stringify(`${here}Plugins.svelte`)}
+    import { store } from ${JSON.stringify(`${here}../../lib/store.svelte.ts`)}
+    if (location.hash === '#peers')
+      store.nodes = [
+        { id: 'self', name: 'bazzite', is_self: true, reachable: true },
+        { id: 'peer-b', name: 'homelab', is_self: false, reachable: true },
+      ]
   </script>
   <Plugins channels={['personal', 'orbit']} />
 `
@@ -109,7 +116,7 @@ const fail = (status: number, message: string) => ({ status, body: { error: { co
 /** What each stubbed request was sent, by `METHOD path`. */
 type Seen = Record<string, unknown[]>
 
-async function open(routes: Record<string, Reply>): Promise<{ page: Page; seen: Seen }> {
+async function open(routes: Record<string, Reply>, hash = ''): Promise<{ page: Page; seen: Seen }> {
   const page = await browser!.newPage({ viewport: { width: 390, height: 844 } })
   const errors: string[] = []
   const seen: Seen = {}
@@ -129,7 +136,7 @@ async function open(routes: Record<string, Reply>): Promise<{ page: Page; seen: 
     const r = typeof reply === 'function' ? await reply() : reply
     return route.fulfill({ status: r.status ?? 200, contentType: 'application/json', body: JSON.stringify(r.body) })
   })
-  await page.goto('http://tracon.test/')
+  await page.goto(`http://tracon.test/${hash}`)
   await page.waitForSelector('li[data-plugin]', { timeout: 3000 }).catch((e) => {
     throw new Error(errors.join('\n') || String(e))
   })
@@ -263,5 +270,50 @@ test.skipIf(!browser)('a plugin with no previous build offers no rollback', asyn
   expect(await r.getByRole('button', { name: /Roll back/ }).count()).toBe(0)
   expect(await r.getByText('no previous version').isVisible()).toBe(true)
   expect(await r.getByRole('button', { name: 'Check for update' }).isVisible()).toBe(true)
+  await page.close()
+})
+
+test.skipIf(!browser)("a peer's plugins are administered through the mesh, and its logs stay on it", async () => {
+  const running = { ...RELEASED, instances: [{ plugin: 'sql-review', channel: 'personal', state: 'ready', pid: 7, uptime_secs: 5, restarts: 0, backoff_ms: null, last_error: null }] }
+  const { page, seen } = await open(
+    {
+      'GET /api/plugins': { body: { plugins: [LOCAL] } },
+      'GET /api/nodes/peer-b/admin/plugins': { body: { plugins: [running] } },
+      'POST /api/nodes/peer-b/admin/plugins/sql-review/rollback': {
+        body: { active: { version: '0.3.0', tools: [] }, previous: { version: '0.3.1', digest: 'bb' } },
+      },
+      'POST /api/nodes/peer-b/admin/plugins/sql-review/restart': { body: { instance: running.instances[0] } },
+    },
+    '#peers',
+  )
+  await page.getByLabel('Node to administer').selectOption('peer-b')
+  const r = row(page, 'sql-review')
+  await r.waitFor()
+  expect(await row(page, 'tickets').count()).toBe(0)
+  expect(await r.getByRole('button', { name: 'Logs' }).count()).toBe(0)
+  await r.getByRole('button', { name: 'Restart' }).click()
+  await r.getByRole('button', { name: 'Roll back to 0.3.0' }).click()
+  await r.getByRole('group', { name: 'Confirm the rollback' }).getByRole('button', { name: 'Roll back to 0.3.0' }).click()
+  const sent = 'POST /api/nodes/peer-b/admin/plugins/sql-review/rollback'
+  for (let i = 0; i < 60 && !seen[sent]; i++) await page.waitForTimeout(50)
+  expect(seen[sent]).toEqual([null])
+  expect(seen['POST /api/nodes/peer-b/admin/plugins/sql-review/restart']).toEqual([{ channel: 'personal' }])
+  expect(seen['POST /api/plugins/sql-review/rollback']).toBeUndefined()
+  await page.close()
+})
+
+test.skipIf(!browser)('a peer that does not name this node says what to change', async () => {
+  const { page } = await open(
+    {
+      'GET /api/plugins': { body: { plugins: [LOCAL] } },
+      'GET /api/nodes/peer-b/admin/plugins': {
+        status: 403,
+        body: { error: { code: 403, kind: 'not_admin_peer', message: 'homelab does not name this node in its [mesh] admin_peers' } },
+      },
+    },
+    '#peers',
+  )
+  await page.getByLabel('Node to administer').selectOption('peer-b')
+  await page.getByText('homelab must list this node in [mesh] admin_peers to be administered from here.', { exact: false }).waitFor()
   await page.close()
 })

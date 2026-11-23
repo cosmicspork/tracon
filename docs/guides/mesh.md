@@ -46,6 +46,17 @@ who may reach or administer the node and where its credentials go: all of `[auth
 `[mesh]` (`admin_peers` and the hub among them), a provider's `upstream`, `credential`
 and `login`, and `[embed] base_url` and `api_key_file`. Those, like the host-only keys,
 are changed at the node or with its own passkey.
+
+The same node picker appears where a node's other admin actions live, so a node you
+administer is run from yours: **Settings → Plugins** (check for an update, roll back,
+restart a plugin on a channel), **Settings → Permissions & policies** (make and revoke
+authority grants), **Settings → Channels** (stop or reopen a peer's channel to external
+harnesses, turn its pushes on or off, offer one of its repository recipes and accept
+one offered to it), and **Settings → System → Restart** (now, or when its sessions
+finish). Each is one passkey prompt on your node naming the peer and the action, and
+the peer runs it through its own route and pushes it to you as done by your node.
+Installing or removing a plugin, the operator token and passkeys, the mesh's members,
+credentials, policy signing and the service stay with the node itself.
 Provider login stays on the selected node; credential listings show names and
 bindings, never secret values. Sessions can be started, prompted, reviewed, and
 stopped from another channel member.

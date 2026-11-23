@@ -66,7 +66,10 @@ Settings › Plugins can do the first two as well: each plugin's row has **Check
 update**, which raises the same update card on the channel picked in the card's header,
 and **Roll back to `<previous>`**, which asks in the page first. That works from the
 PWA on a node you reach through the hub, with a passkey confirming the rollback.
-Installing and removing stay with `tracon plugin`.
+Picking another node in the page's node picker does the same on a peer whose `[mesh]
+admin_peers` names yours, restarting a plugin's process on a channel included: your
+passkey confirms it, with a prompt naming that node, and the peer checks it again.
+Installing and removing stay with `tracon plugin`, at the node.
 `tracon plugin ls` lists what is installed, the version before it, and any build waiting
 on a card. It also lists each tool of the active build and how a call to it is answered
 now (runs, asked or refused) and by which rule. That answer is the signed policy's on a

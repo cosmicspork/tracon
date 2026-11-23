@@ -952,3 +952,302 @@ async fn a_peer_forging_a_step_up_is_relayed_as_its_refusal() {
         );
     }
 }
+
+/// What A's operator confirmed for exactly `command` on `target`, at `at`.
+fn admin_request(
+    from: &Identity,
+    target: &str,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    at: Option<i64>,
+) -> Command {
+    let mut command = Command::AdminRequest {
+        method: method.into(),
+        path: path.into(),
+        body,
+        statement: None,
+    };
+    if let Some(at) = at {
+        let op_hash = tracon::mesh::admin::op_hash(target, &command);
+        let signed = AdminStatement::sign(from, target, &op_hash, "On beta: test", "local", at);
+        if let Command::AdminRequest { statement, .. } = &mut command {
+            *statement = Some(Box::new(signed));
+        }
+    }
+    command
+}
+
+fn grant_body(target: &str) -> Value {
+    json!({
+        "action": "merge", "verdict": "allow", "target": target, "channel": "personal",
+        "revision": "abc123", "reason": "release train",
+    })
+}
+
+fn b_bindings(b: &Node) -> Value {
+    serde_json::from_str(
+        &b.store
+            .channel_get("personal")
+            .unwrap()
+            .unwrap()
+            .bindings_json,
+    )
+    .unwrap()
+}
+
+/// B names A: each family of B's admin actions runs from A's interface, with
+/// one passkey prompt on A naming B and the action (none at A's machine),
+/// through B's own routes. A route B lets no peer reach is refused before
+/// any prompt.
+#[tokio::test]
+async fn an_admin_peer_runs_a_nodes_admin_actions_from_its_interface() {
+    let _lock = state::config_lock().await;
+    state::isolate_dirs();
+    let (a, b) = pair(&[identity(1).node_id()]).await;
+    let bi = b.id.node_id();
+    let on_b = |rest: &str| format!("/api/nodes/{bi}/admin/{rest}");
+    let prompt = format!("On beta ({}\u{2026}): ", &bi[..8]);
+
+    // Authority grants, from A's phone: one prompt naming B and the grant.
+    let (cookie, mut key) = pair_phone(&a).await;
+    let body = grant_body("cosmicspork/tracon");
+    let uri = on_b("authority/grants");
+    let refused = remote(&a, &cookie, "POST", &uri, Some(&body), None).await;
+    assert_eq!(refused.kind(), "step_up_required", "{}", refused.body);
+    assert_eq!(
+        refused.body["step_up"]["summary"],
+        format!("{prompt}Grant allow merge on cosmicspork/tracon in personal at abc123")
+    );
+    assert!(b.store.authority_grants(false).unwrap().is_empty());
+    let step_up = &refused.body["step_up"];
+    let credential = key.get(&step_up["options"]);
+    let finished = remote(
+        &a,
+        &cookie,
+        "POST",
+        "/api/passkeys/assert/finish",
+        Some(&json!({ "challenge_id": step_up["challenge_id"], "credential": credential })),
+        None,
+    )
+    .await;
+    let proof = finished.body["proof"].as_str().unwrap().to_string();
+    // Bound to this grant: another target is another confirmation.
+    let other = grant_body("cosmicspork/other");
+    let r = remote(&a, &cookie, "POST", &uri, Some(&other), Some(&proof)).await;
+    assert_eq!(r.kind(), "step_up_required", "{}", r.body);
+    let r = remote(&a, &cookie, "POST", &uri, Some(&body), Some(&proof)).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let grants = b.store.authority_grants(false).unwrap();
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].target, "cosmicspork/tracon");
+    // Read back over the mesh, and revoked at A's machine with no prompt.
+    let r = local(&a, "GET", &on_b("authority/grants"), None).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(
+        r.body.to_string().contains("cosmicspork/tracon"),
+        "{}",
+        r.body
+    );
+    let r = local(
+        &a,
+        "DELETE",
+        &on_b(&format!("authority/grants/{}", grants[0].id)),
+        None,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(b.store.authority_grants(false).unwrap().is_empty());
+
+    // External harnesses on one of B's channels: stopped and reopened.
+    let r = local(&a, "POST", &on_b("external/personal/stop"), None).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(b_bindings(&b)["external_stopped"], true);
+    let r = local(&a, "POST", &on_b("external/personal/start"), None).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_ne!(b_bindings(&b)["external_stopped"], true);
+
+    // Its notifications, and no other binding.
+    let r = local(
+        &a,
+        "PUT",
+        &on_b("channels/personal/bindings"),
+        Some(&json!({ "notify": { "approvals": false } })),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(b_bindings(&b)["notify"]["approvals"], false);
+    let r = local(
+        &a,
+        "PUT",
+        &on_b("channels/personal/bindings"),
+        Some(&json!({ "repos": ["x"] })),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.body);
+    assert!(b_bindings(&b).get("repos").is_none());
+
+    // Plugins, recipes and the restart reach B's own routes, which answer
+    // for what B holds (here: none of them).
+    let r = local(&a, "GET", &on_b("plugins"), None).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let r = local(&a, "POST", &on_b("plugins/hora/rollback"), None).await;
+    assert_eq!(r.kind(), "peer_refused", "{}", r.body);
+    assert!(r.body.to_string().contains("beta refused"), "{}", r.body);
+    let r = local(
+        &a,
+        "POST",
+        &on_b("repos/offers/nope/accept"),
+        Some(&json!({ "viewed_hash": "x" })),
+    )
+    .await;
+    assert_eq!(r.kind(), "peer_refused", "{}", r.body);
+    let r = local(&a, "DELETE", &on_b("admin/restart"), None).await;
+    assert_eq!(r.kind(), "peer_refused", "{}", r.body);
+    assert!(
+        r.body.to_string().contains("no restart can be withdrawn"),
+        "{}",
+        r.body
+    );
+    let r = local(&a, "GET", &on_b("restart"), None).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+
+    // What no peer may do here is refused at A, before any prompt.
+    for (method, rest) in [
+        ("POST", "plugins"),
+        ("DELETE", "plugins/hora"),
+        ("PUT", "auth/token"),
+        ("POST", "credentials/import"),
+        ("POST", "admin/policy/apply"),
+    ] {
+        let r = remote(&a, &cookie, method, &on_b(rest), Some(&json!({})), None).await;
+        assert_eq!(
+            r.status,
+            StatusCode::FORBIDDEN,
+            "{method} {rest}: {}",
+            r.body
+        );
+        assert_ne!(r.kind(), "step_up_required", "{method} {rest}");
+    }
+}
+
+/// B checks each request for itself: a node it does not name, a missing,
+/// stale, replayed or swapped statement, or a route it lets no peer reach
+/// is refused with the check that failed. A read needs no statement. What
+/// ran is audited and pushed as A's operator's.
+#[tokio::test]
+async fn a_peer_admin_request_runs_only_as_confirmed() {
+    let _lock = state::config_lock().await;
+    state::isolate_dirs();
+    let (a, b) = pair(&[identity(1).node_id()]).await;
+    let bi = b.id.node_id();
+    let t = Duration::from_secs(5);
+    let now = tracon::store::now_ms;
+    subscribe(&b.store);
+    let req = |method: &str, path: &str, body: Option<Value>, at: Option<i64>| {
+        admin_request(&a.id, &bi, method, path, body, at)
+    };
+    let grants = "/api/authority/grants";
+
+    // A read runs without a statement; a write never does.
+    let ok = a
+        .client
+        .command(&bi, req("GET", grants, None, None), t)
+        .await
+        .unwrap();
+    assert_eq!(ok["status"], 200, "{ok}");
+    let result = a
+        .client
+        .command(&bi, req("POST", grants, Some(grant_body("x/y")), None), t)
+        .await;
+    assert!(refused_with(&result, "carry the statement"), "{result:?}");
+
+    // Confirmed for exactly this: runs once, audited and pushed as A's.
+    let good = req("POST", grants, Some(grant_body("x/y")), Some(now()));
+    let ok = a.client.command(&bi, good.clone(), t).await.unwrap();
+    assert_eq!(ok["status"], 200, "{ok}");
+    let short = &a.id.node_id()[..16];
+    assert_eq!(ok["audit"]["actor"], format!("peer {short} for local"));
+    let push = ok["audit"]["push"].as_str().unwrap().to_string();
+    wait_for("B to push the action", || {
+        b.store
+            .notification_attempts(&push)
+            .is_ok_and(|a| !a.is_empty())
+    })
+    .await;
+    let result = a.client.command(&bi, good, t).await;
+    assert!(refused_with(&result, "already used"), "{result:?}");
+    let id = b.store.authority_grants(false).unwrap()[0].id.clone();
+
+    // Stale, for another action, for another node.
+    let revoke = format!("{grants}/{id}");
+    let stale = req(
+        "DELETE",
+        &revoke,
+        None,
+        Some(now() - STATEMENT_TTL_MS - 60_000),
+    );
+    let result = a.client.command(&bi, stale, t).await;
+    assert!(refused_with(&result, "expired"), "{result:?}");
+    let Command::AdminRequest { statement, .. } =
+        req("DELETE", &format!("{grants}/another"), None, Some(now()))
+    else {
+        unreachable!()
+    };
+    let swapped = Command::AdminRequest {
+        method: "DELETE".into(),
+        path: revoke.clone(),
+        body: None,
+        statement,
+    };
+    let result = a.client.command(&bi, swapped, t).await;
+    assert!(refused_with(&result, "another operation"), "{result:?}");
+    let elsewhere = admin_request(
+        &a.id,
+        &identity(3).node_id(),
+        "DELETE",
+        &revoke,
+        None,
+        Some(now()),
+    );
+    let result = a.client.command(&bi, elsewhere, t).await;
+    assert!(refused_with(&result, "another node"), "{result:?}");
+    assert_eq!(b.store.authority_grants(false).unwrap().len(), 1);
+
+    // A route B lets no peer reach, however confirmed.
+    for (method, path) in [("PUT", "/api/auth/token"), ("POST", "/api/plugins")] {
+        let signed = req(method, path, Some(json!({})), Some(now()));
+        let result = a.client.command(&bi, signed, t).await;
+        assert!(
+            refused_with(&result, "not an action a peer may take"),
+            "{method} {path}: {result:?}"
+        );
+    }
+}
+
+/// A node that does not name A takes no admin request from it, read or
+/// write, and A says why.
+#[tokio::test]
+async fn a_node_not_naming_the_peer_takes_no_admin_request() {
+    let _lock = state::config_lock().await;
+    state::isolate_dirs();
+    let (a, b) = pair(&[]).await;
+    let bi = b.id.node_id();
+    for (method, rest, body) in [
+        ("GET", "plugins", None),
+        ("POST", "external/personal/stop", None),
+        ("POST", "authority/grants", Some(grant_body("x/y"))),
+    ] {
+        let r = local(
+            &a,
+            method,
+            &format!("/api/nodes/{bi}/admin/{rest}"),
+            body.as_ref(),
+        )
+        .await;
+        assert_eq!(r.kind(), "not_admin_peer", "{rest}: {}", r.body);
+        assert!(r.body.to_string().contains("admin_peers"), "{}", r.body);
+    }
+    assert!(b.store.authority_grants(false).unwrap().is_empty());
+    assert_ne!(b_bindings(&b)["external_stopped"], true);
+}

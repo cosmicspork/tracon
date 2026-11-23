@@ -333,7 +333,7 @@ pub async fn step_up(
                 "at the node an admin action needs no confirmation; send it again",
             )))
         }
-        Caller::Other => return Err(Refusal::unavailable(
+        Caller::Other | Caller::Peer(_) => return Err(Refusal::unavailable(
             "no_session",
             "a confirmation belongs to a signed-in browser session, and a bearer token has none",
         )),
@@ -625,7 +625,7 @@ fn decider(s: &AppState, parts: &Parts) -> Result<String, Refusal> {
     match caller(s, parts) {
         Caller::Local => Ok("local".into()),
         Caller::Session(h) => Ok(h),
-        Caller::Other => Err(Refusal::unavailable(
+        Caller::Other | Caller::Peer(_) => Err(Refusal::unavailable(
             "no_session",
             "a request is approved from a signed-in browser, or at the node",
         )),

@@ -3,12 +3,16 @@
   import { tick } from 'svelte'
   import { api } from '../../lib/api'
   import { formatAge, formatDuration } from '../../lib/format'
+  import { peerFailure } from '../../lib/peer-admin'
   import { OFFERS_ANCHOR, inboxOrder, reviewIsStale, shown } from '../../lib/recipes'
   import { router } from '../../lib/router.svelte'
   import { store } from '../../lib/store.svelte'
   import type { RecipeOffer, RecipeOfferView } from '../../lib/types'
 
-  let { onaccepted }: { onaccepted?: () => void } = $props()
+  // `node` shows and accepts the offers a peer administered from here holds.
+  // A request to a peer takes no query, so its offers are compared and
+  // accepted as placed by default, and declining stays with that node.
+  let { onaccepted, node = '' }: { onaccepted?: () => void; node?: string } = $props()
 
   const local = $derived(store.node?.loopback ?? false)
 
@@ -32,10 +36,10 @@
 
   async function load() {
     try {
-      offers = (await api.recipeOffers()).offers
+      offers = (await api.recipeOffers(node)).offers
       error = ''
     } catch (cause) {
-      error = cause instanceof Error ? cause.message : String(cause)
+      error = peerFailure(store.nodes, node, cause)
     }
   }
   // Read again on each arrival, so a tapped notification or Home's card that
@@ -59,11 +63,13 @@
     busy = `view:${offer.id}`
     error = ''
     try {
-      view = await api.recipeOffer(offer.id, path.trim(), replaceImage, keepCredentials)
+      view = node
+        ? await api.recipeOffer(offer.id, '', false, false, node)
+        : await api.recipeOffer(offer.id, path.trim(), replaceImage, keepCredentials)
       path = view.target.path
     } catch (cause) {
       view = null
-      error = cause instanceof Error ? cause.message : String(cause)
+      error = peerFailure(store.nodes, node, cause)
     } finally {
       busy = ''
     }
@@ -94,14 +100,14 @@
         replace_image: view.replace_image,
         keep_credentials: view.keep_credentials,
         viewed_hash: view.viewed_hash,
-      })
-      note = `Accepted onto ${done.path} in node.toml.${done.building ? ' This node is building its own image from it now.' : ''}`
+      }, node)
+      note = `Accepted onto ${done.path} in node.toml.${done.building ? ` ${node ? 'That' : 'This'} node is building its own image from it now.` : ''}`
       open = null
       view = null
       await decided()
       onaccepted?.()
     } catch (cause) {
-      error = cause instanceof Error ? cause.message : String(cause)
+      error = peerFailure(store.nodes, node, cause)
     } finally {
       busy = ''
     }
@@ -149,21 +155,24 @@
             <button class="lnk" type="button" onclick={() => toggle(offer)} disabled={busy !== ''}>
               {open === offer.id ? 'Hide changes' : busy === `view:${offer.id}` ? 'Reading…' : 'Review changes'}
             </button>
-            <button class="lnk d" type="button" onclick={() => void decline(offer)} disabled={busy !== ''}>
-              {busy === `decline:${offer.id}` ? 'Declining…' : 'Decline'}
-            </button>
+            {#if !node}
+              <button class="lnk d" type="button" onclick={() => void decline(offer)} disabled={busy !== ''}>
+                {busy === `decline:${offer.id}` ? 'Declining…' : 'Decline'}
+              </button>
+            {/if}
           </div>
         {/if}
         {#if open === offer.id}
           <div class="review">
             <label>
               <span>Apply to</span>
-              <input bind:value={path} spellcheck="false" placeholder={offer.repo} disabled={busy !== ''} />
+              <input bind:value={path} spellcheck="false" placeholder={offer.repo} disabled={busy !== '' || !!node} />
               <small>
                 {#if view}{view.target.exists ? 'Existing entry.' : 'New entry.'}{/if}
+                {#if node}Placed as that node would by default; choose another entry there.{/if}
               </small>
             </label>
-            {#if pinned}
+            {#if pinned && !node}
               <label class="toggle">
                 <input
                   type="checkbox"
@@ -177,7 +186,7 @@
                 Build the offered Dockerfile in place of the image this entry pins
               </label>
             {/if}
-            {#if lends && view}
+            {#if lends && view && !node}
               <label class="toggle">
                 <input
                   type="checkbox"

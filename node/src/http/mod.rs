@@ -12,6 +12,7 @@ pub mod metrics;
 pub mod names;
 pub mod passkey;
 mod peer_admin;
+mod peer_routes;
 pub mod plugin_ui;
 mod plugins;
 mod policy_admin;
@@ -288,6 +289,12 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/nodes/{id}/config",
             get(config_api::get_node_config).patch(config_api::patch_node_config),
+        )
+        // One of an admin peer's own admin routes, run there for an operator
+        // administering it from here (`peer_admin::relay`, `peer_routes`).
+        .route(
+            "/api/nodes/{id}/admin/{*rest}",
+            axum::routing::any(peer_admin::relay),
         )
         .route("/api/awake", get(api::awake))
         .route(

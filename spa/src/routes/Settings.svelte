@@ -4,7 +4,7 @@
   // scopes so a local host change is never mistaken for a peer or device change.
   import { onMount, tick } from 'svelte'
   import Name from '../components/Name.svelte'
-  import { generatedName } from '../lib/names'
+  import { generatedName, nodeDisplayName } from '../lib/names'
   import { isTauri } from '@tauri-apps/api/core'
   import LaunchManifest from '../components/LaunchManifest.svelte'
   import QrScanner from '../components/QrScanner.svelte'
@@ -32,6 +32,10 @@
   import MeshAdministration from '../components/settings/MeshAdministration.svelte'
   import NodeList from '../components/settings/NodeList.svelte'
   import PeerConfig from '../components/settings/PeerConfig.svelte'
+  import NodePicker from '../components/settings/NodePicker.svelte'
+  import PeerChannels from '../components/settings/PeerChannels.svelte'
+  import PeerRecipes from '../components/settings/PeerRecipes.svelte'
+  import { peerFailure } from '../lib/peer-admin'
   import SharedSignIns from '../components/settings/SharedSignIns.svelte'
   import PolicyManagement from '../components/settings/PolicyManagement.svelte'
   import ModelPicker from '../components/ModelPicker.svelte'
@@ -302,8 +306,31 @@
           ? 'plugin:jira-review__transition:<sha256, from the card>'
           : 'canonical, no-space identifier',
   )
+  /** The node whose local grants are shown and changed: empty for this
+      one, or a peer that names this node in its `[mesh] admin_peers`. */
+  let grantsNode = $state('')
+  let authorityError = $state('')
+  const grantsNodeName = $derived(grantsNode ? nodeDisplayName(store.nodes, grantsNode) : (store.node?.name ?? 'the serving node'))
   async function loadAuthority() {
-    authority = await api.authorityGrants()
+    const reading = grantsNode
+    try {
+      const read = await api.authorityGrants(reading)
+      if (reading !== grantsNode) return
+      authority = read
+      authorityError = ''
+    } catch (cause) {
+      if (reading !== grantsNode) return
+      authority = null
+      authorityError = peerFailure(store.nodes, reading, cause)
+    }
+  }
+  function pickGrantsNode(next: string) {
+    grantsNode = next
+    authority = null
+    authorityError = ''
+    grantConfirmation = null
+    revoking = ''
+    void loadAuthority()
   }
   void loadAuthority()
   function preparedGrant(): Omit<AuthorityGrant, 'id' | 'revoked_ms' | 'created_ms'> {
@@ -328,7 +355,7 @@
     const confirmedGrant = grantConfirmation
     if (!confirmedGrant) return
     return act('authority', async () => {
-      await api.createAuthorityGrant(confirmedGrant)
+      await api.createAuthorityGrant(confirmedGrant, grantsNode)
       grant = { action: 'merge', verdict: 'ask', target: '', channel: '', session_id: null, revision: null, expires_ms: null, reason: '' }
       grantConfirmation = null
       await loadAuthority()
@@ -336,7 +363,7 @@
   }
   function revokeGrant(id: string) {
     return act('authority', async () => {
-      await api.revokeAuthorityGrant(id)
+      await api.revokeAuthorityGrant(id, grantsNode)
       await loadAuthority()
     })
   }
@@ -976,10 +1003,11 @@
   {/if}
 
   {#if store.channels.length}<ChannelNotifications />{/if}
+  {#if store.nodes.some((node) => !node.is_self)}<PeerChannels />{/if}
   <ChannelMeters />
   <LaunchManifest />
   <Repositories />
-  {#if store.nodes.some((node) => !node.is_self)}<PeerConfig only="repo" />{/if}
+  {#if store.nodes.some((node) => !node.is_self)}<PeerConfig only="repo" /><PeerRecipes />{/if}
 {/if}
 
 {#if activeSection === 'access'}
@@ -1135,8 +1163,11 @@
 {#if activeSection === 'policies'}
   <PolicyManagement onapplied={loadAuthority} />
 
-  <Card title="Local grants" note={`Exceptions on ${store.node?.name ?? 'the serving node'} only. Consequential actions no grant matches still ask.`}>
-    {#if !authority}
+  <Card title="Local grants" note={`Exceptions on ${grantsNodeName} only. Consequential actions no grant matches still ask.`}>
+    {#snippet actions()}<NodePicker value={grantsNode} onchange={pickGrantsNode} />{/snippet}
+    {#if authorityError}
+      <div class="empty bad">{authorityError}</div>
+    {:else if !authority}
       <div class="empty">Reading signed policy and local grants…</div>
     {:else}
       {#if !authority.policy.trusted}

@@ -5,12 +5,37 @@
   // otherwise one inline step names what is running and offers the ways on,
   // each one more click. A restart that is waiting can be withdrawn, or
   // hurried along. Restarting is an administrator's action: off the node the
-  // passkey prompt (`StepUpPrompt`) confirms it.
+  // passkey prompt (`StepUpPrompt`) confirms it. `node` restarts a peer
+  // administered from here instead, whose status the caller holds (`peer`)
+  // and is handed back fresh (`onstatus`) after each step.
   import { api } from '../lib/api'
+  import { peerFailure } from '../lib/peer-admin'
   import { list, restartAsk, type RestartAsk } from '../lib/restart'
   import { store } from '../lib/store.svelte'
+  import type { RestartStatus } from '../lib/types'
 
-  let { variant = 'banner' }: { variant?: 'banner' | 'card' } = $props()
+  let {
+    variant = 'banner',
+    node = '',
+    peer = null,
+    onstatus,
+  }: {
+    variant?: 'banner' | 'card'
+    node?: string
+    peer?: RestartStatus | null
+    onstatus?: (status: RestartStatus) => void
+  } = $props()
+
+  /** Read the restart status again, of this node or of the peer. */
+  async function refresh(): Promise<RestartStatus | null> {
+    if (!node) {
+      await store.refreshRestart()
+      return store.restart
+    }
+    const fresh = await api.restartStatus(node)
+    onstatus?.(fresh)
+    return fresh
+  }
 
   type Confirm = Extract<RestartAsk, { kind: 'confirm' }>
 
@@ -18,7 +43,7 @@
   let busy = $state(false)
   let error = $state('')
 
-  const status = $derived(store.restart)
+  const status = $derived(node ? peer : store.restart)
   const plan = $derived(status?.plan ?? null)
   const unavailable = $derived(status ? restartAsk(status).kind === 'unavailable' : true)
   const cls = $derived(variant === 'card' ? 'btn' : 'lnk')
@@ -30,12 +55,12 @@
       await run()
       confirming = null
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e)
+      error = peerFailure(store.nodes, node, e)
     } finally {
       busy = false
       // A refusal (the file changed since it was read, a restart already
       // waiting) is shown against the status as it is now.
-      await store.refreshRestart()
+      await refresh().catch(() => null)
     }
   }
 
@@ -48,12 +73,13 @@
     let hash: string | undefined
     try {
       // Decided against what runs now, not what the page last heard.
-      const fresh = await api.restartStatus()
-      store.restart = fresh
+      const fresh = await api.restartStatus(node)
+      if (node) onstatus?.(fresh)
+      else store.restart = fresh
       ask = restartAsk(fresh)
       hash = fresh.config?.hash
     } catch (e) {
-      error = `could not read the node's restart status: ${e instanceof Error ? e.message : String(e)}`
+      error = `could not read the node's restart status: ${peerFailure(store.nodes, node, e)}`
       busy = false
       return
     }
@@ -68,13 +94,13 @@
     }
     // `when_idle` even with nothing running: a turn that starts meanwhile is
     // waited for rather than cut off.
-    if (hash) await act(() => api.restart('when_idle', hash))
+    if (hash) await act(() => api.restart('when_idle', hash, false, node))
   }
 
   function send(mode: 'when_idle' | 'now') {
-    const hash = store.restart?.config?.hash
+    const hash = status?.config?.hash
     if (!hash) return
-    return act(() => api.restart(mode, hash, mode === 'now'))
+    return act(() => api.restart(mode, hash, mode === 'now', node))
   }
 
   function endLabel(c: Confirm): string {
@@ -84,7 +110,7 @@
 </script>
 
 {#if plan?.state === 'draining'}
-  <button class={cls} type="button" disabled={busy} onclick={() => act(() => api.cancelRestart())}>Don't restart</button>
+  <button class={cls} type="button" disabled={busy} onclick={() => act(() => api.cancelRestart(node))}>Don't restart</button>
   <button class="{cls} d" type="button" disabled={busy} onclick={() => send('now')}
     >{status?.closing.length ? 'End them and restart now' : 'Restart now'}</button
   >

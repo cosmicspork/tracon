@@ -164,6 +164,16 @@ a statement for exactly this command on itself. The owner refuses it when `revis
 is no longer the review's latest revision, and returns any refusal of the start itself
 verbatim. The op is additive and the contract version is unmoved: a node that predates
 it answers that it runs an older build.
+An `admin_request` command `{ method, path, body?, statement? }` runs one of the
+owner's own admin routes for an admin peer, as its interface would: `path` is the
+route's path with no query, `body` its JSON body. The owner runs only the routes it
+lets a peer reach (plugin update, rollback and restart; authority grants; stopping
+and reopening a channel to external harnesses and its `notify` binding; offering a
+repository recipe and accepting one; restarting the node; and reads of the lists they
+act on), only for an admin peer, and every one but a read only with a statement for
+exactly this command on itself. It answers `{ status, body }`, the route's own
+answer. The op is additive and the contract version is unmoved: a node that predates
+it answers that it runs an older build.
 Version 4 lets a review row and a queued card name no session: a harness the operator
 runs themselves calls with none. `session_id` on a `reviews` row and on a `queue` card
 may be `null`, a review row gains an optional `lane` (the caller's display label), and

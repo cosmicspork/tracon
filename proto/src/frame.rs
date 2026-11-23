@@ -571,6 +571,23 @@ pub enum Command {
         statement: AdminStatement,
         not_after_ms: i64,
     },
+    /// Run one of the owner's own admin routes for an admin peer, as its own
+    /// operator would from its interface: `method` and `path` (no query) name
+    /// the route, `body` is its JSON body. The owner runs only the routes it
+    /// lets a peer reach (`http::peer_routes`), only for a peer its `[mesh]
+    /// admin_peers` names, and, for anything but a read, only with the
+    /// [`AdminStatement`] its operator confirmed for exactly this request on
+    /// exactly this owner. Answered as `{ status, body }`, the route's own
+    /// answer. An older peer cannot read this op and answers that it runs an
+    /// older build.
+    AdminRequest {
+        method: String,
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        statement: Option<Box<AdminStatement>>,
+    },
     /// Start a fresh reviewer on a review the owner holds, as its own
     /// operator would from the review page. It spends the owner's models and
     /// budget, so it is an admin command: run only for a peer the owner's

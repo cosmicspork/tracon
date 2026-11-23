@@ -47,7 +47,11 @@ cannot make them. A configuration save's prompt lists the keys it changes. Every
 `node.toml` key can be changed this way except a few changed at the node only: the
 state mount, the gateway's socket path, and the images and bundle the node runs. A
 secret's value can be set but is never shown back. Importing a skill from a host directory, policy signing and the service
-lifecycle stay at the node. A
+lifecycle stay at the node. From the phone you can also administer another node that
+names yours in its `[mesh] admin_peers`: pick it in Settings, and its plugin updates,
+rollbacks and restarts, authority grants, external-harness access and pushes per
+channel, repository recipes and restart run there, each confirmed with this node's
+passkey (see the mesh guide). A
 freshly paired browser may add the node's first passkey without one for 15 minutes;
 after that, adding another is itself confirmed with an existing passkey, so a token
 that leaks later buys a sign-in but not admin. Passkeys are bound to

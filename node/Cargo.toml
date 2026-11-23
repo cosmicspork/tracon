@@ -113,6 +113,8 @@ openssl = { version = "0.10", features = ["vendored"] }
 # The `[metrics] listen` scrape target: the Prometheus project's own client,
 # pure Rust, for its escaping and OpenMetrics histogram encoding.
 prometheus-client = "0.25"
+# Running an admin peer's request through this node's own router.
+tower = { version = "0.5.3", features = ["util"] }
 
 [features]
 # What only a test build has: `config::path_guard::Guard::unchecked` and
@@ -124,7 +126,6 @@ test-support = []
 [dev-dependencies]
 tracon = { path = ".", features = ["test-support"] }
 tracon-hub = { path = "../hub" }
-tower = { version = "0.5.3", features = ["util"] }
 # Reading a response body frame by frame: an SSE stream never ends, so a test
 # that asserts what the native UI receives cannot wait for the whole body.
 futures-util = { version = "0.3", default-features = false }

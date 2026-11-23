@@ -3,10 +3,15 @@
   // and the processes the node runs of it, one per channel that used it,
   // with their state and the last lines each wrote. Checking for an update
   // (which raises an update card) and rolling back are here; installing and
-  // removing stay with `tracon plugin`.
+  // removing stay with `tracon plugin`. A peer that names this node in its
+  // `[mesh] admin_peers` is administered the same way from here (`node`);
+  // its processes' logs stay on it.
   import { onMount } from 'svelte'
   import Card from './Card.svelte'
+  import NodePicker from './NodePicker.svelte'
   import { api } from '../../lib/api'
+  import { peerFailure } from '../../lib/peer-admin'
+  import { store } from '../../lib/store.svelte'
   import { rollbackNote, rolledBack, updateFailure, updateNote, waitingCard, type PluginNote } from '../../lib/plugin-actions'
   import type { PluginInstance, PluginSummary } from '../../lib/types'
 
@@ -14,6 +19,8 @@
       `[session] default_channel`. */
   let { channels = [] }: { channels?: string[] } = $props()
 
+  /** The node administered: empty for this one, or a peer's id. */
+  let node = $state('')
   let plugins = $state<PluginSummary[] | null>(null)
   let error = $state('')
   let busy = $state(false)
@@ -31,11 +38,15 @@
 
   async function load() {
     busy = true
+    const reading = node
     try {
-      plugins = (await api.plugins()).plugins.filter((p) => p.state !== 'removed')
+      const read = (await api.plugins(reading)).plugins.filter((p) => p.state !== 'removed')
+      if (reading !== node) return
+      plugins = read
       error = ''
     } catch (cause) {
-      error = cause instanceof Error ? cause.message : String(cause)
+      if (reading !== node) return
+      error = peerFailure(store.nodes, reading, cause)
     } finally {
       busy = false
     }
@@ -60,9 +71,9 @@
   async function restart(i: PluginInstance) {
     restarting[key(i)] = true
     try {
-      await api.pluginRestart(i.plugin, i.channel)
+      await api.pluginRestart(i.plugin, i.channel, node)
     } catch (cause) {
-      error = cause instanceof Error ? cause.message : String(cause)
+      error = peerFailure(store.nodes, node, cause)
     } finally {
       restarting[key(i)] = false
       await load()
@@ -73,7 +84,7 @@
     acting[plugin.name] = 'update'
     delete notes[plugin.name]
     try {
-      const offered = await api.pluginUpdate(plugin.name, channel)
+      const offered = await api.pluginUpdate(plugin.name, channel, node)
       notes[plugin.name] = updateNote(offered)
       // A raised card is the row's pending build now.
       if (!offered.up_to_date) await load()
@@ -89,13 +100,13 @@
     acting[plugin.name] = 'rollback'
     delete notes[plugin.name]
     try {
-      const now = await api.pluginRollback(plugin.name)
+      const now = await api.pluginRollback(plugin.name, node)
       plugins = (plugins ?? []).map((p) => (p.name === plugin.name ? rolledBack(p, now) : p))
       notes[plugin.name] = rollbackNote(now)
       // The tools and rules shown are the active build's: read them again.
       await load()
     } catch (cause) {
-      notes[plugin.name] = { kind: 'error', text: cause instanceof Error ? cause.message : String(cause) }
+      notes[plugin.name] = { kind: 'error', text: peerFailure(store.nodes, node, cause) }
     } finally {
       delete acting[plugin.name]
     }
@@ -118,14 +129,25 @@
 
   const answer = { allow: 'Runs', ask: 'Asked', deny: 'Refused' } as const
 
+  function pick(next: string) {
+    node = next
+    plugins = null
+    error = ''
+    logs = {}
+    notes = {}
+    confirming = null
+    void load()
+  }
+
   onMount(() => void load())
 </script>
 
 <Card
   title="Plugins"
-  note="Plugins installed on this node, how each tool is answered by the signed policy and its [[plugin]] entry, and a process for each channel whose sessions used one. A process stops after its idle timeout, and an unhealthy one stays down until it is used again or restarted. Check for an update (it raises an update card, and nothing is installed until the card is allowed) and roll back to the previous version here. Install and remove with tracon plugin."
+  note="Plugins installed on the node, how each tool is answered by the signed policy and its [[plugin]] entry, and a process for each channel whose sessions used one. A process stops after its idle timeout, and an unhealthy one stays down until it is used again or restarted. Check for an update (it raises an update card, and nothing is installed until the card is allowed) and roll back to the previous version here, on this node or on a peer that lists this node in [mesh] admin_peers. Install and remove with tracon plugin on the node itself."
 >
   {#snippet actions()}
+    <NodePicker value={node} onchange={pick} />
     {#if plugins?.length}
       <label class="to">
         Cards to
@@ -220,9 +242,11 @@
                       {instance.channel}
                     </span>
                     <span class="acts">
-                      <button class="btn small" onclick={() => void toggleLogs(instance)}>
-                        {key(instance) in logs ? 'Hide logs' : 'Logs'}
-                      </button>
+                      {#if !node}
+                        <button class="btn small" onclick={() => void toggleLogs(instance)}>
+                          {key(instance) in logs ? 'Hide logs' : 'Logs'}
+                        </button>
+                      {/if}
                       <button class="btn small" onclick={() => void restart(instance)} disabled={restarting[key(instance)]}>
                         {restarting[key(instance)] ? 'Restarting…' : 'Restart'}
                       </button>
