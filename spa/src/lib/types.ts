@@ -1878,6 +1878,7 @@ export type Frame =
   | ({ type: 'awake' } & AwakeState)
   | ({ type: 'restart' } & RestartStatus)
   | ({ type: 'publication' } & PublicationProgress)
+  | { type: 'review_detail'; review_id: string }
 
 export const TERMINAL_STATES: SessionState[] = ['closed', 'killed_budget', 'failed']
 

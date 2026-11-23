@@ -11,7 +11,7 @@
       }
     ]
   },
-  "contract_version": 4,
+  "contract_version": 5,
   "issuer_seed_hex": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
   "nonce_hex": "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3",
   "op_hash_hex": "89348a735d234dde15558539d497a5f8ab507cb0a486b3a980c1b2eebe8e2826",

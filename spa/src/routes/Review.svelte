@@ -68,6 +68,7 @@
     rereadDelay,
     rereadPeer,
     rereadReviewer,
+    WATCH_RENEW_MS,
     reviewerControl,
     startedHow,
     unavailable,
@@ -651,6 +652,7 @@
   let ownerLost = $state(false)
   $effect(() => {
     const when = rereadPeer(
+      remoteOwner !== null,
       rereadReviewer(
         control,
         reviewerView,
@@ -668,6 +670,27 @@
       const t = setTimeout(() => void refreshReviewer(), delay)
       return () => clearTimeout(t)
     }
+  })
+  // A peer's review is watched while this page is open: its owner pushes
+  // what changes, and the page reads it again from what this node holds.
+  const pushedAt = $derived(store.reviewPushes.get(id))
+  $effect(() => {
+    if (pushedAt === undefined) return
+    void reread()
+  })
+  $effect(() => {
+    if (!loaded || !remoteOwner) return
+    const t = setInterval(() => {
+      void api
+        .watchReview(id)
+        .then(async (w) => {
+          // The watch lapsed or the owner went away: read again, which
+          // watches anew or says the owner can't be reached.
+          if (!w.watching) ownerLost = lostOwner(await reread(), ownerDetail)
+        })
+        .catch(() => {})
+    }, WATCH_RENEW_MS)
+    return () => clearInterval(t)
   })
   const edited = $derived(
     review !== null &&

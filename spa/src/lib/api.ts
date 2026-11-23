@@ -731,6 +731,8 @@ export const api = {
       change,
     }),
   releaseReview: (id: string) => call<void>('POST', `/api/reviews/${id}/release`),
+  /** Keep watching a peer's review while its page is open; false once no watch is held. */
+  watchReview: (id: string) => call<{ watching: boolean }>('POST', `/api/reviews/${id}/watch`),
   /** Mark the change a review updates ready for review, or turn it back into a draft. */
   markReviewReady: (id: string, ready: boolean) =>
     call<{ change_draft: ChangeDraft | null }>('POST', `/api/reviews/${id}/ready`, { ready }),

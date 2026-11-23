@@ -99,6 +99,12 @@ pub enum Frame {
     /// runs. This node's alone; never forwarded: a peer's review page reads
     /// the owner's record.
     Publication(Value),
+    /// A peer's review this node watches has new detail from its owner: the
+    /// review page reads it again (from what this node now holds, not the
+    /// owner). This node's alone; never forwarded.
+    ReviewDetail {
+        review_id: String,
+    },
 }
 
 impl Frame {
@@ -122,6 +128,7 @@ impl Frame {
             Frame::Awake(_) => "awake",
             Frame::Restart(_) => "restart",
             Frame::Publication(_) => "publication",
+            Frame::ReviewDetail { .. } => "review_detail",
         }
     }
 

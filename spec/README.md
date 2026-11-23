@@ -13,7 +13,7 @@ vendored, not depended on, so this contract moves on its own cadence.
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `CONTRACT_VERSION` | 4 | Wire version, reported at `GET /v0/info`. Additive; moving it rotates nothing. Every node and the hub move together: a frame or enrollment of another version is refused. |
+| `CONTRACT_VERSION` | 5 | Wire version, reported at `GET /v0/info`. Additive; moving it rotates nothing. Every node and the hub move together: a frame or enrollment of another version is refused. |
 | `CONTRACT_MAJOR` | 0 | Cryptographic era, embedded in every label below. Bumps only on a key-rotating break. |
 
 Labels are `tracon/v{MAJOR}/{operation}`.
@@ -92,7 +92,8 @@ Channel names match `^[a-z0-9@._-]{1,64}$`. `@mesh` is the channel every node is
 a member of. A frame may be at most 4 MiB serialized.
 
 Payload kinds (JSON, discriminated on `kind`): `hello`, `snapshot`, `session`,
-`event`, `queue`, `reviews`, `questions`, `node`, `command`, `ack`, `events_request`,
+`event`, `queue`, `review`, `review_update` (direct only), `questions`, `node`,
+`command`, `ack`, `events_request`,
 `events_batch`, `key_handoff` (direct only), `policy_bundle` (direct only),
 `credential_handoff` (direct only; broker rows for the recipient), `changes`,
 `changes_request` (direct only), `changes_batch` (direct only), `repo_images`.
@@ -186,10 +187,33 @@ exactly this command on itself. It answers `{ status, body }`, the route's own
 answer. The op is additive and the contract version is unmoved: a node that predates
 it answers that it runs an older build.
 Version 4 lets a review row and a queued card name no session: a harness the operator
-runs themselves calls with none. `session_id` on a `reviews` row and on a `queue` card
+runs themselves calls with none. `session_id` on a review row and on a `queue` card
 may be `null`, a review row gains an optional `lane` (the caller's display label), and
 a session-less card is grouped by its `intent.channel`. A version 3 node fails to
 deserialize the null, so the two cannot share a mesh.
+Version 5 replaces the `reviews` payload, which listed every open review with its
+diff and description each time the sender's queue was republished, with `review`
+`{ event }`: one change to one of the sender's reviews, on the review's channel.
+`event` is tagged on `event`: `opened` and `revised` carry `review`, the owner's
+metadata row (`id`, `session_id`, `node_id`, `channel`, `kind`, `title`, `state`,
+`provider`, `target`, `base_ref`, `head_sha`, `added`, `removed`, `files`, `lane`,
+`publication_failed`, `claimed_ms`, `claimers`, `created_ms`, `updated_ms`, and `body`
+for a report only); `claimed` and `unclaimed` carry `{ review_id, claimers,
+claimed_ms }`; `closed` carries `outcome` `{ id, state, verdict_reason,
+publish_result, updated_ms }`. A `snapshot`'s `reviews` lists the same metadata rows.
+The `review_detail` command is gone. A `review_watch` command `{ request }`, where the
+request is `{ review_id, channel, owner, renew? }`, watches a review the receiver
+owns, on a channel both share: it answers with the owner's whole detail, the diff
+included (cut at a line under 2 MiB, with `diff_truncated: { bytes, shown }`), and the
+owner then sends the watcher `review_update` `{ review_id, detail }` directly whenever
+that detail changes (with `review.diff` null and `diff_omitted: true` when the watcher
+already holds that head's diff). A watch lapses two minutes after it was last renewed
+(`renew: true`, answered `{ watching }`), when the watcher is unreachable, or when the
+review closes; one on a review that left the queue answers the detail once and
+watches nothing. `review_unwatch` `{ request }` ends a watch. `review_read`
+`{ request }` answers `{ review, outcome }`, the metadata row and, once the review
+left the queue, its outcome. A version 4 node cannot read these, so the two cannot
+share a mesh.
 A peer mirrors a session-less card by the channel it was listed on and sends an
 `answer` for it to the card's node, which decides and runs it for a co-member of the
 channel. An `answer` that is an admin action on the card's node (allowing a repository

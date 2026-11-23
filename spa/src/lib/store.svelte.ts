@@ -76,6 +76,8 @@ class Store {
   sessions = $state<Map<string, Session>>(new Map())
   /** The latest step of each review's publication attempt this tab heard, by review id. */
   publications = $state<Map<string, PublicationProgress>>(new Map())
+  /** A peer's reviews whose owner pushed new detail, by id: when it last did. */
+  reviewPushes = $state<Map<string, number>>(new Map())
   /** Persisted events for the session that is open on screen. */
   events = $state<Event[]>([])
   openSession = $state<string | null>(null)
@@ -217,6 +219,7 @@ class Store {
       'awake',
       'restart',
       'publication',
+      'review_detail',
     ] as const) {
       source.addEventListener(name, (m) => this.onFrame(JSON.parse((m as MessageEvent).data)))
     }
@@ -461,6 +464,12 @@ class Store {
       }
       case 'restart': {
         this.restart = frame
+        break
+      }
+      case 'review_detail': {
+        const next = new Map(this.reviewPushes)
+        next.set(frame.review_id, Date.now())
+        this.reviewPushes = next
         break
       }
       case 'publication': {

@@ -2186,6 +2186,115 @@ impl Store {
         Ok(absent)
     }
 
+    /// A review's metadata as its owner told its channel, stored or updated
+    /// here without a diff. A new head drops a diff held for the old one; a
+    /// code review's description is left as held (its owner gives it when the
+    /// review is read). Returns `false` only for an id already bound to
+    /// another owner, channel, session or kind, which is never rewritten.
+    pub fn upsert_review_meta(&self, m: &crate::mesh::review_events::ReviewMeta) -> Result<bool> {
+        let r = m.row();
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "INSERT INTO review (id, session_id, node_id, channel, kind, title, body, provider,
+                target, diff, files, head_sha, base_ref, added, removed, state, claimed_ms,
+                created_ms, created_mono_ms, updated_ms, lane, publication_failed, verdict_reason)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'',?10,?11,?12,?13,?14,?15,?16,?17,0,?18,?19,?20,
+                ?22)
+             ON CONFLICT(id) DO UPDATE SET title=?6,
+                body=CASE WHEN excluded.kind=?21 THEN ?7 ELSE review.body END,
+                target=?9, files=?10,
+                diff=CASE WHEN review.head_sha=?11 THEN review.diff ELSE '' END,
+                head_sha=?11, base_ref=?12, added=?13, removed=?14, state=?15, claimed_ms=?16,
+                updated_ms=?18, lane=?19, publication_failed=?20, verdict_reason=?22
+             WHERE node_id=excluded.node_id AND channel=excluded.channel
+                AND session_id IS excluded.session_id AND kind=excluded.kind",
+            rusqlite::params![
+                r.id,
+                r.session_id,
+                r.node_id,
+                r.channel,
+                r.kind,
+                r.title,
+                r.body,
+                r.provider,
+                r.target,
+                r.files,
+                r.head_sha,
+                r.base_ref,
+                r.added,
+                r.removed,
+                r.state,
+                r.claimed_ms,
+                r.created_ms,
+                r.updated_ms,
+                r.lane,
+                r.publication_failed,
+                reports::KIND,
+                r.verdict_reason,
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// A peer's review claimed or let go there: `claimed_ms` as its owner
+    /// holds it, and `new` or `claimed` to match while it is waiting.
+    /// Returns whether the copy here changed.
+    pub fn apply_review_claim(
+        &self,
+        node_id: &str,
+        channel: &str,
+        id: &str,
+        claimed_ms: Option<i64>,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE review SET claimed_ms=?4,
+                state=CASE WHEN state IN ('new','claimed')
+                      THEN CASE WHEN ?4 IS NULL THEN 'new' ELSE 'claimed' END ELSE state END
+             WHERE id=?1 AND node_id=?2 AND channel=?3",
+            rusqlite::params![id, node_id, channel, claimed_ms],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// A peer's review that left its owner's queue: what became of it, taken
+    /// onto the copy here while that copy is open, or gone without the owner
+    /// having said so. Gone from the owner is gone here for good. Returns
+    /// whether the copy changed.
+    pub fn close_mirrored_review(
+        &self,
+        node_id: &str,
+        channel: &str,
+        c: &crate::mesh::review_events::ReviewClosed,
+    ) -> Result<bool> {
+        if crate::mesh::review_events::OPEN_STATES.contains(&c.state.as_str()) {
+            return Ok(false);
+        }
+        let conn = self.conn.lock().unwrap();
+        let gone = (c.state == "gone").then(now_ms);
+        let n = conn.execute(
+            "UPDATE review SET state=?4, verdict_reason=?5, publish_result=?6, updated_ms=?7,
+                publication_failed=NULL, gone_confirmed_ms=COALESCE(?8, gone_confirmed_ms)
+             WHERE id=?1 AND node_id=?2 AND channel=?3
+             AND (state IN ('new','claimed','revising','publishing')
+                  OR (state='gone' AND gone_confirmed_ms IS NULL)
+                  OR (kind=?9 AND state=?10))",
+            rusqlite::params![
+                c.id,
+                node_id,
+                channel,
+                c.state,
+                c.verdict_reason,
+                c.publish_result,
+                c.updated_ms,
+                gone,
+                reports::KIND,
+                reports::ACKNOWLEDGED,
+            ],
+        )?;
+        Ok(n == 1)
+    }
+
     /// A peer's review its owner says it does not hold is gone here, if it is
     /// still open, and confirmed so. Returns whether it was.
     pub fn gone_mirrored_review(&self, node_id: &str, id: &str) -> Result<bool> {
@@ -4022,11 +4131,23 @@ impl Store {
     /// review `node_id` owns is claimed: a peer's copy holds what its owner
     /// lists, and a claim here would be released here into an open review
     /// the owner may long since have decided.
-    pub fn claim_review(&self, node_id: &str, id: &str) -> Result<()> {
+    /// Whether it changed: one already claimed, decided or a peer's is not.
+    pub fn claim_review(&self, node_id: &str, id: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let n = conn.execute(
             "UPDATE review SET state='claimed', claimed_ms=COALESCE(claimed_ms, ?3), updated_ms=?3
              WHERE id=?1 AND node_id=?2 AND state='new'",
+            rusqlite::params![id, node_id, now_ms()],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// Keep a claim fresh while someone still has the review open, so the
+    /// sweeper does not take it for abandoned: a peer renewing its watch.
+    pub fn touch_claim(&self, node_id: &str, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE review SET updated_ms=?3 WHERE id=?1 AND node_id=?2 AND state='claimed'",
             rusqlite::params![id, node_id, now_ms()],
         )?;
         Ok(())
@@ -4179,14 +4300,15 @@ impl Store {
     /// A claim measures attention, so one that never releases would report every
     /// review as attended forever. Only a review `node_id` owns: a peer's
     /// claim is its owner's to release.
-    pub fn release_review(&self, node_id: &str, id: &str) -> Result<()> {
+    /// Whether it changed.
+    pub fn release_review(&self, node_id: &str, id: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let n = conn.execute(
             "UPDATE review SET state='new', claimed_ms=NULL, updated_ms=?3
              WHERE id=?1 AND node_id=?2 AND state='claimed'",
             rusqlite::params![id, node_id, now_ms()],
         )?;
-        Ok(())
+        Ok(n == 1)
     }
 
     /// Claims older than the grace period, for the sweeper. A dropped socket

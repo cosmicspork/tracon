@@ -15,6 +15,7 @@ import {
   lostOwner,
   ownersReviewer,
   rereadPeer,
+  WATCH_RENEW_MS,
   rereadReviewer,
   reviewerControl,
   startedHow,
@@ -300,15 +301,28 @@ describe("reading a peer's reviewer again", () => {
 
   test('keeps going while the owner it lost is said to be away, until it is read again', () => {
     const away = "Reviewer runs on homelab; it can't be reached from here right now"
-    // While running, the reviewer's own pace.
-    expect(rereadPeer('now', false, null)).toBe('now')
-    expect(rereadPeer('later', true, away)).toBe('later')
     // A poll lost the owner mid-run: the control is hidden, the page still reads.
-    expect(rereadPeer(null, true, away)).toBe('later')
-    // Read again, and the owner says nothing is running: the poll stops.
-    expect(rereadPeer(null, false, null)).toBeNull()
+    expect(rereadPeer(true, null, true, away)).toBe('later')
+    expect(rereadPeer(true, 'later', true, away)).toBe('later')
+    // Read again, and the owner answers: the poll stops.
+    expect(rereadPeer(true, null, false, null)).toBeNull()
     // Away on load, with no reviewer seen running: nothing to follow.
-    expect(rereadPeer(null, false, away)).toBeNull()
+    expect(rereadPeer(true, null, false, away)).toBeNull()
+  })
+
+  test("never polls a peer's running reviewer: its owner pushes what changes", () => {
+    expect(rereadPeer(true, 'now', false, null)).toBeNull()
+    expect(rereadPeer(true, 'later', false, null)).toBeNull()
+  })
+
+  test("reads this node's own reviewer at its pace", () => {
+    expect(rereadPeer(false, 'now', false, null)).toBe('now')
+    expect(rereadPeer(false, 'later', false, null)).toBe('later')
+    expect(rereadPeer(false, null, true, 'away')).toBeNull()
+  })
+
+  test('renews a watch well inside the two-minute lease', () => {
+    expect(WATCH_RENEW_MS).toBeLessThan(120_000 / 2)
   })
 })
 

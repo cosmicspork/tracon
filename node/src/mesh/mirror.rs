@@ -8,14 +8,15 @@
 
 use std::sync::Arc;
 
-use proto::frame::Payload;
+use proto::frame::{Payload, ReviewEvent};
 use serde_json::Value;
 
 use crate::store::{
-    now_ms, NewEvent, NodeRow, OperatorQuestionRow, PermissionRow, ReviewOutcome, ReviewRow,
-    SessionRow, Store,
+    now_ms, NewEvent, NodeRow, OperatorQuestionRow, PermissionRow, ReviewOutcome, SessionRow, Store,
 };
 use crate::stream::{Bus, Frame};
+
+use super::review_events::{ReviewClosed, ReviewMeta};
 
 pub struct Mirror {
     pub store: Arc<Store>,
@@ -121,11 +122,8 @@ impl Mirror {
                 }
                 r
             }
-            Payload::Reviews { waiting, decided } => {
-                let mut r = self.apply_reviews(sender, channel, &waiting);
-                if r == Applied::Stored {
-                    r = self.apply_outcomes(sender, channel, &decided);
-                }
+            Payload::Review { event } => {
+                let r = self.apply_review_event(sender, channel, event);
                 if r == Applied::Stored {
                     self.publish_queue();
                 }
@@ -201,6 +199,7 @@ impl Mirror {
             Payload::Command { .. } => Applied::Unhandled("command"),
             Payload::Ack { .. } => Applied::Unhandled("ack"),
             Payload::EventsRequest { .. } => Applied::Unhandled("events_request"),
+            Payload::ReviewUpdate { .. } => Applied::Unhandled("review_update"),
             Payload::EventsBatch { .. } => Applied::Unhandled("events_batch"),
             Payload::KeyHandoff { .. } => Applied::Unhandled("key_handoff"),
             Payload::PolicyBundle { .. } => Applied::Unhandled("policy_bundle"),
@@ -353,29 +352,77 @@ impl Mirror {
         Applied::Stored
     }
 
+    /// A snapshot's listing of the sender's open reviews, as metadata.
     fn apply_reviews(&self, sender: &str, channel: &str, rows: &[Value]) -> Applied {
         for v in rows {
-            match serde_json::from_value::<ReviewRow>(v.clone()) {
-                Ok(r) if r.node_id == sender && r.channel == channel => {
-                    match self.store.upsert_review_mirror(&r) {
-                        Ok(true) => {}
-                        // The sender owns the payload row, but it tried to
-                        // reuse an ID already bound to another owner/channel.
-                        Ok(false) => return Applied::Impersonation,
-                        Err(error) => {
-                            tracing::warn!(%error, review = %r.id, "mirrored review not stored");
-                            return Applied::Malformed;
-                        }
-                    }
-                }
-                Ok(_) => return Applied::Impersonation,
-                Err(_) => return Applied::Malformed,
+            match self.apply_review_meta(sender, channel, v) {
+                Applied::Stored => {}
+                other => return other,
             }
         }
         // What the listing leaves out is read again from the owner by the
         // client (`reread_unlisted_reviews`): a review leaves an owner's
         // listing as soon as it is decided, so absence is not loss.
         Applied::Stored
+    }
+
+    fn apply_review_meta(&self, sender: &str, channel: &str, v: &Value) -> Applied {
+        match serde_json::from_value::<ReviewMeta>(v.clone()) {
+            Ok(m) if m.node_id == sender && m.channel == channel => {
+                match self.store.upsert_review_meta(&m) {
+                    Ok(true) => Applied::Stored,
+                    // The sender owns the listed row, but it tried to reuse
+                    // an ID already bound to another owner/channel.
+                    Ok(false) => Applied::Impersonation,
+                    Err(error) => {
+                        tracing::warn!(%error, review = %m.id, "mirrored review not stored");
+                        Applied::Malformed
+                    }
+                }
+            }
+            Ok(_) => Applied::Impersonation,
+            Err(_) => Applied::Malformed,
+        }
+    }
+
+    /// One change to one of the sender's reviews. Only the sender's own
+    /// copies change: the claim and the outcome match the owner and channel.
+    fn apply_review_event(&self, sender: &str, channel: &str, event: ReviewEvent) -> Applied {
+        let stored = |r: Result<bool, crate::store::StoreError>, id: &str| match r {
+            Ok(_) => Applied::Stored,
+            Err(error) => {
+                tracing::warn!(%error, review = %id, "mirrored review change not stored");
+                Applied::Malformed
+            }
+        };
+        match event {
+            ReviewEvent::Opened { review } | ReviewEvent::Revised { review } => {
+                self.apply_review_meta(sender, channel, &review)
+            }
+            ReviewEvent::Claimed {
+                review_id,
+                claimed_ms,
+                ..
+            }
+            | ReviewEvent::Unclaimed {
+                review_id,
+                claimed_ms,
+                ..
+            } => stored(
+                self.store
+                    .apply_review_claim(sender, channel, &review_id, claimed_ms),
+                &review_id,
+            ),
+            ReviewEvent::Closed { outcome } => {
+                let Ok(closed) = serde_json::from_value::<ReviewClosed>(outcome) else {
+                    return Applied::Malformed;
+                };
+                stored(
+                    self.store.close_mirrored_review(sender, channel, &closed),
+                    &closed.id,
+                )
+            }
+        }
     }
 
     /// What became of a peer's decided code reviews on `channel`, taken onto
@@ -459,6 +506,7 @@ impl Mirror {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::ReviewRow;
 
     fn terminal_session() -> SessionRow {
         SessionRow {
@@ -960,7 +1008,7 @@ mod tests {
     }
 
     #[test]
-    fn review_frame_mirrors_acknowledgement_without_reopening_the_queue() {
+    fn review_event_mirrors_acknowledgement_without_reopening_the_queue() {
         let owner = owner_with_acknowledged_report();
         let peer = Arc::new(Store::open_in_memory().unwrap());
         let mirror = Mirror {
@@ -977,78 +1025,123 @@ mod tests {
             ),
             Applied::Stored
         );
-
-        let payload = crate::mesh::frames::to_payloads(
-            &Frame::Reviews {
-                waiting: Vec::new(),
-            },
-            &owner,
-            "owner",
-        )
-        .into_iter()
-        .find_map(|(channel, payload)| (channel == "personal").then_some(payload))
-        .unwrap();
-        assert_eq!(mirror.apply("owner", "personal", payload), Applied::Stored);
-
+        let report = owner.get_review("report").unwrap().unwrap();
+        let review = serde_json::to_value(ReviewMeta::of(&report, Vec::new())).unwrap();
         assert_eq!(
-            peer.get_review("report").unwrap().unwrap().state,
-            crate::store::reports::ACKNOWLEDGED
+            mirror.apply(
+                "owner",
+                "personal",
+                Payload::Review {
+                    event: ReviewEvent::Opened { review }
+                }
+            ),
+            Applied::Stored
         );
+
+        let held = peer.get_review("report").unwrap().unwrap();
+        assert_eq!(held.state, crate::store::reports::ACKNOWLEDGED);
+        // A report is its text: it comes with it.
+        assert_eq!(held.body, "The narrative body");
         assert!(peer.open_reviews().unwrap().is_empty());
     }
 
     #[test]
-    fn review_frame_mirrors_the_owners_reviewer_and_its_verdict() {
+    fn review_events_mirror_metadata_claims_and_outcome_but_no_diff() {
         let peer = Arc::new(Store::open_in_memory().unwrap());
         let mirror = Mirror {
             store: peer.clone(),
             bus: Bus::new(),
             self_id: "peer".into(),
         };
-        let listed = |reviewer: Option<&str>, verdict: Option<&str>| {
-            let review = ReviewRow {
-                id: "code".into(),
-                session_id: None,
-                kind: "pr".into(),
-                state: "new".into(),
-                verdict_reason: None,
-                resolved_mono_ms: None,
-                review_session_id: reviewer.map(Into::into),
-                ai_verdict_json: verdict.map(Into::into),
-                ..acknowledged_report()
-            };
-            Payload::Reviews {
-                waiting: vec![serde_json::to_value(review).unwrap()],
-                decided: Vec::new(),
-            }
+        let row = ReviewRow {
+            id: "code".into(),
+            session_id: None,
+            kind: "pr".into(),
+            state: "new".into(),
+            body: "a description".into(),
+            diff: "+the diff".into(),
+            verdict_reason: None,
+            resolved_mono_ms: None,
+            ..acknowledged_report()
         };
+        let event = |event| Payload::Review { event };
+        let meta = |r: &ReviewRow| serde_json::to_value(ReviewMeta::of(r, Vec::new())).unwrap();
         let held = || peer.get_review("code").unwrap().unwrap();
 
-        let approved = r#"{"verdict":"approve","summary":"fine","findings":[]}"#;
         assert_eq!(
             mirror.apply(
                 "owner",
                 "personal",
-                listed(Some("reviewer-1"), Some(approved))
+                event(ReviewEvent::Opened { review: meta(&row) })
             ),
             Applied::Stored
         );
-        assert_eq!(held().review_session_id.as_deref(), Some("reviewer-1"));
-        assert_eq!(held().ai_verdict_json.as_deref(), Some(approved));
+        assert_eq!(held().state, "new");
+        assert_eq!(held().diff, "");
+        assert_eq!(
+            held().body,
+            "",
+            "a code review's description stays with its owner"
+        );
 
-        // A newer reviewer's verdict replaces the first.
-        let changes = r#"{"verdict":"request_changes","summary":"no","findings":[]}"#;
+        // Another node cannot open a review in the owner's name.
+        assert_eq!(
+            mirror.apply(
+                "intruder",
+                "personal",
+                event(ReviewEvent::Opened { review: meta(&row) })
+            ),
+            Applied::Impersonation
+        );
+
+        // Watched from somewhere: claimed here too, and let go.
         mirror.apply(
             "owner",
             "personal",
-            listed(Some("reviewer-2"), Some(changes)),
+            event(ReviewEvent::Claimed {
+                review_id: "code".into(),
+                claimers: vec!["peer".into()],
+                claimed_ms: Some(7),
+            }),
         );
-        assert_eq!(held().review_session_id.as_deref(), Some("reviewer-2"));
-        assert_eq!(held().ai_verdict_json.as_deref(), Some(changes));
+        assert_eq!(
+            (held().state.as_str(), held().claimed_ms),
+            ("claimed", Some(7))
+        );
+        mirror.apply(
+            "owner",
+            "personal",
+            event(ReviewEvent::Unclaimed {
+                review_id: "code".into(),
+                claimers: Vec::new(),
+                claimed_ms: None,
+            }),
+        );
+        assert_eq!((held().state.as_str(), held().claimed_ms), ("new", None));
 
-        // A resubmission clears both on the owner, and so here.
-        mirror.apply("owner", "personal", listed(None, None));
-        assert_eq!(held().review_session_id, None);
-        assert_eq!(held().ai_verdict_json, None);
+        // Resubmitted with a new head.
+        let revised = ReviewRow {
+            head_sha: "next".into(),
+            added: 9,
+            ..row.clone()
+        };
+        mirror.apply(
+            "owner",
+            "personal",
+            event(ReviewEvent::Revised {
+                review: meta(&revised),
+            }),
+        );
+        assert_eq!((held().head_sha.as_str(), held().added), ("next", 9));
+
+        // Decided: the outcome, and no longer waiting.
+        let outcome = serde_json::json!({
+            "id": "code", "state": "approved", "verdict_reason": null,
+            "publish_result": "https://forge/pr/1", "updated_ms": 9,
+        });
+        mirror.apply("owner", "personal", event(ReviewEvent::Closed { outcome }));
+        assert_eq!(held().state, "approved");
+        assert_eq!(held().publish_result.as_deref(), Some("https://forge/pr/1"));
+        assert!(peer.open_reviews().unwrap().is_empty());
     }
 }

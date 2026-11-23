@@ -95,33 +95,11 @@ pub fn to_payloads(frame: &Frame, store: &Store, self_id: &str) -> Vec<(String, 
                 .map(|(c, rows)| (c, Payload::Questions { waiting: rows }))
                 .collect()
         }
-        Frame::Reviews { .. } => {
-            // The UI frame only lists waiting reviews. The mesh additionally
-            // carries acknowledged narrative reports, so a peer learns durable
-            // receipt without showing terminal reports in its operator queue.
-            let Ok(replicated) = store.mirrored_reviews() else {
-                return Vec::new();
-            };
-            let mine: Vec<&ReviewRow> =
-                replicated.iter().filter(|r| r.node_id == self_id).collect();
-            let mut out = Vec::new();
-            for c in store.node_channels_keyed(self_id).unwrap_or_default() {
-                let rows: Vec<Value> = mine
-                    .iter()
-                    .filter(|r| r.channel == c)
-                    .map(|r| json!(r))
-                    .collect();
-                let decided = decided(store, self_id, &c);
-                out.push((
-                    c,
-                    Payload::Reviews {
-                        waiting: rows,
-                        decided,
-                    },
-                ));
-            }
-            out
-        }
+        // A review reaches the mesh as the events that changed it, which the
+        // client works out from what it last told each channel
+        // (`MeshClient::send_review_events`): the interface's frame lists the
+        // whole queue every time anything is published, read or not.
+        Frame::Reviews { .. } => Vec::new(),
         Frame::Node(v) => vec![(MESH_CHANNEL.to_string(), Payload::Node(v.clone()))],
         // Only this site's own changes leave here: a mirrored change that won
         // locally is republished untapped, and even if it were not, a change
@@ -225,7 +203,12 @@ pub fn snapshots(store: &Store, self_id: &str) -> Vec<(String, Payload)> {
             Payload::Snapshot {
                 sessions: s,
                 waiting: w,
-                reviews: r.into_iter().map(|review| json!(review)).collect(),
+                // Metadata only: a peer reads the diff from the owner when
+                // its operator opens the review.
+                reviews: r
+                    .into_iter()
+                    .map(|review| json!(super::review_events::ReviewMeta::of(review, Vec::new())))
+                    .collect(),
                 questions: q,
                 decided: d,
             },

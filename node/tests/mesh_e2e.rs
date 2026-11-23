@@ -1365,14 +1365,31 @@ async fn a_mirrored_review_is_read_from_the_node_that_holds_it() {
     let (a, b) = pair().await;
     let (ai, bi) = (a.id.node_id(), b.id.node_id());
     let id = uuid::Uuid::now_v7().to_string();
-    a.store.insert_review(&held_review(&id, &bi)).unwrap();
-    b.store.insert_review(&held_review(&id, &bi)).unwrap();
+    let open = tracon::store::ReviewRow {
+        state: "new".into(),
+        ..held_review(&id, &bi)
+    };
+    // A holds what B's channel was told: no diff.
+    a.store
+        .insert_review(&tracon::store::ReviewRow {
+            diff: String::new(),
+            ..open.clone()
+        })
+        .unwrap();
+    b.store.insert_review(&open).unwrap();
 
     let (st, v) = call(&a.app, "GET", &format!("/api/reviews/{id}"), None).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["remote_owner"], bi.as_str());
     assert_eq!(v["owner_detail"]["state"], "fetched", "{v}");
     assert!(v["intent"].is_object(), "the owner's intent: {v}");
+    assert_eq!(
+        v["review"]["diff"], "+x",
+        "the diff is read from the owner: {v}"
+    );
+    // Opening it watches it on B, which claims it there.
+    assert_eq!(b.client.watches().claimers(&id), vec![ai.clone()]);
+    assert_eq!(b.store.get_review(&id).unwrap().unwrap().state, "claimed");
 
     // B answers only for what it owns: not a review it does not hold, and
     // not as a relay for a third node's claim.
@@ -1380,7 +1397,7 @@ async fn a_mirrored_review_is_read_from_the_node_that_holds_it() {
         .client
         .command(
             &bi,
-            Command::ReviewDetail {
+            Command::ReviewWatch {
                 request: json!({ "review_id": id, "channel": "personal", "owner": ai }),
             },
             Duration::from_secs(5),
@@ -1396,7 +1413,7 @@ async fn a_mirrored_review_is_read_from_the_node_that_holds_it() {
         .client
         .command(
             &bi,
-            Command::ReviewDetail {
+            Command::ReviewWatch {
                 request: json!({ "review_id": other, "channel": "personal", "owner": bi }),
             },
             Duration::from_secs(5),
@@ -1413,6 +1430,140 @@ async fn a_mirrored_review_is_read_from_the_node_that_holds_it() {
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["owner_detail"]["state"], "unreachable", "{v}");
     assert!(v["evidence"].is_null());
+}
+
+/// A watching peer reads the whole detail from the owner once; after that
+/// the owner pushes what changes (here its reviewer's verdict), and the page
+/// here reads it again from what this node holds, without asking the owner.
+/// Unrenewed, the watch lapses on the owner and the channel is told.
+#[tokio::test]
+async fn a_watching_peer_is_given_the_detail_once_then_pushed_the_reviewers_verdict() {
+    state::isolate();
+    let (a, b) = pair().await;
+    let (ai, bi) = (a.id.node_id(), b.id.node_id());
+    let id = uuid::Uuid::now_v7().to_string();
+    let open = tracon::store::ReviewRow {
+        state: "new".into(),
+        ..held_review(&id, &bi)
+    };
+    b.store.insert_review(&open).unwrap();
+    b.bus.publish(tracon::stream::Frame::Reviews {
+        waiting: b.store.open_reviews().unwrap(),
+    });
+    wait_for("A to be told of B's review", || {
+        a.store.get_review(&id).unwrap().is_some()
+    })
+    .await;
+
+    let mut pushed = a.bus.subscribe();
+    let (st, v) = call(&a.app, "GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["owner_detail"]["state"], "fetched", "{v}");
+    assert_eq!(v["review"]["diff"], "+x", "{v}");
+    assert!(v["review"]["ai_verdict_json"].is_null(), "{v}");
+    assert_eq!(b.client.watches().claimers(&id), vec![ai.clone()]);
+    // The claim reaches A as an event.
+    wait_for("A to see B's review claimed", || {
+        a.store
+            .get_review(&id)
+            .unwrap()
+            .is_some_and(|r| r.state == "claimed")
+    })
+    .await;
+
+    // Read again while watching: answered from what A holds, so B sends
+    // nothing for it.
+    let delivered = b.client.snapshot().delivered_since_reconnect;
+    let (st, again) = call(&a.app, "GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(st, StatusCode::OK, "{again}");
+    assert_eq!(again["owner_detail"]["state"], "fetched", "{again}");
+    assert_eq!(b.client.snapshot().delivered_since_reconnect, delivered);
+
+    // B's reviewer lands its verdict; B republishes its queue, as it does.
+    let verdict = json!({ "verdict": "approve", "summary": "fine", "model": "m" }).to_string();
+    b.store.set_review_session(&id, "reviewer-on-b").unwrap();
+    b.store.set_ai_verdict(&id, &verdict, None).unwrap();
+    b.bus.publish(tracon::stream::Frame::Reviews {
+        waiting: b.store.open_reviews().unwrap(),
+    });
+    let frame = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(tracon::stream::Frame::ReviewDetail { review_id }) = pushed.recv().await {
+                break review_id;
+            }
+        }
+    })
+    .await
+    .expect("A's page told the detail changed");
+    assert_eq!(frame, id);
+    let (st, v) = call(&a.app, "GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["review"]["ai_verdict_json"], verdict, "{v}");
+    assert_eq!(v["review"]["review_session_id"], "reviewer-on-b", "{v}");
+    assert_eq!(
+        v["review"]["diff"], "+x",
+        "the diff the push left out is kept: {v}"
+    );
+
+    // Left unrenewed, the watch lapses on B, which tells its channel.
+    b.client
+        .expire_watches(tracon::store::now_ms() + tracon::mesh::review_events::WATCH_TTL_MS + 1);
+    assert!(b.client.watches().claimers(&id).is_empty());
+
+    // Renewed from the page, a held watch reaches B again.
+    let (st, v) = call_local(&a.app, "POST", &format!("/api/reviews/{id}/watch"), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["watching"], true, "{v}");
+    wait_for("B to take A's renewal as a watch", || {
+        b.client.watches().claimers(&id) == vec![ai.clone()]
+    })
+    .await;
+    // Released when the page closes.
+    let (st, _) = call_local(&a.app, "POST", &format!("/api/reviews/{id}/release"), None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    wait_for("B to let A's watch go", || {
+        b.client.watches().claimers(&id).is_empty()
+    })
+    .await;
+    let (_, v) = call_local(&a.app, "POST", &format!("/api/reviews/{id}/watch"), None).await;
+    assert_eq!(v["watching"], false, "{v}");
+}
+
+/// Reading a review publishes nothing to the mesh, however often: only a
+/// claim that changed it does, once.
+#[tokio::test]
+async fn reading_a_review_publishes_nothing_to_the_mesh() {
+    state::isolate();
+    let (a, _b) = pair().await;
+    let ai = a.id.node_id();
+    let id = uuid::Uuid::now_v7().to_string();
+    let open = tracon::store::ReviewRow {
+        state: "new".into(),
+        ..held_review(&id, &ai)
+    };
+    a.store.insert_review(&open).unwrap();
+    a.bus.publish(tracon::stream::Frame::Reviews {
+        waiting: a.store.open_reviews().unwrap(),
+    });
+    let sent = || {
+        let s = a.client.snapshot();
+        s.delivered_since_reconnect + s.queued
+    };
+    // The open event, then the claim the first read makes.
+    let (st, _) = call(&a.app, "GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let before = sent();
+    for _ in 0..5 {
+        let (st, v) = call(&a.app, "GET", &format!("/api/reviews/{id}"), None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+    }
+    // The queue republished with nothing changed tells the mesh nothing either.
+    a.bus.publish(tracon::stream::Frame::Reviews {
+        waiting: a.store.open_reviews().unwrap(),
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(sent(), before, "reads published to the mesh");
 }
 
 /// A peer's review is started by its owner: A forwards the start, B runs
@@ -1526,27 +1677,30 @@ async fn a_reviewer_on_a_peers_review_is_started_by_the_node_that_holds_it() {
     assert!(message(&v).contains("unreachable"), "{v}");
 }
 
-/// A review leaves its owner's listing as soon as it is decided, so a peer
-/// that held it open reads it again from the owner: approved and published
-/// there, it is approved here, with the owner's result and checks. Only one
-/// the owner says it does not hold is gone.
+/// A review the owner decides is closed here by the event saying so, with
+/// the owner's result. One a snapshot no longer lists and no event closed is
+/// read again from the owner, and only one the owner does not hold is gone.
 #[tokio::test]
-async fn a_peers_decided_review_is_read_again_from_its_owner_and_only_a_lost_one_is_gone() {
+async fn a_peers_decided_review_is_closed_here_and_only_a_lost_one_is_gone() {
     state::isolate();
     let (a, b) = pair().await;
     let bi = b.id.node_id();
-    let checks = json!([{ "command": "just check", "ok": true }]).to_string();
     let id = uuid::Uuid::now_v7().to_string();
     let mut held = held_review(&id, &bi);
     held.state = "new".into();
-    held.checks_json = Some(checks.clone());
     b.store.insert_review(&held).unwrap();
-    a.store
-        .insert_review(&tracon::store::ReviewRow {
-            checks_json: None,
-            ..held.clone()
-        })
-        .unwrap();
+    // The owner's queue republished: its channel is told it opened.
+    b.bus.publish(tracon::stream::Frame::Reviews {
+        waiting: b.store.open_reviews().unwrap(),
+    });
+    wait_for("A to be told of B's review", || {
+        a.store.get_review(&id).unwrap().is_some()
+    })
+    .await;
+    let mirrored = a.store.get_review(&id).unwrap().unwrap();
+    assert_eq!(mirrored.diff, "", "an opened review carries no diff");
+    assert_eq!(mirrored.title, held.title);
+
     let lost = uuid::Uuid::now_v7().to_string();
     let mut lost_row = held_review(&lost, &bi);
     lost_row.state = "new".into();
@@ -1557,12 +1711,11 @@ async fn a_peers_decided_review_is_read_again_from_its_owner_and_only_a_lost_one
         .store
         .resolve_review(&id, "approved", None, None, None, Some(url), 1, None)
         .unwrap());
-    // The owner's listing of its open reviews, which no longer has either.
     b.bus.publish(tracon::stream::Frame::Reviews {
         waiting: b.store.open_reviews().unwrap(),
     });
 
-    wait_for("A to read the decided review again from B", || {
+    wait_for("A to close the review B decided", || {
         a.store
             .get_review(&id)
             .unwrap()
@@ -1571,7 +1724,9 @@ async fn a_peers_decided_review_is_read_again_from_its_owner_and_only_a_lost_one
     .await;
     let mirrored = a.store.get_review(&id).unwrap().unwrap();
     assert_eq!(mirrored.publish_result.as_deref(), Some(url));
-    assert_eq!(mirrored.checks_json.as_deref(), Some(checks.as_str()));
+    // The lost one: B's snapshot does not list it, so A asks B, which does
+    // not hold it.
+    b.client.send_snapshots();
     wait_for("A to mark the review B does not hold gone", || {
         a.store
             .get_review(&lost)
@@ -1663,9 +1818,9 @@ async fn a_peers_failed_publication_is_shown_here_until_its_owner_clears_it() {
 
 /// Builds before the owner was asked wrote a peer's review off as gone as soon
 /// as the owner's listing left it out, decided ones included. Such a copy is
-/// read again from the owner at its next listing: restored, outcome and
-/// checks, when the owner holds it, and confirmed gone when the owner refuses,
-/// after which it is not asked about again.
+/// read again from the owner at its next snapshot: restored, with its
+/// outcome, when the owner holds it, and confirmed gone when the owner
+/// refuses, after which it is not asked about again.
 #[tokio::test]
 async fn a_review_an_earlier_build_marked_gone_is_restored_or_confirmed_once() {
     state::isolate();
@@ -1691,11 +1846,7 @@ async fn a_review_an_earlier_build_marked_gone_is_restored_or_confirmed_once() {
         b.store.insert_review(&decided(id)).unwrap();
         a.store.insert_review(&written_off(id)).unwrap();
     };
-    let listing = || {
-        b.bus.publish(tracon::stream::Frame::Reviews {
-            waiting: b.store.open_reviews().unwrap(),
-        })
-    };
+    let listing = || b.client.send_snapshots();
     let approved_on_a = |id: &str| {
         a.store
             .get_review(id)
@@ -1715,7 +1866,6 @@ async fn a_review_an_earlier_build_marked_gone_is_restored_or_confirmed_once() {
     .await;
     let mirrored = a.store.get_review(&restored).unwrap().unwrap();
     assert_eq!(mirrored.publish_result.as_deref(), Some(url));
-    assert_eq!(mirrored.checks_json.as_deref(), Some(checks.as_str()));
     wait_for("A to confirm the review B refuses gone", || {
         !a.store
             .unconfirmed_gone_reviews(&bi, "personal")
@@ -1744,12 +1894,12 @@ async fn a_review_an_earlier_build_marked_gone_is_restored_or_confirmed_once() {
     );
 }
 
-/// The owner's listing says what became of the reviews it decided lately, so
-/// a peer that held one open learns the outcome from the frame itself, even
-/// when it could not ask the owner: here A is still waiting out a failed
-/// read when the listing arrives.
+/// The owner's `closed` event says what became of a review it decided, so a
+/// peer that held it open learns the outcome from the frame itself, even when
+/// it could not ask the owner: here A is still waiting out a failed read when
+/// the event arrives.
 #[tokio::test]
-async fn a_peers_listing_carries_what_became_of_its_decided_reviews() {
+async fn a_peers_closed_event_carries_what_became_of_its_decided_review() {
     state::isolate();
     let (a, b) = pair().await;
     let bi = b.id.node_id();
@@ -1758,7 +1908,16 @@ async fn a_peers_listing_carries_what_became_of_its_decided_reviews() {
     let mut held = held_review(&id, &bi);
     held.state = "new".into();
     b.store.insert_review(&held).unwrap();
-    a.store.insert_review(&held).unwrap();
+    // B's channel told it opened.
+    b.bus.publish(tracon::stream::Frame::Reviews {
+        waiting: b.store.open_reviews().unwrap(),
+    });
+    wait_for("A to be told of B's review", || {
+        a.store.get_review(&id).unwrap().is_some()
+    })
+    .await;
+    // As A holds it once its operator has read it from B.
+    a.store.upsert_review_mirror(&held).unwrap();
     a.client
         .defer_reread(&id, tracon::store::now_ms() + 3_600_000);
 
@@ -1781,7 +1940,6 @@ async fn a_peers_listing_carries_what_became_of_its_decided_reviews() {
     .await;
     let mirrored = a.store.get_review(&id).unwrap().unwrap();
     assert_eq!(mirrored.publish_result.as_deref(), Some(url));
-    assert_eq!(mirrored.checks_json.as_deref(), Some(checks.as_str()));
     assert_eq!(
         mirrored.diff, held.diff,
         "an outcome leaves the diff held here"

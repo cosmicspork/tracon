@@ -253,20 +253,25 @@ export function lostOwner(read: boolean, ownerDetail: OwnerDetail | null | undef
 }
 
 /**
- * When to read a peer's review again: as `when` says while its reviewer is
- * seen running; and, once a poll lost sight of the owner (`lost`), on a
- * pause for as long as the page says it can't be read (`away`), so it picks
- * the reviewer up again when the owner comes back instead of waiting for a
- * reload.
+ * When to read a review again. This node's own reviewer is read at `when`'s
+ * pace while it runs. A peer's review is not polled: its owner pushes what
+ * changes while this node watches it. It is read again only once a read lost
+ * sight of the owner (`lost`), on a pause for as long as the page says it
+ * can't be read (`away`), so it picks the reviewer up again when the owner
+ * comes back instead of waiting for a reload.
  */
 export function rereadPeer(
+  remote: boolean,
   when: 'now' | 'later' | null,
   lost: boolean,
   away: string | null,
 ): 'now' | 'later' | null {
-  if (when) return when
+  if (!remote) return when
   return lost && away ? 'later' : null
 }
+
+/** How often the review page renews its watch of a peer's review, in ms: well inside the node's two-minute lease. */
+export const WATCH_RENEW_MS = 45_000
 
 /**
  * When the review page reads its reviewer again while one is starting or
