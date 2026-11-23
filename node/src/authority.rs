@@ -645,10 +645,13 @@ pub async fn publish_review(
         serde_json::from_str(&review.target).map_err(|e| PublishError::External(e.to_string()))?;
     let intent =
         revision_intent(ctx.store, revision_id.as_deref()).map_err(PublishError::Conflict)?;
-    let mut outputs = edited_outputs
-        .cloned()
-        .unwrap_or_else(|| intent.forge.clone())
-        .resolve(&target, title, body);
+    let mut outputs = crate::review::publish::Outputs::approved(
+        edited_outputs,
+        &intent.forge,
+        &target,
+        title,
+        body,
+    );
     // Nothing a person did not approve is opened ready to merge.
     if !operator && target.change.is_none() && !target.initial && !target.direct {
         outputs.draft = true;

@@ -6257,6 +6257,92 @@ async fn a_new_change_goes_out_only_behind_the_operators_opener() {
     assert_eq!(f.publication(&id).body.as_deref(), Some(GENERATED));
 }
 
+/// The review screen's preview of the outgoing text is the text an
+/// approval with the same edits publishes, byte for byte, the opener and
+/// its fold included; without the opener it says why approval is refused.
+#[tokio::test]
+async fn the_outgoing_preview_is_exactly_what_approval_publishes() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, generated_details).await;
+    let id = f.submit().await;
+    f.forget_logs();
+    let outgoing = format!("/api/reviews/{id}/outgoing");
+    let edits = json!({
+        "title": "fix: the sync",
+        "body": "## What\n\nThe agent's long account.",
+    });
+
+    let (status, preview) = f.call("POST", &outgoing, Some(edits.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["description"], json!(null), "{preview}");
+    assert_eq!(
+        preview["refusal"],
+        "write an opener above the generated details"
+    );
+
+    let mut asked = edits.clone();
+    asked["opener"] = json!("  Fixes the flaky sync.\n");
+    let (status, preview) = f.call("POST", &outgoing, Some(asked.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["refusal"], json!(null), "{preview}");
+    assert_eq!(preview["description"]["title"], "fix: the sync");
+    assert_eq!(preview["description"]["body"], GENERATED);
+    assert!(f.gh_log().is_empty(), "a preview publishes nothing");
+
+    asked["verdict"] = json!("approve");
+    let (status, body) = f
+        .call("POST", &format!("/api/reviews/{id}/verdict"), Some(asked))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let gh = f.gh_log();
+    assert!(
+        gh.contains(&format!(
+            "--title {} --body {}",
+            preview["description"]["title"].as_str().unwrap(),
+            preview["description"]["body"].as_str().unwrap()
+        )),
+        "{gh}"
+    );
+}
+
+/// An update's preview is the description replacing the change's and the
+/// comment, as edited; a push-only update sends no description.
+#[tokio::test]
+async fn the_outgoing_preview_of_an_update_names_what_it_sends() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let base = f.base_sha();
+    f.forge_holds(&base);
+    gh_forge(&f, pull_seven(&base));
+    let id = review_id(
+        &f.submit_update(json!({ "forge": { "comment": "agent's wording" } }))
+            .await,
+    );
+    let outgoing = format!("/api/reviews/{id}/outgoing");
+
+    let (status, preview) = f.call("POST", &outgoing, Some(json!({}))).await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["description"], json!(null), "{preview}");
+    assert_eq!(preview["comment"], "agent's wording");
+
+    let (status, preview) = f
+        .call(
+            "POST",
+            &outgoing,
+            Some(json!({ "outputs": {
+                "description": { "title": "fix: x", "body": "why" },
+                "comment": "operator's wording",
+            }})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(
+        preview["description"],
+        json!({ "title": "fix: x", "body": "why" })
+    );
+    assert_eq!(preview["comment"], "operator's wording");
+}
+
 /// No agent text, no empty fold: the opener is the whole description.
 #[tokio::test]
 async fn an_empty_generated_body_publishes_the_opener_alone() {

@@ -71,11 +71,15 @@ export function openerFor(
 
 /**
  * The description the forge gets: the opener, then the agent's text folded
- * under "Generated details", or the opener alone when there is no text. The
- * node composes the published one the same way; this is its preview.
+ * under "Generated details", or the opener alone when there is no text; null
+ * without an opener, which the node refuses. The node composes the published
+ * one (`compose_generated_details`); this composes a mirrored review's
+ * preview, whose owner the screen cannot ask, and both are held to the cases
+ * in `spa/fixtures/generated-details.json`.
  */
-export function composeGeneratedDetails(opener: string, body: string): string {
+export function composeGeneratedDetails(opener: string, body: string): string | null {
   const lead = opener.trim()
+  if (!lead) return null
   const rest = body.trim()
   if (!rest) return lead
   return `${lead}\n\n<details>\n<summary>${GENERATED_DETAILS}</summary>\n\n${rest}\n\n</details>`

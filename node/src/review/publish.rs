@@ -223,6 +223,23 @@ pub struct Outputs {
 }
 
 impl Outputs {
+    /// What an approval sends: the operator's edits if they made any, else
+    /// the revision's own, resolved against the target. Publication acts on
+    /// exactly this, and the review screen's preview of the outgoing text
+    /// is read from it, so the two cannot differ.
+    pub fn approved(
+        edited: Option<&Outputs>,
+        revision: &Outputs,
+        target: &Target,
+        title: &str,
+        body: &str,
+    ) -> Self {
+        edited
+            .cloned()
+            .unwrap_or_else(|| revision.clone())
+            .resolve(target, title, body)
+    }
+
     /// The outputs a publication acts on: a new change always has a
     /// description, and without one it is the approved title and body — which
     /// is all a review published before outputs existed ever asked for.
@@ -2541,6 +2558,28 @@ mod tests {
                  ## What\n\nLong text.\n\n</details>"
             )
         );
+    }
+
+    /// The interface composes a mirrored review's preview itself, from the
+    /// cases in `spa/fixtures/generated-details.json`, which its tests check
+    /// too: every one is what this node publishes.
+    #[test]
+    fn the_spa_composes_generated_details_as_the_node_does() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../spa/fixtures/generated-details.json");
+        let text = std::fs::read_to_string(&path).expect("spa/fixtures/generated-details.json");
+        let fixture: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let cases = fixture["cases"].as_array().expect("cases");
+        assert!(!cases.is_empty());
+        for case in cases {
+            let opener = case["opener"].as_str().unwrap();
+            let body = case["body"].as_str().unwrap();
+            assert_eq!(
+                compose_generated_details(opener, body).as_deref(),
+                case["published"].as_str(),
+                "{case}"
+            );
+        }
     }
 
     /// No agent text, no empty fold: the opener is the whole description.
