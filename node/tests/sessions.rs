@@ -4992,15 +4992,6 @@ impl tracon::adapter::HarnessAdapter for StallingAdapter {
             max: 1,
         }
     }
-    async fn version(
-        &self,
-        _r: &dyn Runner,
-    ) -> Result<tracon::adapter::HarnessVersion, AdapterError> {
-        Ok(tracon::adapter::HarnessVersion {
-            found: "1.0.0".into(),
-            pinned: "1.0.0".into(),
-        })
-    }
     async fn probe_models(
         &self,
         _r: &dyn Runner,
@@ -5477,15 +5468,6 @@ impl HarnessAdapter for IncompatibleAdapter {
             max: 1,
         }
     }
-    async fn version(
-        &self,
-        _r: &dyn Runner,
-    ) -> Result<tracon::adapter::HarnessVersion, AdapterError> {
-        Ok(tracon::adapter::HarnessVersion {
-            found: "1.0.0".into(),
-            pinned: "1.0.0".into(),
-        })
-    }
     async fn probe_models(
         &self,
         _r: &dyn Runner,
@@ -5579,15 +5561,6 @@ impl HarnessAdapter for ConfiguredByTheRepoAdapter {
     }
     fn refused_workspace_entries(&self) -> &'static [&'static str] {
         &[".git"]
-    }
-    async fn version(
-        &self,
-        _r: &dyn Runner,
-    ) -> Result<tracon::adapter::HarnessVersion, AdapterError> {
-        Ok(tracon::adapter::HarnessVersion {
-            found: "1.0.0".into(),
-            pinned: "1.0.0".into(),
-        })
     }
     async fn probe_models(
         &self,
@@ -6335,15 +6308,6 @@ impl HarnessAdapter for GatedAdapter {
             max: 1,
         }
     }
-    async fn version(
-        &self,
-        _r: &dyn Runner,
-    ) -> Result<tracon::adapter::HarnessVersion, AdapterError> {
-        Ok(tracon::adapter::HarnessVersion {
-            found: "1.0.0".into(),
-            pinned: "1.0.0".into(),
-        })
-    }
     async fn probe_models(
         &self,
         _r: &dyn Runner,
@@ -6891,12 +6855,6 @@ impl HarnessAdapter for SlowClose {
     fn protocol(&self) -> tracon::adapter::ProtocolSupport {
         self.0.protocol()
     }
-    async fn version(
-        &self,
-        r: &dyn Runner,
-    ) -> Result<tracon::adapter::HarnessVersion, AdapterError> {
-        self.0.version(r).await
-    }
     async fn probe_models(
         &self,
         r: &dyn Runner,
@@ -7073,12 +7031,6 @@ impl HarnessAdapter for Reopening {
         _harness_session_id: &str,
     ) -> Result<bool, AdapterError> {
         Ok(self.kept.load(std::sync::atomic::Ordering::SeqCst))
-    }
-    async fn version(
-        &self,
-        r: &dyn Runner,
-    ) -> Result<tracon::adapter::HarnessVersion, AdapterError> {
-        self.inner.version(r).await
     }
     async fn probe_models(
         &self,

@@ -120,7 +120,7 @@ export function nodeHarnesses(node: NodeInfo): HarnessState[] {
  * has, so a harness with nothing found never shows it as if installed.
  */
 export function harnessFact(h: HarnessState): string {
-  if (h.found === null) return h.mismatch || h.image_state === 'missing' ? `${h.id} not installed` : `${h.id} not probed`
+  if (h.found === null) return h.mismatch || h.image_state === 'missing' ? `${h.id} not installed` : `${h.id} no version yet`
   if (h.mismatch) return `${h.id} ${h.found} (expects ${h.pinned})`
   return `${h.id} ${h.found}`
 }

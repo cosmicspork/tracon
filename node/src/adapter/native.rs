@@ -16,8 +16,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::{
     AdapterError, ExitCause, HarnessAdapter, HarnessCompat, HarnessEvent, HarnessHandle,
-    HarnessVersion, LaunchSpec, Layout, ModelOption, PermissionReply, PermissionRequest,
-    ProtocolSupport, Resume, TurnResult,
+    LaunchSpec, Layout, ModelOption, PermissionReply, PermissionRequest, ProtocolSupport, Resume,
+    TurnResult,
 };
 use crate::adapter::types::{self, methods};
 use crate::config::{SHAPE_OPENAI, SHAPE_OPENAI_CODEX};
@@ -141,14 +141,6 @@ fn speaks(shape: &str) -> bool {
     shape == SHAPE_OPENAI || shape == SHAPE_OPENAI_CODEX
 }
 
-fn parse_version(out: &str) -> String {
-    // "tracon-agent 0.34.0"
-    out.split_whitespace()
-        .last()
-        .unwrap_or("unknown")
-        .to_string()
-}
-
 /// What policy reads, from the tool's own name and input: the same closed
 /// mapping the other adapters make, so a rule written for Claude Code's
 /// `Read` reads this harness's `read` the same way.
@@ -194,6 +186,10 @@ impl HarnessAdapter for NativeAdapter {
         Self::PROTOCOL
     }
 
+    fn bundle_component(&self) -> Option<&'static str> {
+        Some("tracon-agent")
+    }
+
     fn scratch_files(&self, wiring: &Wiring) -> Vec<(String, String)> {
         vec![(
             Self::PROVIDERS_FILE.into(),
@@ -224,24 +220,6 @@ impl HarnessAdapter for NativeAdapter {
     /// repository's to have; nothing in a workspace configures this harness.
     fn refused_workspace_entries(&self) -> &'static [&'static str] {
         &[]
-    }
-
-    async fn version(&self, runner: &dyn Runner) -> Result<HarnessVersion, AdapterError> {
-        let out = runner
-            .run_probe(RunnerCommand {
-                argv: vec![Self::BINARY.into(), "--version".into()],
-                name: crate::config::resource_name("native-version"),
-                labels: RunLabels {
-                    harness: Some(Self::ID.into()),
-                    ..RunLabels::of(RunKind::Probe)
-                },
-                ..Default::default()
-            })
-            .await?;
-        Ok(HarnessVersion {
-            found: parse_version(&String::from_utf8_lossy(&out.stdout)),
-            pinned: self.pinned.clone(),
-        })
     }
 
     /// Declared, never probed: the models this node configures under the
@@ -994,6 +972,5 @@ mod tests {
             ]
         );
         assert_eq!(cmd.workdir.as_deref(), Some("/work"));
-        assert_eq!(parse_version("tracon-agent 0.34.0\n"), "0.34.0");
     }
 }

@@ -1359,70 +1359,71 @@ async fn init_node(
     Ok((id, identity))
 }
 
-/// Every harness this node runs, each probed in its own image the way the
-/// configured one is: a session runs whichever its model's credential allows,
-/// so each one's version is a fact about this node. A node whose configured
-/// harness is not a supported one (a test's fake) runs only that.
+/// The version the installed harness bundle's manifest names for
+/// `adapter`'s component: what this node records as found for it, read
+/// without starting a sandbox (every backend runs its harnesses from that
+/// bundle). `None` for a harness that is not in the bundle, or while no
+/// bundle is installed. A manifest that cannot be read, or that lacks the
+/// component, records "unknown", which does not equal the pin: new sessions
+/// are blocked with the version pair shown rather than run on a harness the
+/// node cannot name. Each sandbox's handshake still checks what it runs.
+fn bundle_found(
+    versions: Option<&Result<std::collections::BTreeMap<String, String>, String>>,
+    adapter: &dyn HarnessAdapter,
+) -> Option<String> {
+    let component = adapter.bundle_component()?;
+    Some(match versions? {
+        Ok(versions) => versions.get(component).cloned().unwrap_or_else(|| {
+            tracing::warn!(
+                harness = adapter.id(),
+                component,
+                "the harness bundle's manifest does not name this harness; treating its version as unknown"
+            );
+            "unknown".into()
+        }),
+        Err(error) => {
+            tracing::warn!(harness = adapter.id(), %error, "could not read the harness bundle's manifest; treating its version as unknown");
+            "unknown".into()
+        }
+    })
+}
+
+/// Every harness this node runs, each with the version the installed
+/// bundle's manifest names for it: a session runs whichever its model's
+/// credential allows, so each one's version is a fact about this node. A
+/// node whose configured harness is not a supported one (a test's fake) runs
+/// only that.
 async fn harness_states(
     cfg: &Config,
     adapter: &dyn HarnessAdapter,
     backend: &dyn boundary::Backend,
-    found: Option<&str>,
-    ready: bool,
+    versions: Option<&Result<std::collections::BTreeMap<String, String>, String>>,
 ) -> Vec<crate::store::HarnessState> {
     let images = backend.harness_images(cfg).await;
     let image_of = |id: &str| images.iter().find(|image| image.harness_id == id);
-    let default = crate::store::HarnessState {
-        id: adapter.id().to_string(),
-        pinned: adapter.pinned_version().to_string(),
-        found: found.map(str::to_string),
-        default: true,
-        image: image_of(adapter.id()).map(|image| image.image.clone()),
-        image_state: image_of(adapter.id())
+    let state = |other: &dyn HarnessAdapter, default: bool| crate::store::HarnessState {
+        id: other.id().to_string(),
+        pinned: other.pinned_version().to_string(),
+        found: bundle_found(versions, other),
+        default,
+        image: image_of(other.id()).map(|image| image.image.clone()),
+        image_state: image_of(other.id())
             .map_or("unknown", |image| image.state)
             .to_string(),
     };
     if !crate::adapter::is_enabled(cfg, adapter.id()) {
-        return vec![default];
+        return vec![state(adapter, true)];
     }
     let mut out = Vec::new();
     for id in crate::adapter::enabled(cfg) {
         if id == adapter.id() {
-            out.push(default.clone());
+            out.push(state(adapter, true));
             continue;
         }
         let Ok(other) = crate::adapter::adapter_for_id(cfg, id) else {
             continue;
         };
-        let found = if ready {
-            let runner = backend.runner_for(
-                id,
-                crate::session::materialize::state_mounts(&backend.harness_home(), other.layout())
-                    .unwrap_or_default(),
-            );
-            Some(
-                other
-                    .version(runner.as_ref())
-                    .await
-                    .map(|v| v.found)
-                    .unwrap_or_else(|e| {
-                        tracing::warn!(harness = id, error = %e, "harness version probe failed; treating as unknown");
-                        "unknown".into()
-                    }),
-            )
-        } else {
-            None
-        };
-        out.push(crate::store::HarnessState {
-            id: id.to_string(),
-            pinned: other.pinned_version().to_string(),
-            found,
-            default: false,
-            image: image_of(id).map(|image| image.image.clone()),
-            image_state: image_of(id)
-                .map_or("unknown", |image| image.state)
-                .to_string(),
-        });
+        out.push(state(other.as_ref(), false));
     }
     out
 }
@@ -1432,13 +1433,15 @@ async fn harness_states(
 /// setup, and record a verdict on images that have since been rebuilt.
 static VERIFY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Run the boundary checks, probe the harness, and record what this node is.
+/// Run the boundary checks, read the harnesses' versions from the installed
+/// bundle, and record what this node is.
 ///
 /// Startup calls it, and so does a re-check from the interface: an operator
 /// who has just started the runtime should not have to restart the node to be
-/// believed. The harness probe belongs to it, not to startup, because a node
-/// that goes refused → ready without one has no recorded version and blocks
-/// every new session on a mismatch against `None`.
+/// believed. The versions are read here, not at startup, because the bundle
+/// may arrive after the node starts (its converge fetches it), and a node
+/// that goes refused → ready must record what it now runs. Nothing here
+/// starts a sandbox but the boundary's own checks.
 pub(crate) async fn verify_node(
     store: &Arc<Store>,
     cfg: &Arc<Config>,
@@ -1466,28 +1469,15 @@ pub(crate) async fn verify_node(
         }
         None => {}
     }
-    let found = if ready {
-        let runner = backend.runner(
-            crate::session::materialize::state_mounts(&backend.harness_home(), adapter.layout())
-                .unwrap_or_default(),
-        );
-        // A probe that cannot read the version is not a pass: record "unknown",
-        // which does not equal the pin, so new sessions are blocked with the
-        // version pair shown rather than run against an unverified harness.
-        Some(
-            adapter
-                .version(runner.as_ref())
-                .await
-                .map(|v| v.found)
-                .unwrap_or_else(|e| {
-                    tracing::warn!(error = %e, "harness version probe failed; treating as unknown");
-                    "unknown".into()
-                }),
-        )
-    } else {
-        None
-    };
-    let harnesses = harness_states(cfg, adapter, backend, found.as_deref(), ready).await;
+    // What the installed bundle names, read here rather than from a
+    // sandbox: a version pod would need a schedulable node, which a pool that
+    // autoscales from zero does not have until a session asks for one.
+    let versions = crate::bundle::installed_versions(cfg);
+    let harnesses = harness_states(cfg, adapter, backend, versions.as_ref()).await;
+    let found = harnesses
+        .iter()
+        .find(|h| h.default)
+        .and_then(|h| h.found.clone());
     let previous = store.get_node(id).ok().flatten();
     // The model list is probed once the gateway is listening (see `serve`);
     // until then the previous run's list stands.
@@ -1663,5 +1653,271 @@ mod tests {
         assert_eq!(hostname("http://[::1]:7420"), "::1");
         assert_eq!(hostname("http://evil.example"), "evil.example");
         assert_eq!(hostname("evil.example:80"), "evil.example");
+    }
+
+    /// A node on Kubernetes whose `[runtime.kubernetes.pool]` autoscales from
+    /// zero and has no node yet: any pod but the boundary's gated probe
+    /// would wait for a scale-up and be given up as unschedulable.
+    mod version_from_the_bundle {
+        use std::sync::{Arc, Mutex};
+
+        use async_trait::async_trait;
+
+        use crate::adapter::{claude::ClaudeAdapter, native::NativeAdapter};
+        use crate::boundary::{Backend, BoundaryError, BoundaryReport, CheckId, CheckResult};
+        use crate::config::Config;
+        use crate::runner::{Mount, Runner, RunnerCommand, RunnerError, Spawned};
+        use crate::store::Store;
+
+        /// The pods the node created, by name.
+        type Pods = Arc<Mutex<Vec<String>>>;
+
+        /// The boundary's checks pass, as they do on the empty pool: their
+        /// probe pod carries the `tracon.dev/probe` scheduling gate, so it
+        /// is admitted and read back without ever being scheduled. Every
+        /// other pod is created and stays unschedulable.
+        struct EmptyPool {
+            pods: Pods,
+        }
+
+        struct Unschedulable {
+            pods: Pods,
+        }
+
+        impl Unschedulable {
+            fn refuse(&self, cmd: &RunnerCommand) -> RunnerError {
+                self.pods.lock().unwrap().push(cmd.name.clone());
+                RunnerError::Other(format!(
+                    "could not be scheduled: 0/1 nodes are available (pod {}, unschedulable for 60s)",
+                    cmd.name
+                ))
+            }
+        }
+
+        #[async_trait]
+        impl Runner for Unschedulable {
+            async fn spawn(&self, cmd: RunnerCommand) -> Result<Spawned, RunnerError> {
+                Err(self.refuse(&cmd))
+            }
+            async fn run_capture(
+                &self,
+                cmd: RunnerCommand,
+            ) -> Result<std::process::Output, RunnerError> {
+                Err(self.refuse(&cmd))
+            }
+            async fn kill(&self, _name: &str) -> Result<(), RunnerError> {
+                Ok(())
+            }
+        }
+
+        fn gated_probe() -> String {
+            crate::config::resource_name("boundary-probe")
+        }
+
+        #[async_trait]
+        impl Backend for EmptyPool {
+            fn kind(&self) -> &'static str {
+                "kubernetes"
+            }
+            async fn setup(&self, _cfg: &Config, _rebuild: bool) -> Result<(), BoundaryError> {
+                Ok(())
+            }
+            async fn check_all(&self, _cfg: &Config, _deep: bool) -> BoundaryReport {
+                self.pods.lock().unwrap().push(gated_probe());
+                BoundaryReport {
+                    checks: [
+                        CheckId::Runtime,
+                        CheckId::HarnessUnprivileged,
+                        CheckId::NoRuntimeSocket,
+                        CheckId::NetworkIsolated,
+                    ]
+                    .into_iter()
+                    .map(|id| CheckResult::ok(id, "the gated probe pod"))
+                    .collect(),
+                }
+            }
+            fn runner(&self, _extra: Vec<Mount>) -> Arc<dyn Runner> {
+                Arc::new(Unschedulable {
+                    pods: self.pods.clone(),
+                })
+            }
+            fn runner_for(&self, _harness_id: &str, _extra: Vec<Mount>) -> Arc<dyn Runner> {
+                self.runner(Vec::new())
+            }
+            async fn import_volume(
+                &self,
+                _v: &str,
+                _s: &std::path::Path,
+            ) -> Result<(), BoundaryError> {
+                Ok(())
+            }
+            async fn export_volume(
+                &self,
+                _v: &str,
+                _d: &std::path::Path,
+            ) -> Result<(), BoundaryError> {
+                Ok(())
+            }
+            fn harness_host(&self) -> String {
+                "10.244.0.9".into()
+            }
+            fn harness_home(&self) -> String {
+                "/home/harness".into()
+            }
+            async fn reconcile(&self, _names: &[String]) {}
+        }
+
+        /// A bundle as `scripts/harness-bundle.sh` lays it out, whose
+        /// manifest names these versions.
+        fn bundle(dir: &std::path::Path, claude: &str, agent: &str) -> std::path::PathBuf {
+            let bundle = dir.join("bundle");
+            std::fs::create_dir_all(bundle.join("bin")).unwrap();
+            let mut components = serde_json::Map::new();
+            for (name, version) in [
+                ("tracon-sandbox", agent),
+                ("tracon-agent", agent),
+                ("claude", claude),
+            ] {
+                std::fs::write(bundle.join("bin").join(name), name).unwrap();
+                components.insert(
+                    name.into(),
+                    serde_json::json!({"path": format!("bin/{name}"), "version": version, "sha256": "00"}),
+                );
+            }
+            std::fs::write(
+                bundle.join("manifest.json"),
+                serde_json::json!({"schema": 1, "version": agent, "arch": "amd64", "components": components})
+                    .to_string(),
+            )
+            .unwrap();
+            bundle
+        }
+
+        fn kubernetes(bundle: Option<std::path::PathBuf>) -> Arc<Config> {
+            let mut cfg = Config::default();
+            cfg.runtime.kind = crate::config::RuntimeKind::Kubernetes;
+            cfg.harness.id = ClaudeAdapter::ID.into();
+            // Given, so the test does not depend on the node's state directory.
+            cfg.sandbox.bundle =
+                Some(bundle.unwrap_or_else(|| std::path::PathBuf::from("/nonexistent/bundle")));
+            Arc::new(cfg)
+        }
+
+        async fn verify(
+            cfg: &Arc<Config>,
+        ) -> (
+            crate::store::NodeRow,
+            Vec<crate::store::HarnessState>,
+            Vec<String>,
+        ) {
+            let store = Arc::new(Store::open_in_memory().unwrap());
+            let pods: Pods = Arc::default();
+            let backend = EmptyPool { pods: pods.clone() };
+            let adapter = crate::adapter::adapter_for_id(cfg, ClaudeAdapter::ID).unwrap();
+            let row =
+                super::super::verify_node(&store, cfg, adapter.as_ref(), &backend, "n1", None)
+                    .await
+                    .unwrap();
+            let harnesses = row.harnesses();
+            let pods = pods.lock().unwrap().clone();
+            (row, harnesses, pods)
+        }
+
+        fn pins(cfg: &Config) -> (String, String) {
+            let pin = |id| {
+                crate::adapter::adapter_for_id(cfg, id)
+                    .unwrap()
+                    .pinned_version()
+                    .to_string()
+            };
+            (pin(ClaudeAdapter::ID), pin(NativeAdapter::ID))
+        }
+
+        #[tokio::test]
+        async fn an_empty_pool_is_not_scaled_up_for_the_harness_versions() {
+            let tmp = tempfile::tempdir().unwrap();
+            let (claude, native) = pins(&kubernetes(None));
+            let cfg = kubernetes(Some(bundle(tmp.path(), &claude, &native)));
+            let (row, harnesses, pods) = verify(&cfg).await;
+
+            assert_eq!(pods, vec![gated_probe()], "no pod but the gated probe");
+            assert_eq!(row.state, "ready", "{row:?}");
+            assert_eq!(row.harness_found.as_deref(), Some(claude.as_str()));
+            let found = |id: &str| {
+                let h = harnesses.iter().find(|h| h.id == id).unwrap();
+                assert!(!h.mismatch(), "{h:?}");
+                h.found.clone()
+            };
+            assert_eq!(found(ClaudeAdapter::ID), Some(claude));
+            assert_eq!(found(NativeAdapter::ID), Some(native));
+        }
+
+        /// A manifest that names another version than the pin is a
+        /// mismatch, as a probe that read one was.
+        #[tokio::test]
+        async fn a_manifest_off_the_pin_is_a_mismatch() {
+            let tmp = tempfile::tempdir().unwrap();
+            let (_, native) = pins(&kubernetes(None));
+            let cfg = kubernetes(Some(bundle(tmp.path(), "2.0.0-other", &native)));
+            let (row, harnesses, pods) = verify(&cfg).await;
+
+            assert_eq!(pods, vec![gated_probe()]);
+            assert_eq!(row.harness_found.as_deref(), Some("2.0.0-other"));
+            assert_eq!(row.to_json()["harness"]["mismatch"], true);
+            let claude = harnesses
+                .iter()
+                .find(|h| h.id == ClaudeAdapter::ID)
+                .unwrap();
+            assert!(claude.mismatch(), "{claude:?}");
+            let native = harnesses
+                .iter()
+                .find(|h| h.id == NativeAdapter::ID)
+                .unwrap();
+            assert!(!native.mismatch(), "{native:?}");
+        }
+
+        /// No bundle yet: nothing is found, which is not a mismatch.
+        #[tokio::test]
+        async fn without_a_bundle_nothing_is_found() {
+            let cfg = kubernetes(None);
+            let (row, harnesses, pods) = verify(&cfg).await;
+            assert_eq!(pods, vec![gated_probe()]);
+            assert_eq!(row.harness_found, None);
+            assert_eq!(harnesses.len(), 2);
+            for h in &harnesses {
+                assert_eq!(h.found, None, "{h:?}");
+                assert!(!h.mismatch());
+            }
+        }
+
+        /// A bundle whose manifest cannot be read, or that does not name a
+        /// harness, records it as unknown: a mismatch, fail closed.
+        #[tokio::test]
+        async fn an_unreadable_or_incomplete_manifest_is_unknown() {
+            let tmp = tempfile::tempdir().unwrap();
+            let (claude, native) = pins(&kubernetes(None));
+            let dir = bundle(tmp.path(), &claude, &native);
+            let manifest = dir.join("manifest.json");
+            let text = std::fs::read_to_string(&manifest).unwrap();
+            let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            value["components"]
+                .as_object_mut()
+                .unwrap()
+                .remove("tracon-agent");
+            std::fs::write(&manifest, value.to_string()).unwrap();
+            let cfg = kubernetes(Some(dir.clone()));
+            let (_, harnesses, _) = verify(&cfg).await;
+            let native = harnesses
+                .iter()
+                .find(|h| h.id == NativeAdapter::ID)
+                .unwrap();
+            assert_eq!(native.found.as_deref(), Some("unknown"));
+            assert!(native.mismatch());
+
+            std::fs::write(&manifest, "not json").unwrap();
+            let (row, harnesses, _) = verify(&cfg).await;
+            assert_eq!(row.harness_found.as_deref(), Some("unknown"));
+            assert!(harnesses.iter().all(|h| h.mismatch()), "{harnesses:?}");
+        }
     }
 }

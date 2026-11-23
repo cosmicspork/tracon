@@ -22,8 +22,8 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 
 use tracon::adapter::{
-    AdapterError, HarnessAdapter, HarnessEvent, HarnessHandle, HarnessVersion, LaunchSpec,
-    ModelOption, ProtocolSupport,
+    AdapterError, HarnessAdapter, HarnessEvent, HarnessHandle, LaunchSpec, ModelOption,
+    ProtocolSupport,
 };
 use tracon::boundary::{Backend, BoundaryError, BoundaryReport};
 use tracon::broker::Broker;
@@ -118,9 +118,6 @@ impl HarnessAdapter for Lasting {
     }
     fn protocol(&self) -> ProtocolSupport {
         self.fake.protocol()
-    }
-    async fn version(&self, r: &dyn Runner) -> Result<HarnessVersion, AdapterError> {
-        self.fake.version(r).await
     }
     async fn probe_models(
         &self,

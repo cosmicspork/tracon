@@ -181,18 +181,6 @@ pub fn image_version(harness_id: &str) -> &'static str {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct HarnessVersion {
-    pub found: String,
-    pub pinned: String,
-}
-
-impl HarnessVersion {
-    pub fn matches(&self) -> bool {
-        self.found == self.pinned
-    }
-}
-
 /// The wire protocol an adapter drives, and the versions of it it will drive.
 ///
 /// A harness that answers the handshake with a version outside this range is
@@ -577,6 +565,15 @@ pub trait HarnessAdapter: Send + Sync {
     /// The protocol this adapter drives, and the versions of it it accepts.
     fn protocol(&self) -> ProtocolSupport;
 
+    /// The component of the harness bundle's `manifest.json` this harness
+    /// runs from, whose version is what the node records as found for it
+    /// (`crate::bundle::installed_versions`). `None` for a harness that is
+    /// not in the bundle, which then has no version recorded: each sandbox's
+    /// own handshake still checks what it runs.
+    fn bundle_component(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Where this harness keeps its state, and what it calls that place.
     fn layout(&self) -> Layout {
         layout(self.id())
@@ -657,7 +654,6 @@ pub trait HarnessAdapter: Send + Sync {
         Ok(true)
     }
 
-    async fn version(&self, runner: &dyn Runner) -> Result<HarnessVersion, AdapterError>;
     /// The models this node can run through the harness: probed from it where
     /// it keeps a catalogue, declared by the node where it does not. The
     /// wiring is the whole answer for a declaring harness and the environment

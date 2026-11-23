@@ -16,7 +16,7 @@ use support::rows::session_row;
 use support::state;
 use tracon::adapter::{
     AdapterError, ExitCause, HarnessAdapter, HarnessCompat, HarnessEvent, HarnessHandle,
-    HarnessVersion, LaunchSpec, ModelOption, ProtocolSupport, Resume, TurnResult,
+    LaunchSpec, ModelOption, ProtocolSupport, Resume, TurnResult,
 };
 use tracon::runner::Runner;
 use tracon::session::supervisor::{Command, Prompted, Relaunch, Supervisor};
@@ -85,9 +85,6 @@ impl HarnessAdapter for Restorable {
     }
     fn restorable(&self) -> bool {
         true
-    }
-    async fn version(&self, _r: &dyn Runner) -> Result<HarnessVersion, AdapterError> {
-        unreachable!()
     }
     async fn probe_models(
         &self,
