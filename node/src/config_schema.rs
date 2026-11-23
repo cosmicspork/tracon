@@ -276,6 +276,7 @@ pub const KEYS: &[KeySpec] = &[
     live("repo.style.kebab_branch"),
     live("repo.style.no_ticket_keys"),
     live("repo.warn_direct"),
+    live("repo.service_volumes"),
     // [[service]]
     restart("service.name"),
     restart("service.command"),
