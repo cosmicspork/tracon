@@ -215,6 +215,11 @@ pub mod event_kind {
     /// `text`). Held by the node, not refused: it reaches the agent in the
     /// next node tool result or as the next prompt, whichever comes first.
     pub const PROMPT_QUEUED: &str = "prompt_queued";
+    /// Files the operator sent with a prompt were staged into the session's
+    /// workspace before the prompt was sent (`dir`, and `attachments`: each
+    /// one's `name`, `path`, `type`, `size` and `sha256`). The prompt that
+    /// follows names each path; `ref_id` is the id in `dir`.
+    pub const ATTACHMENTS_STAGED: &str = "attachments_staged";
     /// Queued messages reached the agent in a node tool's result
     /// (`message_ids`, `tool`). Delivery as the next prompt is the
     /// `user_prompt` naming them in `queued`.

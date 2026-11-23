@@ -109,7 +109,9 @@ QR: it never chooses the node (see [Commands](../reference/cli.md#commands) for 
 
 The phone is a full seat, not a viewer. From it you can add a work item, start a
 plan or execute session, answer the agent's permission requests, read the diff and
-approve or reject it, connect a provider (the sign-in happens where your password
+approve or reject it, send a session a screenshot or a log with its prompt (the
+camera and the photo library are offered; see
+[Sending a screenshot or a log](sessions.md#sending-a-screenshot-or-a-log)), connect a provider (the sign-in happens where your password
 manager lives), enroll a new node, and kill a session (with a confirm — a stray
 thumb is likely).
 

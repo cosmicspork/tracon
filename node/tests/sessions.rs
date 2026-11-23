@@ -3286,6 +3286,26 @@ async fn orientation_setup(
     prepare: &[&str],
     phase: Phase,
 ) -> Orientation {
+    orientation_on(
+        tag,
+        launch_with,
+        pinned_docs,
+        prepare,
+        phase,
+        Arc::new(tracon::runner::local::LocalBackend),
+    )
+    .await
+}
+
+/// [`orientation_setup`] on `backend`.
+async fn orientation_on(
+    tag: &str,
+    launch_with: Option<Arc<dyn HarnessAdapter>>,
+    pinned_docs: usize,
+    prepare: &[&str],
+    phase: Phase,
+    backend: Arc<dyn tracon::boundary::Backend>,
+) -> Orientation {
     state::isolate();
     let dir = state::scratch(&format!("orientation-{tag}"));
     let repo = state::managed_clone(&format!("orientation-{tag}"));
@@ -3379,7 +3399,7 @@ async fn orientation_setup(
         "n1".into(),
         tools.clone(),
         tracon::policy::Policy::shipped_shared(),
-        Arc::new(tracon::runner::local::LocalBackend),
+        backend,
     );
     let _ = tools.session.set(tracon::mcp::SessionAccess {
         store: store.clone(),
@@ -8326,5 +8346,220 @@ async fn the_source_records_a_fork_another_node_started_and_keeps_running() {
             .unwrap()
             .len(),
         1
+    );
+}
+
+// ---- prompt attachments ---------------------------------------------------
+
+/// The local backend, keeping its volumes as the node keeps a sandbox's
+/// trees (`files_for`), as every real runtime does for a session's
+/// workspace.
+struct Keeping(tracon::runner::local::LocalBackend);
+
+impl Keeping {
+    fn store() -> tracon::runner::sandbox_files::FilesStore {
+        tracon::runner::sandbox_files::FilesStore::new(Config::state_dir().join("local-runtime"))
+    }
+}
+
+#[async_trait]
+impl tracon::boundary::Backend for Keeping {
+    fn kind(&self) -> &'static str {
+        self.0.kind()
+    }
+    async fn setup(
+        &self,
+        cfg: &Config,
+        rebuild: bool,
+    ) -> Result<(), tracon::boundary::BoundaryError> {
+        self.0.setup(cfg, rebuild).await
+    }
+    async fn check_all(&self, cfg: &Config, deep: bool) -> tracon::boundary::BoundaryReport {
+        self.0.check_all(cfg, deep).await
+    }
+    fn runner(&self, extra: Vec<tracon::runner::Mount>) -> Arc<dyn Runner> {
+        self.0.runner(extra)
+    }
+    fn runner_for(&self, harness_id: &str, extra: Vec<tracon::runner::Mount>) -> Arc<dyn Runner> {
+        self.0.runner_for(harness_id, extra)
+    }
+    fn files_for(&self, _volume: &str) -> Option<tracon::runner::sandbox_files::FilesStore> {
+        Some(Self::store())
+    }
+    async fn import_volume(
+        &self,
+        volume: &str,
+        source: &std::path::Path,
+    ) -> Result<(), tracon::boundary::BoundaryError> {
+        self.0.import_volume(volume, source).await
+    }
+    async fn export_volume(
+        &self,
+        volume: &str,
+        destination: &std::path::Path,
+    ) -> Result<(), tracon::boundary::BoundaryError> {
+        self.0.export_volume(volume, destination).await
+    }
+    async fn export_workspace(
+        &self,
+        volume: &str,
+        destination: &std::path::Path,
+    ) -> Result<(), tracon::boundary::BoundaryError> {
+        self.0.export_workspace(volume, destination).await
+    }
+    fn harness_host(&self) -> String {
+        self.0.harness_host()
+    }
+    fn harness_home(&self) -> String {
+        self.0.harness_home()
+    }
+    async fn reconcile(&self, names: &[String]) {
+        self.0.reconcile(names).await
+    }
+}
+
+/// A screenshot and a log sent with a prompt are staged in the session's
+/// workspace under the fixed path before the prompt goes, the prompt names
+/// each with its path, type and size, and the session records each one's
+/// name, digest and size. A file the node does not take refuses the prompt
+/// with why, and nothing of it is staged or sent.
+#[tokio::test]
+async fn a_prompts_attachments_are_staged_in_the_workspace_and_named_in_its_turn() {
+    use base64::Engine as _;
+    let o = orientation_on(
+        "attachments",
+        None,
+        0,
+        &[],
+        Phase::Plan,
+        Arc::new(Keeping(tracon::runner::local::LocalBackend)),
+    )
+    .await;
+    let id = o.row.id.clone();
+    // The kickoff turn has run.
+    first_prompt(&o.store, &id).await;
+    let state = AppState {
+        manager: o.manager.clone(),
+        cfg: o.cfg.clone(),
+        adapter: o.adapter.clone(),
+        node_id: "n1".into(),
+        tools: o.tools.clone(),
+        mesh: None,
+        auth: Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
+        enroll: Default::default(),
+    };
+    let operator = tracon::http::router(state);
+    let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    let png: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+    let uri = format!("/api/sessions/{id}/prompt");
+
+    // Refused at send, with why, and nothing staged.
+    let (status, body) = support::http::call(
+        &operator,
+        "POST",
+        &uri,
+        Some(json!({ "text": "look", "attachments": [
+            { "name": "shot.png", "type": "image/png", "data": b64(png) },
+            { "name": "tool.exe", "type": "application/octet-stream", "data": b64(b"MZ\x90\0\x03\0\xff") },
+        ]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("tool.exe is not a type the node stages"),
+        "{message}"
+    );
+    let workspace = Keeping::store()
+        .tree(&tracon::workspace::volume_name(
+            o.row
+                .repo_path
+                .strip_prefix("workspace://")
+                .unwrap_or(&o.row.id),
+        ))
+        .expect("the session's workspace is kept");
+    assert!(!workspace.join(".tracon/attachments").exists());
+    assert!(o
+        .store
+        .last_event_payload(&id, "attachments_staged")
+        .unwrap()
+        .is_none());
+
+    // Too many files is refused too, saying the limit.
+    let many: Vec<Value> = (0..=tracon::session::attachments::MAX_COUNT)
+        .map(|n| json!({ "name": format!("{n}.txt"), "data": b64(b"x") }))
+        .collect();
+    let (status, body) = support::http::call(
+        &operator,
+        "POST",
+        &uri,
+        Some(json!({ "text": "many", "attachments": many })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+
+    // Accepted: staged, recorded and named.
+    let log = b"error: connection refused\n";
+    let (status, body) = support::http::call(
+        &operator,
+        "POST",
+        &uri,
+        Some(json!({ "text": "why does it fail?", "attachments": [
+            { "name": "shot.png", "type": "image/png", "data": b64(png) },
+            { "name": "../../server.log", "data": b64(log) },
+        ]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let staged = body["attachments"].as_array().unwrap();
+    assert_eq!(staged.len(), 2, "{body}");
+    let shot = staged[0]["path"].as_str().unwrap();
+    let server = staged[1]["path"].as_str().unwrap();
+    assert!(
+        shot.starts_with(".tracon/attachments/") && shot.ends_with("/shot.png"),
+        "{shot}"
+    );
+    assert!(server.ends_with("/server.log"), "{server}");
+    assert_eq!(std::fs::read(workspace.join(shot)).unwrap(), png);
+    assert_eq!(std::fs::read(workspace.join(server)).unwrap(), log);
+    assert_eq!(staged[1]["type"], "text/plain");
+    assert_eq!(staged[1]["size"], log.len());
+
+    let recorded = o
+        .store
+        .last_event_payload(&id, "attachments_staged")
+        .unwrap()
+        .unwrap();
+    assert_eq!(recorded["attachments"], json!(staged));
+    use sha2::Digest as _;
+    assert_eq!(
+        recorded["attachments"][0]["sha256"],
+        hex::encode(sha2::Sha256::digest(png))
+    );
+
+    // The prompt that went (or waits for the turn) names each file.
+    let mut said = None;
+    for _ in 0..300 {
+        said = o
+            .store
+            .events_after(&id, 0, 500)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "user_prompt" || e.kind == "prompt_queued")
+            .filter_map(|e| e.payload["text"].as_str().map(str::to_string))
+            .find(|text| text.starts_with("why does it fail?"));
+        if said.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let said = said.expect("the prompt was sent");
+    assert!(
+        said.contains(&format!("- `{shot}` (image/png, 16 bytes)")),
+        "{said}"
+    );
+    assert!(
+        said.contains(&format!("- `{server}` (text/plain, 26 bytes)")),
+        "{said}"
     );
 }
