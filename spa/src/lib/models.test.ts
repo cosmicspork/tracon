@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { filterModels, matchesQuery, modelSummary, orderModels, recentModelValues } from './models'
+import { filterModels, matchesQuery, modelSummary, orderModels, probeFailureLine, recentModelValues } from './models'
 import type { ProviderInfo, Session } from './types'
 
 const models = [
@@ -88,4 +88,14 @@ test('a catalogue of nothing but aliases still names its connected providers', (
   expect(modelSummary(aliases, connected)).toBe(
     '2 models · Anthropic 0 · OpenAI Codex 0 · 2 adapter aliases',
   )
+})
+
+test('a failed probe says why and how long ago; none says nothing', () => {
+  const now = 1_000_000_000
+  expect(probeFailureLine(null, now)).toBeNull()
+  expect(probeFailureLine(undefined, now)).toBeNull()
+  const line = probeFailureLine({ error: 'the harness did not answer', at_ms: now - 3 * 60_000 }, now)
+  expect(line).toContain('3m ago')
+  expect(line).toContain('the harness did not answer')
+  expect(probeFailureLine({ error: '  ', at_ms: now }, now)).toContain('no reason given')
 })

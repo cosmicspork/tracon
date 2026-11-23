@@ -2700,7 +2700,7 @@
     },
     {
       "admin": true,
-      "apply": "restart",
+      "apply": "live",
       "array": "providers.*.models",
       "editable": true,
       "editable_at_node": true,
@@ -2717,7 +2717,7 @@
     },
     {
       "admin": true,
-      "apply": "restart",
+      "apply": "live",
       "array": "providers.*.models",
       "editable": true,
       "editable_at_node": true,
@@ -2734,7 +2734,7 @@
     },
     {
       "admin": true,
-      "apply": "restart",
+      "apply": "live",
       "array": "providers.*.models",
       "editable": true,
       "editable_at_node": true,
@@ -2751,7 +2751,7 @@
     },
     {
       "admin": true,
-      "apply": "restart",
+      "apply": "live",
       "array": "providers.*.models",
       "editable": true,
       "editable_at_node": true,
@@ -2768,7 +2768,7 @@
     },
     {
       "admin": true,
-      "apply": "restart",
+      "apply": "live",
       "array": "providers.*.models",
       "editable": true,
       "editable_at_node": true,
@@ -2785,7 +2785,7 @@
     },
     {
       "admin": true,
-      "apply": "restart",
+      "apply": "live",
       "array": "providers.*.models",
       "editable": true,
       "editable_at_node": true,
@@ -2802,7 +2802,7 @@
     },
     {
       "admin": true,
-      "apply": "restart",
+      "apply": "live",
       "array": "providers.*.models",
       "editable": true,
       "editable_at_node": true,
@@ -2819,7 +2819,7 @@
     },
     {
       "admin": true,
-      "apply": "restart",
+      "apply": "live",
       "array": "providers.*.models",
       "editable": true,
       "editable_at_node": true,

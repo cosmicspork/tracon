@@ -48,14 +48,24 @@ struct Node {
     app: axum::Router,
     store: Arc<Store>,
     cfg: Arc<Config>,
+    tools: Arc<Tools>,
 }
 
 fn node() -> Node {
+    node_with(
+        Config::default(),
+        Arc::new(FakeAdapter {
+            tx: Arc::new(tokio::sync::Mutex::new(None)),
+            tokens: Arc::new(tokio::sync::Mutex::new(0)),
+        }),
+    )
+}
+
+fn node_with(mut cfg: Config, adapter: Arc<dyn tracon::adapter::HarnessAdapter>) -> Node {
     // The guard stays on: these tests are about what an edit may name.
     state::isolate_dirs();
     let store = Arc::new(Store::open_in_memory().unwrap());
     store.ensure_peer_node("n1").unwrap();
-    let mut cfg = Config::default();
     cfg.auth.public_origin = Some(ORIGIN.to_string());
     let cfg = Arc::new(cfg);
     let tools = Arc::new(Tools {
@@ -79,19 +89,21 @@ fn node() -> Node {
     let state = AppState {
         manager,
         cfg: cfg.clone(),
-        adapter: Arc::new(FakeAdapter {
-            tx: Arc::new(tokio::sync::Mutex::new(None)),
-            tokens: Arc::new(tokio::sync::Mutex::new(0)),
-        }),
+        adapter,
         node_id: "n1".into(),
-        tools,
+        tools: tools.clone(),
         mesh: None,
         auth: Arc::new(AuthState::load(&store, "127.0.0.1".into())),
         enroll: Default::default(),
     };
     let app = tracon::http::router(state.clone())
         .layer(axum::middleware::from_fn_with_state(state, auth::guard));
-    Node { app, store, cfg }
+    Node {
+        app,
+        store,
+        cfg,
+        tools,
+    }
 }
 
 struct Reply {
@@ -1310,4 +1322,199 @@ async fn a_manifest_text_prompt_shows_what_it_says() {
             r.body
         );
     }
+}
+
+/// A harness that lists exactly the models it was wired with, as the
+/// declaring harnesses do, or fails to answer when told to.
+struct Listing {
+    inner: FakeAdapter,
+    fail: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl tracon::adapter::HarnessAdapter for Listing {
+    fn id(&self) -> &'static str {
+        "listing"
+    }
+    fn pinned_version(&self) -> &str {
+        self.inner.pinned_version()
+    }
+    fn protocol(&self) -> tracon::adapter::ProtocolSupport {
+        self.inner.protocol()
+    }
+    async fn version(
+        &self,
+        r: &dyn tracon::runner::Runner,
+    ) -> Result<tracon::adapter::HarnessVersion, tracon::adapter::AdapterError> {
+        self.inner.version(r).await
+    }
+    async fn probe_models(
+        &self,
+        _r: &dyn tracon::runner::Runner,
+        wiring: &tracon::gateway::model::Wiring,
+    ) -> Result<Vec<tracon::adapter::ModelOption>, tracon::adapter::AdapterError> {
+        if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(tracon::adapter::AdapterError::Protocol(
+                "the harness did not answer".into(),
+            ));
+        }
+        Ok(wiring
+            .providers
+            .iter()
+            .flat_map(|p| {
+                p.models.iter().map(|m| tracon::adapter::ModelOption {
+                    value: format!("{}/{}", p.name, m.id),
+                    name: m.id.clone(),
+                    harnesses: Vec::new(),
+                })
+            })
+            .collect())
+    }
+    async fn launch(
+        &self,
+        r: &dyn tracon::runner::Runner,
+        spec: tracon::adapter::LaunchSpec,
+    ) -> Result<
+        (
+            Box<dyn tracon::adapter::HarnessHandle>,
+            tokio::sync::mpsc::Receiver<tracon::adapter::HarnessEvent>,
+        ),
+        tracon::adapter::AdapterError,
+    > {
+        self.inner.launch(r, spec).await
+    }
+}
+
+const PROBED: &str = "[providers.acme]\ncredential = \"acme\"\n\
+upstream = \"https://acme.example\"\nshape = \"openai\"\nmodels = [{ id = \"a-1\" }]\n\
+[providers.bolt]\ncredential = \"bolt\"\n\
+upstream = \"https://bolt.example\"\nshape = \"openai\"\nmodels = [{ id = \"b-1\" }]\n";
+
+/// A ready node holding a model credential for each provider in `PROBED`,
+/// whose harness lists what it is wired with.
+fn probed() -> (Node, Arc<std::sync::atomic::AtomicBool>) {
+    let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cfg = Config::from_toml(PROBED, std::path::Path::new("node.toml")).unwrap();
+    let n = node_with(
+        cfg,
+        Arc::new(Listing {
+            inner: FakeAdapter {
+                tx: Arc::new(tokio::sync::Mutex::new(None)),
+                tokens: Arc::new(tokio::sync::Mutex::new(0)),
+            },
+            fail: fail.clone(),
+        }),
+    );
+    let mut row = n.store.get_node("n1").unwrap().unwrap();
+    row.state = "ready".into();
+    row.models_json = Some("[]".into());
+    n.store.put_node(&row).unwrap();
+    for name in ["acme", "bolt"] {
+        n.tools.broker.write().unwrap().put(
+            name,
+            tracon::broker::Credential {
+                kind: tracon::broker::KIND_API_KEY.into(),
+                provider: Some(name.into()),
+                channels: vec!["personal".into()],
+                env: [("API_KEY".to_string(), "k".to_string())].into(),
+                ..Default::default()
+            },
+        );
+    }
+    write_file(PROBED);
+    (n, fail)
+}
+
+/// The model values on the node's row, sorted.
+fn listed(n: &Node) -> Vec<String> {
+    let row = n.store.get_node("n1").unwrap().unwrap();
+    let models: Vec<Value> =
+        serde_json::from_str(row.models_json.as_deref().unwrap_or("[]")).unwrap();
+    let mut values: Vec<String> = models
+        .iter()
+        .map(|m| m["value"].as_str().unwrap().to_string())
+        .collect();
+    values.sort();
+    values
+}
+
+async fn listed_soon(n: &Node, want: &[&str]) {
+    for _ in 0..300 {
+        if listed(n) == want {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(listed(n), want);
+}
+
+/// Saving a provider's declared models probes again, so the pickers follow
+/// the save; so does removing a provider, whose models leave with it.
+#[tokio::test]
+async fn saving_declared_models_or_removing_a_provider_probes_again() {
+    let _lock = state::config_lock().await;
+    let (n, _) = probed();
+    let r = local(
+        &n,
+        "PATCH",
+        "/api/config",
+        Some(&patch(
+            &hash(&n).await,
+            vec![set(
+                "providers.acme.models",
+                json!([{ "id": "a-2" }, { "id": "a-3" }]),
+            )],
+        )),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    // Declared models apply without a restart.
+    assert_eq!(r.body["restart_required"], false, "{}", r.body);
+    listed_soon(&n, &["acme/a-2", "acme/a-3", "bolt/b-1"]).await;
+
+    let r = local(
+        &n,
+        "PATCH",
+        "/api/config",
+        Some(&patch(
+            &hash(&n).await,
+            vec![json!({ "op": "remove", "key": "providers.acme" })],
+        )),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    listed_soon(&n, &["bolt/b-1"]).await;
+}
+
+/// A probe that fails is said on the node, with why, until one answers.
+#[tokio::test]
+async fn a_failed_probe_is_said_until_a_retry_answers() {
+    let _lock = state::config_lock().await;
+    let (n, fail) = probed();
+    fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    let r = local(&n, "POST", "/api/node/refresh-models", None).await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "{}", r.body);
+    let node = local(&n, "GET", "/api/node", None).await;
+    let failure = &node.body["models_probe_failure"];
+    assert!(
+        failure["error"]
+            .as_str()
+            .unwrap()
+            .contains("the harness did not answer"),
+        "{}",
+        node.body
+    );
+    assert!(failure["at_ms"].as_i64().unwrap() > 0);
+
+    fail.store(false, std::sync::atomic::Ordering::SeqCst);
+    let r = local(&n, "POST", "/api/node/refresh-models", None).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let node = local(&n, "GET", "/api/node", None).await;
+    assert_eq!(
+        node.body["models_probe_failure"],
+        Value::Null,
+        "{}",
+        node.body
+    );
+    assert_eq!(listed(&n), ["acme/a-1", "bolt/b-1"]);
 }

@@ -820,6 +820,7 @@ pub async fn patch_config(
     let outcome = edit::edit_live(&s.cfg, s.store(), &ops, Some(&expected), actor(&req))
         .map_err(edit_refusal)?;
     let (restart_required, pending) = restart_owed(&s, &outcome).await;
+    reprobe_after(&s, &outcome);
     Ok(Json(json!({
         "changed": outcome.changed(),
         "old_hash": outcome.old_hash,
@@ -847,6 +848,15 @@ pub(crate) async fn restart_owed(s: &AppState, outcome: &edit::EditOutcome) -> (
             serde_json::to_value(&pending).unwrap_or_default(),
         ),
         None => (outcome.restart_required, Value::Null),
+    }
+}
+
+/// An edit that changed a provider (its declared models, or the provider
+/// itself, removed) changes what the model probe finds: probe again, so the
+/// pickers follow the save without a refresh.
+pub(crate) fn reprobe_after(s: &AppState, outcome: &edit::EditOutcome) {
+    if outcome.wrote() && super::api::touches_providers(&outcome.changed()) {
+        super::api::reprobe_models(s);
     }
 }
 
@@ -923,6 +933,7 @@ async fn peer_patch_here(
         .map_err(edit_refusal)?;
     tracing::info!(actor = %admitted.actor(), summary = %admitted.summary, "node.toml edited by an admin peer");
     let (restart_required, pending) = restart_owed(s, &outcome).await;
+    reprobe_after(s, &outcome);
     Ok(json!({
         "changed": outcome.changed(),
         "old_hash": outcome.old_hash,

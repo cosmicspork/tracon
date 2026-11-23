@@ -3,8 +3,9 @@
 // recency this node knows is which of them it has run: those come first,
 // newest use first, and the rest keep the order they arrived in.
 
-import type { ModelOption, ProviderInfo, Session } from './types'
+import type { ModelOption, ProbeFailure, ProviderInfo, Session } from './types'
 import { providerLabel } from './providers'
+import { formatAge } from './format'
 
 /** Distinct model values from sessions on this node, most recently started first. */
 export function recentModelValues(sessions: Iterable<Session>): string[] {
@@ -71,4 +72,13 @@ export function modelSummary(models: ModelOption[], providers: ProviderInfo[]): 
     .map((provider) => `${providerLabel(provider.name)} ${counts.get(provider.name) ?? 0}`)
   if (aliases > 0) parts.push(`${aliases} adapter alias${aliases === 1 ? '' : 'es'}`)
   return [`${models.length} model${models.length === 1 ? '' : 's'}`, ...parts].join(' · ')
+}
+
+/** What Settings says when the node's last model probe failed, or null when
+    it did not: the pickers keep the list from before it, and this is why
+    they did not follow a save. */
+export function probeFailureLine(failure: ProbeFailure | null | undefined, now = Date.now()): string | null {
+  if (!failure) return null
+  const why = failure.error.trim() || 'no reason given'
+  return `The model list could not be read ${formatAge(failure.at_ms, now)} ago: ${why}. The pickers show the list from before.`
 }

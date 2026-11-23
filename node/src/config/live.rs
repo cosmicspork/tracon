@@ -339,6 +339,11 @@ fn under(path: &[String]) -> Under {
     }
 }
 
+/// `providers.<name>`: one provider's table.
+fn is_provider_entry(path: &[String]) -> bool {
+    matches!(path, [providers, _] if providers == "providers")
+}
+
 fn overlay_table(base: &mut toml::Table, next: &toml::Table, path: &mut Vec<String>) {
     let keys: Vec<String> = base
         .keys()
@@ -357,14 +362,19 @@ fn overlay_table(base: &mut toml::Table, next: &toml::Table, path: &mut Vec<Stri
                 }
             },
             // Only into a table both sides have: a table the node did not
-            // start with (a new provider) is a restart's to add.
-            Under::Mixed => {
-                if let (Some(toml::Value::Table(into)), Some(toml::Value::Table(from))) =
-                    (base.get_mut(&key), next.get(&key))
-                {
+            // start with (a new provider) is a restart's to add. A provider
+            // the file no longer names leaves at once, so the model probe and
+            // the next session stop offering it; the gateway keeps serving
+            // its credential and upstream until the restart.
+            Under::Mixed => match (base.get_mut(&key), next.get(&key)) {
+                (Some(toml::Value::Table(into)), Some(toml::Value::Table(from))) => {
                     overlay_table(into, from, path);
                 }
-            }
+                (Some(_), None) if is_provider_entry(path) => {
+                    base.remove(&key);
+                }
+                _ => {}
+            },
             Under::Restart => {}
         }
         path.pop();
@@ -444,6 +454,39 @@ mod tests {
         let again = overlay(&merged, &boot).unwrap();
         assert_eq!(again.notify.contact, None);
         assert!(again.repo.is_empty());
+    }
+
+    #[test]
+    fn declared_models_apply_live_and_a_removed_provider_leaves() {
+        let boot = load(
+            "[providers.acme]\ncredential = \"acme\"\nupstream = \"https://acme.example\"\n\
+             models = [{ id = \"a-1\" }]\n",
+        );
+        let newer = load(
+            "[providers.acme]\ncredential = \"acme\"\nupstream = \"https://acme.example\"\n\
+             models = [{ id = \"a-2\", name = \"A two\" }, { id = \"a-3\" }]\n\
+             [providers.anthropic]\nmodels = [{ id = \"claude-z\" }]\n",
+        );
+        let merged = overlay(&boot, &newer).unwrap();
+        let ids = |cfg: &Config, name: &str| -> Vec<String> {
+            cfg.providers[name]
+                .models
+                .iter()
+                .map(|m| m.id.clone())
+                .collect()
+        };
+        assert_eq!(ids(&merged, "acme"), ["a-2", "a-3"]);
+        assert_eq!(ids(&merged, "anthropic"), ["claude-z"]);
+        // The restart keys of a provider stay as the node started.
+        assert_eq!(merged.providers["acme"].upstream, "https://acme.example");
+
+        // Gone from the file: gone from what the probe and a session read.
+        // A built-in provider is never gone; the file only adds to it.
+        let without = load("");
+        let merged = overlay(&boot, &without).unwrap();
+        assert!(!merged.providers.contains_key("acme"));
+        assert!(merged.providers.contains_key("anthropic"));
+        assert_ne!(ids(&merged, "anthropic"), ["claude-z"]);
     }
 
     #[test]
