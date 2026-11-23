@@ -184,11 +184,18 @@ jobs:
   # reads a Linux-only field, and nothing compiled it on macOS until the
   # release that failed. A debug build is enough to catch that; the release
   # profile's LTO build cost most of this job and is left to the release leg.
+  #
+  # Advisory, not required: hosted macOS runners are often short, and a job
+  # that waits too long for one is cancelled unstarted, which failed runs and
+  # blocked merges that had nothing to do with macOS. It still runs on every
+  # change, and a red result is worth reading, but it does not fail the run;
+  # the release leg builds macOS regardless.
   macos:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: macos-15
     timeout-minutes: 30
+    continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
