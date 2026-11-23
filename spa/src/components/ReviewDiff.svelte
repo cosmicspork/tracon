@@ -14,6 +14,12 @@
   // Each file is a section of its own, so what comes later (moving file to
   // file, rendering only the files in view) has one place per file to hang on.
   //
+  // A large change is found and kept track of file by file: a filter on the
+  // paths, every file folding under its header with its own counts, a step
+  // to the next or previous change (also `n` and `p`), and, given `viewed`,
+  // a mark on each file the reader has read. Viewed is the reader's progress
+  // and never approval; the bar says so beside the count.
+  //
   // The unchanged lines a hunk leaves out are counted on its header and, given
   // `context`, shown on request: the file is read whole, once, from what the
   // revision pinned, checked against the diff, and the gap written back into
@@ -21,6 +27,7 @@
   import { tick, untrack } from 'svelte'
 
   import Diff from './Diff.svelte'
+  import type { ViewedFiles } from '../lib/viewedFiles.svelte'
   import { splitDiff, type DiffFile } from '../lib/diff'
   import {
     contextMismatch,
@@ -43,9 +50,12 @@
     diff,
     collapsed = false,
     context,
+    viewed,
   }: {
     diff: string
     collapsed?: boolean
+    /** The reader's viewed marks on this revision; absent, files cannot be marked. */
+    viewed?: ViewedFiles
     /** Read one file whole on both sides, as the revision pinned it; absent, gaps are only counted. */
     context?: (path: string) => Promise<Context>
   } = $props()
@@ -53,6 +63,7 @@
   type MergeDiffInstance = {
     rowAt(clientY: number): { line: number; into: number } | null
     rowTop(line: number): number | null
+    changeTops(): number[]
   }
 
   const parsed = $derived(splitDiff(diff))
@@ -135,7 +146,8 @@
   const mode = $derived<DiffMode | null>(chosen ?? (width > 0 ? defaultMode(width) : null))
 
   // Open files, by path. On the phone every file starts folded, since the
-  // list decides most reviews; elsewhere every file starts open.
+  // list decides most reviews; elsewhere every file starts open but the ones
+  // already viewed on this revision.
   let open = $state(new Set<string>())
   let seeded = ''
   $effect(() => {
@@ -143,9 +155,112 @@
     if (key === seeded) return
     seeded = key
     untrack(() => {
-      open = collapsed ? new Set() : new Set(files.map((f) => f.file.path))
+      open = collapsed
+        ? new Set()
+        : new Set(files.map((f) => f.file.path).filter((p) => viewed?.state(p) !== 'viewed'))
     })
   })
+
+  // --- finding the way through ----------------------------------------------
+
+  /** What the reader typed to narrow the files to. */
+  let filter = $state('')
+  const matches = (path: string) => !filter.trim() || path.toLowerCase().includes(filter.trim().toLowerCase())
+  const shownCount = $derived(files.filter((f) => matches(f.file.path)).length)
+  const totals = $derived(
+    files.reduce((t, f) => ({ added: t.added + f.file.added, removed: t.removed + f.file.removed }), { added: 0, removed: 0 }),
+  )
+
+  /** Mark a file viewed and fold it, or take the mark off and open it again. */
+  function markViewed(path: string, on: boolean) {
+    viewed?.set(path, on)
+    toggle(path, !on)
+  }
+
+  /** Open or fold every file the filter shows. */
+  function foldAll(on: boolean) {
+    const next = new Set(open)
+    for (const { file } of files) {
+      if (!matches(file.path)) continue
+      if (on) next.delete(file.path)
+      else next.add(file.path)
+    }
+    open = next
+  }
+
+  let bar = $state<HTMLDivElement>()
+
+  /**
+   * Where the diff's view starts on screen: below the bar, where the bar
+   * sits once it sticks. Until the page has scrolled that far the bar is
+   * lower, so its own position would move under every step.
+   */
+  function viewTop(): number {
+    const box = scroller()
+    return (box ? box.getBoundingClientRect().top : 0) + (bar?.offsetHeight ?? 0)
+  }
+
+  /** Where each change in an open, shown file starts on screen, top to bottom. */
+  function changeTops(): { path: string; top: number }[] {
+    const tops: { path: string; top: number }[] = []
+    for (const { file } of files) {
+      if (!open.has(file.path) || !matches(file.path)) continue
+      for (const top of views.get(file.path)?.changeTops() ?? []) tops.push({ path: file.path, top })
+    }
+    return tops
+  }
+
+  /** A change brought to just below the bar, with a few rows above it showing. */
+  const LEAD = 56
+  function scrollTo(top: number) {
+    const by = top - (viewTop() + LEAD)
+    const box = scroller()
+    if (box) box.scrollTop += by
+    else window.scrollBy(0, by)
+  }
+
+  /**
+   * Bring the next (or previous) change into view. Past the last change of
+   * the open files, the next shown file that is folded and not yet viewed is
+   * opened at its first change.
+   */
+  export async function step(dir: 1 | -1) {
+    const at = viewTop() + LEAD
+    const tops = changeTops()
+    const target = dir > 0 ? tops.find((t) => t.top > at + 2) : tops.findLast((t) => t.top < at - 2)
+    if (target) return scrollTo(target.top)
+    if (dir < 0) return
+    const below = files.find(({ file }) => {
+      const el = sections.get(file.path)
+      return (
+        el &&
+        matches(file.path) &&
+        !open.has(file.path) &&
+        viewed?.state(file.path) !== 'viewed' &&
+        el.getBoundingClientRect().top > viewTop()
+      )
+    })
+    if (!below) return
+    toggle(below.file.path, true)
+    // Its editors are made a frame or two after it opens.
+    for (let i = 0; i < 30; i++) {
+      await tick()
+      await new Promise((r) => requestAnimationFrame(r))
+      const first = views.get(below.file.path)?.changeTops()[0]
+      if (first !== undefined) return scrollTo(first)
+    }
+    sections.get(below.file.path)?.scrollIntoView({ block: 'start' })
+  }
+
+  /** `n` and `p` step change to change, unless the reader is typing. */
+  function onkey(e: KeyboardEvent) {
+    if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || (e.key !== 'n' && e.key !== 'p')) return
+    const t = e.target as HTMLElement | null
+    if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return
+    if (!root?.isConnected || !files.length) return
+    e.preventDefault()
+    void step(e.key === 'n' ? 1 : -1)
+  }
 
   const views = new Map<string, MergeDiffInstance>()
   const sections = new Map<string, HTMLElement>()
@@ -242,8 +357,33 @@
   }
 </script>
 
+<svelte:window onkeydown={onkey} />
+
 <div class="review-diff" bind:this={root} bind:clientWidth={width}>
-  <div class="bar">
+  <div class="bar" bind:this={bar}>
+    <div class="find">
+      <input
+        type="search"
+        class="filter"
+        placeholder="Filter files"
+        aria-label="Filter files by path"
+        bind:value={filter}
+      />
+      {#if filter.trim()}<span class="count">{shownCount} of {files.length}</span>{/if}
+      <span class="total" title="Lines added and removed in this diff">{stat(totals.added, totals.removed)}</span>
+    </div>
+    {#if viewed}
+      {@const p = viewed.progress}
+      <span class="progress" title="Viewed marks are your own reading progress. They approve nothing.">
+        {p.viewed}/{p.of} viewed <span class="not">· not approval</span>
+      </span>
+    {/if}
+    <div class="steps">
+      <button type="button" title="Previous change (p)" aria-label="Previous change" onclick={() => step(-1)}>↑</button>
+      <button type="button" title="Next change (n)" aria-label="Next change" onclick={() => step(1)}>↓</button>
+      <button type="button" title="Fold every file shown" onclick={() => foldAll(true)}>Fold all</button>
+      <button type="button" title="Open every file shown" onclick={() => foldAll(false)}>Open all</button>
+    </div>
     <div class="modes" role="radiogroup" aria-label="Diff layout">
       <button
         type="button"
@@ -262,9 +402,15 @@
     </div>
     <button type="button" class="wrap" aria-pressed={wrap} class:on={wrap} onclick={toggleWrap}>Wrap lines</button>
   </div>
+  {#if filter.trim() && shownCount === 0}
+    <div class="empty">No file path contains “{filter.trim()}”.</div>
+  {/if}
   {#each files as { file, sides, view, unavailable } (file.path)}
+    {@const seen = viewed?.state(file.path) ?? 'unviewed'}
     <details
       class="file"
+      class:viewed={seen === 'viewed'}
+      hidden={!matches(file.path)}
       data-path={file.path}
       open={open.has(file.path)}
       ontoggle={(e) => toggle(file.path, (e.currentTarget as HTMLDetailsElement).open)}
@@ -273,7 +419,22 @@
       <summary>
         <span class="path">{file.path}</span>
         {#each sides.notes as n (n)}<span class="note">{n === 'binary' ? 'binary file' : n}</span>{/each}
-        {#if sides.hunks}<span class="stat">{stat(file.added, file.removed)}</span>{/if}
+        {#if seen === 'changed'}<span class="changed">changed since you viewed it</span>{/if}
+        {#if sides.hunks}<span class="stat"
+            ><span class="add">+{file.added}</span> <span class="del">−{file.removed}</span></span
+          >{/if}
+        {#if viewed?.tracks(file.path)}
+          <!-- A click on the mark is the mark's, not the fold's. -->
+          <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
+          <label class="seen" title="Your own reading progress. Marking a file viewed does not approve it." onclick={(e) => e.stopPropagation()}>
+            <input
+              type="checkbox"
+              checked={seen === 'viewed'}
+              onchange={(e) => markViewed(file.path, (e.currentTarget as HTMLInputElement).checked)}
+            />
+            Viewed
+          </label>
+        {/if}
       </summary>
       {#if open.has(file.path)}
         <div class="body">
@@ -318,12 +479,81 @@
     top: 0;
     z-index: 2;
     display: flex;
+    flex-wrap: wrap;
+    gap: 6px 8px;
+    align-items: center;
     justify-content: flex-end;
     padding: 4px 0;
     background: var(--bg);
   }
+  .find {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1 1 220px;
+    min-width: 0;
+  }
+  .filter {
+    flex: 1;
+    min-width: 0;
+    max-width: 320px;
+    font: 12px var(--mono);
+    padding: 4px 8px;
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    background: var(--s1);
+    color: var(--ink);
+  }
+  .count,
+  .total,
+  .progress {
+    font: 12px var(--mono);
+    color: var(--dim);
+    white-space: nowrap;
+  }
+  .progress .not {
+    color: var(--dim);
+    font-style: italic;
+  }
+  .steps {
+    display: inline-flex;
+    gap: 4px;
+  }
+  .steps button {
+    font: 12px var(--mono);
+    padding: 4px 8px;
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    background: var(--s1);
+    color: var(--ink);
+    cursor: pointer;
+  }
+  .add {
+    color: var(--ok);
+  }
+  .del {
+    color: var(--crit);
+  }
+  .changed {
+    color: var(--wait);
+    white-space: nowrap;
+    font-size: 11.5px;
+  }
+  .seen {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--dim);
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .file.viewed summary .path {
+    color: var(--dim);
+  }
+  .file[hidden] {
+    display: none;
+  }
   .wrap {
-    margin-left: 8px;
     font: 12px var(--mono);
     padding: 4px 10px;
     border: 1px solid var(--rule);

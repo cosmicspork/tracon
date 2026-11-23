@@ -561,6 +561,14 @@ blob its diff names and the file at its commit, or the evidence store's copy of 
 commit), never from the worktree as it stands, and they are checked against the diff
 first; when they cannot be read or do not match, the gap says so instead. A rename, a
 binary file and a change of mode are each labelled as what they are.
+To find your way through a large change, the bar above the diff filters the files by
+path, totals the lines added and removed, folds or opens every file, and steps to the
+next or previous change (**n** and **p** on the keyboard). Each file folds under its
+header with its own counts and a **Viewed** mark. A mark is your reading progress on this
+device, bound to the revision you made it on and to the file's diff as it was then: when
+the agent resubmits, files it left alone stay viewed and files it changed lose the mark
+and say they changed since you viewed them. Viewed never means approved; nothing is sent
+when you mark a file, and only a verdict decides the review.
 You approve, reject with a reason, or — on a desktop — edit the diff and send it back as
 a request for changes. A request for changes is how a review comes back: the agent
 resubmits with the same `review_id`. A rejection is final: `submit_review` refuses a

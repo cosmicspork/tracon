@@ -47,6 +47,8 @@
   let host = $state<HTMLDivElement>()
   /** The editor whose rows are the file after the change: what a position is read in. */
   let after: EditorView | undefined
+  /** The changes the editors mark, in positions of `after`, for moving change to change. */
+  let changes: () => readonly { fromB: number }[] = () => []
   /** Every editor showing now, for what reconfigures them in place. */
   let editors: EditorView[] = []
   const wrapping = new Compartment()
@@ -87,6 +89,7 @@
       })
       after = merge.b
       editors = [merge.a, merge.b]
+      changes = () => merge.chunks
       const unfollow = followSideways(merge.a, merge.b)
       return () => {
         unfollow()
@@ -107,6 +110,7 @@
     })
     after = view
     editors = [view]
+    changes = () => getChunks(view.state)?.chunks ?? []
     return () => {
       view.destroy()
       after = undefined
@@ -325,6 +329,18 @@
     const top = after.documentTop
     const block = after.lineBlockAtHeight(clientY - top)
     return { line: after.state.doc.lineAt(block.from).number, into: clientY - top - block.top }
+  }
+
+  /**
+   * Where on screen each change starts, top to bottom: what moving to the
+   * next or previous change steps through. Unified, a deletion is drawn above
+   * the row it precedes, so it starts a deleted chunk's height higher; the
+   * row is near enough to bring it into view.
+   */
+  export function changeTops(): number[] {
+    if (!after) return []
+    const view = after
+    return changes().map((c) => view.documentTop + view.lineBlockAt(c.fromB).top)
   }
 
   /** Where on screen a row of the after side starts, as `rowAt` named it. */
