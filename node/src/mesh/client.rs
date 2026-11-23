@@ -15,6 +15,7 @@ use proto::frame::{Envelope, Payload, MESH_CHANNEL};
 use proto::keyring::Keyring;
 use proto::keys::Identity;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch, Notify};
 
 use super::mirror::{Applied, Mirror};
@@ -22,6 +23,18 @@ use super::{enroll, frames, HubState, MeshState};
 use crate::config::Config;
 use crate::store::{now_ms, NodeRow, Store};
 use crate::stream::{Bus, Frame};
+
+/// How long an unchanged snapshot goes without being sent again. A peer that
+/// fell behind retention, or missed one, has a copy within this long.
+pub const SNAPSHOT_REFRESH_MS: i64 = 60 * 60 * 1000;
+
+/// What [`MeshClient::send_snapshots`] last sent on a channel.
+struct SentSnapshot {
+    hash: [u8; 32],
+    sent_ms: i64,
+    /// The channel's other members it went to, sorted.
+    others: Vec<String>,
+}
 
 const OUTBOX_BATCH: i64 = 50;
 const PULL_LIMIT: usize = 200;
@@ -158,6 +171,10 @@ pub struct MeshClient {
     /// listings arrive meanwhile, and not on every listing while the owner
     /// cannot be reached.
     rereading: Mutex<HashMap<String, i64>>,
+    /// Per channel, the snapshot last sent: its hash, when, and to which other
+    /// members. A snapshot goes out again only when one of those changed or
+    /// [`SNAPSHOT_REFRESH_MS`] has passed.
+    snapshots_sent: Mutex<HashMap<String, SentSnapshot>>,
 }
 
 /// How often a refused handoff from one sender may have the member list read
@@ -222,6 +239,7 @@ impl MeshClient {
             vouch: std::sync::OnceLock::new(),
             handoff_refresh: Mutex::new(HashMap::new()),
             rereading: Mutex::new(HashMap::new()),
+            snapshots_sent: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1617,11 +1635,58 @@ impl MeshClient {
         }
     }
 
-    /// This node's open state per channel, queued for peers.
+    /// This node's open state per channel, queued for peers: only on a
+    /// channel another node shares, and only when the state or that channel's
+    /// members changed since the last one sent there, or it is
+    /// [`SNAPSHOT_REFRESH_MS`] old. Unchanged state was resent every ten
+    /// minutes before, which filled the hub with copies nobody needed.
     pub fn send_snapshots(&self) {
-        for (channel, payload) in frames::snapshots(&self.store, &self.node_id()) {
-            let _ = self.enqueue(&channel, None, &payload);
+        self.send_snapshots_at(now_ms());
+    }
+
+    /// [`Self::send_snapshots`] as of `now`. Returns the channels sent to.
+    pub fn send_snapshots_at(&self, now: i64) -> Vec<String> {
+        let me = self.node_id();
+        let mut sent = Vec::new();
+        for (channel, payload) in frames::snapshots(&self.store, &me) {
+            let mut others = self.store.nodes_in_channel(&channel).unwrap_or_default();
+            others.retain(|n| *n != me);
+            if others.is_empty() {
+                // No node to read it. Forget what was sent, so the first
+                // snapshot after a node joins goes out.
+                self.snapshots_sent.lock().unwrap().remove(&channel);
+                continue;
+            }
+            let Ok(bytes) = serde_json::to_vec(&payload) else {
+                continue;
+            };
+            let hash = Sha256::digest(&bytes).into();
+            let due = self
+                .snapshots_sent
+                .lock()
+                .unwrap()
+                .get(&channel)
+                .is_none_or(|last| {
+                    last.hash != hash
+                        || last.others != others
+                        || now - last.sent_ms >= SNAPSHOT_REFRESH_MS
+                });
+            if !due {
+                continue;
+            }
+            if self.enqueue(&channel, None, &payload).is_ok() {
+                self.snapshots_sent.lock().unwrap().insert(
+                    channel.clone(),
+                    SentSnapshot {
+                        hash,
+                        sent_ms: now,
+                        others,
+                    },
+                );
+                sent.push(channel);
+            }
         }
+        sent
     }
 
     /// Queue privacy-preserving aggregates only for channels whose members

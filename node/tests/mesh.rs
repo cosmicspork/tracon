@@ -309,12 +309,95 @@ async fn queue_frames_expire_answered_requests_and_snapshots_close_lost_sessions
             },
         )
         .unwrap();
+    // A snapshot goes only to a channel another node shares: A learns B's
+    // channels from the member list.
+    a.client.refresh_members().await.unwrap();
     a.client.send_snapshots();
     a.client.drain_once().await.unwrap();
     b.client.pull_once().await.unwrap();
     let s = b.store.get_session("s1").unwrap().unwrap();
     assert_eq!(s.state, "closed");
     assert_eq!(s.last_error.as_deref(), Some("lost on owner"));
+}
+
+/// A snapshot is sent on a channel only when another node shares it, and
+/// again only when the state or the members changed, or it is an hour old.
+#[tokio::test]
+async fn snapshots_go_only_where_read_and_only_when_changed() {
+    state::isolate();
+    let (a, b) = pair().await;
+    let t = now_ms();
+    // Before the member list arrives, A knows of no other node anywhere.
+    assert!(a.client.send_snapshots_at(t).is_empty());
+    a.client.refresh_members().await.unwrap();
+    let mut first = a.client.send_snapshots_at(t);
+    first.sort();
+    assert_eq!(
+        first,
+        vec![MESH_CHANNEL.to_string(), "personal".into(), "secret".into()]
+    );
+    // Nothing changed: nothing goes out, until the refresh interval passes.
+    assert!(a.client.send_snapshots_at(t + 60_000).is_empty());
+    let refresh = tracon::mesh::client::SNAPSHOT_REFRESH_MS;
+    assert_eq!(a.client.send_snapshots_at(t + refresh).len(), 3);
+    // A change on one channel sends that channel's alone.
+    a.store
+        .insert_session(&support::rows::session_row(
+            "s9",
+            &a.id.node_id(),
+            "personal",
+        ))
+        .unwrap();
+    assert_eq!(
+        a.client.send_snapshots_at(t + refresh + 1),
+        vec!["personal".to_string()]
+    );
+    // A channel no other node shares gets none, and the first after a node
+    // joins it goes out.
+    a.store
+        .node_channels_set(&b.id.node_id(), &[MESH_CHANNEL.into()])
+        .unwrap();
+    assert!(a.client.send_snapshots_at(t + refresh + 2).is_empty());
+    a.store
+        .node_channels_set(&b.id.node_id(), &[MESH_CHANNEL.into(), "secret".into()])
+        .unwrap();
+    assert_eq!(
+        a.client.send_snapshots_at(t + refresh + 3),
+        vec!["secret".to_string()]
+    );
+}
+
+/// A decided outcome carries its checks but not the approved body, and
+/// applying one leaves a peer's copy of the body as it was.
+#[test]
+fn decided_outcomes_carry_checks_but_not_bodies() {
+    let owner = Store::open_in_memory().unwrap();
+    let mut r = support::rows::review_row("r1", "s1", "approved");
+    r.session_id = None;
+    r.edited_body = Some("the approved body".repeat(200));
+    r.checks_json = Some("[{\"name\":\"ci\"}]".into());
+    owner.insert_review(&r).unwrap();
+    let outcomes = owner
+        .decided_review_outcomes("n1", "personal", 0, 200)
+        .unwrap();
+    assert_eq!(outcomes.len(), 1);
+    let wire = serde_json::to_value(&outcomes[0]).unwrap();
+    assert!(wire.get("edited_body").is_none(), "{wire}");
+    assert_eq!(wire["checks_json"], "[{\"name\":\"ci\"}]", "{wire}");
+
+    let peer = Store::open_in_memory().unwrap();
+    let mut mirrored = support::rows::review_row("r1", "s1", "new");
+    mirrored.session_id = None;
+    mirrored.edited_body = Some("held here".into());
+    mirrored.checks_json = Some("[]".into());
+    peer.insert_review(&mirrored).unwrap();
+    assert!(peer
+        .apply_review_outcome("n1", "personal", &outcomes[0])
+        .unwrap());
+    let after = peer.get_review("r1").unwrap().unwrap();
+    assert_eq!(after.state, "approved");
+    assert_eq!(after.edited_body.as_deref(), Some("held here"));
+    assert_eq!(after.checks_json.as_deref(), Some("[{\"name\":\"ci\"}]"));
 }
 
 #[tokio::test]
