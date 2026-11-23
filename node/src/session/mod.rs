@@ -1,6 +1,7 @@
 //! Session lifecycle: create a worktree, materialize config, spawn the harness
 //! inside the boundary, and hand it to a supervisor.
 
+pub mod attachments;
 pub mod chunks;
 pub mod exhaustion;
 pub mod external;
@@ -678,6 +679,11 @@ pub enum SessionError {
     NoMesh,
     #[error("{0}")]
     Rejected(String),
+    /// What was sent with a prompt is not something the node stages: too
+    /// many files, too large, of a type it does not take, or a session it
+    /// has no workspace to stage them into. Nothing was sent.
+    #[error("attachment refused: {0}")]
+    Attachment(String),
     /// An Allow refused because the plugin's preview, taken again as it was
     /// answered, is not the one the operator read: what the call changes
     /// has moved. Nothing was decided; the card shows the fresh preview.
@@ -4266,6 +4272,102 @@ impl Manager {
                 }),
             Err(e) => Err(e),
         }
+    }
+
+    /// [`Self::prompt`], with files the operator attached: each is checked
+    /// against [`attachments`]' limits and refused with why, then staged into
+    /// the session's workspace before the prompt is sent, and the prompt's
+    /// text names each one. Answers what was staged.
+    pub async fn prompt_with(
+        &self,
+        id: &str,
+        text: String,
+        uploads: &[attachments::Upload],
+    ) -> Result<(Prompted, Vec<attachments::Staged>), SessionError> {
+        if uploads.is_empty() {
+            return Ok((self.prompt(id, text).await?, Vec::new()));
+        }
+        self.ensure_active(id)?;
+        self.refuse_turn_while_restarting(id)?;
+        let staged = self.stage_attachments(id, uploads).await?;
+        let prompted = self
+            .prompt(id, attachments::with_note(&text, &staged))
+            .await?;
+        Ok((prompted, staged))
+    }
+
+    /// [`Self::ask`] with a message and files the operator attached, staged
+    /// as [`Self::prompt_with`] stages them, once the session is known to be
+    /// askable.
+    pub async fn ask_with(
+        &self,
+        id: &str,
+        text: String,
+        uploads: &[attachments::Upload],
+    ) -> Result<SessionRow, SessionError> {
+        if uploads.is_empty() {
+            return self.ask(id, Ask::Message(text)).await;
+        }
+        let askable = self.askable(id).await?;
+        if let Some(reason) = askable.reason.filter(|_| !askable.restorable) {
+            return Err(SessionError::Rejected(format!(
+                "its conversation cannot be restored: {reason}"
+            )));
+        }
+        let staged = self.stage_attachments(id, uploads).await?;
+        self.ask(id, Ask::Message(attachments::with_note(&text, &staged)))
+            .await
+    }
+
+    /// Check `uploads` and write them into the session `id`'s workspace under
+    /// [`attachments::DIR`], recording what was staged on the session.
+    async fn stage_attachments(
+        &self,
+        id: &str,
+        uploads: &[attachments::Upload],
+    ) -> Result<Vec<attachments::Staged>, SessionError> {
+        let files = attachments::accept(uploads).map_err(SessionError::Attachment)?;
+        let row = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
+        // The workspace is where the session runs: a peer's is the peer's,
+        // and the mesh carries a prompt's text, never its files.
+        if row.node_id != self.node_id {
+            return Err(SessionError::Attachment(format!(
+                "this session runs on node {}, and attachments are staged by the node that                  runs it: send them from that node's own interface",
+                row.node_id
+            )));
+        }
+        if row.harness_id == external::HARNESS_ID {
+            return Err(SessionError::Attachment(
+                "an external agent works in its own checkout; the node has no workspace of                  its to stage files into"
+                    .into(),
+            ));
+        }
+        let volume = crate::workspace::volume_name(&workspace_of(&row));
+        let place = attachments::place(self.backend().as_ref(), &volume)
+            .map_err(SessionError::Attachment)?;
+        let prompt_id = uuid::Uuid::now_v7().simple().to_string();
+        let stage = crate::workspace::staging_path(&format!("attach-{prompt_id}"));
+        let _ = std::fs::remove_dir_all(&stage);
+        let written = match attachments::lay_out(&stage, &prompt_id, &files) {
+            Ok(()) => attachments::write(place, &stage).await,
+            Err(error) => Err(format!("the attachments could not be staged: {error}")),
+        };
+        let _ = std::fs::remove_dir_all(&stage);
+        written.map_err(SessionError::Rejected)?;
+        let staged = attachments::staged(&prompt_id, &files);
+        self.record(NewEvent {
+            session_id: id.to_string(),
+            work_item_id: None,
+            kind: ek::ATTACHMENTS_STAGED.into(),
+            ref_id: Some(prompt_id.clone()),
+            payload: json!({
+                "dir": attachments::prompt_dir(&prompt_id),
+                "attachments": staged,
+            }),
+            at_ms: now_ms(),
+            mono_ms: 0,
+        });
+        Ok(staged)
     }
 
     /// Deliver what the operator queued for `session_id` in the result of

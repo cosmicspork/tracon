@@ -393,10 +393,19 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/authority", get(api::session_authority))
         .route("/api/sessions/{id}/audit", get(api::session_audit))
         .route("/api/sessions/{id}/outcome", get(api::session_outcome))
-        .route("/api/sessions/{id}/prompt", post(api::prompt))
+        .route(
+            "/api/sessions/{id}/prompt",
+            post(api::prompt).layer(DefaultBodyLimit::max(
+                crate::session::attachments::MAX_BODY_BYTES,
+            )),
+        )
         .route(
             "/api/sessions/{id}/ask",
-            get(api::askable).post(api::ask_session),
+            get(api::askable)
+                .post(api::ask_session)
+                .layer(DefaultBodyLimit::max(
+                    crate::session::attachments::MAX_BODY_BYTES,
+                )),
         )
         .route("/api/sessions/{id}/compact", post(api::compact))
         .route("/api/sessions/{id}/kill", post(api::kill))

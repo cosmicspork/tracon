@@ -76,7 +76,8 @@ impl From<SessionError> for ApiError {
             | SessionError::InSession(_)
             | SessionError::PlanRequired(_)
             | SessionError::Source(_)
-            | SessionError::Unfit(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            | SessionError::Unfit(_)
+            | SessionError::Attachment(_) => StatusCode::UNPROCESSABLE_ENTITY,
             SessionError::Ceiling(_) => StatusCode::TOO_MANY_REQUESTS,
             SessionError::ChannelArchived(_) => StatusCode::CONFLICT,
             SessionError::NotFound => StatusCode::NOT_FOUND,
@@ -2241,23 +2242,36 @@ pub async fn session_events(
 
 #[derive(Deserialize)]
 pub struct PromptBody {
+    #[serde(default)]
     text: String,
+    /// Files sent with the prompt (`name`, `type`, base64 `data`), staged
+    /// into the session's workspace before it is sent
+    /// (`session::attachments`). A file the node does not take refuses the
+    /// whole prompt, with why.
+    #[serde(default)]
+    attachments: Vec<crate::session::attachments::Upload>,
 }
 
 /// `POST /api/sessions/{id}/prompt`. A session whose turn is running holds
 /// the prompt rather than refusing it: the answer says which, and a queued
 /// one names the message whose delivery the log will show. A prompt for an
 /// unreachable owner is queued too, on this node, and names the owner instead.
+/// Its attachments, when it has any, are staged first and listed in the
+/// answer as `attachments`.
 pub async fn prompt(
     State(s): State<AppState>,
     Path(id): Path<String>,
     Json(b): Json<PromptBody>,
 ) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
-    let body = match s.manager.prompt(&id, b.text).await? {
+    let (prompted, staged) = s.manager.prompt_with(&id, b.text, &b.attachments).await?;
+    let mut body = match prompted {
         Prompted::Sent => json!({ "queued": false }),
         Prompted::Queued { message_id } => json!({ "queued": true, "message_id": message_id }),
         Prompted::QueuedForOwner { node_id } => json!({ "queued": true, "owner": node_id }),
     };
+    if !staged.is_empty() {
+        body["attachments"] = json!(staged);
+    }
     Ok((StatusCode::ACCEPTED, Json(body)))
 }
 /// Whether a session that ended or was suspended can be asked again in its
@@ -2276,10 +2290,7 @@ pub async fn ask_session(
     Path(id): Path<String>,
     Json(b): Json<PromptBody>,
 ) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
-    let row = s
-        .manager
-        .ask(&id, crate::session::Ask::Message(b.text))
-        .await?;
+    let row = s.manager.ask_with(&id, b.text, &b.attachments).await?;
     Ok((StatusCode::ACCEPTED, Json(json!(row))))
 }
 

@@ -2,6 +2,7 @@
 // interface can say what the node said, not "request failed".
 
 import type { NameKind } from './names'
+import type { AttachmentUpload, StagedAttachment } from './attachments'
 import type {
   ChangeDraft,
   Askable,
@@ -559,12 +560,17 @@ export const api = {
   deleteChannel: (name: string) => call<{ deleted: string }>('DELETE', `/api/channels/${encodeURIComponent(name)}`),
   /** Sent now, or held (`queued`): for the agent while its turn runs (`message_id`), or on
    *  this node until an unreachable owner returns (`owner`). */
-  prompt: (id: string, text: string) =>
-    call<{ queued: boolean; message_id?: string; owner?: string }>('POST', `/api/sessions/${id}/prompt`, { text }),
+  prompt: (id: string, text: string, attachments: AttachmentUpload[] = []) =>
+    call<{ queued: boolean; message_id?: string; owner?: string; attachments?: StagedAttachment[] }>(
+      'POST',
+      `/api/sessions/${id}/prompt`,
+      attachments.length ? { text, attachments } : { text },
+    ),
   /** Whether a session that ended or was suspended can be asked again in its own conversation. */
   askable: (id: string) => call<Askable>('GET', `/api/sessions/${id}/ask`),
   /** Ask it: the same session, its harness started again in its own conversation. */
-  ask: (id: string, text: string) => call<Session>('POST', `/api/sessions/${id}/ask`, { text }),
+  ask: (id: string, text: string, attachments: AttachmentUpload[] = []) =>
+    call<Session>('POST', `/api/sessions/${id}/ask`, attachments.length ? { text, attachments } : { text }),
   /** Compact its conversation with the harness's own compaction; an ended one is reopened for it. */
   compact: (id: string) => call<void>('POST', `/api/sessions/${id}/compact`),
   pause: (id: string, reason?: string) => call<void>('POST', `/api/sessions/${id}/pause`, { reason }),

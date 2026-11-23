@@ -23,6 +23,7 @@
   import { runtimeNote as runtimeNoteFor, usageNote as usageNoteFor } from '../lib/usage'
   import { filesSyncNote, logRoot } from '../lib/filesSync'
   import { repetitionHint } from '../lib/log'
+  import { addAttachments, ATTACH_ACCEPT, pastedName, sizeText, toUpload } from '../lib/attachments'
   import { askMode, compactOffered, compactionRunning, composerState, sessionControls } from '../lib/session-actions'
   import { router } from '../lib/router.svelte'
   import { chipLabel, nodeById, unreachableReason } from '../lib/nodes'
@@ -44,6 +45,39 @@
   let { id }: { id: string } = $props()
 
   let draft = $state('')
+  /** Files to send with the next prompt, and why any the operator picked were left out. */
+  let files = $state<File[]>([])
+  let refusedFiles = $state<string[]>([])
+  let picker = $state<HTMLInputElement | null>(null)
+  function attach(added: File[]) {
+    const next = addAttachments(files, added)
+    files = next.files
+    refusedFiles = next.refused
+  }
+  function unattach(i: number) {
+    files = files.filter((_, at) => at !== i)
+    refusedFiles = []
+  }
+  function onPick(e: Event) {
+    const input = e.currentTarget as HTMLInputElement
+    attach([...(input.files ?? [])])
+    // The same file picked again after it was removed is a change too.
+    input.value = ''
+  }
+  /** A screenshot pasted into the box is attached, not pasted as text. */
+  function onPaste(e: ClipboardEvent) {
+    const pasted = [...(e.clipboardData?.files ?? [])]
+    if (pasted.length === 0) return
+    e.preventDefault()
+    const now = new Date()
+    attach(
+      pasted.map((f) =>
+        f.type.startsWith('image/') && (!f.name || /^image\.\w+$/.test(f.name))
+          ? new File([f], pastedName(f.type, now), { type: f.type })
+          : f,
+      ),
+    )
+  }
   /** Shown once, when text the operator typed elsewhere comes back from the node. */
   let restored = $state(false)
   let sending = $state(false)
@@ -213,7 +247,7 @@
   async function send(e?: SubmitEvent) {
     e?.preventDefault()
     const text = draft.trim()
-    if (!text || sending) return
+    if ((!text && files.length === 0) || sending) return
     sending = true
     error = null
     restored = false
@@ -223,8 +257,11 @@
     try {
       // An ended or suspended session is asked again in its own
       // conversation; a live one takes the prompt as it is.
-      await (ask.kind === 'ask' ? api.ask(id, text) : api.prompt(id, text))
+      const uploads = await Promise.all(files.map(toUpload))
+      await (ask.kind === 'ask' ? api.ask(id, text, uploads) : api.prompt(id, text, uploads))
       draft = ''
+      files = []
+      refusedFiles = []
     } catch (err) {
       error = err instanceof Error ? err.message : String(err)
     } finally {
@@ -753,16 +790,43 @@
         bind:value={draft}
         use:autogrow={draft}
         oninput={onDraftInput}
+        onpaste={onPaste}
         {placeholder}
         disabled={composer.disabled}
         onkeydown={(e) => {
           if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) void send()
         }}
       ></textarea>
-      <button class="btn p" type="submit" disabled={(inputReason !== null && !composer.queues) || !draft.trim()}>
+      <!-- On a phone the picker offers the camera and the photo library too. -->
+      <input class="pick" type="file" multiple accept={ATTACH_ACCEPT} bind:this={picker} onchange={onPick} hidden />
+      <button
+        class="btn attach"
+        type="button"
+        title={remote ? 'attachments are staged by the node that runs the session' : 'attach a screenshot or a log'}
+        aria-label="Attach files"
+        disabled={composer.disabled || remote}
+        onclick={() => picker?.click()}>Attach</button
+      >
+      <button
+        class="btn p"
+        type="submit"
+        disabled={(inputReason !== null && !composer.queues) || (!draft.trim() && files.length === 0) || sending}
+      >
         {ask.kind === 'ask' ? 'Ask' : composer.queues ? 'Queue' : 'Send'}
       </button>
     </form>
+    {#if files.length || refusedFiles.length}
+      <div class="files">
+        {#each files as file, i (i)}
+          <span class="att"
+            >{file.name} · {sizeText(file.size)}<button type="button" class="lnk" aria-label="Remove {file.name}" onclick={() => unattach(i)}
+              >×</button
+            ></span
+          >
+        {/each}
+        {#each refusedFiles as why (why)}<small class="crit">not attached · {why}</small>{/each}
+      </div>
+    {/if}
   {/if}
 {/if}
 
@@ -829,6 +893,28 @@
     color: var(--ink);
     font: 13.5px var(--sans);
     padding: 9px 11px;
+  }
+  .files {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    margin-top: 6px;
+    font: 12px var(--mono);
+    color: var(--ink2);
+    min-width: 0;
+  }
+  .files .att {
+    display: inline-flex;
+    gap: 6px;
+    align-items: baseline;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+  .files small {
+    flex-basis: 100%;
+  }
+  .files small.crit {
+    color: var(--crit);
   }
   /* Plainly not taking input: no resize grip, no text cursor. */
   textarea:disabled {

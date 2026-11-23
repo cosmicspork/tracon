@@ -752,6 +752,45 @@ draft until it is marked ready. A `pr_merge` whose `head_sha` is not the pull
 request's current head is refused before you are asked, and its card names the
 head it merges in full.
 
+## Sending a screenshot or a log
+
+The session's message box takes files as well as text, in the browser and on the
+phone: **Attach** opens the file picker (on a phone, the camera and the photo
+library too), and an image pasted into the box is attached rather than pasted. The
+prompt API carries them beside the text: `POST /api/sessions/{id}/prompt` (and
+`/ask`, for an ended session asked again) takes `attachments`, a list of
+`{name, type, data}` with the bytes base64 in `data`, and answers with what it
+staged.
+
+Before the prompt is sent, the node stages each file into the session's workspace,
+under one fixed path, `.tracon/attachments/<id>/<name>`, on every runtime (Podman,
+Apple, Kubernetes, DigitalOcean): into the running sandbox's own tree over the files
+channel, or into the node's copy of the workspace that the sandbox is sent when it
+starts. The write follows the files channel's rules — plain files only, nothing
+written through a link left in the workspace — so nothing lands outside that
+directory, and its `.gitignore` keeps attachments out of every change the session
+submits. The prompt the agent gets ends with a line for each file, naming its path,
+its type and its size, and the session's log records it as `attachments_staged`:
+each file's name, path, type, size and SHA-256. A prompt held while a turn runs is
+staged when you send it, so its files are there for the turn that delivers it.
+
+The node enforces the limits and refuses the whole prompt, saying which file and
+why, rather than dropping one:
+
+| Limit | Value |
+| --- | --- |
+| Files per prompt | 8 |
+| One file | 10 MiB |
+| All of a prompt's files | 20 MiB |
+| Types | PNG, JPEG, GIF or WebP images, PDF, or UTF-8 text (logs, JSON, CSV, Markdown, source) |
+
+The type is read from the bytes, not from the name or what the browser says; a name
+is cut to its last component, at most 128 bytes, and two files of one name are kept
+as `name`, `name-2`. The message box checks the same limits before it uploads
+anything and says why a file was left out. Attachments are staged by the node that
+runs the session: a peer's session, or an external agent working in its own
+checkout, refuses them with that reason.
+
 ## Asking, pinging, and complaining
 
 Three tools let an agent reach you without pretending a question is a permission.

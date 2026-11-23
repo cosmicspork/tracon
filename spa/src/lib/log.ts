@@ -9,6 +9,7 @@
 
 import { nameOf } from './names'
 import { roomWords } from './capabilities'
+import { sizeText, stagedOf } from './attachments'
 import { exhaustionNote } from './exhaustion'
 import { formatBytes } from './data'
 import { formatDuration, formatTokens } from './format'
@@ -454,6 +455,11 @@ function forgePath(url: string): string {
 export function eventLine(e: Event): EventLine | null {
   const p = e.payload
   switch (e.kind) {
+    case 'attachments_staged': {
+      const files = stagedOf(p)
+      const what = files.length === 1 ? 'attached 1 file' : `attached ${files.length} files`
+      return line('sys', [what, ...files.map((f) => `${f.path || f.name} (${f.type}, ${sizeText(f.size)})`)])
+    }
     case 'prompt_delivered': {
       const n = Array.isArray(p.message_ids) ? p.message_ids.length : 1
       const what = n === 1 ? 'your queued message reached the agent' : `your ${n} queued messages reached the agent`

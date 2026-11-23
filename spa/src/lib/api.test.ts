@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 
-import { answerBody, ApiError, call, failureText } from './api'
+import { answerBody, api, ApiError, call, failureText } from './api'
 
 const cloudflare504 = `<!DOCTYPE html>
 <!--[if lt IE 7]> <html class="no-js ie6 oldie" lang="en-US"> <![endif]-->
@@ -46,6 +46,29 @@ describe('call', () => {
     expect(err.status).toBe(504)
     expect(err.message).not.toContain('<')
     expect(err.message).toContain('504: Gateway time-out')
+  })
+})
+
+describe('prompt', () => {
+  const realFetch = globalThis.fetch
+  afterEach(() => {
+    globalThis.fetch = realFetch
+  })
+
+  test('carries its attachments beside the text, and only when there are some', async () => {
+    const bodies: unknown[] = []
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)))
+      return new Response(JSON.stringify({ queued: false }), { status: 202, headers: { 'content-type': 'application/json' } })
+    }) as unknown as typeof fetch
+    await api.prompt('s1', 'look', [{ name: 'shot.png', type: 'image/png', data: 'iVBORw==' }])
+    await api.prompt('s1', 'plain')
+    await api.ask('s1', 'again', [{ name: 'run.log', type: 'text/plain', data: 'eA==' }])
+    expect(bodies).toEqual([
+      { text: 'look', attachments: [{ name: 'shot.png', type: 'image/png', data: 'iVBORw==' }] },
+      { text: 'plain' },
+      { text: 'again', attachments: [{ name: 'run.log', type: 'text/plain', data: 'eA==' }] },
+    ])
   })
 })
 
