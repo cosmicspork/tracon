@@ -50,6 +50,10 @@ pub struct Config {
     /// MCP servers outside the node whose tools sessions reach through the
     /// node's own MCP endpoint, each tool decided allow, ask or deny.
     pub mcp_server: Vec<McpServer>,
+    /// Provider command-line tools the node runs on an agent's behalf
+    /// (`provider_cli_run`), each with its credential in the environment
+    /// and the argument prefixes that follow the policy.
+    pub provider_cli: Vec<ProviderCli>,
     /// Where plugins may be installed from.
     pub plugins: Plugins,
     /// The operator's settings for each installed plugin, by name.
@@ -787,6 +791,160 @@ pub fn validate_mcp_servers(servers: &[McpServer]) -> Result<(), String> {
             if tools.iter().any(|t| t.trim().is_empty()) {
                 return Err(format!("mcp_server {name}: {list} has an empty entry"));
             }
+        }
+    }
+    Ok(())
+}
+
+/// One `[[provider_cli]]`: a provider's command-line tool (`aws`, `gcloud`,
+/// `wrangler`) the node runs on its host for an agent that asks
+/// (`provider_cli_run`). The agent names the arguments; it never holds the
+/// credential, which reaches the program as environment only, and never
+/// learns where the program is.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct ProviderCli {
+    /// What an agent names the tool by: 1-24 lowercase letters, digits or
+    /// `-`.
+    pub name: String,
+    /// The program: an absolute path, or a bare name on the node's `PATH`.
+    /// Held to the path guard's rules for a program the node runs, and never
+    /// a shell or an interpreter.
+    pub binary: String,
+    /// A broker credential of kind `env`, whose variables are the program's
+    /// environment. It must be bound to the calling channel too. Without
+    /// one the program runs with no credential at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential: Option<String>,
+    /// Channels whose sessions are offered it. Empty means none.
+    pub channels: Vec<String>,
+    /// Argument prefixes, each its words separated by spaces (`"s3 ls"`): a
+    /// run whose arguments begin with every word of one, in order, is
+    /// decided by the signed policy and its grants like any tool call. Any
+    /// other run is put to the operator.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+    /// How long one run may take before it is killed. Zero takes the
+    /// default.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub timeout_secs: u64,
+}
+
+impl ProviderCli {
+    pub const DEFAULT_TIMEOUT_SECS: u64 = 120;
+
+    pub fn timeout_secs(&self) -> u64 {
+        match self.timeout_secs {
+            0 => Self::DEFAULT_TIMEOUT_SECS,
+            n => n,
+        }
+    }
+
+    /// Whether a session on `channel` is offered this tool at all.
+    pub fn serves(&self, channel: &str) -> bool {
+        self.channels.iter().any(|c| c == channel)
+    }
+
+    /// The `allow` entry `argv` begins with, if any: every word of the
+    /// entry, in order, exactly.
+    pub fn allowed_prefix(&self, argv: &[String]) -> Option<&str> {
+        self.allow
+            .iter()
+            .find(|prefix| {
+                let words: Vec<&str> = prefix.split_whitespace().collect();
+                !words.is_empty()
+                    && words.len() <= argv.len()
+                    && words.iter().zip(argv).all(|(w, a)| *w == a)
+            })
+            .map(String::as_str)
+    }
+}
+
+/// Names a `[[provider_cli]]` may not run: a shell or an interpreter would
+/// run whatever its arguments say, and an agent chooses those.
+pub const PROVIDER_CLI_REFUSED_PROGRAMS: &[&str] = &[
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "ksh",
+    "mksh",
+    "fish",
+    "csh",
+    "tcsh",
+    "busybox",
+    "env",
+    "sudo",
+    "doas",
+    "su",
+    "xargs",
+    "nohup",
+    "timeout",
+    "nice",
+    "exec",
+    "python",
+    "python2",
+    "python3",
+    "perl",
+    "ruby",
+    "node",
+    "nodejs",
+    "deno",
+    "bun",
+    "php",
+    "lua",
+    "tclsh",
+    "osascript",
+    "pwsh",
+    "powershell",
+];
+
+/// Whether `program` (a path or a bare name) is a shell or an interpreter
+/// by its file name. `python3.12` counts as `python3`.
+pub fn provider_cli_refused_program(program: &str) -> bool {
+    let name = Path::new(program)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    let stem = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    PROVIDER_CLI_REFUSED_PROGRAMS
+        .iter()
+        .any(|refused| name == *refused || stem == *refused)
+}
+
+/// A `[[provider_cli]]` the node could not honour is refused at load.
+pub fn validate_provider_clis(clis: &[ProviderCli]) -> Result<(), String> {
+    let mut seen = std::collections::BTreeSet::new();
+    for cli in clis {
+        let name = &cli.name;
+        if !namespace_name_ok(name) {
+            return Err(format!(
+                "provider_cli {name:?}: name must be 1-24 lowercase letters, digits or '-'"
+            ));
+        }
+        if !seen.insert(name) {
+            return Err(format!("provider_cli {name}: named twice"));
+        }
+        if cli.binary.trim().is_empty() {
+            return Err(format!("provider_cli {name}: binary is empty"));
+        }
+        if provider_cli_refused_program(&cli.binary) {
+            return Err(format!(
+                "provider_cli {name}: binary {:?} is a shell or an interpreter, which would run \
+                 whatever an agent's arguments say",
+                cli.binary
+            ));
+        }
+        if cli
+            .credential
+            .as_deref()
+            .is_some_and(|c| c.trim().is_empty())
+        {
+            return Err(format!("provider_cli {name}: credential is empty"));
+        }
+        if cli.allow.iter().any(|p| p.trim().is_empty()) {
+            return Err(format!("provider_cli {name}: allow has an empty entry"));
         }
     }
     Ok(())
@@ -3479,6 +3637,7 @@ impl Default for Config {
             live: ConfigHandle::default(),
             service: Vec::new(),
             mcp_server: Vec::new(),
+            provider_cli: Vec::new(),
             plugins: Plugins::default(),
             plugin: Vec::new(),
             providers: default_providers(),
@@ -3946,6 +4105,8 @@ impl Config {
         validate_services(&config.service)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_mcp_servers(&config.mcp_server)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        validate_provider_clis(&config.provider_cli)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         validate_plugins(&config.plugins, &config.plugin)
             .map_err(|error| format!("{}: {error}", path.display()))?;
@@ -4667,6 +4828,69 @@ mod tests {
     /// A server name that could run into the separator, an address that is
     /// not one, or a credential header the node writes itself is refused at
     /// load, with the entry named.
+    #[test]
+    fn a_provider_cli_entry_the_node_could_not_honour_is_refused_at_load() {
+        let text = "[[provider_cli]]\nname = \"aws\"\nbinary = \"/usr/local/bin/aws\"\n\
+                    credential = \"aws-ops\"\nchannels = [\"ops\"]\nallow = [\"s3 ls\"]\n";
+        let parsed: Config = toml::from_str(text).unwrap();
+        let ok = parsed.provider_cli[0].clone();
+        validate_provider_clis(std::slice::from_ref(&ok)).unwrap();
+        assert_eq!(ok.timeout_secs(), ProviderCli::DEFAULT_TIMEOUT_SECS);
+        let words = |s: &str| s.split(' ').map(str::to_string).collect::<Vec<_>>();
+        assert_eq!(ok.allowed_prefix(&words("s3 ls s3://b")), Some("s3 ls"));
+        assert_eq!(ok.allowed_prefix(&words("s3 lsx")), None);
+        for (bad, why) in [
+            (
+                ProviderCli {
+                    name: "AWS".into(),
+                    ..ok.clone()
+                },
+                "name must be",
+            ),
+            (
+                ProviderCli {
+                    binary: " ".into(),
+                    ..ok.clone()
+                },
+                "binary is empty",
+            ),
+            (
+                ProviderCli {
+                    binary: "/bin/bash".into(),
+                    ..ok.clone()
+                },
+                "shell or an interpreter",
+            ),
+            (
+                ProviderCli {
+                    binary: "python3".into(),
+                    ..ok.clone()
+                },
+                "shell or an interpreter",
+            ),
+            (
+                ProviderCli {
+                    credential: Some("".into()),
+                    ..ok.clone()
+                },
+                "credential is empty",
+            ),
+            (
+                ProviderCli {
+                    allow: vec![" ".into()],
+                    ..ok.clone()
+                },
+                "empty entry",
+            ),
+        ] {
+            let error = validate_provider_clis(&[bad]).unwrap_err();
+            assert!(error.contains(why), "{error}");
+        }
+        assert!(validate_provider_clis(&[ok.clone(), ok])
+            .unwrap_err()
+            .contains("named twice"));
+    }
+
     #[test]
     fn an_mcp_server_entry_the_node_could_not_honour_is_refused_at_load() {
         let ok = McpServer {

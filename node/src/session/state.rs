@@ -163,6 +163,13 @@ pub mod event_kind {
     /// allowed it (`decided_by`: `policy`, `grant` or `operator`, with the
     /// `rule` or `approval_id`), or the `error` that stopped it.
     pub const WEB_FETCHED: &str = "web_fetched";
+    /// A provider CLI ran on the node for the caller (`provider_cli_run`):
+    /// `cli`, `argv` (secret-looking ones redacted), `credential` (its name),
+    /// `prefix` (the allowed prefix it began with, if any), `exit`,
+    /// `timed_out`, `ms`, `stdout` and `stderr` (`bytes` and `sha256` of
+    /// everything each printed), `approval_id` when the operator allowed it,
+    /// or `error` when it could not start.
+    pub const PROVIDER_CLI_RAN: &str = "provider_cli_ran";
     /// What the session was told at start, so the transcript shows it.
     pub const ORIENTATION: &str = "orientation";
     /// Where the session runs, when placement decided it (`decision`:

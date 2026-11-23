@@ -23,6 +23,7 @@ mod names;
 pub mod operator;
 pub mod parity;
 pub mod plugin_host;
+pub mod provider_cli;
 pub mod review;
 pub mod schema;
 pub mod services;
@@ -736,6 +737,13 @@ impl Tools {
             if !self.cfg.service.is_empty() {
                 out.extend(services::definitions(&self.cfg));
             }
+            // A provider's CLI runs on the node with a credential the
+            // session never holds, for the channels its entry names.
+            out.extend(provider_cli::definitions(
+                &self.cfg.live(),
+                channel,
+                &available,
+            ));
             // Another server's tools are only ever asked, run or refused
             // here, so they need a node that can hold an approval.
             out.extend(
@@ -2786,6 +2794,24 @@ impl Tools {
                     .ok_or("services are not available on this node")?;
                 services::call(access, ctx, name, args).await
             }
+            provider_cli::RUN => {
+                // Decided again at the last moment: an entry edited, or a
+                // rule signed, while the run waited on the operator holds.
+                let decision = self.decide(ctx, name, args);
+                match decision.verdict {
+                    Verdict::Deny => Err(refusal(decision)),
+                    Verdict::Ask if !gated.one_shot => {
+                        Err(format!("{name} runs only once the operator allows it"))
+                    }
+                    Verdict::Allow | Verdict::Ask => {
+                        let access = self
+                            .session
+                            .get()
+                            .ok_or("provider CLIs are not available on this node")?;
+                        provider_cli::call(self, access, ctx, args, approval).await
+                    }
+                }
+            }
             other => match (self.plugin_tool(other), self.upstream_tool(other)) {
                 (Some(pt), _) => {
                     // Decided again at the last moment, as another server's
@@ -3281,6 +3307,7 @@ impl Tools {
             // The card names the direction, so a `ready` it cannot read is
             // refused before it is shown.
             github::PR_READY | gitlab::MR_READY => github::ready_arg(args).err(),
+            provider_cli::RUN => provider_cli::refusal(&self.cfg.live(), ctx, args),
             _ => None,
         }
     }
@@ -4246,6 +4273,21 @@ impl Tools {
                 tool,
             );
         }
+        if name == provider_cli::RUN {
+            let cfg = self.cfg.live();
+            return match (
+                provider_cli::entry(&cfg, ctx, args),
+                provider_cli::argv(args),
+            ) {
+                (Ok(cli), Ok(argv)) => provider_cli::decide(cli, &argv, tool),
+                // Refused before it is asked; asked, never allowed, if not.
+                _ => Decision {
+                    verdict: Verdict::Ask,
+                    rule_id: None,
+                    reason: None,
+                },
+            };
+        }
         if let Some(scope) = consequential(name, args) {
             return self.authority_decision(ctx, Some(scope), args);
         }
@@ -4345,6 +4387,9 @@ impl Tools {
     /// say what a denial names and is read on its card instead. What the call
     /// acts on is still matched.
     fn policy_arguments<'a>(&self, name: &str, args: &'a Value) -> std::borrow::Cow<'a, Value> {
+        if name == provider_cli::RUN {
+            return std::borrow::Cow::Owned(provider_cli::policy_arguments(args));
+        }
         let Some(shown) = self.plugin_presentation(name) else {
             return std::borrow::Cow::Borrowed(args);
         };
@@ -5235,6 +5280,13 @@ fn prose_title(name: &str, args: &Value) -> Option<String> {
             }
         }
         services::START => format!("{name} {}", id("name")),
+        provider_cli::RUN => {
+            let argv = provider_cli::argv(args).unwrap_or_default();
+            match argv.is_empty() {
+                true => format!("{name} {}", id("cli")),
+                false => format!("{name} {}: {}", id("cli"), argv.join(" ")),
+            }
+        }
         setup::PROPOSE => with(format!("{name} {}", id("repo")), first_line("why")),
         setup::TRY => format!(
             "{name} {}: build {} from {}",
@@ -5958,6 +6010,121 @@ mod tests {
         assert!(
             text.contains("no-warehouse") && text.contains("closed today"),
             "{text}"
+        );
+    }
+
+    fn with_provider_cli(store: &str, rules: &str) -> Tools {
+        let mut t = tools(store);
+        let mut cfg = Config::default();
+        cfg.provider_cli.push(crate::config::ProviderCli {
+            name: "aws".into(),
+            binary: "aws".into(),
+            credential: Some("aws-ops".into()),
+            channels: vec!["ops".into()],
+            allow: vec!["s3 ls".into()],
+            timeout_secs: 0,
+        });
+        t.cfg = Arc::new(cfg);
+        let mut policy: Policy = toml::from_str(rules).unwrap();
+        policy.trusted = true;
+        t.policy = Arc::new(parking_lot::RwLock::new(policy));
+        t
+    }
+
+    const OPS_STORE: &str = r#"
+        [credentials.aws-ops]
+        channels = ["ops"]
+        [credentials.aws-ops.env]
+        AWS_SECRET_ACCESS_KEY = "sekritvalue"
+    "#;
+
+    const ALLOW_CLI: &str = r#"
+        [[rule]]
+        id = "allow-aws-reads"
+        verdict = "allow"
+        reason = "reads"
+        kinds = ["tool"]
+        matches = ["provider_cli_run"]
+        args = { cli = ["aws"], command = ["s3 *"] }
+
+        [[rule]]
+        id = "no-deletes"
+        verdict = "deny"
+        reason = "no deletes"
+        kinds = ["tool"]
+        matches = ["s3 rb"]
+    "#;
+
+    #[tokio::test]
+    async fn a_provider_cli_is_offered_where_its_entry_and_credential_are_bound() {
+        let t = with_provider_cli(OPS_STORE, ALLOW_CLI);
+        // No session store: nothing that can hold an approval, so nothing.
+        assert!(t.list("ops", "n1").is_empty());
+        let cfg = t.cfg.live();
+        let offered = |channel: &str, available: &[&str]| {
+            provider_cli::definitions(&cfg, channel, available)
+                .iter()
+                .map(|d| d["name"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(offered("ops", &["aws-ops"]), vec![provider_cli::RUN]);
+        // A channel the entry does not name, or one not lent its credential.
+        assert!(offered("work", &["aws-ops"]).is_empty());
+        assert!(offered("ops", &[]).is_empty());
+    }
+
+    #[test]
+    fn a_provider_cli_run_follows_the_policy_under_a_prefix_and_is_asked_otherwise() {
+        let t = with_provider_cli(OPS_STORE, ALLOW_CLI);
+        let run = |argv: &[&str]| {
+            t.decide(
+                &ctx("ops"),
+                provider_cli::RUN,
+                &json!({ "cli": "aws", "args": argv }),
+            )
+        };
+        // Under `s3 ls`, and the policy allows it.
+        let allowed = run(&["s3", "ls", "s3://bucket"]);
+        assert_eq!(allowed.verdict, Verdict::Allow);
+        assert_eq!(allowed.rule_id.as_deref(), Some("allow-aws-reads"));
+        // The policy would allow `s3 cp`, but no prefix covers it: asked.
+        let asked = run(&["s3", "cp", "a", "s3://bucket/a"]);
+        assert_eq!(asked.verdict, Verdict::Ask);
+        assert_eq!(asked.rule_id.as_deref(), Some("provider_cli.aws.allow"));
+        // A signed denial holds whatever the prefixes say.
+        assert_eq!(run(&["s3", "rb", "s3://bucket"]).verdict, Verdict::Deny);
+        // Under a prefix with no rule allowing it: the policy asks.
+        let t = with_provider_cli(OPS_STORE, "");
+        let asked = t.decide(
+            &ctx("ops"),
+            provider_cli::RUN,
+            &json!({ "cli": "aws", "args": ["s3", "ls"] }),
+        );
+        assert_eq!(asked.verdict, Verdict::Ask);
+    }
+
+    #[test]
+    fn a_provider_cli_call_the_channel_is_not_offered_is_refused_before_asking() {
+        let t = with_provider_cli(OPS_STORE, ALLOW_CLI);
+        let refused = |channel: &str, args: Value| {
+            t.refusal_before_asking(&ctx(channel), provider_cli::RUN, &args)
+        };
+        assert!(refused("ops", json!({ "cli": "aws", "args": ["s3", "ls"] })).is_none());
+        assert!(
+            refused("work", json!({ "cli": "aws", "args": ["s3", "ls"] }))
+                .unwrap()
+                .contains("not offered on channel work")
+        );
+        assert!(refused("ops", json!({ "cli": "gcloud", "args": [] }))
+            .unwrap()
+            .contains("no provider CLI named gcloud"));
+        assert!(refused("ops", json!({ "cli": "aws", "args": "s3 ls" })).is_some());
+        assert_eq!(
+            summarize(
+                provider_cli::RUN,
+                &json!({ "cli": "aws", "args": ["s3", "ls"] })
+            ),
+            "provider_cli_run aws: s3 ls"
         );
     }
 
