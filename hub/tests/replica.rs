@@ -26,6 +26,7 @@ use support::{now, now_ms};
 struct Rig {
     app: Router,
     replica: Arc<Replica>,
+    frames: Arc<MemoryFrames>,
     a: Identity,
     /// A member of `@mesh` and `work`, but not of `personal`.
     c: Identity,
@@ -68,7 +69,7 @@ fn rig() -> Rig {
         Replica::in_memory(hub_id, frames.clone(), members.clone(), pokes.clone()).unwrap();
     admit_self(members.as_ref(), &replica, 0).unwrap();
     let app = app_with_state(state_for(
-        frames,
+        frames.clone(),
         members,
         HubConfig::default(),
         pokes,
@@ -77,6 +78,7 @@ fn rig() -> Rig {
     Rig {
         app,
         replica,
+        frames,
         personal: Keyring::genesis(&a.x25519_public(), &DataKey::generate()),
         work: Keyring::genesis(&a.x25519_public(), &DataKey::generate()),
         a,
@@ -363,4 +365,59 @@ async fn the_hub_refuses_a_channel_key_from_a_sender_outside_that_channel() {
     r.replica.ingest_pending();
     assert_eq!(r.replica.readable_channels(), vec!["personal".to_string()]);
     assert_eq!(r.replica.bindings_of("personal")["processing"], "hub");
+}
+
+/// A page the byte budget cut short is not the end of the channel: the
+/// replica keeps reading and applies what follows it in the same pass.
+#[tokio::test]
+async fn the_replica_reads_past_a_page_cut_short_by_bytes() {
+    use hub::store::{FrameStore, PAGE_MAX_BYTES};
+    let r = rig();
+    let a = &r.a;
+    let hub_id = r.replica.node_id();
+    let hub_pk = proto::keys::key32(&r.replica.x25519_hex())
+        .map(x25519_dalek::PublicKey::from)
+        .unwrap();
+    let (st, _) = post(&r, a, "/v0/admit", &json!({"node_id": hub_id, "x25519_pub": r.replica.x25519_hex(), "name": "hub", "channels": ["personal"], "role": "hub"}).to_string()).await;
+    assert_eq!(st, StatusCode::OK);
+    let handoff = Payload::KeyHandoff {
+        channels: vec![ChannelHandoff {
+            name: "personal".into(),
+            keyring: r.personal.wrap_for(a, &hub_pk).unwrap(),
+            bindings_json: r#"{"processing":"hub"}"#.into(),
+        }],
+    };
+    let env = Envelope::seal_direct(a, MESH_CHANNEL, &hub_id, &hub_pk, &handoff, now_ms()).unwrap();
+    let (st, _) = post(&r, a, "/v0/frames", &serde_json::to_string(&env).unwrap()).await;
+    assert_eq!(st, StatusCode::CREATED);
+
+    // Two envelopes too big to share a page, stored directly; the replica
+    // skips what it cannot open but must not stop at them.
+    let big = json!({"pad": "x".repeat(PAGE_MAX_BYTES * 2 / 3)}).to_string();
+    for _ in 0..2 {
+        r.frames.append("personal", &big, now_ms()).unwrap();
+    }
+    let personal = Payload::Changes {
+        channel: "personal".into(),
+        changes: vec![change(&a.node_id(), 1, "guide-after", "past the big ones")],
+    };
+    let env =
+        Envelope::seal_channel(a, "personal", None, &r.personal, &personal, now_ms()).unwrap();
+    assert_eq!(
+        post(&r, a, "/v0/frames", &serde_json::to_string(&env).unwrap())
+            .await
+            .0,
+        StatusCode::CREATED
+    );
+
+    r.replica.ingest_pending();
+    let body: String = r.replica.with_db(|c| {
+        c.query_row(
+            "SELECT body FROM document WHERE id = 'guide-after'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    });
+    assert_eq!(body, "past the big ones");
 }

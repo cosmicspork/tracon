@@ -69,7 +69,14 @@ fn snapshot_then_restore_reopens_the_same_hub() {
     replica
         .write_change("personal", "memory", ChangeOp::Upsert, "m1", json!({"channel": "personal", "scope": "global", "kind": "fact", "body": "survives a restore", "confidence": 1.0, "state": "active", "created_ms": 1, "updated_ms": 1}))
         .unwrap();
-    assert_eq!(frames.read("personal", 0, 10).unwrap().frames.len(), 1);
+    assert_eq!(
+        frames
+            .read("personal", 0, 10, hub::store::PAGE_MAX_BYTES)
+            .unwrap()
+            .frames
+            .len(),
+        1
+    );
 
     // The restore key lives with the operator; the hub keeps the public half.
     let (seed_hex, pub_path) = snapshot::create_restore_key(&data).unwrap();
@@ -104,7 +111,14 @@ fn snapshot_then_restore_reopens_the_same_hub() {
     assert_eq!(identity2.node_id(), hub_id);
     let frames2: Arc<dyn FrameStore> = Arc::new(FsFrames::new(&into).unwrap());
     let members2: Arc<dyn MemberStore> = Arc::new(FsMembers::new(&into).unwrap());
-    assert_eq!(frames2.read("personal", 0, 10).unwrap().frames.len(), 1);
+    assert_eq!(
+        frames2
+            .read("personal", 0, 10, hub::store::PAGE_MAX_BYTES)
+            .unwrap()
+            .frames
+            .len(),
+        1
+    );
     assert_eq!(members2.list().unwrap().len(), 2);
     let replica2 = Replica::open(
         &into,

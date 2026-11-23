@@ -23,7 +23,7 @@ use tokio::sync::Notify;
 
 use crate::auth::now_ms;
 use crate::pokes::PokeHub;
-use crate::store::{FrameStore, MemberStore};
+use crate::store::{FrameStore, MemberStore, PAGE_MAX_BYTES};
 
 pub const DB_FILE: &str = "hub.db";
 
@@ -295,7 +295,7 @@ impl Replica {
         for channel in channels {
             loop {
                 let after = self.cursor(&channel);
-                let page = match self.frames.read(&channel, after, PAGE) {
+                let page = match self.frames.read(&channel, after, PAGE, PAGE_MAX_BYTES) {
                     Ok(p) => p,
                     Err(e) => {
                         tracing::warn!(channel, error = %e, "replica read failed");
@@ -310,14 +310,18 @@ impl Replica {
                 if page.frames.is_empty() {
                     break;
                 }
-                let n = page.frames.len();
+                let latest = page.latest;
+                let mut last = after;
                 for (seq, json) in page.frames {
                     if self.ingest_one(&channel, &json) {
                         applied += 1;
                     }
                     self.set_cursor(&channel, seq);
+                    last = seq;
                 }
-                if n < PAGE {
+                // A short page is not the end: the byte budget can cut one
+                // before PAGE frames.
+                if last >= latest {
                     break;
                 }
             }

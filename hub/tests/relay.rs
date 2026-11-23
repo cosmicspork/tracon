@@ -276,6 +276,78 @@ async fn cursor_behind_retention_is_gone() {
     assert_eq!(st, StatusCode::OK);
 }
 
+/// Pages are bounded by bytes as well as count, say there is more whenever
+/// they stop short of the latest frame, and pass envelopes through as stored.
+#[tokio::test]
+async fn frame_pages_are_bounded_by_bytes() {
+    use hub::store::{FrameStore, PAGE_MAX_BYTES};
+    let (a, _, _) = ids();
+    let frames = Arc::new(MemoryFrames::new());
+    let members = Arc::new(MemoryMembers::new());
+    members
+        .put(&Member {
+            node_id: a.node_id(),
+            x25519_pub: a.x25519_hex(),
+            binding_sig: proto::enroll::sign_binding(&a),
+            name: "a".into(),
+            channels: vec!["work".into()],
+            admitted_ms: 0,
+            admitted_by: "t".into(),
+            role: Default::default(),
+        })
+        .unwrap();
+    let app = app(frames.clone(), members, HubConfig::default());
+    // Stored directly: the read path neither knows nor checks what an
+    // envelope holds, and these are past what one page may carry together.
+    let big = json!({"pad": "x".repeat(PAGE_MAX_BYTES * 2 / 3)}).to_string();
+    for _ in 0..3 {
+        frames.append("work", &big, 0).unwrap();
+    }
+    frames.append("work", "{\"small\":1}", 0).unwrap();
+    frames.append("work", "not json", 0).unwrap();
+
+    let get = |after: u64| {
+        let path = format!("/v0/frames?channel=work&after={after}&limit=200");
+        let app = app.clone();
+        let req = signed(&a, "GET", &path, "", now());
+        async move {
+            let res = app.oneshot(req).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            let bytes = to_bytes(res.into_body(), 4 * PAGE_MAX_BYTES).await.unwrap();
+            serde_json::from_slice::<Value>(&bytes).unwrap()
+        }
+    };
+    let mut after = 0;
+    let mut pages = Vec::new();
+    loop {
+        let v = get(after).await;
+        let seqs: Vec<u64> = v["frames"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["seq"].as_u64().unwrap())
+            .collect();
+        assert_eq!(v["latest"], 5);
+        pages.push(seqs.clone());
+        if v["next"].is_null() {
+            assert_eq!(*seqs.last().unwrap(), 5);
+            break;
+        }
+        assert_eq!(v["next"], *seqs.last().unwrap());
+        after = v["next"].as_u64().unwrap();
+    }
+    // One big envelope a page, then the rest together.
+    assert_eq!(pages, vec![vec![1], vec![2], vec![3, 4, 5]]);
+    let v = get(0).await;
+    assert_eq!(
+        v["frames"][0]["envelope"]["pad"].as_str().unwrap().len(),
+        PAGE_MAX_BYTES * 2 / 3
+    );
+    let v = get(3).await;
+    assert_eq!(v["frames"][0]["envelope"]["small"], 1);
+    assert!(v["frames"][1]["envelope"].is_null());
+}
+
 /// One member wins a version; the others are told who holds it, and a
 /// stranger cannot claim at all.
 #[tokio::test]
