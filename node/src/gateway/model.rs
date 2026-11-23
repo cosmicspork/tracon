@@ -205,6 +205,11 @@ pub struct Wiring {
     /// (Claude Code's `--mcp-config`) renders them here; one that takes them
     /// at launch ignores it.
     pub mcp_servers: Vec<serde_json::Value>,
+    /// The workspace's read-only `origin` at the gateway
+    /// (`gateway::git::origin_url`), when the session works on a forge
+    /// repository the node cloned. The harness's gitconfig names it, with
+    /// this wiring's token as the header the gateway knows the session by.
+    pub git_origin: Option<String>,
 }
 
 impl Wiring {
@@ -304,6 +309,7 @@ pub fn harness_wiring(
         token: token.to_string(),
         manifest: crate::manifest::LaunchManifest::default(),
         mcp_servers: Vec::new(),
+        git_origin: None,
     }
 }
 

@@ -89,8 +89,9 @@ pub fn definitions() -> Vec<Value> {
         "name": FETCH,
         "description": "Bring a branch of this repository's origin up to date in your workspace, \
                         at any time: the base after your change merged, or a branch to build on \
-                        (a stacked change, a teammate's work). Your workspace has no remote of \
-                        its own, so `git fetch` cannot do this. Only `origin/<branch>` moves; \
+                        (a stacked change, a teammate's work). Where your workspace's `origin` is \
+                        the node's read-only remote, `git fetch origin <branch>` does the same. \
+                        Only `origin/<branch>` moves; \
                         your working tree, index and branches are untouched, so rebase, merge or \
                         check out from it yourself. Returns the fetched `head` and how far your \
                         HEAD is `ahead` of and `behind` it. submit_review with that `base` then \

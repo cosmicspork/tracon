@@ -3379,6 +3379,18 @@ impl Manager {
                     }
                 };
                 let stage = crate::workspace::staging_path(id);
+                // The workspace's read-only `origin`, through the gateway
+                // (`gateway::git`), in its own configuration, where the
+                // node's rewrites of it keep it.
+                if let Some(url) = crate::gateway::git::origin_for(
+                    &Config::state_dir(),
+                    &repo,
+                    &self.backend.harness_host(),
+                    self.cfg.gateway.forward_port,
+                    &spec.channel,
+                ) {
+                    crate::gateway::git::set_workspace_origin(&stage, &url)?;
+                }
                 let base = match synced.as_ref().is_some_and(|sync| sync.empty) {
                     true => None,
                     false => Some(crate::workspace::head_of(&git, &stage).await?),
@@ -3389,6 +3401,11 @@ impl Manager {
         };
         let snapshot = crate::workspace::export(self.backend.as_ref(), &workspace).await?;
         crate::workspace::sanitize_git(&snapshot)?;
+        // The origin the workspace names, if it is the gateway's: a resumed
+        // workspace keeps the one it was seeded with.
+        let workspace_origin = std::fs::read_to_string(snapshot.join(".git").join("config"))
+            .ok()
+            .and_then(|text| crate::gateway::git::kept_origin(&text));
         if let Some(entry) = adapter
             .refused_workspace_entries()
             .iter()
@@ -3674,6 +3691,23 @@ impl Manager {
         }
 
         let mut wiring = wiring;
+        // The workspace's read-only `origin`, through the gateway, for a
+        // session on a forge repository this node cloned, when the workspace
+        // names it as this launch would. The gateway resolves the repository
+        // from the session again on every request; this is only the URL the
+        // workspace knows it by, and the harness's token is sent to it.
+        wiring.git_origin = origin
+            .as_deref()
+            .and_then(|repo| {
+                crate::gateway::git::origin_for(
+                    &crate::config::Config::state_dir(),
+                    repo,
+                    &self.backend.harness_host(),
+                    self.cfg.gateway.forward_port,
+                    &spec.channel,
+                )
+            })
+            .filter(|url| workspace_origin.as_deref() == Some(url.as_str()));
         let manifest = {
             let (skills, instructions, agents) = self.store.manifest_contents(&spec.channel)?;
             let built = crate::manifest::build(crate::manifest::Inputs {
@@ -3806,6 +3840,7 @@ impl Manager {
                         .as_ref()
                         .map(|_| environment.session_egress.as_slice()),
                     forge_repo: forge_repo.as_ref(),
+                    git_origin: wiring.git_origin.is_some(),
                     prepared: prepared.as_ref(),
                     stale_base: stale.as_deref(),
                     scratchpad: Some(&scratchpad),

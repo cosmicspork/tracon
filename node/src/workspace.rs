@@ -902,11 +902,22 @@ pub fn sanitize_git(root: &Path) -> Result<(), WorkspaceError> {
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(WorkspaceError::Unsafe(git));
     }
+    // The gateway's read-only `origin` (`gateway::git`) is the one remote
+    // kept: a URL of a fixed shape, which no transport reads as a command.
+    let origin = std::fs::read_to_string(git.join("config"))
+        .ok()
+        .and_then(|text| crate::gateway::git::kept_origin(&text));
     scrub_git_dir(&git, 0)?;
     std::fs::create_dir_all(git.join("info"))?;
     std::fs::write(
         git.join("config"),
-        "[core]\n\trepositoryformatversion = 0\n\tbare = false\n\thooksPath = /dev/null\n\tfsmonitor =\n",
+        format!(
+            "[core]\n\trepositoryformatversion = 0\n\tbare = false\n\thooksPath = /dev/null\n\tfsmonitor =\n{}",
+            origin
+                .as_deref()
+                .map(crate::gateway::git::kept_section)
+                .unwrap_or_default()
+        ),
     )?;
     Ok(())
 }
