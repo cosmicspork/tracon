@@ -156,6 +156,8 @@ async fn run(s: &AppState, review_id: &str, op: ThreadOp) -> ApiResult<Value> {
     let op = serde_json::to_value(&op)
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let timeout = std::time::Duration::from_secs(s.cfg.mesh.command_timeout_secs.max(1));
+    // What this node holds of the owner's detail is read again after it.
+    mesh.watches().release_held(review_id);
     match mesh
         .command(
             &r.node_id,
@@ -330,6 +332,10 @@ pub(crate) fn apply(s: &AppState, review_id: &str, op: ThreadOp) -> ApiResult<Va
                 ));
             }
         }
+    }
+    // Peers watching it are pushed the threads as they stand now.
+    if let Some(mesh) = s.mesh.as_ref() {
+        mesh.review_changed(review_id);
     }
     Ok(json!({ "threads": threads::of_review(store, review_id, false)? }))
 }

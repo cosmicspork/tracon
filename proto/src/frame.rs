@@ -89,6 +89,34 @@ pub struct Envelope {
     pub sig: String,
 }
 
+/// What happened to one review, as its owner tells the review's channel.
+/// `review` is the owner's metadata row (id, owner, channel, kind, title,
+/// state, provider, target, head, line counts, file list, claim); `outcome`
+/// is `{ id, state, verdict_reason, publish_result, updated_ms }`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum ReviewEvent {
+    /// A review the owner's channel has not been told of.
+    Opened { review: Value },
+    /// A review whose listing changed: resubmitted, retitled, its state or
+    /// publication failure moved.
+    Revised { review: Value },
+    /// Someone began watching or claimed it; `claimers` is who watches now.
+    Claimed {
+        review_id: String,
+        claimers: Vec<String>,
+        claimed_ms: Option<i64>,
+    },
+    /// A watcher or claim let go; `claimers` is who still watches.
+    Unclaimed {
+        review_id: String,
+        claimers: Vec<String>,
+        claimed_ms: Option<i64>,
+    },
+    /// It left the owner's queue: decided, withdrawn or lost.
+    Closed { outcome: Value },
+}
+
 /// Is `name` an acceptable channel name? Lowercase, digits, `@._-`, 1–64 chars.
 /// `AAD_SEP` (0x1f) is outside this set by construction.
 pub fn valid_channel(name: &str) -> bool {
@@ -137,7 +165,10 @@ pub enum Payload {
         node: Value,
         contract: u32,
     },
-    /// The sender's full open state on one channel.
+    /// The sender's full open state on one channel. `reviews` lists each open
+    /// review (and each acknowledged report) as its metadata, never its diff
+    /// or description: a peer resyncs its listing from it and reads detail
+    /// from the owner on demand.
     Snapshot {
         sessions: Vec<Value>,
         waiting: Vec<Value>,
@@ -147,7 +178,7 @@ pub enum Payload {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         questions: Vec<Value>,
         /// What became of the sender's code reviews on the channel decided
-        /// lately, as on [`Payload::Reviews`].
+        /// lately: the outcome only.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         decided: Vec<Value>,
     },
@@ -164,15 +195,20 @@ pub enum Payload {
     Queue {
         waiting: Vec<Value>,
     },
-    Reviews {
-        waiting: Vec<Value>,
-        /// What became of the sender's code reviews on the channel decided
-        /// lately: the outcome only, no diff, so a peer that held one open
-        /// learns it from the frame without asking the sender, which may by
-        /// then be unreachable. Additive: an older sender names none, and an
-        /// older receiver ignores the field.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        decided: Vec<Value>,
+    /// Contract 5: one change to one of the sender's reviews, on the review's
+    /// channel. Metadata only: a review's diff and description stay with its
+    /// owner, which a peer reads them from when its operator opens it.
+    Review {
+        event: ReviewEvent,
+    },
+    /// Contract 5, direct only: the owner's detail of a review the recipient
+    /// is watching (see [`Command::ReviewWatch`]), pushed when what only the
+    /// owner holds changes: its reviewer, checks, staleness, publication.
+    /// `detail.review.diff` is null with `diff_omitted: true` when the
+    /// recipient already holds the diff of that head.
+    ReviewUpdate {
+        review_id: String,
+        detail: Value,
     },
     /// The sender's open operator questions on one channel, possibly none: an
     /// empty list is how a peer learns one it mirrored was answered. An older
@@ -552,11 +588,25 @@ pub enum Command {
     EvidenceCandidates {
         query: Value,
     },
-    /// A mirrored review's detail — its checks, evidence and staleness —
-    /// read from the node that holds it. The request names the owner and the
-    /// review's channel, so the receiver refuses a third-node relay or a
-    /// lookup across channels; an older peer rejects it.
-    ReviewDetail {
+    /// Contract 5: watch a review the receiver holds. The request
+    /// `{ review_id, channel, owner, renew }` names the owner and the review's
+    /// channel, so the receiver refuses a third-node relay or a lookup across
+    /// channels. Without `renew` the answer is the owner's whole detail, its
+    /// diff included; after that the owner pushes [`Payload::ReviewUpdate`]
+    /// while the watch holds. A watch lapses unless renewed, when the watcher
+    /// goes unreachable, or when the review leaves the queue.
+    ReviewWatch {
+        request: Value,
+    },
+    /// Contract 5: stop watching a review (same request shape, `renew`
+    /// ignored). Answered whether or not a watch was held.
+    ReviewUnwatch {
+        request: Value,
+    },
+    /// Contract 5: a review's metadata and, once decided, its outcome, as its
+    /// owner holds it now: `{ review, outcome }`. How a peer settles a review
+    /// a snapshot no longer lists.
+    ReviewRead {
         request: Value,
     },
     /// The operator's change to a review thread on a review the receiver

@@ -2414,16 +2414,26 @@ Every node serves the same embedded SPA; a client is a matter of shell.
   manifest.
 - The interface talks only to the node that served it; that node mirrors peers and
   forwards commands to owners. A verdict executes on the owner, because staleness
-  and publishing need the owner's worktree and broker. A mirrored review's checks,
-  evidence, staleness and forge intent are read from the owner when it is
-  opened, bounded like candidate evidence. The owner answers only for a review it holds,
-  on a channel both nodes share. An owner that cannot be read, or that has moved on to
-  a revision not yet mirrored, is said to be, rather than shown as an empty review.
-  A mirrored review's state is only ever what its owner sent: opening it, the claim
-  sweeper and a restart's publish reconciliation leave a peer's copy alone. The
-  owner's listings carry the outcome of its reviews decided in the last week, so a
-  node that slept through a decision learns it from the hub without asking an owner
-  that may be asleep in turn; one whose read failed asks again when the owner returns.
+  and publishing need the owner's worktree and broker. A review reaches its channel as
+  events, in metadata alone: opened, revised, claimed, unclaimed, closed (with the
+  outcome). The owner works them out from what it last told the channel, so
+  republishing its queue, or an operator reading a review, sends nothing unless
+  something changed. A review's diff and description, and its checks, evidence,
+  staleness, reviewer and forge intent, stay with the owner: opening a peer's review
+  watches it, the owner answers once with the whole detail (a diff too large for a
+  frame is cut at a line, saying so), and pushes what changes in it to each watcher
+  directly while the watch holds. The review page renews the watch while it is open;
+  it lapses after two minutes unrenewed, when the watcher becomes unreachable, when the
+  page releases it, or when the review closes. A watching peer counts as a claimer, so
+  the owner's claim stays fresh while someone has the review open anywhere. The owner
+  answers only for a review it holds, on a channel both nodes share. An owner that
+  cannot be read, or that has moved on to a revision not yet mirrored, is said to be,
+  rather than shown as an empty review. A mirrored review's state is only ever what its
+  owner sent: opening it, the claim sweeper and a restart's publish reconciliation
+  leave a peer's copy alone. The `closed` event carries the outcome, so a node learns a
+  decision from the hub without asking an owner that may be asleep in turn; a review a
+  snapshot no longer lists and no event closed is read again from its owner, and one
+  whose read failed asks again when the owner returns.
 - **The attention count is actionable human decisions, and nothing else.** Everything
   parked in the operator's bay is sorted into three lanes before it is counted: what a
   person can decide now; what the agent holds (a review being revised, a request that

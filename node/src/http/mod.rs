@@ -510,6 +510,7 @@ pub fn router(state: AppState) -> Router {
             post(threads::reopen),
         )
         .route("/api/reviews/{id}/release", post(api::release_review))
+        .route("/api/reviews/{id}/watch", post(api::watch_review))
         .route("/api/reviews/{id}/ready", post(api::mark_review_ready))
         .route(
             "/api/reviews/{id}/review-session",

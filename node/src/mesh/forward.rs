@@ -25,6 +25,10 @@ pub trait CommandExecutor: Send + Sync {
     /// `transfer_id`. A fork's package starts its session here; anything
     /// else waits for an operator's import.
     async fn transfer_staged(&self, _sender: &str, _transfer_id: &str) {}
+
+    /// Reviews this node owns that peers watch may have changed: push each
+    /// watcher what changed in their detail.
+    async fn push_reviews(&self, _ids: &[String]) {}
 }
 
 /// How far the owner's clock may run ahead of the sender's before a command

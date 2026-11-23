@@ -175,6 +175,15 @@ pub struct MeshClient {
     /// members. A snapshot goes out again only when one of those changed or
     /// [`SNAPSHOT_REFRESH_MS`] has passed.
     snapshots_sent: Mutex<HashMap<String, SentSnapshot>>,
+    /// Peers watching this node's reviews, and this node watching peers'.
+    watches: Arc<super::review_events::Watches>,
+    /// What each channel was last told of this node's reviews, by id: the
+    /// next events are what changed since.
+    review_sent: Mutex<HashMap<String, super::review_events::ReviewMeta>>,
+    /// Watched reviews of this node's whose detail may have changed, waiting
+    /// to be pushed; `push_wake` says there are some.
+    review_dirty: Mutex<std::collections::HashSet<String>>,
+    push_wake: Notify,
 }
 
 /// How often a refused handoff from one sender may have the member list read
@@ -206,6 +215,21 @@ impl MeshClient {
             fingerprint: proto::enroll::fingerprint_hex(&self_id),
             ..Default::default()
         });
+        // What peers hold of this node's reviews from before a restart: the
+        // events start from here, and a peer that missed some resyncs from a
+        // snapshot.
+        let review_sent = store
+            .mirrored_reviews()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.node_id == self_id)
+            .map(|r| {
+                (
+                    r.id.clone(),
+                    super::review_events::ReviewMeta::of(&r, Vec::new()),
+                )
+            })
+            .collect();
         Arc::new_cyclic(|weak| Self {
             weak: weak.clone(),
             identity: Arc::new(identity),
@@ -240,7 +264,51 @@ impl MeshClient {
             handoff_refresh: Mutex::new(HashMap::new()),
             rereading: Mutex::new(HashMap::new()),
             snapshots_sent: Mutex::new(HashMap::new()),
+            watches: Arc::new(super::review_events::Watches::default()),
+            review_sent: Mutex::new(review_sent),
+            review_dirty: Mutex::new(std::collections::HashSet::new()),
+            push_wake: Notify::new(),
         })
+    }
+
+    /// Peers watching this node's reviews, and this node watching peers'.
+    pub fn watches(&self) -> &Arc<super::review_events::Watches> {
+        &self.watches
+    }
+
+    /// Tell each channel what changed about this node's reviews since it was
+    /// last told: opened, revised, claimed or let go, closed. Nothing when
+    /// nothing changed, however often the queue is republished.
+    pub fn send_review_events(&self) {
+        use super::review_events::{events, ReviewClosed, ReviewMeta};
+        let self_id = self.node_id();
+        let Ok(rows) = self.store.mirrored_reviews() else {
+            return;
+        };
+        let now: Vec<ReviewMeta> = rows
+            .iter()
+            .filter(|r| r.node_id == self_id)
+            .map(|r| ReviewMeta::of(r, self.watches.claimers(&r.id)))
+            .collect();
+        let mut sent = self.review_sent.lock().unwrap();
+        let out = events(&sent, &now, |id| {
+            self.store
+                .get_review(id)
+                .ok()
+                .flatten()
+                .map(|r| ReviewClosed::of(&r))
+        });
+        for (channel, event) in out {
+            if let proto::frame::ReviewEvent::Closed { outcome } = &event {
+                if let Some(id) = outcome["id"].as_str() {
+                    self.watches.end(id);
+                }
+            }
+            if let Err(e) = self.enqueue(&channel, None, &Payload::Review { event }) {
+                tracing::warn!(channel = %channel, error = %e, "review change not queued for the mesh");
+            }
+        }
+        *sent = now.into_iter().map(|m| (m.id.clone(), m)).collect();
     }
 
     /// Give handoffs somewhere to land.
@@ -382,6 +450,8 @@ impl MeshClient {
         tokio::spawn(async move { c.heartbeat_loop().await });
         let c = self.clone();
         tokio::spawn(async move { c.presence_loop().await });
+        let c = self.clone();
+        tokio::spawn(async move { c.watch_loop().await });
         tap_tx
     }
 
@@ -627,6 +697,10 @@ impl MeshClient {
 
     /// Convert a locally published frame into sealed envelopes in the outbox.
     pub fn on_frame(&self, frame: &Frame) {
+        if matches!(frame, Frame::Reviews { .. }) {
+            self.send_review_events();
+        }
+        self.note_watched_change(frame);
         for (channel, payload) in frames::to_payloads(frame, &self.store, &self.node_id()) {
             if let Err(e) = self.enqueue(&channel, None, &payload) {
                 tracing::warn!(channel = %channel, error = %e, "frame not queued for the mesh");
@@ -1253,6 +1327,23 @@ impl MeshClient {
                 }
                 return Opened::Applied;
             }
+            Payload::ReviewUpdate { review_id, detail } if env.is_direct() => {
+                // Only the review's owner pushes it, and only while this node
+                // watches it.
+                let owner = self
+                    .store
+                    .get_review(review_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|r| r.node_id == sender);
+                if owner && self.watches.take_push(review_id, sender, detail.clone()) {
+                    self.bus.publish_untapped(Frame::ReviewDetail {
+                        review_id: review_id.clone(),
+                    });
+                    return Opened::Applied;
+                }
+                return Opened::Ignored;
+            }
             Payload::EventsRequest {
                 session_id,
                 after_origin_seq,
@@ -1303,18 +1394,29 @@ impl MeshClient {
         // The reviews a listing names, read before the payload is consumed:
         // those it leaves out are asked of their owner once it is applied.
         let listed = match &payload {
-            Payload::Reviews { waiting: rows, .. } | Payload::Snapshot { reviews: rows, .. } => {
-                Some(
-                    rows.iter()
-                        .filter_map(|row| row.get("id").and_then(Value::as_str))
-                        .map(str::to_string)
-                        .collect::<Vec<_>>(),
-                )
-            }
+            Payload::Snapshot { reviews: rows, .. } => Some(
+                rows.iter()
+                    .filter_map(|row| row.get("id").and_then(Value::as_str))
+                    .map(str::to_string)
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        };
+        // A review that left its owner's queue is no longer watched from here.
+        let closed = match &payload {
+            Payload::Review {
+                event: proto::frame::ReviewEvent::Closed { outcome },
+            } => outcome["id"].as_str().map(str::to_string),
             _ => None,
         };
         match self.mirror.apply(sender, &env.channel, payload) {
             Applied::Stored => {
+                if let Some(id) = closed {
+                    if self.watches.release_held(&id) {
+                        self.bus
+                            .publish_untapped(Frame::ReviewDetail { review_id: id });
+                    }
+                }
                 if returning {
                     self.reconcile_deliveries(Some(sender));
                     self.reread_after_return(sender);
@@ -1533,22 +1635,34 @@ impl MeshClient {
     /// Whether the owner answered; `false` when it could not be read, to be
     /// asked again after [`REREAD_BACKOFF_MS`].
     async fn reread_review(&self, owner: &str, channel: &str, id: &str) -> bool {
+        use super::review_events::{ReviewClosed, ReviewMeta};
         let request = serde_json::json!({ "review_id": id, "channel": channel, "owner": owner });
         let answer = self
             .command(
                 owner,
-                proto::frame::Command::ReviewDetail { request },
+                proto::frame::Command::ReviewRead { request },
                 Duration::from_secs(self.cfg.mesh.command_timeout_secs.max(1)),
             )
             .await;
         match answer {
-            Ok(detail) => {
-                let row = serde_json::from_value::<crate::store::ReviewRow>(
-                    detail.get("review").cloned().unwrap_or_default(),
+            Ok(read) => {
+                let meta = serde_json::from_value::<ReviewMeta>(
+                    read.get("review").cloned().unwrap_or_default(),
                 );
-                match row {
-                    Ok(row) if row.id == id && row.node_id == owner && row.channel == channel => {
-                        match self.store.upsert_review_mirror(&row) {
+                match meta {
+                    Ok(m) if m.id == id && m.node_id == owner && m.channel == channel => {
+                        // The outcome first, onto the copy as it is held (open,
+                        // or gone unconfirmed); then the listing as the owner
+                        // holds it now.
+                        let outcome = read
+                            .get("outcome")
+                            .cloned()
+                            .and_then(|o| serde_json::from_value::<ReviewClosed>(o).ok());
+                        let stored = outcome
+                            .map(|o| self.store.close_mirrored_review(owner, channel, &o))
+                            .unwrap_or(Ok(false))
+                            .and_then(|_| self.store.upsert_review_meta(&m));
+                        match stored {
                             Ok(true) => self.mirror.publish_queue(),
                             Ok(false) => {
                                 tracing::warn!(review = %id, from = %owner, "a reread review names another owner; not stored")
@@ -1563,9 +1677,9 @@ impl MeshClient {
                     }
                 }
             }
-            // The owner holds no such review, or will not give it (one too
-            // large for a frame, a channel it no longer shares): either way it
-            // has left the queue there, and asking again changes nothing.
+            // The owner holds no such review, or will not give it (a channel
+            // it no longer shares): either way it has left the queue there,
+            // and asking again changes nothing.
             Err(super::forward::CommandError::Refused(why)) => {
                 if why != crate::http::api::NO_SUCH_REVIEW {
                     tracing::info!(review = %id, from = %owner, %why, "the owner refused an unlisted review; marked gone");
@@ -1929,6 +2043,88 @@ impl MeshClient {
             }
             n += 1;
             tokio::time::sleep(every).await;
+        }
+    }
+
+    /// Mark the watched reviews a local frame may have changed the detail of:
+    /// any, when the queue is republished; the one a reviewer or a
+    /// publication is about, when it moves.
+    fn note_watched_change(&self, frame: &Frame) {
+        let watched = self.watches.watched();
+        if watched.is_empty() {
+            return;
+        }
+        let touched: Vec<String> = match frame {
+            Frame::Reviews { .. } => watched,
+            Frame::Session(row) => row
+                .review_id
+                .iter()
+                .filter(|id| watched.contains(id))
+                .cloned()
+                .collect(),
+            Frame::Publication(v) => v["review_id"]
+                .as_str()
+                .filter(|id| watched.iter().any(|w| w == id))
+                .map(|id| vec![id.to_string()])
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        if touched.is_empty() {
+            return;
+        }
+        self.review_dirty.lock().unwrap().extend(touched);
+        self.push_wake.notify_one();
+    }
+
+    /// Push watched reviews' changes, a moment after the first change so a
+    /// burst goes as one; and let go of watches that lapsed.
+    async fn watch_loop(&self) {
+        const EXPIRE_EVERY: Duration = Duration::from_secs(15);
+        let mut expired_at = tokio::time::Instant::now();
+        loop {
+            tokio::select! {
+                _ = self.push_wake.notified() => {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    self.push_dirty().await;
+                }
+                _ = tokio::time::sleep(EXPIRE_EVERY) => {}
+            }
+            if expired_at.elapsed() >= EXPIRE_EVERY {
+                expired_at = tokio::time::Instant::now();
+                self.expire_watches(now_ms());
+            }
+        }
+    }
+
+    /// A review this node owns changed in a way no frame says (its threads,
+    /// say): push its watchers what changed.
+    pub fn review_changed(&self, id: &str) {
+        if self.watches.watchers(id).is_empty() {
+            return;
+        }
+        self.review_dirty.lock().unwrap().insert(id.to_string());
+        self.push_wake.notify_one();
+    }
+
+    /// Push what is waiting to be pushed, now.
+    pub async fn push_dirty(&self) {
+        let ids: Vec<String> = self.review_dirty.lock().unwrap().drain().collect();
+        if ids.is_empty() {
+            return;
+        }
+        if let Some(executor) = self.executor.get() {
+            executor.push_reviews(&ids).await;
+        }
+    }
+
+    /// Let go of watches on this node's reviews that lapsed unrenewed or
+    /// whose watcher cannot be reached, and tell the channels who still
+    /// watches. The claim itself is left to the sweeper's grace, as a closed
+    /// tab here would be.
+    pub fn expire_watches(&self, now: i64) {
+        let changed = self.watches.expire(now, |node| self.peer_reachable(node));
+        if !changed.is_empty() {
+            self.send_review_events();
         }
     }
 

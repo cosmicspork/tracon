@@ -3273,7 +3273,10 @@ pub async fn get_review(
 ) -> ApiResult<Json<serde_json::Value>> {
     // Claim on open, then read: a response that showed the row as it stood
     // before the claim would tell the operator something already untrue.
-    let _ = s.store().claim_review(&s.node_id, &id);
+    // Reading publishes nothing; a claim that changed the review does.
+    if s.store().claim_review(&s.node_id, &id).unwrap_or(false) {
+        s.manager.publish_queue().await;
+    }
     let r = s
         .store()
         .get_review(&id)?
@@ -3282,7 +3285,6 @@ pub async fn get_review(
     // publication evidence. Returning empty code-review fields prevents the
     // presentation layer from treating its content hash as a commit.
     if r.kind == crate::store::reports::KIND {
-        s.manager.publish_queue().await;
         return Ok(Json(json!({
             "review": r,
             // A report's version is its content hash, carried on the row and
@@ -3298,7 +3300,6 @@ pub async fn get_review(
             "shown_work": [],
         })));
     }
-    s.manager.publish_queue().await;
     let mut detail = review_detail(&s, &r).await?;
     if r.node_id != s.node_id {
         read_from_owner(&s, &r, &mut detail).await;
@@ -3532,15 +3533,17 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
     }))
 }
 
-/// What a mirrored review is read with from its owner: the owner and the
-/// channel both named, so the owner can refuse a relay through a third node
-/// or a lookup across channels.
+/// What a mirrored review is watched or read with from its owner: the owner
+/// and the channel both named, so the owner can refuse a relay through a
+/// third node or a lookup across channels. `renew` only extends a watch.
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct ReviewDetailRequest {
     review_id: String,
     channel: String,
     owner: String,
+    #[serde(default)]
+    renew: bool,
 }
 
 /// The fields of a review only its owner can fill: what the checks, the
@@ -3567,7 +3570,17 @@ const OWNER_FIELDS: &[&str] = &[
 
 /// The review row's own fields the owner's reviewer writes, taken from the
 /// owner over the mirror's copy when its detail is read.
-const OWNER_REVIEW_FIELDS: &[&str] = &["review_session_id", "ai_verdict_json"];
+const OWNER_REVIEW_FIELDS: &[&str] = &[
+    "review_session_id",
+    "ai_verdict_json",
+    "diff",
+    "body",
+    "edited_title",
+    "edited_body",
+    "checks_json",
+    "revision_patch",
+    "verdict_reason",
+];
 
 /// A mirrored review's detail as the node that owns it holds it, over the
 /// mesh; the error says why it could not be read.
@@ -3582,19 +3595,45 @@ async fn owner_review_detail(
     if !mesh.peer_reachable(&r.node_id) {
         return Err("the node that holds it is unreachable; reload when it returns".into());
     }
+    // Watching already: the owner pushes what changes, so nothing is asked.
+    if let Some(held) = mesh.watches().held(&r.id, crate::store::now_ms()) {
+        return Ok(held);
+    }
     let request = serde_json::to_value(ReviewDetailRequest {
         review_id: r.id.clone(),
         channel: r.channel.clone(),
         owner: r.node_id.clone(),
+        renew: false,
     })
     .map_err(|error| error.to_string())?;
-    mesh.command(
-        &r.node_id,
-        proto::frame::Command::ReviewDetail { request },
-        std::time::Duration::from_secs(15),
-    )
-    .await
-    .map_err(|error| error.to_string())
+    let detail = mesh
+        .command(
+            &r.node_id,
+            proto::frame::Command::ReviewWatch { request },
+            std::time::Duration::from_secs(15),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    // Held while it waits: a decided one is pushed nothing, so is read again.
+    if detail["review"]["state"]
+        .as_str()
+        .is_some_and(|state| crate::mesh::review_events::OPEN_STATES.contains(&state))
+    {
+        mesh.watches()
+            .hold(&r.id, &r.node_id, detail.clone(), crate::store::now_ms());
+    }
+    Ok(detail)
+}
+
+/// A request naming `r` as its owner holds it.
+fn review_request(r: &crate::store::ReviewRow, renew: bool) -> serde_json::Value {
+    serde_json::to_value(ReviewDetailRequest {
+        review_id: r.id.clone(),
+        channel: r.channel.clone(),
+        owner: r.node_id.clone(),
+        renew,
+    })
+    .unwrap_or_default()
 }
 
 /// Fill a mirrored review's detail from the node that owns it, over the
@@ -3630,11 +3669,16 @@ async fn read_from_owner(
                 }
                 // The page derives its reviewer control from the owner's
                 // reviewer and its verdict card from this row, so both come
-                // from one read: the mirror can lag the owner's `done`.
+                // from one read: the mirror can lag the owner's `done`. The
+                // diff and description are the owner's alone: the mirror
+                // holds metadata.
                 for field in OWNER_REVIEW_FIELDS {
                     if let Some(value) = owned["review"].get(*field) {
                         detail["review"][*field] = value.clone();
                     }
+                }
+                if let Some(t) = owned.get("diff_truncated") {
+                    detail["diff_truncated"] = t.clone();
                 }
                 json!({ "state": "fetched" })
             }
@@ -3647,15 +3691,15 @@ async fn read_from_owner(
 /// one refusal that tells the peer its copy is gone, not merely unread.
 pub const NO_SUCH_REVIEW: &str = "no review this node holds on that channel";
 
-/// A peer reading a review this node owns. The sender and this node must
-/// both be on the review's channel, and this node must be the owner it was
-/// asked of: a review mirrored here from a third node is that node's to
-/// answer for.
-pub async fn forwarded_review_detail(
+/// The review a peer's request names, as this node owns it: the sender and
+/// this node must both be on the review's channel, and this node must be the
+/// owner it was asked of (a review mirrored here from a third node is that
+/// node's to answer for).
+fn requested_review(
     s: &AppState,
     sender: &str,
     request: serde_json::Value,
-) -> ApiResult<serde_json::Value> {
+) -> ApiResult<(ReviewDetailRequest, crate::store::ReviewRow)> {
     let request: ReviewDetailRequest = serde_json::from_value(request).map_err(|error| {
         ApiError::new(
             StatusCode::BAD_REQUEST,
@@ -3680,15 +3724,156 @@ pub async fn forwarded_review_detail(
         .get_review(&request.review_id)?
         .filter(|r| r.channel == request.channel && r.node_id == s.node_id)
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, NO_SUCH_REVIEW))?;
+    Ok((request, r))
+}
+
+/// A review's detail as a peer is given it: a diff too large for a frame is
+/// cut and says so.
+async fn detail_for_peer(
+    s: &AppState,
+    r: &crate::store::ReviewRow,
+) -> ApiResult<serde_json::Value> {
+    let mut detail = review_detail(s, r).await?;
+    crate::mesh::review_events::truncate_diff(&mut detail);
+    crate::http::evidence::within_mesh_limit(&detail, "the review's detail")?;
+    Ok(detail)
+}
+
+/// A peer watching a review this node owns: answered with the whole detail,
+/// then pushed what changes while the watch holds (`push_watched_reviews`).
+/// A renewal only extends the watch, or starts it again if it lapsed.
+pub async fn forwarded_review_watch(
+    s: &AppState,
+    sender: &str,
+    request: serde_json::Value,
+) -> ApiResult<serde_json::Value> {
+    let (request, r) = requested_review(s, sender, request)?;
     if r.kind == crate::store::reports::KIND {
         return Err(ApiError::new(
             StatusCode::NOT_FOUND,
             "a report has no detail held on its node",
         ));
     }
-    let detail = review_detail(s, &r).await?;
-    crate::http::evidence::within_mesh_limit(&detail, "the review's detail")?;
+    // One that left the queue is read, not watched: nothing more will change.
+    if !crate::mesh::review_events::OPEN_STATES.contains(&r.state.as_str()) {
+        if request.renew {
+            return Ok(json!({ "watching": false }));
+        }
+        return detail_for_peer(s, &r).await;
+    }
+    let Some(mesh) = s.mesh.as_ref() else {
+        return Err(ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "no mesh"));
+    };
+    let fresh = mesh.watches().watch(&r.id, sender, crate::store::now_ms());
+    // A peer with it open keeps the claim fresh, as an open page here does.
+    let claimed = s.store().claim_review(&s.node_id, &r.id).unwrap_or(false);
+    if !claimed {
+        let _ = s.store().touch_claim(&s.node_id, &r.id);
+    }
+    if claimed {
+        s.manager.publish_queue().await;
+    } else if fresh {
+        mesh.send_review_events();
+    }
+    if request.renew {
+        return Ok(json!({ "watching": true }));
+    }
+    let r = s.store().get_review(&r.id)?.unwrap_or(r);
+    let detail = detail_for_peer(s, &r).await?;
+    mesh.watches().sent(
+        &r.id,
+        sender,
+        &r.head_sha,
+        crate::mesh::review_events::hash(&detail),
+    );
     Ok(detail)
+}
+
+/// A peer no longer watching a review this node owns.
+pub async fn forwarded_review_unwatch(
+    s: &AppState,
+    sender: &str,
+    request: serde_json::Value,
+) -> ApiResult<serde_json::Value> {
+    let (_, r) = requested_review(s, sender, request)?;
+    if let Some(mesh) = s.mesh.as_ref() {
+        if mesh.watches().unwatch(&r.id, sender) {
+            mesh.send_review_events();
+        }
+    }
+    Ok(json!({ "watching": false }))
+}
+
+/// A review's metadata and, once it has left the queue, what became of it:
+/// how a peer settles one a snapshot no longer lists.
+pub async fn forwarded_review_read(
+    s: &AppState,
+    sender: &str,
+    request: serde_json::Value,
+) -> ApiResult<serde_json::Value> {
+    use crate::mesh::review_events::{ReviewClosed, ReviewMeta, OPEN_STATES};
+    let (_, r) = requested_review(s, sender, request)?;
+    let claimers = s
+        .mesh
+        .as_ref()
+        .map(|m| m.watches().claimers(&r.id))
+        .unwrap_or_default();
+    let outcome = (!OPEN_STATES.contains(&r.state.as_str())).then(|| ReviewClosed::of(&r));
+    Ok(json!({ "review": ReviewMeta::of(&r, claimers), "outcome": outcome }))
+}
+
+/// Push each watching peer what changed in the detail of a review this node
+/// owns, now: one frame per watcher whose last detail differs, without the
+/// diff when it already holds that head's. A review that left the queue
+/// ends its watches instead (the channel's `closed` event says so).
+pub async fn push_watched_reviews(s: &AppState, ids: &[String]) {
+    use crate::mesh::review_events::{hash, OPEN_STATES};
+    let Some(mesh) = s.mesh.as_ref() else {
+        return;
+    };
+    for id in ids {
+        let watchers = mesh.watches().watchers(id);
+        if watchers.is_empty() {
+            continue;
+        }
+        let Ok(Some(r)) = s.store().get_review(id) else {
+            mesh.watches().end(id);
+            continue;
+        };
+        if r.node_id != s.node_id || !OPEN_STATES.contains(&r.state.as_str()) {
+            continue;
+        }
+        let detail = match detail_for_peer(s, &r).await {
+            Ok(detail) => detail,
+            Err(error) => {
+                tracing::warn!(review = %id, error = %error.1, "watched review's detail not pushed");
+                continue;
+            }
+        };
+        let digest = hash(&detail);
+        for (node, watcher) in watchers {
+            if watcher.sent_hash == Some(digest) {
+                continue;
+            }
+            let mut push = detail.clone();
+            if watcher.sent_head.as_deref() == Some(r.head_sha.as_str())
+                && push.get("diff_truncated").is_none()
+            {
+                push["review"]["diff"] = serde_json::Value::Null;
+                push["diff_omitted"] = json!(true);
+            }
+            let payload = proto::frame::Payload::ReviewUpdate {
+                review_id: r.id.clone(),
+                detail: push,
+            };
+            match mesh.enqueue_direct(&r.channel, &node, &payload) {
+                Ok(_) => mesh.watches().sent(id, &node, &r.head_sha, digest),
+                Err(error) => {
+                    tracing::warn!(review = %id, to = %node, %error, "watched review's detail not queued")
+                }
+            }
+        }
+    }
 }
 
 /// Where a review's diff was captured: the operator's worktree for a harness
@@ -3999,13 +4184,91 @@ pub async fn attach_demonstration(
 
 /// Called when the operator leaves the review screen. Explicit release is the
 /// common case; the sweeper is for clients that vanish without saying so.
+///
+/// A peer's review is unwatched instead: its owner stops pushing to this
+/// node, and the claim is the owner's to let go.
 pub async fn release_review(
     State(s): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
-    s.store().release_review(&s.node_id, &id)?;
-    s.manager.publish_queue().await;
+    if let Some(r) = s
+        .store()
+        .get_review(&id)?
+        .filter(|r| r.node_id != s.node_id)
+    {
+        if let Some(mesh) = s.mesh.clone() {
+            if mesh.watches().release_held(&r.id) {
+                ask_owner(
+                    mesh,
+                    &r,
+                    proto::frame::Command::ReviewUnwatch {
+                        request: review_request(&r, false),
+                    },
+                );
+            }
+        }
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    if s.store().release_review(&s.node_id, &id)? {
+        s.manager.publish_queue().await;
+    }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Called by the review page while it stays open on a peer's review, well
+/// inside [`crate::mesh::review_events::WATCH_TTL_MS`]: renews this node's
+/// watch with the owner. `watching: false` when none is held any more (it
+/// lapsed, or the review closed): the page reads the review again, which
+/// watches anew.
+pub async fn watch_review(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let r = s
+        .store()
+        .get_review(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such review".into()))?;
+    if r.node_id == s.node_id {
+        return Ok(Json(json!({ "watching": true })));
+    }
+    let Some(mesh) = s.mesh.clone() else {
+        return Ok(Json(json!({ "watching": false })));
+    };
+    // An owner gone away pushes nothing: the page says so rather than show
+    // what was held as current.
+    if !mesh.peer_reachable(&r.node_id) {
+        mesh.watches().release_held(&id);
+        return Ok(Json(json!({ "watching": false })));
+    }
+    let held = mesh.watches().renew_held(&id, crate::store::now_ms());
+    if held {
+        ask_owner(
+            mesh,
+            &r,
+            proto::frame::Command::ReviewWatch {
+                request: review_request(&r, true),
+            },
+        );
+    }
+    Ok(Json(json!({ "watching": held })))
+}
+
+/// Send `command` about `r` to its owner without waiting on the answer, but
+/// with a deadline, so one that sat out an absence never runs late.
+fn ask_owner(
+    mesh: Arc<crate::mesh::client::MeshClient>,
+    r: &crate::store::ReviewRow,
+    command: proto::frame::Command,
+) {
+    let owner = r.node_id.clone();
+    tokio::spawn(async move {
+        if let Err(error) = mesh
+            .command(&owner, command, std::time::Duration::from_secs(15))
+            .await
+        {
+            tracing::debug!(%error, to = %owner, "review watch not renewed or released");
+        }
+    });
 }
 
 /// What `POST /api/reviews/{id}/ready` takes: true marks the change ready,
@@ -4144,6 +4407,10 @@ pub async fn start_review_session(
         crate::names::kind::REVIEW
     };
     let named = crate::names::generated(review_kind, &id);
+    // What this node holds of the owner's detail is read again after it.
+    if let Some(mesh) = s.mesh.as_ref() {
+        mesh.watches().release_held(&id);
+    }
     admin_on_peer(
         &s,
         &parts,
@@ -4401,6 +4668,8 @@ async fn decide_review_inner(
             ));
         }
         let timeout = std::time::Duration::from_secs(s.cfg.mesh.command_timeout_secs.max(1));
+        // What this node holds of the owner's detail is read again after it.
+        mesh.watches().release_held(&id);
         return match mesh
             .command(
                 &r.node_id,
@@ -8509,6 +8778,10 @@ async fn close_moved_source(
 /// Commands other nodes forward to this one run exactly as local requests do.
 #[async_trait::async_trait]
 impl crate::mesh::forward::CommandExecutor for AppState {
+    async fn push_reviews(&self, ids: &[String]) {
+        push_watched_reviews(self, ids).await;
+    }
+
     async fn transfer_staged(&self, sender: &str, transfer_id: &str) {
         match start_staged_fork(self, sender, transfer_id).await {
             Ok(Some(started)) => tracing::info!(
@@ -8553,7 +8826,9 @@ impl crate::mesh::forward::CommandExecutor for AppState {
             C::EvidenceCandidates { query } => {
                 crate::http::evidence::forwarded_candidates(self, sender, query)
             }
-            C::ReviewDetail { request } => forwarded_review_detail(self, sender, request).await,
+            C::ReviewWatch { request } => forwarded_review_watch(self, sender, request).await,
+            C::ReviewUnwatch { request } => forwarded_review_unwatch(self, sender, request).await,
+            C::ReviewRead { request } => forwarded_review_read(self, sender, request).await,
             // Scoped by `forwarded_scope`: owned here, the sender on its channel.
             C::ReviewThread { review_id, change } => {
                 super::threads::forwarded(self, &review_id, change).await
