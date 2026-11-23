@@ -2643,7 +2643,11 @@ running; the vector index is derived and is rebuilt rather than restored.
 harness run directly and what that costs.
 
 A harness session's own state lives in the session's scratch volume and goes with its
-runtime storage. `tracon-agent`'s journal is the one piece of it the node reads back,
+runtime storage. So do the contexts it saved before each compaction and each restart of
+its harness (`session::saved`: the log rendered as text, the harness's own transcript,
+and the session's scratchpad, under `saved/` where no sandbox mounts them), so a
+compacted context summarises something that still exists; they are read back and
+exported through the session's API. `tracon-agent`'s journal is the one piece of it the node reads back,
 when it relaunches a harness that died (see Harness control); nothing restores a
 session's state across a node restart, and a session cut off by one is carried on as a
 new session on the same workspace.

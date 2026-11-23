@@ -124,6 +124,9 @@ pub struct Facts<'a> {
     /// could not be fetched, so the session starts from the default branch
     /// it fetched last (`stale: last fetched at …`). `None` for a fresh base.
     pub stale_base: Option<&'a str>,
+    /// Where the session's scratchpad is in its sandbox, which the node saves
+    /// with its conversation before each compaction. `None` when it has none.
+    pub scratchpad: Option<&'a str>,
 }
 
 /// What a review session reads, and what it was started with.
@@ -260,6 +263,14 @@ fn push_node(out: &mut String, facts: &Facts) {
         "- Your worktree is `{}`; the main checkout is not yours.\n",
         facts.worktree
     ));
+    if let Some(pad) = facts.scratchpad {
+        out.push_str(&format!(
+            "- Your scratchpad is `{pad}`: keep notes, plans and findings there that you want \
+             to outlast a compaction of your context. It is not part of the worktree or the \
+             change, and the node saves it with your full conversation before each \
+             compaction.\n"
+        ));
+    }
     push_repository(out, facts);
     if let Some(note) = facts.stale_base {
         out.push_str(&format!(
@@ -1553,6 +1564,7 @@ mod tests {
             forge_repo: None,
             prepared: None,
             stale_base: None,
+            scratchpad: None,
         };
         let (text, missing) = assemble(&store, &Policy::shipped(), &facts);
         assert!(missing.is_empty(), "{missing:?}");
@@ -1648,6 +1660,7 @@ mod tests {
                 forge_repo: None,
                 prepared: None,
                 stale_base: None,
+                scratchpad: None,
             };
             assemble(&store, &Policy::shipped(), &facts).0
         };
@@ -1741,6 +1754,7 @@ mod tests {
                 forge_repo: repo,
                 prepared: None,
                 stale_base: None,
+                scratchpad: None,
             };
             let (text, _) = assemble(&store, &Policy::default(), &facts);
             let node = &text[text.find("## Environment").unwrap()..];
@@ -1899,6 +1913,7 @@ mod tests {
             forge_repo: None,
             prepared: None,
             stale_base: None,
+            scratchpad: None,
         };
         let (text, missing) = assemble(&store, &Policy::shipped(), &facts);
         let i = |s: &str| {
@@ -2065,6 +2080,7 @@ mod tests {
             forge_repo: None,
             prepared: None,
             stale_base: None,
+            scratchpad: None,
         };
         let (text, _) = assemble(&store, &Policy::default(), &facts);
         assert!(
@@ -2110,6 +2126,7 @@ mod tests {
             forge_repo: None,
             prepared: None,
             stale_base: None,
+            scratchpad: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         assert!(!text.contains(&"x".repeat(KNOWN_CHARS)), "{text}");
@@ -2156,6 +2173,7 @@ mod tests {
             forge_repo: None,
             prepared: None,
             stale_base: None,
+            scratchpad: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         assert!(!text.contains(&ready_title), "ready work bypassed the cap");
@@ -2208,6 +2226,7 @@ mod tests {
             forge_repo: None,
             prepared: None,
             stale_base: None,
+            scratchpad: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         assert!(!text.contains("old guidance"), "{text}");
@@ -2258,6 +2277,7 @@ mod tests {
             forge_repo: None,
             prepared: None,
             stale_base: None,
+            scratchpad: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         assert!(
@@ -2313,6 +2333,7 @@ mod tests {
             forge_repo: None,
             prepared: None,
             stale_base: None,
+            scratchpad: None,
         };
         let (text, _) = assemble(&store, &Policy::default(), &facts);
         assert!(!text.contains("should not appear"), "{text}");
@@ -2360,6 +2381,7 @@ mod tests {
             forge_repo: None,
             prepared: None,
             stale_base: None,
+            scratchpad: None,
         };
         let (text, missing) = assemble(&store, &Policy::default(), &facts);
         // All three pinned documents survive in full: none was capped,
@@ -2415,6 +2437,7 @@ mod tests {
             forge_repo: None,
             prepared: None,
             stale_base: None,
+            scratchpad: None,
         };
         let (text, _) = assemble(&store, &Policy::shipped(), &facts);
 
@@ -2494,6 +2517,7 @@ mod tests {
                 forge_repo: None,
                 prepared: None,
                 stale_base: None,
+                scratchpad: None,
             };
             assemble(&store, &Policy::shipped(), &facts)
         };
@@ -2541,6 +2565,7 @@ mod tests {
             forge_repo: None,
             prepared: None,
             stale_base: None,
+            scratchpad: None,
         };
         let (text, _) = assemble(&store, &Policy::shipped(), &facts);
         assert!(text.contains("Refused outright by the node"), "{text}");
@@ -2767,6 +2792,7 @@ mod tests {
             forge_repo: None,
             prepared: None,
             stale_base: None,
+            scratchpad: None,
         }
     }
 
@@ -2794,6 +2820,7 @@ mod tests {
             forge_repo: None,
             prepared: None,
             stale_base: None,
+            scratchpad: None,
         }
     }
 
@@ -2830,6 +2857,7 @@ mod tests {
                 forge_repo: None,
                 prepared: None,
                 stale_base: None,
+                scratchpad: None,
             };
             assemble(&store, &Policy::shipped(), &facts).0
         };
