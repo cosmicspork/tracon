@@ -561,3 +561,110 @@ test.skipIf(!browser)('a viewed file folds, counts toward progress that says it 
   expect(await page.locator('.bar .progress').textContent()).toBe('1/3 viewed · not approval')
   await page.close()
 })
+
+// Sixty files of three changes each, a lockfile and a minified bundle: more
+// than a screen holds many times over.
+const many = (i: number) => {
+  const path = `src/m${String(i).padStart(2, '0')}.rs`
+  const hunks = [10, 60, 110].map((at) =>
+    [
+      `@@ -${at},7 +${at},8 @@`,
+      ...[0, 1, 2].map((k) => ` let keep_${at + k} = ${k};`),
+      `-let old_${at} = ${i};`,
+      `+let new_${at} = ${i};`,
+      `+let more_${at} = ${i};`,
+      ...[4, 5, 6].map((k) => ` let keep_${at + k} = ${k};`),
+    ].join('\n'),
+  )
+  return `diff --git a/${path} b/${path}\nindex 1111111..2222222 100644\n--- a/${path}\n+++ b/${path}\n${hunks.join('\n')}\n`
+}
+const LARGE =
+  Array.from({ length: 60 }, (_, i) => many(i)).join('') +
+  `diff --git a/Cargo.lock b/Cargo.lock\nindex 3333333..4444444 100644\n--- a/Cargo.lock\n+++ b/Cargo.lock\n@@ -1,0 +1,400 @@\n` +
+  Array.from({ length: 400 }, (_, i) => `+name = "crate-${i}"`).join('\n') +
+  '\n' +
+  `diff --git a/web/app.js b/web/app.js\nindex 5555555..6666666 100644\n--- a/web/app.js\n+++ b/web/app.js\n@@ -1 +1 @@\n-x\n+${'f();'.repeat(2000)}\n`
+
+const editors = (page: Page) =>
+  page.evaluate(() => [...new Set([...document.querySelectorAll('details.file .cm-editor')].map((e) => e.closest('details')!.getAttribute('data-path')))])
+
+test.skipIf(!browser)('a large review draws every header at once and only the files near the view', async () => {
+  const page = await open({ diff: LARGE })
+  await ready(page, 'src/m00.rs')
+  await page.waitForTimeout(300)
+  expect(await page.locator('details.file').count()).toBe(62)
+  const first = await editors(page)
+  expect(first).toContain('src/m00.rs')
+  // A handful near the top, not sixty: the rest hold their place.
+  expect(first.length).toBeLessThan(15)
+  expect(await page.locator('details[data-path="src/m59.rs"] .pending').count()).toBe(1)
+  expect(await page.locator('details[data-path="src/m59.rs"] .cm-editor').count()).toBe(0)
+
+  // At the bottom, the last files are drawn and the first put away.
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight))
+  await page.waitForSelector('details[data-path="src/m59.rs"] .cm-editor')
+  await page.waitForTimeout(300)
+  const last = await editors(page)
+  expect(last).not.toContain('src/m00.rs')
+  expect(last.length).toBeLessThan(15)
+
+  // Back at the top, the first file is drawn again, where it was.
+  await page.evaluate(() => window.scrollTo(0, 0))
+  await page.waitForSelector('details[data-path="src/m00.rs"] .cm-editor')
+  expect(await editors(page)).not.toContain('src/m59.rs')
+  await page.close()
+})
+
+test.skipIf(!browser)('files are put away and drawn again without moving what is in view', async () => {
+  const page = await open({ diff: LARGE })
+  await ready(page, 'src/m00.rs')
+  await page.locator('details[data-path="src/m30.rs"]').scrollIntoViewIfNeeded()
+  await page.waitForSelector('details[data-path="src/m30.rs"] .cm-editor')
+  await page.waitForTimeout(400)
+  const top = () => page.evaluate(() => Math.round(document.querySelector('details[data-path="src/m30.rs"]')!.getBoundingClientRect().top))
+  const before = await top()
+  // A little up and back down draws and puts away files above it.
+  for (const by of [-1500, 1500, -2500, 2500]) {
+    await page.evaluate((by) => window.scrollBy(0, by), by)
+    await page.waitForTimeout(250)
+  }
+  expect(Math.abs((await top()) - before)).toBeLessThanOrEqual(2)
+  await page.close()
+})
+
+test.skipIf(!browser)('generated and oversized files start folded with the reason, and load on request', async () => {
+  const page = await open({ diff: LARGE })
+  await ready(page, 'src/m00.rs')
+  for (const [path, chip, why] of [
+    ['Cargo.lock', 'generated', 'Generated file (lockfile)'],
+    ['web/app.js', 'large', 'Very long lines: one is 8,001 characters'],
+  ]) {
+    const file = page.locator(`details[data-path="${path}"]`)
+    expect(await file.getAttribute('open')).toBeNull()
+    expect(await file.locator('summary .heavy-note').textContent()).toBe(chip)
+    await file.locator('summary').click()
+    expect(await file.locator('.held span').textContent()).toBe(`${why}: folded so the rest of the review stays quick.`)
+    expect(await file.locator('.cm-editor').count()).toBe(0)
+    await file.getByRole('button', { name: 'Load diff' }).click()
+    await page.waitForSelector(`details[data-path="${path}"] .cm-editor`)
+  }
+  await page.close()
+})
+
+test.skipIf(!browser)('stepping reaches changes in files not drawn yet', async () => {
+  const page = await open({ diff: LARGE })
+  await ready(page, 'src/m00.rs')
+  await page.locator('body').click({ position: { x: 2, y: 790 } })
+  // Three changes a file: thirty steps reach the eleventh file at least.
+  for (let i = 0; i < 30; i++) {
+    await page.keyboard.press('n')
+    await page.waitForTimeout(60)
+  }
+  const at = await page.evaluate(() => {
+    const bar = document.querySelector('.bar')!.getBoundingClientRect().bottom
+    return [...document.querySelectorAll('details.file')].find((d) => d.getBoundingClientRect().bottom > bar + 60)!.getAttribute('data-path')
+  })
+  expect(Number(at!.slice(5, 7))).toBeGreaterThanOrEqual(8)
+  expect(await page.locator(`details[data-path="${at}"] .cm-editor`).count()).toBeGreaterThan(0)
+  await page.close()
+})

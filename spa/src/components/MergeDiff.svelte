@@ -1,3 +1,51 @@
+<script lang="ts" module>
+  import { EditorView as View } from '@codemirror/view'
+
+  // The editor takes the interface's tokens rather than bringing a theme.
+  // The before side washes red and the after side green; unified, the deleted
+  // chunks are red and the rest of the changed lines green. Made once for
+  // every file: each theme is a style sheet of its own, and one per file
+  // would grow the page's styles with every file drawn.
+  const theme = View.theme({
+    '&': { backgroundColor: 'var(--s2)', color: 'var(--ink)', font: '12px/1.55 var(--mono)' },
+    '.cm-content': { padding: '4px 0' },
+    '.cm-line': { padding: '0 12px 0 6px' },
+    '.cm-gutters': { backgroundColor: 'var(--s2)', border: 'none', color: 'var(--dim)' },
+    '.cm-lineNo .cm-gutterElement': { padding: '0 4px 0 8px', textAlign: 'right', minWidth: '2ch', userSelect: 'none' },
+    '.cm-lineNo-before + .cm-lineNo-after .cm-gutterElement': { paddingLeft: '4px' },
+    '.cm-deletedNumbers div': { lineHeight: '1.55' },
+    '&.cm-focused': { outline: 'none' },
+    '.cm-hunkHeader': { color: 'var(--dim)', backgroundColor: 'var(--s1)' },
+    '.cm-gap': { marginLeft: '12px', color: 'var(--dim)', fontStyle: 'italic' },
+    '.cm-gapMissing': { marginLeft: '8px', color: 'var(--wait)' },
+    '.cm-gapShow': {
+      marginLeft: '8px',
+      font: '11px var(--mono)',
+      fontStyle: 'normal',
+      padding: '0 6px',
+      border: '1px solid var(--rule)',
+      borderRadius: '3px',
+      background: 'var(--s2)',
+      color: 'var(--ink)',
+      cursor: 'pointer',
+    },
+    '.cm-changedLine': { backgroundColor: 'color-mix(in srgb, var(--ok) 16%, transparent)' },
+    '.cm-changedText': { backgroundColor: 'color-mix(in srgb, var(--ok) 34%, transparent)' },
+    '&.cm-merge-a .cm-changedLine, .cm-deletedChunk': {
+      backgroundColor: 'color-mix(in srgb, var(--crit) 16%, transparent)',
+    },
+    '&.cm-merge-a .cm-changedText, .cm-deletedChunk .cm-deletedText': {
+      backgroundColor: 'color-mix(in srgb, var(--crit) 34%, transparent)',
+    },
+    '&.cm-merge-b .cm-changedText': { backgroundColor: 'color-mix(in srgb, var(--ok) 34%, transparent)' },
+    '.cm-deletedChunk': { paddingLeft: '6px' },
+    '.cm-changedLineGutter': { backgroundColor: 'var(--ok)' },
+    '&.cm-merge-a .cm-changedLineGutter, .cm-deletedLineGutter': { backgroundColor: 'var(--crit)' },
+    '.cm-insertedLine, .cm-deletedLine, .cm-deletedLine del': { textDecoration: 'none' },
+    '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': { backgroundColor: 'var(--s3)' },
+  })
+</script>
+
 <script lang="ts">
   // One file of a review's diff on CodeMirror's merge view: side by side, the
   // two sides aligned row for row, or unified, deletions above the lines that
@@ -351,47 +399,6 @@
     return after.documentTop + block.top
   }
 
-  // The editor takes the interface's tokens rather than bringing a theme. The
-  // before side washes red and the after side green; unified, the deleted
-  // chunks are red and the rest of the changed lines green.
-  const theme = EditorView.theme({
-    '&': { backgroundColor: 'var(--s2)', color: 'var(--ink)', font: '12px/1.55 var(--mono)' },
-    '.cm-content': { padding: '4px 0' },
-    '.cm-line': { padding: '0 12px 0 6px' },
-    '.cm-gutters': { backgroundColor: 'var(--s2)', border: 'none', color: 'var(--dim)' },
-    '.cm-lineNo .cm-gutterElement': { padding: '0 4px 0 8px', textAlign: 'right', minWidth: '2ch', userSelect: 'none' },
-    '.cm-lineNo-before + .cm-lineNo-after .cm-gutterElement': { paddingLeft: '4px' },
-    '.cm-deletedNumbers div': { lineHeight: '1.55' },
-    '&.cm-focused': { outline: 'none' },
-    '.cm-hunkHeader': { color: 'var(--dim)', backgroundColor: 'var(--s1)' },
-    '.cm-gap': { marginLeft: '12px', color: 'var(--dim)', fontStyle: 'italic' },
-    '.cm-gapMissing': { marginLeft: '8px', color: 'var(--wait)' },
-    '.cm-gapShow': {
-      marginLeft: '8px',
-      font: '11px var(--mono)',
-      fontStyle: 'normal',
-      padding: '0 6px',
-      border: '1px solid var(--rule)',
-      borderRadius: '3px',
-      background: 'var(--s2)',
-      color: 'var(--ink)',
-      cursor: 'pointer',
-    },
-    '.cm-changedLine': { backgroundColor: 'color-mix(in srgb, var(--ok) 16%, transparent)' },
-    '.cm-changedText': { backgroundColor: 'color-mix(in srgb, var(--ok) 34%, transparent)' },
-    '&.cm-merge-a .cm-changedLine, .cm-deletedChunk': {
-      backgroundColor: 'color-mix(in srgb, var(--crit) 16%, transparent)',
-    },
-    '&.cm-merge-a .cm-changedText, .cm-deletedChunk .cm-deletedText': {
-      backgroundColor: 'color-mix(in srgb, var(--crit) 34%, transparent)',
-    },
-    '&.cm-merge-b .cm-changedText': { backgroundColor: 'color-mix(in srgb, var(--ok) 34%, transparent)' },
-    '.cm-deletedChunk': { paddingLeft: '6px' },
-    '.cm-changedLineGutter': { backgroundColor: 'var(--ok)' },
-    '&.cm-merge-a .cm-changedLineGutter, .cm-deletedLineGutter': { backgroundColor: 'var(--crit)' },
-    '.cm-insertedLine, .cm-deletedLine, .cm-deletedLine del': { textDecoration: 'none' },
-    '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': { backgroundColor: 'var(--s3)' },
-  })
 </script>
 
 <div class="merge {mode}" bind:this={host}></div>
