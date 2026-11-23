@@ -2812,10 +2812,63 @@ pub(crate) fn admin_answer(
     let Some(approval) = s.store().get_approval(id)? else {
         return Ok(None);
     };
-    let allow = option_id == crate::adapter::types::OPTION_ALLOW_ONCE;
     // The summary is the stored approval's, never the answer's: it says what
     // the operator is confirming in the node's words.
     let args: serde_json::Value = serde_json::from_str(&approval.arguments).unwrap_or_default();
+    Ok(admin_answer_of(
+        &approval.tool,
+        &args,
+        &approval.channel,
+        option_id,
+        edited,
+    ))
+}
+
+/// The card `id`, when answering it with `option_id` is an admin action on
+/// the node that holds it: that node, and what the answer does there. A
+/// card is this node's own approval or a peer's approval mirrored here, which
+/// carries its tool and arguments as its owner listed them
+/// (`ApprovalRow::as_card`). Here that only words the prompt: the owner
+/// decides from its own record whether the answer is an admin action.
+fn card_admin_answer(
+    s: &AppState,
+    id: &str,
+    option_id: &str,
+    edited: Option<&serde_json::Value>,
+) -> ApiResult<Option<(String, AdminAnswer)>> {
+    if let Some(approval) = s.store().get_approval(id)? {
+        return Ok(admin_answer(s, id, option_id, edited)?.map(|a| (approval.node_id, a)));
+    }
+    let Some(card) = s.store().get_permission(id)? else {
+        return Ok(None);
+    };
+    if card.node_id == s.node_id {
+        return Ok(None);
+    }
+    let listed: serde_json::Value = card
+        .raw_input
+        .as_deref()
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or_default();
+    if listed["approval_id"].as_str() != Some(id) {
+        return Ok(None);
+    }
+    let tool = listed["tool"].as_str().unwrap_or_default();
+    let channel = s.store().permission_channel(id)?.unwrap_or_default();
+    Ok(
+        admin_answer_of(tool, &listed["arguments"], &channel, option_id, edited)
+            .map(|a| (card.node_id, a)),
+    )
+}
+
+fn admin_answer_of(
+    tool: &str,
+    args: &serde_json::Value,
+    channel: &str,
+    option_id: &str,
+    edited: Option<&serde_json::Value>,
+) -> Option<AdminAnswer> {
+    let allow = option_id == crate::adapter::types::OPTION_ALLOW_ONCE;
     // An agent wrote these: cleaned and bounded before they are put in front
     // of the operator, here and in another browser's approval page.
     let field = |key: &str| super::passkey::clean_text(args[key].as_str().unwrap_or(""), 100);
@@ -2825,7 +2878,7 @@ pub(crate) fn admin_answer(
     } else {
         repo
     };
-    let answer = match approval.tool.as_str() {
+    let answer = match tool {
         crate::mcp::setup::PROPOSE if allow => Some(AdminAnswer {
             what: "allowing a repository setup proposal writes node.toml",
             summary: format!("Allow repository setup for {repo}"),
@@ -2857,7 +2910,7 @@ pub(crate) fn admin_answer(
                 summary: format!(
                     "Save {} to {}'s fetch allow list",
                     field("pattern"),
-                    super::passkey::clean_text(&approval.channel, 100)
+                    super::passkey::clean_text(channel, 100)
                 ),
             })
         }
@@ -2874,12 +2927,12 @@ pub(crate) fn admin_answer(
     // An answer that edits the arguments says which, by name and first, so
     // no length cuts it off: the line is the stored request's, so without
     // this an approver could not tell that what runs differs from it.
-    Ok(answer.map(|mut a| {
+    answer.map(|mut a| {
         if let Some(edited) = edited {
-            a.summary = format!("{}: {}", edited_line(&args, edited), a.summary);
+            a.summary = format!("{}: {}", edited_line(args, edited), a.summary);
         }
         a
-    }))
+    })
 }
 
 /// "Edited host, repo": the argument names an answer changes from the
@@ -2928,37 +2981,7 @@ pub async fn answer_permission(
                 .into_response()
         }
     };
-    // An answer that writes config or runs networked work outside the
-    // boundary is an admin action: away from the node it needs a passkey,
-    // bound to this answer (option and any edited arguments included).
-    match admin_answer(&s, &id, &b.option_id, b.arguments.as_ref()) {
-        Ok(Some(AdminAnswer { what, summary })) => {
-            let held_elsewhere = s
-                .store()
-                .get_approval(&id)
-                .ok()
-                .flatten()
-                .is_some_and(|a| a.node_id != s.node_id);
-            if held_elsewhere {
-                return ApiError::new(
-                    StatusCode::FORBIDDEN,
-                    format!(
-                        "{what}, so it is answered on the node that holds it: a peer cannot \
-                         confirm an admin action for another node yet"
-                    ),
-                )
-                .into_response();
-            }
-            if let Err(refusal) =
-                super::passkey::authorize_as(&s, &parts, &body, Some(summary)).await
-            {
-                return refusal.into_response();
-            }
-        }
-        Ok(None) => {}
-        Err(e) => return e.into_response(),
-    }
-    let answer = crate::session::OperatorAnswer {
+    let mut answer = crate::session::OperatorAnswer {
         option_id: b.option_id,
         arguments: b.arguments,
         reason: b.reason,
@@ -2966,7 +2989,36 @@ pub async fn answer_permission(
         arguments_hash: b.arguments_hash,
         preview_hash: b.preview_hash,
         by: Some(answered_by(&s, &parts)),
+        statement: None,
     };
+    // An answer that writes config or runs networked work outside the
+    // boundary is an admin action: away from the node it needs a passkey,
+    // bound to this answer (option and any edited arguments included).
+    match card_admin_answer(&s, &id, &answer.option_id, answer.arguments.as_ref()) {
+        Ok(Some((owner, AdminAnswer { summary, .. }))) if owner == s.node_id => {
+            if let Err(refusal) =
+                super::passkey::authorize_as(&s, &parts, &body, Some(summary)).await
+            {
+                return refusal.into_response();
+            }
+        }
+        // A peer's card is decided by the peer, which takes this answer only
+        // from a node its `[mesh] admin_peers` names, with a statement this
+        // node's operator confirmed for exactly the answer it receives.
+        Ok(Some((owner, AdminAnswer { summary, .. }))) => {
+            let op_hash = crate::mesh::admin::op_hash(&owner, &answer.clone().into_frame(&id));
+            let statement =
+                super::peer_admin::summary_for(&s, &owner, &summary).and_then(|summary| {
+                    super::peer_admin::confirm(&s, &parts, &owner, &op_hash, &summary)
+                });
+            match statement {
+                Ok(statement) => answer.statement = Some(statement),
+                Err(refusal) => return refusal.into_response(),
+            }
+        }
+        Ok(None) => {}
+        Err(e) => return e.into_response(),
+    }
     match s.manager.answer(&id, answer).await {
         Ok(()) => StatusCode::OK.into_response(),
         Err(e) => answer_refused(e),
@@ -8079,8 +8131,10 @@ fn valid_operator_notification(title: &str, body: &str, path: &str, device_ids: 
 /// An admin command (a provider sign-in, a read or edit of `node.toml`, a
 /// reviewer start) is decided first, and needs more than a channel: the sender named in this
 /// node's `[mesh] admin_peers`, with a statement its operator confirmed for
-/// exactly that command here ([`admin_peer`]). What that admits is returned,
-/// for the audit log.
+/// exactly that command here ([`admin_peer`]). An answer that allows one of
+/// this node's admin cards needs the same once its channel is checked
+/// ([`admin_answer_peer`]). What either admits is returned, for the audit
+/// log.
 fn authorise_forwarded(
     s: &AppState,
     sender: &str,
@@ -8088,7 +8142,47 @@ fn authorise_forwarded(
 ) -> ApiResult<Option<crate::mesh::admin::Admitted>> {
     let admitted = admin_peer(s, sender, command)?;
     forwarded_scope(s, sender, command)?;
-    Ok(admitted)
+    // After the scope, so an answer refused for its channel leaves its
+    // statement unspent.
+    let answered = admin_answer_peer(s, sender, command)?;
+    Ok(admitted.or(answered))
+}
+
+/// Whether `sender` may give an answer that is an admin action here
+/// ([`admin_answer`]): what any admin command from a peer needs, the sender
+/// named in this node's `[mesh] admin_peers` and a statement its operator
+/// confirmed for exactly this answer (card, option and any edited
+/// arguments), which this spends. `Ok(None)` for any other command or
+/// answer.
+fn admin_answer_peer(
+    s: &AppState,
+    sender: &str,
+    command: &proto::frame::Command,
+) -> ApiResult<Option<crate::mesh::admin::Admitted>> {
+    let proto::frame::Command::Answer {
+        permission_id,
+        option_id,
+        arguments,
+        ..
+    } = command
+    else {
+        return Ok(None);
+    };
+    let Some(AdminAnswer { what, .. }) =
+        admin_answer(s, permission_id, option_id, arguments.as_ref())?
+    else {
+        return Ok(None);
+    };
+    crate::mesh::admin::admit_answer(
+        s.store(),
+        &s.cfg,
+        &s.node_id,
+        sender,
+        command,
+        crate::store::now_ms(),
+    )
+    .map(Some)
+    .map_err(|why| ApiError(StatusCode::FORBIDDEN, format!("{what}: {why}")))
 }
 
 fn forwarded_scope(s: &AppState, sender: &str, command: &proto::frame::Command) -> ApiResult<()> {
@@ -8098,24 +8192,7 @@ fn forwarded_scope(s: &AppState, sender: &str, command: &proto::frame::Command) 
         | C::Kill { session_id }
         | C::Pause { session_id, .. }
         | C::Resume { session_id, .. } => forwarded_session(s, sender, session_id),
-        C::Answer {
-            permission_id,
-            option_id,
-            ..
-        } => {
-            // A passkey confirms an admin action on the node it is enrolled
-            // with; a peer's answer carries none, so these are refused until
-            // the mesh has a signed admin path of its own.
-            if let Some(AdminAnswer { what, .. }) = admin_answer(s, permission_id, option_id, None)?
-            {
-                return Err(ApiError(
-                    StatusCode::FORBIDDEN,
-                    format!(
-                        "{what}, an admin action this node confirms only with its own \
-                         passkey or at the node; a peer's answer cannot confirm it yet"
-                    ),
-                ));
-            }
+        C::Answer { permission_id, .. } => {
             if let Some(approval) = s.store().get_approval(permission_id)? {
                 owned_here(s, &approval.node_id, "approval")?;
                 return sender_in_channel(s, sender, &approval.channel, "approval");
@@ -8585,6 +8662,7 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                 notes,
                 arguments_hash,
                 preview_hash,
+                statement: _,
             } => self
                 .manager
                 .answer(
@@ -8596,16 +8674,25 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                         notes,
                         arguments_hash,
                         preview_hash,
-                        by: Some(format!(
-                            "operator (through {})",
-                            self.store()
+                        by: Some({
+                            let through = self
+                                .store()
                                 .get_node(sender)
                                 .ok()
                                 .flatten()
                                 .map(|n| n.name)
                                 .filter(|n| !n.is_empty())
-                                .unwrap_or_else(|| format!("node {sender}"))
-                        )),
+                                .unwrap_or_else(|| format!("node {sender}"));
+                            match &admitted {
+                                // Which of the peer's operator sessions
+                                // confirmed it with a passkey.
+                                Some(admitted) => {
+                                    format!("operator (through {through}, {})", admitted.actor())
+                                }
+                                None => format!("operator (through {through})"),
+                            }
+                        }),
+                        statement: None,
                     },
                 )
                 .await

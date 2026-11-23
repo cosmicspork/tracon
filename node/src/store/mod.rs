@@ -1980,6 +1980,20 @@ impl Store {
     /// An id already held for another node is never rewritten, and nor is
     /// the id of one of this node's own approvals, which an answer looks up
     /// first: either is `false`.
+    /// The channel a permission request is kept by: a peer's card, the one
+    /// it was listed on.
+    pub fn permission_channel(&self, id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .query_row(
+                "SELECT channel FROM permission_request WHERE id = ?1",
+                [id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
     pub fn upsert_permission_mirror(&self, p: &PermissionRow, channel: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let own: bool = conn.query_row(

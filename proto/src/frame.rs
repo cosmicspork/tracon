@@ -407,6 +407,17 @@ pub enum Command {
         /// Additive like `arguments_hash`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         preview_hash: Option<String>,
+        /// The sender's [`AdminStatement`] for an answer the owner counts as
+        /// an admin action (allowing a setup proposal, a Dockerfile trial, a
+        /// plugin install or update, a host for the repository's egress, or a
+        /// fetch pattern for the channel's allow list):
+        /// its operator confirmed exactly this answer on exactly this owner.
+        /// The owner requires it, and the sender in its `[mesh]
+        /// admin_peers`, for those answers alone. Additive: an older owner
+        /// ignores it and refuses such an answer as before. Boxed, as most
+        /// answers carry none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        statement: Option<Box<AdminStatement>>,
     },
     /// Answer an operator question the receiver holds: a choice it offered,
     /// the operator's own words, or both. The owner answers it as a local
@@ -989,6 +1000,7 @@ mod tests {
             notes: None,
             arguments_hash: None,
             preview_hash: None,
+            statement: None,
         };
         assert_eq!(serde_json::to_value(&plain).unwrap(), old);
         let said = Command::Answer {
@@ -999,6 +1011,7 @@ mod tests {
             notes: Some("shorter".into()),
             arguments_hash: None,
             preview_hash: None,
+            statement: None,
         };
         assert_eq!(serde_json::to_value(&said).unwrap()["notes"], "shorter");
     }

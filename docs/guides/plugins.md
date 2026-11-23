@@ -49,7 +49,10 @@ the channel you name with `--channel` (or `[session] default_channel`). The card
 the tools, the credentials (marking those lent only to a call from an approved card),
 the UI, the egress it declares (shown, not enforced) and the formats, and pins the
 archive's sha256. Nothing is installed until you allow it. Allowing it is an admin
-action, so from off the node's machine a passkey confirms it. Before the build becomes
+action, so from off the node's machine a passkey confirms it. Another node can allow it
+too when the plugin's node names that node in its `[mesh] admin_peers`: the card shows
+on every member of its channel, and allowing it there asks for that node's passkey,
+with a prompt naming the plugin's node and the start of its id. Before the build becomes
 the active one, the node checks it again on disk. `tracon plugin add ./dist/<archive>.tar.gz` stages an archive
 you hold, for testing the shipped shape on a scratch node. It is pinned by its own
 digest and held to no owner, since you are its source. A plugin that declares a format

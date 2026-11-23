@@ -40,9 +40,19 @@ pub async fn harness_with(cfg: Config) -> Harness {
 /// As `harness_with`, on a backend of the test's own: one that can build
 /// images, say, which the local backend cannot.
 pub async fn harness_on(cfg: Config, backend: Arc<dyn tracon::boundary::Backend>) -> Harness {
+    harness_as(cfg, backend, "n1").await
+}
+
+/// As `harness_on`, for a node whose id is `node_id`: a real one, where a
+/// test signs statements that name it.
+pub async fn harness_as(
+    cfg: Config,
+    backend: Arc<dyn tracon::boundary::Backend>,
+    node_id: &str,
+) -> Harness {
     super::state::isolate();
     let store = Arc::new(Store::open_in_memory().unwrap());
-    store.ensure_peer_node("n1").unwrap();
+    store.ensure_peer_node(node_id).unwrap();
     let cfg = Arc::new(cfg);
     let tools = Arc::new(Tools {
         broker: Broker::default().shared(),
@@ -57,7 +67,7 @@ pub async fn harness_on(cfg: Config, backend: Arc<dyn tracon::boundary::Backend>
         store.clone(),
         bus.clone(),
         cfg.clone(),
-        "n1".into(),
+        node_id.into(),
         tools.clone(),
         Default::default(),
         backend,
@@ -73,7 +83,7 @@ pub async fn harness_on(cfg: Config, backend: Arc<dyn tracon::boundary::Backend>
             tx: Arc::new(tokio::sync::Mutex::new(None)),
             tokens: Arc::new(tokio::sync::Mutex::new(0)),
         }),
-        node_id: "n1".into(),
+        node_id: node_id.into(),
         tools: tools.clone(),
         mesh: None,
         auth: Arc::new(tracon::http::auth::AuthState::new("127.0.0.1".into(), None)),
