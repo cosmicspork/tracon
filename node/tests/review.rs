@@ -3199,7 +3199,9 @@ async fn check_run_is_offered_only_where_the_node_runs_containers_for_external_h
     let refused = check_run(&off, json!({ "command": "true" }))
         .await
         .unwrap_err();
-    assert!(refused.contains("[external] run_containers"), "{refused}");
+    // Not offered, so it is refused before policy, as any tool the channel
+    // does not offer is.
+    assert!(refused.contains("no tool named check_run"), "{refused}");
     drop(off);
     let on = fixture_with(&format!("{}-on", test_name!()), WITH_GH, |c| {
         c.external.repo_roots = vec![Config::state_dir()];
