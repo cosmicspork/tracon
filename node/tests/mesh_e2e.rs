@@ -1969,6 +1969,7 @@ async fn a_peer_outside_a_channel_cannot_drive_what_is_in_it() {
             notes: None,
             arguments_hash: None,
             preview_hash: None,
+            statement: None,
         },
         // An admin peer, confirmed: still held to the channels it binds.
         confirmed(

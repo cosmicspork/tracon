@@ -182,7 +182,13 @@ a session-less card is grouped by its `intent.channel`. A version 3 node fails t
 deserialize the null, so the two cannot share a mesh.
 A peer mirrors a session-less card by the channel it was listed on and sends an
 `answer` for it to the card's node, which decides and runs it for a co-member of the
-channel; an answer that is an admin action there is refused, as for any peer. A
+channel. An `answer` that is an admin action on the card's node (allowing a repository
+setup proposal, a Dockerfile trial or a plugin install or update, or saving an egress
+host for the repository or a fetch pattern to the channel's allow list) also needs the sender named in that node's `[mesh]
+admin_peers` and an optional `statement` field the sender's operator confirmed for
+exactly this answer (below); without both it is refused. The field is additive and the
+contract version is unmoved: an older owner ignores it and refuses such an answer as
+before. A
 `snapshot`'s `waiting` lists every card the sender's `queue` would, approvals and
 session-less cards among them, so a peer expires only what the sender no longer holds.
 A listed card whose id is one of the receiver's own approvals is refused as impersonation.

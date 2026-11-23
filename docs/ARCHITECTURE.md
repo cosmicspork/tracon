@@ -1898,7 +1898,12 @@ Invariants on top of the wire:
   relays a command on to a third node under its own identity. A provider sign-in,
   a pasted code and a sign-out are admin commands: the owner runs one only for a
   peer its own `[mesh] admin_peers` names, carrying an admin statement its
-  operator confirmed for exactly that command on the owner (below). The pasted
+  operator confirmed for exactly that command on the owner (below). So is an
+  answer that is an admin action on the owner (allowing a repository setup
+  proposal, a Dockerfile trial or a plugin install or update, or saving an egress
+  host for the repository or a fetch pattern to the channel's allow list), decided by the owner's own record of the approval and
+  checked once the channel is, so a refusal for the channel leaves the statement
+  unspent. The pasted
   code that finishes a sign-in the sender started with a confirmed connect rides on
   that connect's statement (only that sign-in, from that sender, while it waits and
   for at most 15 minutes); a code for any other sign-in needs its own. Then the
@@ -1910,7 +1915,8 @@ Invariants on top of the wire:
   to the sender with its reason, logged, and shown as the mesh's last refusal.
 - **A peer administers a node only with the operator's confirmation, made where
   the operator is.** An admin command from a peer (a provider sign-in, a read or
-  edit of `node.toml`) runs only if the owner's `[mesh] admin_peers` names the
+  edit of `node.toml`, a reviewer start, an answer that allows one of the owner's
+  admin cards) runs only if the owner's `[mesh] admin_peers` names the
   sender. Every one but a read also carries an admin statement
   (`spec/README.md`): the sending node's operator confirmed exactly that command on
   exactly that owner with the sender's passkey (at the sender's own machine, by
@@ -1919,7 +1925,8 @@ Invariants on top of the wire:
   sender's node id, that the statement names it and the command it is about to run,
   that it is no older than two minutes, and spends it once. The owner never sees the
   passkey and never trusts the sender's description of the command: the statement
-  binds the command's own bytes. No peer changes who may reach or administer a node
+  binds the command's own bytes (for an answer, the card, the option and any edited
+  arguments). No peer changes who may reach or administer a node
   or where it sends its credentials (`[auth]`, `[mesh]` with `admin_peers`, a
   provider's upstream, credential and sign-in, the embedding endpoint and key).
 - **A key handoff is taken only from a member.** A peer's `key_handoff` lands only
@@ -2475,11 +2482,11 @@ Three surfaces, three answers, and the differences are the point.
   peers and accepting one into `[[repo]]`, and passkeys themselves. So are
   the approval answers that change the node rather than let one call run:
   allowing a repository setup proposal (it writes the `[[repo]]` entry),
-  allowing a Dockerfile trial (a networked build outside the boundary), and
-  allowing an egress host for the repository. A peer cannot answer one of
-  those over the mesh; the gate is per node. Most peer commands are authorised
-  by channel membership; the admin ones (a peer's provider sign-ins and its
-  `node.toml`) need the peer to name the sender in its `[mesh] admin_peers`
+  allowing a Dockerfile trial (a networked build outside the boundary),
+  allowing an egress host for the repository, saving a fetch pattern to the
+  channel's allow list, and allowing a plugin's install or update card. Most peer commands are authorised by channel membership; the
+  admin ones (a peer's provider sign-ins, its `node.toml`, and answers that
+  allow its admin cards) need the peer to name the sender in its `[mesh] admin_peers`
   and a statement the sender's operator confirmed with the sender's passkey
   (see [Mesh frames](#mesh-frames)). Each handler takes an `AdminAction` extractor, which
   reads the body once and hashes the request it is about to run:

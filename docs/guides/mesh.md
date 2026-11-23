@@ -41,7 +41,14 @@ admin_peers`. Then, from the administering node, **Settings → Connections** si
 that node's providers in and out, and **Settings → Configuration → A peer's node.toml** reads
 and edits its configuration. Each change is confirmed with your passkey on the node
 you are using, with a prompt naming the peer and the start of its id, and the peer
-checks it again before it runs it. A peer may change any key a remote edit may, except
+checks it again before it runs it. The same goes for the peer's admin cards in your
+queue: allowing its repository setup proposal, Dockerfile trial or plugin install or
+update card, or saving an egress host for its repository or a fetch pattern to a
+channel's allow list, asks for your passkey with a
+prompt naming the peer and what the answer does there (and which arguments you edited),
+and the peer takes it only from a node its `admin_peers` names. Without that, the peer
+refuses the answer and says why; refusing a card, or any other answer, needs only that
+both nodes are members of the card's channel. A peer may change any key a remote edit may, except
 who may reach or administer the node and where its credentials go: all of `[auth]` and
 `[mesh]` (`admin_peers` and the hub among them), a provider's `upstream`, `credential`
 and `login`, and `[embed] base_url` and `api_key_file`. Those, like the host-only keys,

@@ -392,6 +392,7 @@ impl Node {
                     arguments_hash: None,
                     preview_hash: None,
                     by: Some("operator (test)".into()),
+                    statement: None,
                 },
             )
             .await
@@ -439,6 +440,7 @@ async fn placement_asks_overflows_and_keeps_client_work_home() {
                 arguments_hash: None,
                 preview_hash: None,
                 by: None,
+                statement: None,
             },
         )
         .await;
