@@ -1868,6 +1868,28 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE publication ADD COLUMN step_started_ms INTEGER;
     ALTER TABLE publication ADD COLUMN steps_json TEXT;
     "#,
+    // 88: repository images pushed to a registry, each as a node's signed
+    // statement (`proto::image::ImageStatement`) that it built `image` from
+    // `recipe_hash` of `repo` for `platform`. This node's own (`channel` is
+    // empty) are sent to its channels; a co-member's are as it sent them on
+    // `channel`, and taken in place of a build only while it still shares
+    // that channel. `statement_json` is the statement whole, verified again
+    // whenever it is used. Node-local and never replicated.
+    r#"
+    CREATE TABLE repo_image_statement (
+        signer         TEXT NOT NULL,
+        channel        TEXT NOT NULL,
+        repo           TEXT NOT NULL,
+        recipe_hash    TEXT NOT NULL,
+        platform       TEXT NOT NULL,
+        statement_json TEXT NOT NULL,
+        signed_ms      INTEGER NOT NULL,
+        received_ms    INTEGER NOT NULL,
+        PRIMARY KEY (signer, channel, repo, recipe_hash, platform)
+    );
+    CREATE INDEX repo_image_statement_recipe
+        ON repo_image_statement(repo, recipe_hash, platform);
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

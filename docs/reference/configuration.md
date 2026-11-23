@@ -359,6 +359,13 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
                                     # offer first), lists each such template in its hello, names it
                                     # <prefix>-tp-<key> (its own sessions in that image start from it
                                     # too) and keeps it 14 days past the last peer's request
+                                    # On a Podman node on a mesh, a registry under
+                                    # registry.digitalocean.com also takes each repository image it
+                                    # builds (<prefix>-repo-images:<recipe>-<arch>), whose digest it
+                                    # signs for its channels' other members: a Podman co-member with a
+                                    # DigitalOcean credential pulls that digest for the same recipe
+                                    # instead of building it, and builds it itself, saying why in the
+                                    # build log, without access or on any mismatch
 # templates = "own"                 # own (image or registry) | peer: a node that cannot build amd64,
                                     # which is all the runtime runs (an Apple node), takes ready
                                     # templates a peer with registry lists for its keys, and asks it

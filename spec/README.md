@@ -95,7 +95,7 @@ Payload kinds (JSON, discriminated on `kind`): `hello`, `snapshot`, `session`,
 `event`, `queue`, `reviews`, `questions`, `node`, `command`, `ack`, `events_request`,
 `events_batch`, `key_handoff` (direct only), `policy_bundle` (direct only),
 `credential_handoff` (direct only; broker rows for the recipient), `changes`,
-`changes_request` (direct only), `changes_batch` (direct only).
+`changes_request` (direct only), `changes_batch` (direct only), `repo_images`.
 
 A `changes` payload carries record-level changes from one site:
 `{ table, op: upsert|delete, id, site, site_seq, hlc_ms, hlc_ctr, row }`. `site` must
@@ -147,6 +147,17 @@ node that asked it, which runs it only for a co-member of the question's channel
 releases the session waiting on it. All three are additive and the contract version is
 unmoved: an older node cannot read a `questions` payload and drops it, ignores the
 snapshot field, and answers the command that it runs an older build.
+A `repo_images` payload `{ images }` on a member channel (never `@mesh`) lists image
+statements the sender signed for repository images it built and pushed to a registry:
+`{ repo, recipe, platform, image, signer, signed_ms, sig }`, `repo` a forge identity,
+`recipe` the 64-hex recipe hash the node keys its build on, `platform` `linux/<arch>`,
+`image` `name@sha256:<64 hex>`, `signer` the sender's node id, and `sig` Ed25519 by
+`signer` over `"tracon/v0/image-statement" ‖ len‖repo ‖ len‖recipe ‖ len‖platform ‖
+len‖image ‖ len‖signer ‖ signed_ms(i64 BE)` (`spec/vectors/image-statement.json`). A
+receiver drops the payload if any statement is not the sender's own or does not verify,
+and takes an image only by the digest signed, from a signer that still shares the
+channel. A `snapshot` cadence repeats the sender's statements. The kind is additive and
+the contract version is unmoved: an older node cannot read it and drops it.
 A peer administers another node only through `[mesh] admin_peers` on the owner and
 an admin statement (below). `provider_connect`, `provider_code` and
 `provider_disconnect` gain an optional `statement`; an owner on this build refuses one

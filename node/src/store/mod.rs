@@ -45,6 +45,7 @@ pub mod publication;
 pub mod queued_prompt;
 pub mod recipe_offers;
 pub mod repo_image;
+pub mod repo_image_statements;
 pub mod reports;
 pub mod review_draft;
 pub mod review_session;
