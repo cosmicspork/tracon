@@ -259,6 +259,78 @@ pub struct Supervisor {
     compacting: bool,
     /// What this session's metric series are labelled with; see `with_series`.
     series: crate::telemetry::SessionSeries,
+    /// Where its context is saved before a compaction or a restart; see
+    /// `with_saver`.
+    saver: Option<crate::session::saved::Saver>,
+    /// The compaction now running was saved already, so the harness's own
+    /// signals for it do not save it again.
+    compaction_saved: bool,
+}
+
+/// Persist an event and publish it on the stream, as a supervisor records
+/// one; for work it runs beside its own loop too.
+#[allow(clippy::too_many_arguments)]
+fn record_event(
+    store: &Store,
+    bus: &Bus,
+    node_id: &str,
+    session_id: &str,
+    mono_ms: i64,
+    kind: &str,
+    ref_id: Option<String>,
+    payload: serde_json::Value,
+) {
+    let e = NewEvent {
+        session_id: session_id.to_string(),
+        work_item_id: None,
+        kind: kind.to_string(),
+        ref_id,
+        payload,
+        at_ms: now_ms(),
+        mono_ms,
+    };
+    match store.append_event(&e) {
+        Ok(seq) => bus.publish(Frame::Event {
+            seq,
+            node_id: node_id.to_string(),
+            session_id: e.session_id,
+            kind: e.kind,
+            ref_id: e.ref_id,
+            payload: e.payload,
+            at_ms: e.at_ms,
+        }),
+        Err(err) => tracing::error!(error = %err, "failed to persist event"),
+    }
+}
+
+/// Take a save and record it as `context_saved`, or record why it could
+/// not be taken: a compaction is never held up by its save.
+async fn save_and_record(
+    saver: crate::session::saved::Saver,
+    store: Arc<Store>,
+    bus: Bus,
+    node_id: String,
+    session_id: String,
+    started: Instant,
+    moment: crate::session::saved::Moment,
+) {
+    let payload = match saver.save(&store, &moment).await {
+        Ok(manifest) => crate::session::saved::event_payload(&manifest),
+        Err(error) => {
+            tracing::warn!(session = %session_id, %error, "could not save the context");
+            json!({ "before": moment.before, "trigger": moment.trigger, "error": error })
+        }
+    };
+    record_event(
+        &store,
+        &bus,
+        &node_id,
+        &session_id,
+        started.elapsed().as_millis() as i64,
+        ek::CONTEXT_SAVED,
+        None,
+        payload,
+    );
 }
 
 /// A tool call as a harness that died mid-turn left it.
@@ -364,6 +436,8 @@ impl Supervisor {
             last_call: None,
             next_prompt_origin: None,
             series: Default::default(),
+            saver: None,
+            compaction_saved: false,
             self_tx,
             runner,
             container,
@@ -386,6 +460,13 @@ impl Supervisor {
     /// (`telemetry`).
     pub fn with_series(mut self, series: crate::telemetry::SessionSeries) -> Self {
         self.series = series;
+        self
+    }
+
+    /// Save the session's conversation and scratchpad before each compaction
+    /// and each restart of its harness (`session::saved`).
+    pub fn with_saver(mut self, saver: crate::session::saved::Saver) -> Self {
+        self.saver = Some(saver);
         self
     }
 
@@ -431,27 +512,73 @@ impl Supervisor {
     /// Persist an event and publish it on the stream. The stored `seq` is the
     /// SSE id, so a reconnecting client can replay from where it left off.
     fn record(&self, kind: &str, ref_id: Option<String>, payload: serde_json::Value) {
-        let e = NewEvent {
-            session_id: self.session_id.clone(),
-            work_item_id: None,
-            kind: kind.to_string(),
+        record_event(
+            &self.store,
+            &self.bus,
+            &self.node_id,
+            &self.session_id,
+            self.mono_ms(),
+            kind,
             ref_id,
             payload,
-            at_ms: now_ms(),
-            mono_ms: self.mono_ms(),
-        };
-        match self.store.append_event(&e) {
-            Ok(seq) => self.bus.publish(Frame::Event {
-                seq,
-                node_id: self.node_id.clone(),
-                session_id: e.session_id,
-                kind: e.kind,
-                ref_id: e.ref_id,
-                payload: e.payload,
-                at_ms: e.at_ms,
-            }),
-            Err(err) => tracing::error!(error = %err, "failed to persist event"),
+        );
+    }
+
+    /// What a save taken now is of.
+    fn save_moment(
+        &self,
+        before: &'static str,
+        trigger: Option<String>,
+    ) -> crate::session::saved::Moment {
+        crate::session::saved::Moment {
+            before,
+            trigger,
+            harness_session_id: self.handle.harness_session_id().to_string(),
+            container: self.container.clone(),
         }
+    }
+
+    /// Save the conversation and the scratchpad before they are compacted or
+    /// the context rebuilt (`session::saved`), and say so in the log. Waits
+    /// for the save: for a compaction the node is about to ask for and a
+    /// harness about to be started again, which nothing is running under.
+    async fn save_context(&mut self, before: &'static str, trigger: Option<String>) {
+        let Some(saver) = self.saver.clone() else {
+            return;
+        };
+        self.flush_chunks();
+        let moment = self.save_moment(before, trigger);
+        save_and_record(
+            saver,
+            self.store.clone(),
+            self.bus.clone(),
+            self.node_id.clone(),
+            self.session_id.clone(),
+            self.started,
+            moment,
+        )
+        .await;
+    }
+
+    /// [`Self::save_context`] without waiting, for a compaction the harness
+    /// began on its own mid-turn: the events it sends meanwhile are still
+    /// read. Its record is appended to, not rewritten, so the save still
+    /// holds everything before the compaction.
+    fn save_context_meanwhile(&mut self, trigger: Option<String>) {
+        let Some(saver) = self.saver.clone() else {
+            return;
+        };
+        self.flush_chunks();
+        let moment = self.save_moment(crate::session::saved::BEFORE_COMPACTION, trigger);
+        tokio::spawn(save_and_record(
+            saver,
+            self.store.clone(),
+            self.bus.clone(),
+            self.node_id.clone(),
+            self.session_id.clone(),
+            self.started,
+            moment,
+        ));
     }
 
     /// Move the session, unless it has already ended. An ending is final:
@@ -1411,7 +1538,18 @@ impl Supervisor {
                             json!({ "trigger": v["trigger"] }),
                         );
                     }
+                    if !self.compaction_saved {
+                        self.compaction_saved = true;
+                        self.save_context_meanwhile(v["trigger"].as_str().map(str::to_string));
+                    }
                 } else if v["sessionUpdate"] == "context_compacted" {
+                    // A compaction that said nothing as it began is saved
+                    // as it ends: its harness's record still holds what it
+                    // replaced.
+                    if !self.compaction_saved {
+                        self.save_context_meanwhile(v["trigger"].as_str().map(str::to_string));
+                    }
+                    self.compaction_saved = false;
                     self.compacting = false;
                     self.record(
                         ek::CONTEXT_COMPACTED,
@@ -1999,6 +2137,13 @@ impl Supervisor {
         self.compacting = matches!(work, Work::Compact);
         if self.compacting {
             self.record(ek::CONTEXT_COMPACTING, None, json!({ "trigger": "manual" }));
+            // Before the harness is asked: what it compacts is saved first.
+            self.save_context(
+                crate::session::saved::BEFORE_COMPACTION,
+                Some("manual".into()),
+            )
+            .await;
+            self.compaction_saved = true;
         }
         self.publish_session();
 
@@ -2136,6 +2281,7 @@ impl Supervisor {
         self.last_tool_call = None;
         self.repeated_tool_calls = 0;
         self.compacting = false;
+        self.compaction_saved = false;
         self.record(kind, None, payload);
         // After the turn it is about, not before: a note on what a turn spent
         // reads as nonsense above the line saying the turn ended.
@@ -2214,6 +2360,7 @@ impl Supervisor {
             return;
         };
         self.compacting = false;
+        self.compaction_saved = false;
         let cost = self.turn_cost(Some(&session));
         let usage = crate::metrics::settle_interrupted_turn(&self.store, &self.session_id, cost);
         let _ = self.store.update_session(
@@ -2325,6 +2472,10 @@ impl Supervisor {
         }
         let resume = self.handle.resume_point()?;
         self.reject_open_permissions_because("denied: the harness restarted")
+            .await;
+        // The new process rebuilds its context from the harness's record:
+        // what the dead one held is saved first, as before a compaction.
+        self.save_context(crate::session::saved::BEFORE_RESTART, None)
             .await;
         // The dead process's container may still be on its way out; the new
         // one takes its name.

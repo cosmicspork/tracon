@@ -2280,6 +2280,62 @@ pub async fn ask_session(
     Ok((StatusCode::ACCEPTED, Json(json!(row))))
 }
 
+/// `GET /api/sessions/{id}/saved`: what the session saved before each
+/// compaction and restart of its harness, oldest first.
+pub async fn saved_contexts(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let saves = s.manager.saved_contexts(&id).await?;
+    Ok(Json(json!({ "saves": saves })))
+}
+
+/// `GET /api/sessions/{id}/saved/{index}`: one save, its manifest, the
+/// full-text conversation and the files it holds.
+pub async fn saved_context(
+    State(s): State<AppState>,
+    Path((id, index)): Path<(String, u32)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let (saved, _) = s.manager.saved_context(&id, index, false).await?;
+    Ok(Json(json!(saved)))
+}
+
+/// `GET /api/sessions/{id}/saved/{index}/export`: one save as a single JSON
+/// document with every file's contents, downloaded, readable with nothing
+/// running.
+pub async fn export_saved_context(
+    State(s): State<AppState>,
+    Path((id, index)): Path<(String, u32)>,
+) -> Response {
+    let (saved, contents) = match s.manager.saved_context(&id, index, true).await {
+        Ok(found) => found,
+        Err(error) => return ApiError::from(error).into_response(),
+    };
+    let body = crate::session::saved::export(&id, &saved, contents);
+    let bytes = match serde_json::to_vec_pretty(&body) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+        }
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .header(
+            axum::http::header::CONTENT_DISPOSITION,
+            format!(
+                "attachment; filename=\"saved-context-{}-{}.json\"",
+                safe_download_name(&id),
+                saved.manifest.name
+            ),
+        )
+        .header("x-content-type-options", "nosniff")
+        .body(axum::body::Body::from(bytes))
+        .unwrap_or_else(|error| {
+            ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+        })
+}
+
 /// Compact a session's conversation with its harness's own compaction.
 pub async fn compact(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<StatusCode> {
     s.manager.compact(&id).await?;

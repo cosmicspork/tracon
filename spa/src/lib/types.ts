@@ -476,6 +476,30 @@ export interface Session {
   request_id?: string | null
 }
 
+/** What one saved context is, as its `save.json` says. */
+export interface SavedContextManifest {
+  index: number
+  name: string
+  /** `compaction` or `restart`. */
+  before: string
+  trigger?: string
+  harness: string
+  harness_session_id: string
+  created_ms: number
+  through_seq: number
+  conversation_bytes: number
+  synced: boolean
+  transcripts: { path: string; bytes: number }[]
+  scratchpad: { path: string; bytes: number }[]
+}
+
+/** A saved context read back: the conversation, and the files it holds. */
+export interface SavedContext {
+  manifest: SavedContextManifest
+  conversation: string
+  files: { path: string; bytes: number }[]
+}
+
 export interface Event {
   seq: number
   node_id: string

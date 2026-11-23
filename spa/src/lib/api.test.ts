@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 
-import { answerBody, ApiError, call, failureText } from './api'
+import { answerBody, api, ApiError, call, failureText, savedContextExportHref } from './api'
 
 const cloudflare504 = `<!DOCTYPE html>
 <!--[if lt IE 7]> <html class="no-js ie6 oldie" lang="en-US"> <![endif]-->
@@ -57,4 +57,26 @@ test('an answer names the arguments and the preview it was read with', () => {
   })
   // Absent, it is left out of the JSON the node reads.
   expect(JSON.parse(JSON.stringify(answerBody('reject_once', undefined, {})))).toEqual({ option_id: 'reject_once' })
+})
+
+describe('saved contexts', () => {
+  const realFetch = globalThis.fetch
+  afterEach(() => {
+    globalThis.fetch = realFetch
+  })
+
+  test('one is read from the session, and exported from its own address', async () => {
+    let asked = ''
+    globalThis.fetch = (async (url: string) => {
+      asked = url
+      return new Response(JSON.stringify({ manifest: { index: 2 }, conversation: '# Conversation', files: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }) as unknown as typeof fetch
+    const saved = await api.savedContext('s1', 2)
+    expect(asked).toBe('/api/sessions/s1/saved/2')
+    expect(saved.conversation).toBe('# Conversation')
+    expect(savedContextExportHref('s 1', 2)).toBe('/api/sessions/s%201/saved/2/export')
+  })
 })

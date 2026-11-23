@@ -220,6 +220,23 @@ impl HarnessAdapter for NativeAdapter {
         true
     }
 
+    /// The agent's journal of the session, which records a compaction as a
+    /// line of its own after everything it replaced: `sessions/<id>.jsonl`
+    /// beside its events file, in the session's own scratch.
+    fn transcripts(&self, scratch: &std::path::Path, harness_session_id: &str) -> Vec<String> {
+        if !crate::session::saved::plain_id(harness_session_id) {
+            return Vec::new();
+        }
+        let journal = format!(
+            "harness/{}/sessions/{harness_session_id}.jsonl",
+            Self::RUN_DIR
+        );
+        match std::fs::symlink_metadata(scratch.join(&journal)) {
+            Ok(meta) if meta.is_file() => vec![journal],
+            _ => Vec::new(),
+        }
+    }
+
     /// The repository instruction files it reads into its prompt are the
     /// repository's to have; nothing in a workspace configures this harness.
     fn refused_workspace_entries(&self) -> &'static [&'static str] {
@@ -826,6 +843,23 @@ impl HarnessHandle for NativeHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a saved context copies of the agent's record: the session's
+    /// journal, in its own scratch.
+    #[test]
+    fn the_transcript_is_the_sessions_journal() {
+        let scratch = tempfile::tempdir().unwrap();
+        let sessions = scratch.path().join("harness/run/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(sessions.join("j1.jsonl"), "{}").unwrap();
+        let adapter = NativeAdapter::new("0");
+        assert_eq!(
+            adapter.transcripts(scratch.path(), "j1"),
+            ["harness/run/sessions/j1.jsonl"]
+        );
+        assert!(adapter.transcripts(scratch.path(), "j2").is_empty());
+        assert!(adapter.transcripts(scratch.path(), "../j1").is_empty());
+    }
 
     #[test]
     fn policy_reads_the_same_targets_as_for_the_other_harnesses() {

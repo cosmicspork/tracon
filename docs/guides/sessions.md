@@ -203,6 +203,41 @@ discretionary: it is included only as far as the session's context budget allows
 Everything left out is named at the end of the orientation with the call that
 fetches it, so a session can ask for what it did not get.
 
+## Before a compaction
+
+A compaction replaces the conversation the model works from with a summary, and a
+harness the node starts again after its process died rebuilds its context from its
+record. Before either, the node saves what the summary is of, so it still exists:
+
+- **the full-text conversation**: the session's log rendered as Markdown
+  (`conversation.md`: the orientation, every prompt, the agent's messages and
+  thinking, each tool call with its input and result, earlier summaries), and the
+  harness's own record of it (`transcript/`: Claude Code's `projects/<dir>/<id>.jsonl`
+  and its subagents', `tracon-agent`'s journal), where tool output the log cut short
+  is whole;
+- **the scratchpad**: every session is given a scratchpad directory beside its harness
+  state (`~/scratchpad` in the sandbox; the orientation names it) for notes, plans and
+  findings it wants to outlast its context. It is not part of the worktree or the
+  change.
+
+A compaction you ask for (the session's **Compact**, `POST /api/sessions/{id}/compact`)
+is saved before its turn is dispatched; one the harness starts itself is saved as it
+says it has begun (Claude Code's `compacting` status, `tracon-agent`'s
+`context_compacting`), or as it ends when it said nothing first. Both harnesses append
+a compaction to their record rather than rewriting it, and the node takes the running
+sandbox's trees back first, so a save holds everything before it. Each save is a
+`context_saved` line in the log.
+
+The saves are kept in the session's scratch volume under `saved/<index>-<before>/`, the
+package its harness state is backed up in, which no sandbox mounts: they are there
+again when the session is reopened or its harness restarted, and they go only when its
+runtime storage is reclaimed (**Settings → Data**, `tracon gc`), with its harness state. Read one back from
+the session: open its `context_saved` line in the log to read the conversation, or
+**Export** it as one JSON document holding every file
+(`GET /api/sessions/{id}/saved`, `…/saved/{index}`, `…/saved/{index}/export`;
+`tracon session saved <id> [<index>] [--export <file>]`). An export is plain JSON,
+readable with nothing running; like any transcript it can carry what the session saw.
+
 ## Review before publish
 
 An agent has no forge token and never runs `gh` or `glab`. To publish it commits,

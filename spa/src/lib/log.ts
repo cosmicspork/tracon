@@ -451,6 +451,20 @@ function forgePath(url: string): string {
 /// The line for every event kind Log.svelte gives no markup of its own, or
 /// null for a kind this does not know. Only what the node recorded: a field
 /// it left out is left out of the line, never filled with a guess.
+/** What a `context_saved` says: what was saved, before what, and how much
+ *  of it there is; or that the save failed, which leaves nothing to read. */
+export function savedLine(p: Record<string, unknown>): [EventLine['tone'], string[]] {
+  const before = str(p.before) === 'restart' ? 'before the harness restarted' : 'before compacting'
+  if (str(p.error)) return ['crit', [`could not save the conversation ${before}`, str(p.error)]]
+  const transcripts = num(p.transcript_files) ?? 0
+  const pad = num(p.scratchpad_files) ?? 0
+  const what = [
+    transcripts > 0 ? `the harness's transcript` : '',
+    pad > 0 ? `${pad} scratchpad ${pad === 1 ? 'file' : 'files'}` : 'an empty scratchpad',
+  ].filter(Boolean)
+  return ['sys', [`full conversation saved ${before}`, `with ${what.join(' and ')}`]]
+}
+
 export function eventLine(e: Event): EventLine | null {
   const p = e.payload
   switch (e.kind) {
@@ -522,6 +536,8 @@ export function eventLine(e: Event): EventLine | null {
             : 'context compacted'
       return line('sys', [why, size, what.join(', ')])
     }
+    case 'context_saved':
+      return line(...savedLine(p))
     case 'budget_changed': {
       const from = num(p.from) ?? 0
       const to = num(p.to) ?? 0

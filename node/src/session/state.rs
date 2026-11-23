@@ -188,6 +188,13 @@ pub mod event_kind {
     /// not say why). The transcript shows it in progress until the
     /// `context_compacted` it ends with, or the turn's end.
     pub const CONTEXT_COMPACTING: &str = "context_compacting";
+    /// The session's full-text conversation and its scratchpad were saved
+    /// into its harness-state package before a compaction or a restart of
+    /// its harness (`before`: `compaction` or `restart`; `trigger`, `index`,
+    /// `name`, `through_seq`, `conversation_bytes`, `transcript_files`,
+    /// `scratchpad_files`, `synced`, or `error` when it could not be).
+    /// Read back with `GET /api/sessions/{id}/saved/{index}`.
+    pub const CONTEXT_SAVED: &str = "context_saved";
     /// The operator asked a session that had ended or was suspended, and its
     /// harness was started again in its own conversation (`outcome`:
     /// `resumed`, or `failed` with the `reason`, and `gone` when the

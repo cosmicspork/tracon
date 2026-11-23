@@ -644,6 +644,16 @@ pub trait HarnessAdapter: Send + Sync {
         false
     }
 
+    /// Where, in a node's copy of the session's scratch volume (`scratch`,
+    /// its root), the harness keeps its own full record of the conversation
+    /// `harness_session_id`: the files a saved context
+    /// (`session::saved`) copies before a compaction replaces the
+    /// conversation with a summary. Relative to `scratch`; only those that
+    /// exist. Empty for a harness that keeps no such record.
+    fn transcripts(&self, _scratch: &std::path::Path, _harness_session_id: &str) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Whether the record a relaunch with `spec` would resume
     /// `harness_session_id` from is still there. Asked before the launch, so
     /// a record that is gone refuses the reopening rather than a first turn.

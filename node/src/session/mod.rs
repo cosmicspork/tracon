@@ -6,6 +6,7 @@ pub mod exhaustion;
 pub mod external;
 pub mod materialize;
 pub mod placing;
+pub mod saved;
 pub mod sign_in;
 pub mod state;
 pub mod supervisor;
@@ -1519,6 +1520,37 @@ impl Manager {
         wait.await
             .map_err(|_| SessionError::Rejected("session stopped".into()))?
             .map_err(SessionError::Rejected)
+    }
+
+    /// The contexts this session saved before its compactions and restarts
+    /// (`saved`), oldest first. Read from this node's copy of its harness
+    /// state; a session that runs on another node keeps its saves there.
+    pub async fn saved_contexts(&self, id: &str) -> Result<Vec<saved::Manifest>, SessionError> {
+        let row = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
+        if row.node_id != self.node_id {
+            return Err(SessionError::Remote(row.node_id, row.channel));
+        }
+        saved::list(self.backend.as_ref(), id)
+            .await
+            .map_err(SessionError::Rejected)
+    }
+
+    /// One saved context, with its files' contents when `with_contents`
+    /// (an export). `NotFound` when the session has no save of that index.
+    pub async fn saved_context(
+        &self,
+        id: &str,
+        index: u32,
+        with_contents: bool,
+    ) -> Result<(saved::Saved, Vec<serde_json::Value>), SessionError> {
+        let row = self.store.get_session(id)?.ok_or(SessionError::NotFound)?;
+        if row.node_id != self.node_id {
+            return Err(SessionError::Remote(row.node_id, row.channel));
+        }
+        saved::read(self.backend.as_ref(), id, index, with_contents)
+            .await
+            .map_err(SessionError::Rejected)?
+            .ok_or(SessionError::NotFound)
     }
 
     /// End the suspended session `old` as continued by `new`. One that ended
@@ -3630,6 +3662,13 @@ impl Manager {
         // constraints, the channel's policy and what is known, and then
         // whatever conventions fit under the cap. Recorded as an event so the
         // transcript shows what the agent was told — and what it was not.
+        // On DigitalOcean the harness's home is the stock base's, whatever
+        // this node's own runtime uses: its state is placed where it looks.
+        let harness_home = match placed.is_elsewhere() {
+            true => crate::sandbox_images::HOME.to_string(),
+            false => self.backend.harness_home(),
+        };
+        let scratchpad = saved::scratchpad_target(&harness_home);
         let (orientation, missing) = {
             let session_row = self.store.get_session(id)?;
             let project = session_row
@@ -3729,6 +3768,7 @@ impl Manager {
                     forge_repo: forge_repo.as_ref(),
                     prepared: prepared.as_ref(),
                     stale_base: stale.as_deref(),
+                    scratchpad: Some(&scratchpad),
                 },
             )
         };
@@ -3784,12 +3824,6 @@ impl Manager {
         // Whose name the session's commits carry: the account behind the
         // channel's bound forge credential, else the host's own Git identity.
         let identity = self.commit_identity(&spec.channel, &repo).await;
-        // On DigitalOcean the harness's home is the stock base's, whatever
-        // this node's own runtime uses: its state is placed where it looks.
-        let harness_home = match placed.is_elsewhere() {
-            true => crate::sandbox_images::HOME.to_string(),
-            false => self.backend.harness_home(),
-        };
         let scratch = materialize::scratch_for(
             id,
             &snapshot,
@@ -4125,7 +4159,8 @@ impl Manager {
         .with_checks(environment.checks)
         .with_waits(self.waits())
         .with_kickoff(kickoff)
-        .with_series(series);
+        .with_series(series)
+        .with_saver(saved::Saver::new(self.backend.clone(), adapter.clone(), id));
         let live = self.live.clone();
         let tokens = self.tokens.clone();
         let waits = self.waits();

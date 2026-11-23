@@ -399,6 +399,12 @@ pub fn router(state: AppState) -> Router {
             get(api::askable).post(api::ask_session),
         )
         .route("/api/sessions/{id}/compact", post(api::compact))
+        .route("/api/sessions/{id}/saved", get(api::saved_contexts))
+        .route("/api/sessions/{id}/saved/{index}", get(api::saved_context))
+        .route(
+            "/api/sessions/{id}/saved/{index}/export",
+            get(api::export_saved_context),
+        )
         .route("/api/sessions/{id}/kill", post(api::kill))
         .route("/api/sessions/{id}/pause", post(api::pause))
         .route("/api/sessions/{id}/resume", post(api::resume))

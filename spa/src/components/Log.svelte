@@ -1,6 +1,7 @@
 <script lang="ts">
   import Name from './Name.svelte'
   import PlanLink from './PlanLink.svelte'
+  import SavedContext from './SavedContext.svelte'
   import {
     eventLine,
     turnEndLine,
@@ -71,6 +72,15 @@
 
   function queuedCount(e: Event): number {
     return Array.isArray(e.payload.queued) ? e.payload.queued.length : 0
+  }
+
+  // The saved contexts opened so far, by event: each is read only once opened.
+  let openSaves = $state(new Set<number>())
+  function toggleSaved(seq: number, open: boolean) {
+    const next = new Set(openSaves)
+    if (open) next.add(seq)
+    else next.delete(seq)
+    openSaves = next
   }
 
   let el = $state<HTMLElement | null>(null)
@@ -234,6 +244,15 @@
         <details class="fold" open={Boolean(e.payload.detail) || notes.length > 0}>
           <summary class:crit={Boolean(e.payload.detail)}>{eventLine(e)?.text}</summary>
           <div>{[e.payload.detail, ...notes, worktree ? worktreeOrigin(worktree.payload) : ''].filter(Boolean).join('\n\n')}</div>
+        </details>
+      {:else if e.kind === 'context_saved' && !e.payload.error && typeof e.payload.index === 'number'}
+        <!-- The conversation as it was before the compaction or restart,
+             read from the session's harness-state package when opened. -->
+        <details class="fold" ontoggle={(ev) => toggleSaved(e.seq, (ev.currentTarget as HTMLDetailsElement).open)}>
+          <summary>{eventLine(e)?.text}</summary>
+          {#if openSaves.has(e.seq)}
+            <div><SavedContext sessionId={e.session_id} index={e.payload.index} /></div>
+          {/if}
         </details>
       {:else if e.kind === 'context_compacted' && e.payload.summary}
         <!-- What the model now works from in place of the earlier transcript. -->

@@ -63,6 +63,8 @@ import type {
   PreparationPreview,
   RepoReadiness,
   SessionOutcome,
+  SavedContext,
+  SavedContextManifest,
   Session,
   SessionUsage,
   ReviewDetails,
@@ -556,6 +558,10 @@ export const api = {
   ask: (id: string, text: string) => call<Session>('POST', `/api/sessions/${id}/ask`, { text }),
   /** Compact its conversation with the harness's own compaction; an ended one is reopened for it. */
   compact: (id: string) => call<void>('POST', `/api/sessions/${id}/compact`),
+  /** What the session saved before each compaction and restart of its harness, oldest first. */
+  savedContexts: (id: string) => call<{ saves: SavedContextManifest[] }>('GET', `/api/sessions/${id}/saved`),
+  /** One save: its full-text conversation and the files it holds. */
+  savedContext: (id: string, index: number) => call<SavedContext>('GET', `/api/sessions/${id}/saved/${index}`),
   pause: (id: string, reason?: string) => call<void>('POST', `/api/sessions/${id}/pause`, { reason }),
   resume: (id: string, reason?: string) => call<void>('POST', `/api/sessions/${id}/resume`, { reason }),
   /** A session's token budget, 0 for none; one held at its budget carries on. */
@@ -1096,4 +1102,9 @@ export const api = {
       'GET',
       `/api/usage/infra?${params}`,
     ),
+}
+
+/** Where one saved context downloads as a single JSON document, every file in it. */
+export function savedContextExportHref(sessionId: string, index: number): string {
+  return `/api/sessions/${encodeURIComponent(sessionId)}/saved/${index}/export`
 }

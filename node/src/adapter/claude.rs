@@ -1215,6 +1215,38 @@ impl HarnessAdapter for ClaudeAdapter {
         true
     }
 
+    /// The CLI's transcript of the conversation, which a compaction appends
+    /// to rather than rewrites: `projects/<dir>/<id>.jsonl` under its state
+    /// directory (the scratch volume's `state/`), and the directory of its
+    /// subagents' transcripts beside it, under any project directory.
+    fn transcripts(&self, scratch: &std::path::Path, harness_session_id: &str) -> Vec<String> {
+        if !crate::session::saved::plain_id(harness_session_id) {
+            return Vec::new();
+        }
+        let projects =
+            std::path::Path::new(crate::session::materialize::OWN_STATE).join("projects");
+        let mut found = Vec::new();
+        let Ok(dirs) = std::fs::read_dir(scratch.join(&projects)) else {
+            return found;
+        };
+        let mut dirs: Vec<_> = dirs.flatten().collect();
+        dirs.sort_by_key(|d| d.file_name());
+        for dir in dirs {
+            for name in [
+                format!("{harness_session_id}.jsonl"),
+                harness_session_id.to_string(),
+            ] {
+                let relative = projects.join(dir.file_name()).join(&name);
+                if std::fs::symlink_metadata(scratch.join(&relative))
+                    .is_ok_and(|meta| meta.is_file() || meta.is_dir())
+                {
+                    found.push(relative.to_string_lossy().into_owned());
+                }
+            }
+        }
+        found
+    }
+
     /// The CLI keeps a conversation at `projects/<cwd, escaped>/<id>.jsonl`
     /// under its state directory. Looked for under any project directory,
     /// since the CLI finds it there from any working directory too. Only a
@@ -1385,6 +1417,27 @@ impl HarnessAdapter for ClaudeAdapter {
 
 #[cfg(test)]
 mod tests {
+
+    /// What a saved context copies of the CLI's record: this conversation's
+    /// transcript and its subagents', under any project directory, and no
+    /// other conversation's.
+    #[test]
+    fn the_transcripts_are_this_conversations_alone() {
+        use crate::adapter::HarnessAdapter;
+        let scratch = tempfile::tempdir().unwrap();
+        let project = scratch.path().join("state/projects/-work");
+        std::fs::create_dir_all(project.join("c1/subagents")).unwrap();
+        std::fs::write(project.join("c1.jsonl"), "{}").unwrap();
+        std::fs::write(project.join("c1/subagents/a.jsonl"), "{}").unwrap();
+        std::fs::write(project.join("c2.jsonl"), "{}").unwrap();
+        let adapter = super::ClaudeAdapter::new("1");
+        assert_eq!(
+            adapter.transcripts(scratch.path(), "c1"),
+            ["state/projects/-work/c1.jsonl", "state/projects/-work/c1"]
+        );
+        assert!(adapter.transcripts(scratch.path(), "../c1").is_empty());
+        assert!(adapter.transcripts(scratch.path(), "c3").is_empty());
+    }
 
     #[test]
     fn the_model_reaches_claude_code_as_anthropic_names_it() {

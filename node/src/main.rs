@@ -429,6 +429,18 @@ enum SessionCommand {
     /// Carry on a session a node restart cut off: a new session on the same
     /// workspace, branch and harness, opening with a handoff note.
     Continue { id: String },
+    /// What a session saved before each compaction and restart of its
+    /// harness: its full-text conversation, its harness's transcript and its
+    /// scratchpad. With an index, that save's conversation; with `--export`,
+    /// that save whole as one JSON file.
+    Saved {
+        id: String,
+        /// The save to read, as the list numbers it.
+        index: Option<u32>,
+        /// Write the save, every file in it, as JSON to this path.
+        #[arg(long, requires = "index")]
+        export: Option<std::path::PathBuf>,
+    },
     /// Fork a session: a new session from its branch and context, on a
     /// branch of its own, here or on another node of its channel, while the
     /// session itself keeps running with its own task.
@@ -2833,6 +2845,62 @@ async fn session_command(cmd: SessionCommand) -> Result<()> {
                 "\nThe new session opens with a handoff note: it inherits the workspace, \
                  not the interrupted session's context."
             );
+            Ok(())
+        }
+        SessionCommand::Saved { id, index, export } => {
+            let id = session_resolve(&id).await?;
+            let Some(index) = index else {
+                let v = node_call(
+                    Method::GET,
+                    &format!("/api/sessions/{id}/saved"),
+                    None,
+                    None,
+                )
+                .await?;
+                let saves = v["saves"].as_array().cloned().unwrap_or_default();
+                if saves.is_empty() {
+                    println!("{id} has saved nothing: it has not been compacted or restarted.");
+                    return Ok(());
+                }
+                for save in saves {
+                    println!(
+                        "{:>4}  before {:<10} {:<9} {} transcript file(s), {} scratchpad file(s), \
+                         through event {}",
+                        save["index"],
+                        save["before"].as_str().unwrap_or(""),
+                        save["trigger"].as_str().unwrap_or(""),
+                        save["transcripts"].as_array().map_or(0, Vec::len),
+                        save["scratchpad"].as_array().map_or(0, Vec::len),
+                        save["through_seq"],
+                    );
+                }
+                println!("\n`tracon session saved {id} <index>` prints one's conversation.");
+                return Ok(());
+            };
+            if let Some(path) = export {
+                let v = node_call(
+                    Method::GET,
+                    &format!("/api/sessions/{id}/saved/{index}/export"),
+                    None,
+                    None,
+                )
+                .await?;
+                std::fs::write(&path, serde_json::to_vec_pretty(&v)?)?;
+                println!(
+                    "wrote save {index} of {id} to {} ({} file(s) beside the conversation)",
+                    path.display(),
+                    v["files"].as_array().map_or(0, Vec::len)
+                );
+                return Ok(());
+            }
+            let v = node_call(
+                Method::GET,
+                &format!("/api/sessions/{id}/saved/{index}"),
+                None,
+                None,
+            )
+            .await?;
+            print!("{}", v["conversation"].as_str().unwrap_or(""));
             Ok(())
         }
     }

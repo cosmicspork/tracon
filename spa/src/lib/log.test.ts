@@ -561,3 +561,26 @@ test('a turn says what it spent, and a compaction the harness counted nothing of
     `turn stopped at the harness's request limit · ${formatTokens(900)} tokens · a prompt carries on`,
   )
 })
+
+test('a saved context says what was saved and before what, or that it was not', () => {
+  const compaction = eventLine(
+    ev('context_saved', null, { index: 1, before: 'compaction', trigger: 'manual', transcript_files: 1, scratchpad_files: 2 }),
+  )
+  expect(compaction).toEqual({
+    text: "full conversation saved before compacting · with the harness's transcript and 2 scratchpad files",
+    tone: 'sys',
+  })
+  const restart = eventLine(ev('context_saved', null, { index: 2, before: 'restart', transcript_files: 0, scratchpad_files: 0 }))
+  expect(restart?.text).toBe('full conversation saved before the harness restarted · with an empty scratchpad')
+  const failed = eventLine(ev('context_saved', null, { before: 'compaction', error: 'disk full' }))
+  expect(failed).toEqual({ text: 'could not save the conversation before compacting · disk full', tone: 'crit' })
+  // It is a line of its own, beside the compaction it was taken for.
+  const leaves = (events: Event[]) => groupLog(events).map((l) => l.event?.kind)
+  expect(
+    leaves([
+      ev('context_compacting', null, { trigger: 'manual' }),
+      ev('context_saved', null, { index: 1, before: 'compaction' }),
+      ev('context_compacted', null, { trigger: 'manual' }),
+    ]),
+  ).toEqual(['context_saved', 'context_compacted'])
+})
