@@ -117,6 +117,9 @@ pub struct Facts<'a> {
     /// resolved it. `None` for a local-only repository or a host that is
     /// neither forge, where there is nothing to name.
     pub forge_repo: Option<&'a crate::forge::ForgeRepo>,
+    /// Whether the workspace's `origin` is the gateway's read-only remote
+    /// for its repository (`gateway::git`).
+    pub git_origin: bool,
     /// What the repository's `prepare` did to the workspace before the
     /// session started. `None` when its entry prepares nothing.
     pub prepared: Option<&'a crate::environment::WorkspacePreparation>,
@@ -540,11 +543,16 @@ fn push_waiting(out: &mut String, facts: &Facts) {
 }
 
 /// Which repository on which forge, so a forge tool is not called with a
-/// guess. The workspace has no remote to read it from, and the forge tools
-/// default to it only where they are offered.
+/// guess, and what the workspace's `origin` will and will not do. The forge
+/// tools default to the repository only where they are offered.
 fn push_repository(out: &mut String, facts: &Facts) {
     use crate::{forge::Forge, mcp};
-    let Some(repo) = facts.forge_repo else { return };
+    let Some(repo) = facts.forge_repo else {
+        if facts.git_origin {
+            out.push_str(&format!("- {}\n", read_only_origin(facts)));
+        }
+        return;
+    };
     let offered = |name: &str| facts.tools.iter().any(|t| t == name);
     let (forge, tools) = match repo.forge {
         Forge::Github => ("GitHub", offered(mcp::github::PR_STATUS)),
@@ -565,6 +573,10 @@ fn push_repository(out: &mut String, facts: &Facts) {
         )),
         (false, false) => {}
     }
+    if facts.git_origin {
+        out.push_str(&format!(". {}\n", read_only_origin(facts)));
+        return;
+    }
     out.push_str(". The workspace has no git remote: fetching and pushing go through the node");
     if submit {
         out.push_str(", and `submit_review` publishes");
@@ -577,6 +589,21 @@ fn push_repository(out: &mut String, facts: &Facts) {
         );
     }
     out.push_str(".\n");
+}
+
+/// What the workspace's read-only `origin` is, and why a push is refused.
+fn read_only_origin(facts: &Facts) -> String {
+    let submit = facts.tools.iter().any(|t| t == crate::mcp::review::SUBMIT);
+    format!(
+        "The workspace's `origin` is read-only, served by the node with this channel's \
+         credential (which never enters the sandbox): `git fetch`, `git pull` and rebasing \
+         onto a moved `origin/main` work as usual. `git push` is refused, because work is \
+         published only through review{}.",
+        match submit {
+            true => ": commit, then `submit_review` publishes",
+            false => "",
+        }
+    )
 }
 
 /// The item, its phase, what the phase must produce, and the plan.
@@ -1562,6 +1589,7 @@ mod tests {
             manifest: &crate::manifest::LaunchManifest::default(),
             egress: None,
             forge_repo: None,
+            git_origin: false,
             prepared: None,
             stale_base: None,
             scratchpad: None,
@@ -1658,6 +1686,7 @@ mod tests {
                 manifest: &crate::manifest::LaunchManifest::default(),
                 egress: None,
                 forge_repo: None,
+                git_origin: false,
                 prepared: None,
                 stale_base: None,
                 scratchpad: None,
@@ -1730,7 +1759,7 @@ mod tests {
         let tools: Vec<String> = ["pr_status", "run_status", "mr_status", "submit_review"]
             .map(String::from)
             .to_vec();
-        let told = |repo: Option<&crate::forge::ForgeRepo>, tools: &[String]| {
+        let told_with = |repo: Option<&crate::forge::ForgeRepo>, tools: &[String], git_origin| {
             let facts = Facts {
                 node_name: "laptop",
                 node_id: "0123456789abcdef",
@@ -1752,6 +1781,7 @@ mod tests {
                 manifest: &manifest,
                 egress: None,
                 forge_repo: repo,
+                git_origin,
                 prepared: None,
                 stale_base: None,
                 scratchpad: None,
@@ -1759,6 +1789,9 @@ mod tests {
             let (text, _) = assemble(&store, &Policy::default(), &facts);
             let node = &text[text.find("## Environment").unwrap()..];
             node[..node.find("\n\n## ").unwrap_or(node.len())].to_string()
+        };
+        let told = |repo: Option<&crate::forge::ForgeRepo>, tools: &[String]| {
+            told_with(repo, tools, false)
         };
 
         let github = crate::forge::ForgeRepo::from_remote("github.com/cosmicspork/tracon");
@@ -1818,6 +1851,28 @@ mod tests {
             ),
             "{text}"
         );
+
+        // With the gateway's read-only origin, the workspace is told it can
+        // fetch and pull, and why a push is refused.
+        let text = told_with(github.as_ref(), &tools, true);
+        assert!(
+            text.contains(
+                "default to it (the forge tools take it as `repo`). The workspace's `origin` is \
+                 read-only"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("`git fetch`, `git pull`"), "{text}");
+        assert!(
+            text.contains(
+                "`git push` is refused, because work is published only through review: commit, \
+                 then `submit_review` publishes."
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("no git remote"), "{text}");
+        let text = told_with(None, &tools, true);
+        assert!(text.contains("`origin` is read-only"), "{text}");
 
         // A local-only repository, or a host that is neither forge: nothing.
         for remote in [
@@ -1911,6 +1966,7 @@ mod tests {
             manifest: &manifest,
             egress: None,
             forge_repo: None,
+            git_origin: false,
             prepared: None,
             stale_base: None,
             scratchpad: None,
@@ -2078,6 +2134,7 @@ mod tests {
             manifest: &crate::manifest::LaunchManifest::default(),
             egress: None,
             forge_repo: None,
+            git_origin: false,
             prepared: None,
             stale_base: None,
             scratchpad: None,
@@ -2124,6 +2181,7 @@ mod tests {
             manifest: &crate::manifest::LaunchManifest::default(),
             egress: None,
             forge_repo: None,
+            git_origin: false,
             prepared: None,
             stale_base: None,
             scratchpad: None,
@@ -2171,6 +2229,7 @@ mod tests {
             manifest: &crate::manifest::LaunchManifest::default(),
             egress: None,
             forge_repo: None,
+            git_origin: false,
             prepared: None,
             stale_base: None,
             scratchpad: None,
@@ -2224,6 +2283,7 @@ mod tests {
             manifest: &crate::manifest::LaunchManifest::default(),
             egress: None,
             forge_repo: None,
+            git_origin: false,
             prepared: None,
             stale_base: None,
             scratchpad: None,
@@ -2275,6 +2335,7 @@ mod tests {
             manifest: &crate::manifest::LaunchManifest::default(),
             egress: None,
             forge_repo: None,
+            git_origin: false,
             prepared: None,
             stale_base: None,
             scratchpad: None,
@@ -2331,6 +2392,7 @@ mod tests {
             manifest: &crate::manifest::LaunchManifest::default(),
             egress: None,
             forge_repo: None,
+            git_origin: false,
             prepared: None,
             stale_base: None,
             scratchpad: None,
@@ -2379,6 +2441,7 @@ mod tests {
             manifest: &crate::manifest::LaunchManifest::default(),
             egress: None,
             forge_repo: None,
+            git_origin: false,
             prepared: None,
             stale_base: None,
             scratchpad: None,
@@ -2435,6 +2498,7 @@ mod tests {
             manifest: &manifest,
             egress: None,
             forge_repo: None,
+            git_origin: false,
             prepared: None,
             stale_base: None,
             scratchpad: None,
@@ -2515,6 +2579,7 @@ mod tests {
                 manifest: &manifest,
                 egress: None,
                 forge_repo: None,
+                git_origin: false,
                 prepared: None,
                 stale_base: None,
                 scratchpad: None,
@@ -2563,6 +2628,7 @@ mod tests {
             manifest: &crate::manifest::LaunchManifest::default(),
             egress: None,
             forge_repo: None,
+            git_origin: false,
             prepared: None,
             stale_base: None,
             scratchpad: None,
@@ -2790,6 +2856,7 @@ mod tests {
             manifest: Box::leak(Box::default()),
             egress: None,
             forge_repo: None,
+            git_origin: false,
             prepared: None,
             stale_base: None,
             scratchpad: None,
@@ -2818,6 +2885,7 @@ mod tests {
             manifest: Box::leak(Box::default()),
             egress: None,
             forge_repo: None,
+            git_origin: false,
             prepared: None,
             stale_base: None,
             scratchpad: None,
@@ -2855,6 +2923,7 @@ mod tests {
                 manifest: &manifest,
                 egress: None,
                 forge_repo: None,
+                git_origin: false,
                 prepared: None,
                 stale_base: None,
                 scratchpad: None,

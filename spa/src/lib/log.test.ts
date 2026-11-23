@@ -5,6 +5,7 @@ import {
   eventLine,
   turnEndLine,
   fallbackLine,
+  gitFetchLine,
   SILENT,
   groupLog,
   missingContext,
@@ -589,4 +590,18 @@ test('a saved context says what was saved and before what, or that it was not', 
       ev('context_compacted', null, { trigger: 'manual' }),
     ]),
   ).toEqual(['context_saved', 'context_compacted'])
+})
+
+test('a fetch from the read-only origin names what it brought', () => {
+  expect(
+    gitFetchLine({
+      repository: 'o/r',
+      protocol: 'v2',
+      fetched: [
+        { sha: '1111111111111111111111111111111111111111', refs: ['HEAD', 'refs/heads/main'] },
+        { sha: '2222222222222222222222222222222222222222', refs: [] },
+      ],
+    }),
+  ).toBe('git fetch from origin · o/r · main 111111111111 · 222222222222')
+  expect(gitFetchLine({})).toBe('git fetch from origin · origin')
 })

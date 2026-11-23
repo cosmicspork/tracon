@@ -605,6 +605,10 @@ pub fn harness_router(state: AppState) -> Router {
             "/model/{provider}/{*rest}",
             axum::routing::any(crate::gateway::model::handle),
         )
+        .route(
+            "/git/{*rest}",
+            axum::routing::any(crate::gateway::git::handle),
+        )
         .with_state(state)
 }
 

@@ -218,6 +218,22 @@ export function providerErrorLine(payload: Record<string, unknown>): string {
   return [`${provider} ${status}`, message, 'harness retrying', attempt].filter(Boolean).join(' · ')
 }
 
+/// "git fetch from origin · o/r · main 1a2b3c4d5e6f" — the workspace fetched
+/// from its read-only origin through the gateway: each commit it asked for,
+/// by the branch or tag the forge's listing named it.
+export function gitFetchLine(payload: Record<string, unknown>): string {
+  const repository = typeof payload.repository === 'string' && payload.repository ? payload.repository : 'origin'
+  const fetched = Array.isArray(payload.fetched) ? payload.fetched : []
+  const parts = fetched.map((entry) => {
+    const item = (typeof entry === 'object' && entry !== null ? entry : {}) as Record<string, unknown>
+    const sha = typeof item.sha === 'string' ? item.sha.slice(0, 12) : ''
+    const refs = Array.isArray(item.refs) ? item.refs.filter((r): r is string => typeof r === 'string') : []
+    const named = refs.filter((r) => r !== 'HEAD').map((r) => r.replace(/^refs\/(heads|tags)\//, ''))
+    return [named.join(', '), sha].filter(Boolean).join(' ')
+  })
+  return ['git fetch from origin', repository, ...parts].join(' · ')
+}
+
 /// "same call 3× in a row · run just test · still running" — the repetition
 /// signal. It reads as something to look at, not as a verdict: the node does
 /// not pause on repetition, because repeating a command is also what a fix-
