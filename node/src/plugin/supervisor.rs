@@ -1630,7 +1630,16 @@ mod tests {
         let live = dir.path().join("live.sock");
         let stale = dir.path().join("stale.sock");
         let _listening = std::os::unix::net::UnixListener::bind(&live).unwrap();
-        drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+        // Bound but never listening: a connect to it is refused even when a
+        // child another test spawns inherits the fd (on Apple targets the
+        // socket is made before close-on-exec is set), where an inherited
+        // listener would stay live after this test dropped its copy.
+        let socket =
+            socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None).unwrap();
+        socket
+            .bind(&socket2::SockAddr::unix(&stale).unwrap())
+            .unwrap();
+        drop(socket);
         let other = dir.path().join("note.txt");
         std::fs::write(&other, "").unwrap();
         sweep(dir.path());
