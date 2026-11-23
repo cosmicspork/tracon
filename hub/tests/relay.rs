@@ -377,8 +377,10 @@ async fn enrollment_lifecycle_and_admit() {
     )
     .await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
-    let (st, _) = call(&h.app, fill("7KQ4M2XA", req.to_string())).await;
-    assert_eq!(st, StatusCode::NO_CONTENT);
+    // The filler learns who opened the slot: the node it takes keys from.
+    let (st, v) = call(&h.app, fill("7KQ4M2XA", req.to_string())).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(v["inviter"], a.node_id());
     let (st, _) = call(&h.app, fill("7KQ4M2XA", req.to_string())).await;
     assert_eq!(st, StatusCode::CONFLICT);
     // Only the inviter can take it; taking deletes.
@@ -512,7 +514,7 @@ async fn a_forged_key_binding_is_refused_at_fill() {
         fill(filled(b.x25519_hex(), proto::enroll::sign_binding(&b))),
     )
     .await;
-    assert_eq!(st, StatusCode::NO_CONTENT);
+    assert_eq!(st, StatusCode::OK);
     // The inviter reads the proof back with the keys.
     let (st, v) = s(&h, &a, "GET", "/v0/enroll/7KQ4M2XA", "").await;
     assert_eq!(st, StatusCode::OK);

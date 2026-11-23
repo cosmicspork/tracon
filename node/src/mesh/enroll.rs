@@ -5,7 +5,8 @@
 //! open_invite: PUT /v0/enroll/{code} ─────►  slot
 //!   prints URL + QR + own fingerprint
 //!                                                        accept: POST /v0/enroll/{code} {keys, name}
-//!                                                          prints own fingerprint, waits
+//!                                                          ◄── {inviter}
+//!                                                          prints own and inviter's fingerprints, waits
 //! poll_invite: GET /v0/enroll/{code} ◄────  fetch-and-delete
 //!   operator compares fingerprints
 //! admit: POST /v0/admit; direct frames on @mesh: key_handoff, policy_bundle
@@ -18,6 +19,11 @@
 //! over its own sealing key: the fingerprint covers the node id alone, so the
 //! signature is what stops anyone who can write the slot from keeping that id
 //! and substituting the key the channel keyrings get wrapped to.
+//!
+//! The new node has no record of the mesh while it enrolls, so it takes
+//! direct frames from the inviter the hub names on fill and nobody else; the
+//! fingerprint it prints for that node is what the operator checks against
+//! the one the inviter printed.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -889,9 +895,30 @@ pub async fn accept(
             body: res.text().await.unwrap_or_default(),
         });
     }
+    // The hub names the node that opened the invitation. This node has no
+    // record of the mesh yet, so that is the one sender it can take keys
+    // from: the operator compares its fingerprint with the one the inviter
+    // printed, as the inviter compares this node's.
+    let filled: Value = res.json().await.unwrap_or(Value::Null);
+    let inviter = filled["inviter"]
+        .as_str()
+        .filter(|id| key32(id).is_some())
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| {
+            EnrollError::Local(
+                "the hub did not say which node opened the invitation, so there is no \
+                 inviter to take keys from; update the hub and run tracon enroll again"
+                    .into(),
+            )
+        })?;
     progress.say(&format!(
         "sent; this node's fingerprint is {} — confirm it on the inviting node",
         proto::enroll::fingerprint(&identity.verifying_key().to_bytes())
+    ));
+    progress.say(&format!(
+        "the inviting node's fingerprint is {} — confirm it matches what it printed; \
+         keys are taken from that node alone",
+        fingerprint_hex(&inviter).unwrap_or_default()
     ));
 
     // Wait for admission, then for the direct handoff on @mesh. Nothing here
@@ -939,6 +966,18 @@ pub async fn accept(
                         continue;
                     }
                     let sender = hex::encode(sender_key);
+                    if sender != inviter {
+                        // Anyone else's handoff waits for the running node,
+                        // which judges it by its records of the mesh; it is
+                        // not marked seen here so that it still can.
+                        if env.recipient.as_deref() == Some(identity.node_id().as_str()) {
+                            progress.say(&format!(
+                                "ignored a handoff from {}: only the inviting node's is taken while enrolling",
+                                short_id(&sender)
+                            ));
+                        }
+                        continue;
+                    }
                     let _ = store.seen_insert(&env.id, now_ms());
                     match env.open_direct(identity) {
                         Ok(Payload::KeyHandoff { channels }) => {

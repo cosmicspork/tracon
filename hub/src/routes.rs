@@ -342,7 +342,8 @@ pub async fn open_enroll(
 }
 
 /// The one public write. Rate-limited per source; stores public keys and a
-/// name in the clear because none of it is secret.
+/// name in the clear because none of it is secret. Answers with the
+/// inviter's node id.
 pub async fn fill_enroll(
     State(s): State<AppState>,
     Path(code): Path<String>,
@@ -396,7 +397,13 @@ pub async fn fill_enroll(
     }
     let body = serde_json::to_string(&req).expect("serializes");
     match s.enroll.fill(&code, body, now_unix()) {
-        Fill::Filled => Ok((StatusCode::NO_CONTENT, Json(Value::Null))),
+        // The inviter's id goes back to the filler, which shows its
+        // fingerprint for the operator to compare with what the inviter
+        // printed and takes its first key handoff from that node alone.
+        Fill::Filled { inviter } => Ok((
+            StatusCode::OK,
+            Json(json!({ "inviter": hex::encode(inviter) })),
+        )),
         Fill::Unknown => Err(err(
             StatusCode::NOT_FOUND,
             "no such invitation, or it expired",

@@ -27,6 +27,8 @@ struct Rig {
     app: Router,
     replica: Arc<Replica>,
     a: Identity,
+    /// A member of `@mesh` and `work`, but not of `personal`.
+    c: Identity,
     personal: Keyring,
     work: Keyring,
 }
@@ -41,6 +43,19 @@ fn rig() -> Rig {
             binding_sig: proto::enroll::sign_binding(&a),
             name: "a".into(),
             channels: vec![MESH_CHANNEL.into(), "personal".into(), "work".into()],
+            admitted_ms: 0,
+            admitted_by: "t".into(),
+            role: MemberRole::Node,
+        })
+        .unwrap();
+    let c = Identity::from_seed(&[3u8; 32]);
+    members
+        .put(&Member {
+            node_id: c.node_id(),
+            x25519_pub: c.x25519_hex(),
+            binding_sig: proto::enroll::sign_binding(&c),
+            name: "c".into(),
+            channels: vec![MESH_CHANNEL.into(), "work".into()],
             admitted_ms: 0,
             admitted_by: "t".into(),
             role: MemberRole::Node,
@@ -65,6 +80,7 @@ fn rig() -> Rig {
         personal: Keyring::genesis(&a.x25519_public(), &DataKey::generate()),
         work: Keyring::genesis(&a.x25519_public(), &DataKey::generate()),
         a,
+        c,
     }
 }
 
@@ -269,4 +285,82 @@ async fn the_hub_opens_what_it_was_handed_and_counts_what_it_was_not() {
         }
     }
     assert!(saw_batch && saw_hub_change);
+}
+
+#[tokio::test]
+async fn the_hub_refuses_a_channel_key_from_a_sender_outside_that_channel() {
+    let r = rig();
+    let (a, c) = (&r.a, &r.c);
+    let hub_id = r.replica.node_id();
+    let hub_pk = proto::keys::key32(&r.replica.x25519_hex())
+        .map(x25519_dalek::PublicKey::from)
+        .unwrap();
+    let (st, _) = post(&r, a, "/v0/admit", &json!({"node_id": hub_id, "x25519_pub": r.replica.x25519_hex(), "name": "hub", "channels": ["personal"], "role": "hub"}).to_string()).await;
+    assert_eq!(st, StatusCode::OK);
+    let stored = |r: &Rig| -> Vec<(String, String)> {
+        r.replica.with_db(|conn| {
+            let mut q = conn
+                .prepare("SELECT name, bindings_json FROM replica_channel ORDER BY name")
+                .unwrap();
+            q.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        })
+    };
+
+    // C is on the mesh but not in `personal`: its key and bindings for it
+    // are refused, while the one for `work`, which it is in, is kept.
+    let forged = Keyring::genesis(&c.x25519_public(), &DataKey::generate());
+    let handoff = Payload::KeyHandoff {
+        channels: vec![
+            ChannelHandoff {
+                name: "personal".into(),
+                keyring: forged.wrap_for(c, &hub_pk).unwrap(),
+                bindings_json: r#"{"processing":"elsewhere"}"#.into(),
+            },
+            ChannelHandoff {
+                name: "work".into(),
+                keyring: Keyring::genesis(&c.x25519_public(), &DataKey::generate())
+                    .wrap_for(c, &hub_pk)
+                    .unwrap(),
+                bindings_json: "{}".into(),
+            },
+        ],
+    };
+    let env = Envelope::seal_direct(c, MESH_CHANNEL, &hub_id, &hub_pk, &handoff, now_ms()).unwrap();
+    let (st, _) = post(&r, c, "/v0/frames", &serde_json::to_string(&env).unwrap()).await;
+    assert_eq!(st, StatusCode::CREATED);
+    r.replica.ingest_pending();
+    assert_eq!(stored(&r), vec![("work".to_string(), "{}".to_string())]);
+    assert!(r.replica.readable_channels().is_empty());
+
+    // A handoff of `personal` alone from C changes nothing.
+    let handoff = Payload::KeyHandoff {
+        channels: vec![ChannelHandoff {
+            name: "personal".into(),
+            keyring: forged.wrap_for(c, &hub_pk).unwrap(),
+            bindings_json: r#"{"processing":"elsewhere"}"#.into(),
+        }],
+    };
+    let env = Envelope::seal_direct(c, MESH_CHANNEL, &hub_id, &hub_pk, &handoff, now_ms()).unwrap();
+    let (st, _) = post(&r, c, "/v0/frames", &serde_json::to_string(&env).unwrap()).await;
+    assert_eq!(st, StatusCode::CREATED);
+    r.replica.ingest_pending();
+    assert_eq!(stored(&r).len(), 1);
+
+    // A, a member of `personal`, is taken.
+    let handoff = Payload::KeyHandoff {
+        channels: vec![ChannelHandoff {
+            name: "personal".into(),
+            keyring: r.personal.wrap_for(a, &hub_pk).unwrap(),
+            bindings_json: r#"{"processing":"hub"}"#.into(),
+        }],
+    };
+    let env = Envelope::seal_direct(a, MESH_CHANNEL, &hub_id, &hub_pk, &handoff, now_ms()).unwrap();
+    let (st, _) = post(&r, a, "/v0/frames", &serde_json::to_string(&env).unwrap()).await;
+    assert_eq!(st, StatusCode::CREATED);
+    r.replica.ingest_pending();
+    assert_eq!(r.replica.readable_channels(), vec!["personal".to_string()]);
+    assert_eq!(r.replica.bindings_of("personal")["processing"], "hub");
 }

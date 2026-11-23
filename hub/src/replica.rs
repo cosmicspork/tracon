@@ -401,9 +401,25 @@ impl Replica {
     fn handle_direct(&self, sender: &str, payload: Payload) -> bool {
         match payload {
             Payload::KeyHandoff { channels } => {
+                // A key from someone outside the channel could add an epoch
+                // the hub would then seal its own records under, and its
+                // bindings could rewrite how the hub processes the channel.
+                // The member records the hub keeps say who is in it.
+                let sender_channels = self
+                    .members
+                    .get(sender)
+                    .ok()
+                    .flatten()
+                    .map(|m| m.channels)
+                    .unwrap_or_default();
                 let conn = self.db.lock().unwrap();
                 let mut n = 0;
                 for h in channels {
+                    if !sender_channels.iter().any(|c| c == &h.name) {
+                        tracing::warn!(from = %sender, channel = %h.name,
+                            "channel key refused: the sender is not a member of that channel");
+                        continue;
+                    }
                     let merged = conn
                         .query_row(
                             "SELECT keyring FROM replica_channel WHERE name = ?1",
@@ -428,6 +444,9 @@ impl Replica {
                     }
                 }
                 drop(conn);
+                if n == 0 {
+                    return false;
+                }
                 tracing::info!(from = %sender, channels = n, "channel keys received by the replica");
                 // Frames on those channels may already sit behind the cursor
                 // — but the cursor is per channel and moved past them while

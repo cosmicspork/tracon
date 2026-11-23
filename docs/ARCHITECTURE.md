@@ -1885,7 +1885,14 @@ Invariants on top of the wire:
   key from anyone else would add an epoch the receiver then seals the channel's
   frames under. It carries the channel's shared bindings; the ones a node keeps
   for itself (`external_stopped`, `external_paused`, `notify`) are never taken
-  from it.
+  from it. While enrolling, a node has no records yet, so it takes its first
+  handoff from the inviter alone: filling the slot returns the id of the node
+  that opened it, `tracon enroll` prints that node's fingerprint for the operator
+  to compare with the one the inviter printed, and a direct frame from any other
+  sender is left for the running node to judge. The hub's replica takes a
+  `key_handoff` only for a channel the sender is a member of by the hub's member
+  records (signed channel membership, which would not trust those records, is
+  not part of this).
 - **A command expires when its sender stops waiting.** A command sent with a
   timeout carries `not_after_ms`; past it (with 30 seconds' leeway for clock skew)
   the owner refuses it unrun, so a command the operator was told failed never runs
