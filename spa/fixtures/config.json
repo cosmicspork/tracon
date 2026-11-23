@@ -3198,7 +3198,7 @@
       "editable_by_peer": true,
       "exec_path": false,
       "fs_path": false,
-      "key": "external.run_checks",
+      "key": "external.run_containers",
       "path": null,
       "secret": false,
       "shape": {

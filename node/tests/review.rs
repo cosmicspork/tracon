@@ -2245,7 +2245,7 @@ async fn an_external_submission_gets_the_repositorys_checks_run_on_its_candidate
     state::isolate();
     let f = fixture_with(test_name!(), WITH_GH, |c| {
         c.external.repo_roots = vec![Config::state_dir()];
-        c.external.run_checks = true;
+        c.external.run_containers = true;
     })
     .await;
     bind_review_model_for_external(&f);
@@ -2309,7 +2309,7 @@ async fn an_external_submission_of_a_commit_a_session_captured_first_gets_its_ch
     state::isolate();
     let f = fixture_with(test_name!(), WITH_GH, |c| {
         c.external.repo_roots = vec![Config::state_dir()];
-        c.external.run_checks = true;
+        c.external.run_containers = true;
     })
     .await;
     let v = f.tool("s1", "submit_review", f.submit_args()).await;
@@ -2364,7 +2364,7 @@ async fn an_external_submission_of_a_commit_a_session_captured_first_gets_its_ch
     assert_eq!(node_runs[0].command.as_deref(), Some("test -f a.txt"));
 }
 
-/// With `[external] run_checks` on, a reviewer has the node's checks to go
+/// With `[external] run_containers` on, a reviewer has the node's checks to go
 /// on, so an external submission on a channel that sets no trigger for it
 /// starts one on its own, once those checks are done.
 #[tokio::test]
@@ -2372,7 +2372,7 @@ async fn a_node_that_checks_external_submissions_reviews_them_unless_told_not_to
     state::isolate();
     let f = fixture_with(test_name!(), WITH_GH, |c| {
         c.external.repo_roots = vec![Config::state_dir()];
-        c.external.run_checks = true;
+        c.external.run_containers = true;
         c.supervision.checks = vec![SLOW_CHECK.into()];
     })
     .await;
@@ -2408,7 +2408,7 @@ async fn a_node_that_checks_external_submissions_reviews_them_unless_told_not_to
 async fn the_channels_say_external_submissions_start_a_reviewer_when_the_node_checks_them() {
     state::isolate();
     let f = fixture_with(test_name!(), WITH_GH, |c| {
-        c.external.run_checks = true;
+        c.external.run_containers = true;
     })
     .await;
     bind_review_model(&f);
@@ -2434,7 +2434,7 @@ async fn an_explicit_manual_trigger_holds_even_when_the_node_checks_external_sub
     state::isolate();
     let f = fixture_with(test_name!(), WITH_GH, |c| {
         c.external.repo_roots = vec![Config::state_dir()];
-        c.external.run_checks = true;
+        c.external.run_containers = true;
     })
     .await;
     bind_review(
@@ -2458,7 +2458,7 @@ async fn an_explicit_manual_trigger_holds_even_when_the_node_checks_external_sub
     );
 }
 
-/// Without `run_checks` an external submission still waits for the
+/// Without `run_containers` an external submission still waits for the
 /// operator: its reviewer would have only the diff.
 #[tokio::test]
 async fn an_external_submission_the_node_does_not_check_waits_for_the_operator() {
@@ -2557,7 +2557,7 @@ async fn a_resubmission_while_checks_run_starts_its_reviewer_on_its_own_checks()
     state::isolate();
     let f = fixture_with(test_name!(), WITH_GH, |c| {
         c.external.repo_roots = vec![Config::state_dir()];
-        c.external.run_checks = true;
+        c.external.run_containers = true;
         c.supervision.checks = vec![SLOW_CHECK.into()];
     })
     .await;
@@ -2631,7 +2631,7 @@ async fn a_resubmission_of_the_commit_being_checked_runs_its_checks_once() {
     state::isolate();
     let f = fixture_with(test_name!(), WITH_GH, |c| {
         c.external.repo_roots = vec![Config::state_dir()];
-        c.external.run_checks = true;
+        c.external.run_containers = true;
         c.supervision.checks = vec![SLOW_CHECK.into()];
     })
     .await;
@@ -2673,7 +2673,7 @@ async fn checks_on_a_candidate_too_large_to_keep_say_why_none_ran() {
     state::isolate();
     let f = fixture_with(test_name!(), WITH_GH, |c| {
         c.external.repo_roots = vec![Config::state_dir()];
-        c.external.run_checks = true;
+        c.external.run_containers = true;
         c.supervision.max_snapshot_bytes = 1;
     })
     .await;
@@ -2849,7 +2849,7 @@ async fn a_commit_submitted_again_after_another_gets_its_checks_and_its_reviewer
     state::isolate();
     let f = fixture_with(test_name!(), WITH_GH, |c| {
         c.external.repo_roots = vec![Config::state_dir()];
-        c.external.run_checks = true;
+        c.external.run_containers = true;
         c.supervision.checks = vec![SLOW_CHECK.into()];
     })
     .await;
@@ -2979,6 +2979,186 @@ async fn an_external_submission_runs_no_checks_unless_asked() {
         .unwrap()
         .is_empty());
     assert_eq!(f.store.get_review(id).unwrap().unwrap().checks_json, None);
+}
+
+/// A failed check behind an external submission is evidence for its
+/// reviewer and the operator, not a refusal: the submission stands, and the
+/// review card says which check failed.
+#[tokio::test]
+async fn a_failed_check_behind_an_external_submission_shows_on_its_card() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.external.repo_roots = vec![Config::state_dir()];
+        c.external.run_containers = true;
+        c.supervision.checks = vec!["echo it broke; exit 3".into()];
+    })
+    .await;
+    let v = submit_externally(&f, json!({})).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    assert_eq!(v["state"], "new", "{v}");
+    let checks = checks_ran(&f, &id).await;
+    assert_eq!(checks[0]["outcome"], "failed", "{checks}");
+    assert_eq!(checks[0]["ok"], false, "{checks}");
+    assert!(
+        checks[0]["tail"].as_str().unwrap().contains("it broke"),
+        "{checks}"
+    );
+    // Still a review waiting on the operator, and the card says so.
+    let review = f.store.get_review(&id).unwrap().unwrap();
+    assert_eq!(review.state, "new");
+    let (status, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.to_string().contains("it broke"), "{body}");
+}
+
+/// `[[repo]]` for the fixture's own repository: what `check_run` needs to run
+/// anything.
+fn with_repo_entry(f: &Fixture, checks: &[&str]) {
+    let path = std::fs::canonicalize(&f.worktree).unwrap();
+    f.manager.cfg().live_repo.set(vec![tracon::config::Repo {
+        path,
+        checks: Some(checks.iter().map(|c| c.to_string()).collect()),
+        ..Default::default()
+    }]);
+}
+
+async fn check_run(f: &Fixture, args: Value) -> Result<Value, String> {
+    let mut asked = json!({ "worktree": f.worktree });
+    for (key, value) in args.as_object().into_iter().flatten() {
+        asked[key] = value.clone();
+    }
+    f.tools
+        .call(
+            &tracon::mcp::CallContext::external(None, "work", "n1"),
+            "check_run",
+            &asked,
+        )
+        .await
+}
+
+/// `check_run` runs the repository's configured checks on the worktree's
+/// commit, returns what they said, and attaches it to nothing: no candidate,
+/// no review, no evidence a submission would reuse.
+#[tokio::test]
+async fn check_run_runs_the_configured_checks_and_attaches_nothing() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.external.repo_roots = vec![Config::state_dir()];
+        c.external.run_containers = true;
+    })
+    .await;
+    with_repo_entry(&f, &["test -f a.txt", "grep -q change a.txt"]);
+    let v = check_run(&f, json!({})).await.unwrap();
+    assert_eq!(v["passed"], true, "{v}");
+    let results = v["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2, "{v}");
+    assert_eq!(results[0]["command"], "test -f a.txt", "{v}");
+    assert_eq!(results[1]["outcome"], "passed", "{v}");
+    let head = sh_out(std::path::Path::new(&f.worktree), "git rev-parse HEAD");
+    assert_eq!(v["head_sha"], head.as_str(), "{v}");
+    // Nothing kept for the commit: a submission of it starts from scratch.
+    let candidate = tracon::store::candidate_id(&head, "work");
+    assert!(f.store.candidate(&candidate).unwrap().is_none());
+    assert!(f
+        .store
+        .check_runs_for_candidate(&candidate)
+        .unwrap()
+        .is_empty());
+
+    // One of them by name; anything else only as `command`.
+    let v = check_run(&f, json!({ "checks": ["grep -q change a.txt"] }))
+        .await
+        .unwrap();
+    assert_eq!(v["results"].as_array().unwrap().len(), 1, "{v}");
+    let refused = check_run(&f, json!({ "checks": ["make"] }))
+        .await
+        .unwrap_err();
+    assert!(refused.contains("`make` is not one of"), "{refused}");
+}
+
+/// One command runs the same way, on the commit, not the worktree's
+/// uncommitted changes; a failing one is told, not refused.
+#[tokio::test]
+async fn check_run_runs_one_command_on_the_commit() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.external.repo_roots = vec![Config::state_dir()];
+        c.external.run_containers = true;
+    })
+    .await;
+    with_repo_entry(&f, &["test -f a.txt"]);
+    sh(
+        std::path::Path::new(&f.worktree),
+        "echo uncommitted >> a.txt",
+    );
+    let v = check_run(&f, json!({ "command": "cat a.txt" }))
+        .await
+        .unwrap();
+    assert_eq!(v["passed"], true, "{v}");
+    let tail = v["results"][0]["tail"].as_str().unwrap();
+    assert!(tail.contains("change"), "{tail}");
+    assert!(!tail.contains("uncommitted"), "{tail}");
+    let v = check_run(&f, json!({ "command": "echo nope; exit 4" }))
+        .await
+        .unwrap();
+    assert_eq!(v["passed"], false, "{v}");
+    assert_eq!(v["results"][0]["outcome"], "failed", "{v}");
+    assert_eq!(v["results"][0]["exit"], 4, "{v}");
+}
+
+/// A repository the operator has not described has no image or checks to
+/// run in: refused, with the way to describe it.
+#[tokio::test]
+async fn check_run_refuses_a_repository_with_no_entry() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.external.repo_roots = vec![Config::state_dir()];
+        c.external.run_containers = true;
+    })
+    .await;
+    let refused = check_run(&f, json!({ "command": "true" }))
+        .await
+        .unwrap_err();
+    assert!(refused.contains("has no [[repo]] entry"), "{refused}");
+    assert!(refused.contains("repo_setup_draft"), "{refused}");
+}
+
+/// The one switch: off, an external harness is not offered `check_run` and
+/// is refused it; on, it is offered it. A session is never offered it.
+#[tokio::test]
+async fn check_run_is_offered_only_where_the_node_runs_containers_for_external_harnesses() {
+    state::isolate();
+    let names = |f: &Fixture, audience: tracon::mcp::Audience| -> Vec<String> {
+        f.tools
+            .list_for("work", "n1", audience)
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(str::to_string))
+            .collect()
+    };
+    let off = fixture_with(test_name!(), WITH_GH, |c| {
+        c.external.repo_roots = vec![Config::state_dir()];
+    })
+    .await;
+    assert!(!names(&off, tracon::mcp::Audience::External).contains(&"check_run".to_string()));
+    let refused = check_run(&off, json!({ "command": "true" }))
+        .await
+        .unwrap_err();
+    assert!(refused.contains("[external] run_containers"), "{refused}");
+    drop(off);
+    let on = fixture_with(&format!("{}-on", test_name!()), WITH_GH, |c| {
+        c.external.repo_roots = vec![Config::state_dir()];
+        c.external.run_containers = true;
+    })
+    .await;
+    assert!(names(&on, tracon::mcp::Audience::External).contains(&"check_run".to_string()));
+    assert!(!names(
+        &on,
+        tracon::mcp::Audience::Session(tracon::session::Phase::Execute)
+    )
+    .contains(&"check_run".to_string()));
 }
 
 #[tokio::test]

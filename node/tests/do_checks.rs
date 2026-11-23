@@ -372,6 +372,7 @@ async fn checks_are_prepared_once_and_forked_per_check() {
         false,
         &RunToCompletion,
         &forks,
+        None,
     )
     .await;
     let Forked::Ran(report) = forked else {
@@ -496,6 +497,7 @@ async fn checks_are_prepared_once_and_forked_per_check() {
         false,
         &RunToCompletion,
         &forks,
+        None,
     )
     .await;
     let Forked::Ran(again) = again else {
@@ -508,6 +510,43 @@ async fn checks_are_prepared_once_and_forked_per_check() {
         "{again:?}"
     );
     assert_eq!(fake.api.lock().unwrap().manifests.len(), 1);
+
+    // What a harness asks to run (`check_run`) runs there too, prepared the
+    // same way, but neither reuses what is recorded for the candidate nor is
+    // recorded on it: its rows name no candidate.
+    let recorded = store.check_runs_for_candidate(&first.id).unwrap().len();
+    let asked = vec!["cat marker README".to_string()];
+    let ad_hoc = run_forked(
+        &backend,
+        &cfg,
+        &store,
+        &first,
+        None,
+        &environment,
+        &tree,
+        false,
+        &RunToCompletion,
+        &forks,
+        Some(&asked),
+    )
+    .await;
+    let Forked::Ran(ad_hoc) = ad_hoc else {
+        panic!("not placed")
+    };
+    let ad_hoc = (*ad_hoc).unwrap();
+    let ended = std::mem::take(&mut *threads.lock().unwrap());
+    for thread in ended {
+        join(thread).await;
+    }
+    assert!(!ad_hoc.reused, "{ad_hoc:?}");
+    assert_eq!(ad_hoc.results.len(), 1, "{ad_hoc:?}");
+    assert_eq!(ad_hoc.results[0].outcome, "passed", "{ad_hoc:?}");
+    assert!(ad_hoc.results[0].tail.contains("prepared"), "{ad_hoc:?}");
+    assert_eq!(fake.api.lock().unwrap().manifests.len(), 2);
+    assert_eq!(
+        store.check_runs_for_candidate(&first.id).unwrap().len(),
+        recorded
+    );
 
     // An image this provider has no template for: back to the node, with
     // nothing recorded.
@@ -527,6 +566,7 @@ async fn checks_are_prepared_once_and_forked_per_check() {
         false,
         &RunToCompletion,
         &forks,
+        None,
     )
     .await;
     let Forked::Unplaced(why) = unplaced else {
