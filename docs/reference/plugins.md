@@ -284,9 +284,18 @@ part way. Pass `secrets.RELEASE_PLEASE_TOKEN || github.token` so the release PR 
 
 ### Start
 
-The node starts a plugin when a channel first needs it: a `tools/list` on a channel it
-is offered to, a call, a card's preview, or a format conversion. It runs the active
-build's `exec` from the install directory with two arguments appended:
+The node starts a plugin when a channel first needs it: a call, a card's preview, an
+`api/` request from its page, or a format conversion. A `tools/list` does not, once the
+node knows what the active build lists: it keeps the tools each ready start listed (see
+[Readiness](#readiness)) for the active build, in its database and across node restarts,
+and offers them from there whether or not a process runs, with the same names,
+descriptions and schemas. Only a build the node has not seen list yet, after its
+install, an update or a rollback, is started by a `tools/list`, once, on the listing's
+channel, to learn them; one that cannot start then offers nothing. Install, update,
+rollback and removal each forget what the build before listed.
+
+It runs the active build's `exec` from the install directory with two arguments
+appended:
 
 ```
 bin/sql-review serve --socket <path> --data <dir>
@@ -322,7 +331,10 @@ marked unhealthy at once:
 its tools disagree with its manifest: lists x not declared; declares y not listed
 ```
 
-That build is not started again until the operator restarts, updates or rolls it back.
+That build is not started again until the operator restarts, updates or rolls it back,
+and its tools are not offered, not even as an earlier start of it listed them. The check
+runs at every start, including one made after the node offered the build's tools from
+what it kept, so a build that lists something else now is caught at its next start.
 
 ### One process per plugin and channel
 

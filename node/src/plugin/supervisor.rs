@@ -1,9 +1,10 @@
 //! Running plugins on the host: one process per plugin and channel.
 //!
 //! An instance starts when a channel first needs the plugin (`ensure`, which
-//! the brokered tool calls make) and stops once it has gone unused for its
-//! `[[plugin]]` entry's idle timeout, when the plugin is updated, rolled back
-//! or removed, and when the node shuts down.
+//! the brokered tool calls, previews, pages and format conversions make) and
+//! stops once it has gone unused for its `[[plugin]]` entry's idle timeout,
+//! when the plugin is updated, rolled back or removed, and when the node
+//! shuts down.
 //!
 //! Each start runs the active build's `exec` from where the node installed
 //! it, once that build still digests to what was approved, with
@@ -22,6 +23,11 @@
 //! started again for that build until it is restarted, updated or rolled
 //! back. Its output is kept in memory and in a rotated file under
 //! `<state>/plugins/logs/`.
+//!
+//! What a ready start listed is kept in the store for the active build
+//! (`listed`), so its tools are offered on a later `tools/list`, after a node
+//! restart too, without starting it. Another build becoming active, or a
+//! start of the same build that disagrees with its manifest, forgets it.
 //!
 //! A call holds a `Lease` on its instance: while one is out, the instance is
 //! not stopped for being idle, and its idle time counts from the end of the
@@ -405,9 +411,32 @@ impl Supervisor {
     }
 
     /// What `plugin`'s build listed the last time an instance of it
-    /// started.
+    /// started and agreed with its manifest, kept in the store across node
+    /// restarts for the active build: what its tools are offered from
+    /// without starting it. `None` while that build is refused.
     pub fn listed(&self, plugin: &str) -> Option<Listed> {
-        self.shared.listed().get(plugin).cloned()
+        let held = self.shared.listed().get(plugin).cloned();
+        let listed = match held {
+            Some(listed) => listed,
+            None => {
+                let kept = self.shared.store.plugin_listed(plugin).ok()??;
+                let listed = Listed {
+                    digest: kept.digest,
+                    tools: kept.tools.into(),
+                };
+                self.shared
+                    .listed()
+                    .entry(plugin.to_string())
+                    .or_insert(listed)
+                    .clone()
+            }
+        };
+        let refused = self
+            .shared
+            .refused()
+            .get(plugin)
+            .is_some_and(|(digest, _)| *digest == listed.digest);
+        (!refused).then_some(listed)
     }
 
     fn instances(&self) -> std::sync::MutexGuard<'_, HashMap<(String, String), Arc<Instance>>> {
@@ -927,9 +956,22 @@ async fn once(
             shared
                 .refused()
                 .insert(plugin.to_string(), (build.digest.clone(), why.clone()));
+            // What an earlier start of this build listed is not offered
+            // either: this start is what the build serves now.
+            shared.listed().remove(plugin);
+            if let Err(error) = shared.store.plugin_clear_listed(plugin, &build.digest) {
+                tracing::warn!(%plugin, %error, "a refused plugin build's tools were not forgotten");
+            }
             break 'run Outcome::Fatal(why);
         }
-        let tools: Arc<[RemoteTool]> = tools.into();
+        let kept = crate::store::plugins::Listed {
+            digest: build.digest.clone(),
+            tools,
+        };
+        if let Err(error) = shared.store.plugin_set_listed(plugin, &kept) {
+            tracing::warn!(%plugin, %error, "a plugin's tools were not kept; the next listing starts it");
+        }
+        let tools: Arc<[RemoteTool]> = kept.tools.into();
         shared.listed().insert(
             plugin.to_string(),
             Listed {
