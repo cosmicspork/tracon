@@ -2609,7 +2609,9 @@ channel, and its logs), where each kind that has a real delete is
 deleted, and what that delete does beyond the node; the Nodes screen carries the
 serving node's total. Documents, memories and work items delete one at a time and
 replicate the delete as a tombstone; workspaces and harness state go through Runtime
-storage once their session is archived, by hand or on that schedule; sessions, their logs and evidence have no
+storage once their session is archived, by hand or on that schedule; the artefact stash
+(`stash_put`, `stash_get`: bytes for sessions only, never mounted into a check or a
+preparation) evicts its least recently used entries past 1 GB per repository; sessions, their logs and evidence have no
 delete. Tombstone semantics wait until replication makes a
 propagated delete matter, and that decision is due before it does. Plain-text export for every kind: no format readable
 only by this binary. Documents export as plain Markdown and import back by filename

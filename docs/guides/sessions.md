@@ -659,6 +659,27 @@ candidate moves past that commit, and lists the required checks it ran there.
 None of it goes to the forge; the pull request gets prose only. A harness you run
 yourself shows work on a review it submitted, from that review's worktree.
 
+Some of what a session builds is slow to rebuild and the same every time: "before"
+screenshots of the default branch are the first case. A session keeps such bytes for
+later sessions on the same repository with **`stash_put`** (`key`, `inputs`, `path`)
+and asks for them back with **`stash_get`** (`key`, `inputs`). An entry is found by
+its name and a digest of the inputs it names: files and directories of the workspace,
+or Git objects written `<revision>:<path>` (`origin/main:spa`). The node computes
+that digest itself from its own snapshot of the workspace, so a changed input misses
+(`hit: false`, with how many entries under that name were built from other inputs)
+and is never handed back stale. A hit is unpacked over the session's workspace in its
+running sandbox, at the path it was kept from. Like `show_work` it reads only what
+Git would see, so what is stashed is written to a path no ignore rule matches and kept
+out of commits. The stash is sessions only: execute and review sessions are offered
+it, a plan session and a harness you run yourself are not, and it is never mounted
+into a run, so checks and preparations never read it and nothing an agent stashed
+reaches a check. It holds bytes, not knowledge: what an agent learned belongs in a
+memory. Each repository of each channel keeps up to 1 GB on the node that ran the
+session (under `stash/` in the state directory); a put past that evicts the least
+recently used entries, a hit counting as a use. **Settings → Data** shows what it
+takes as *Artefact stash*. Neither tool is asked: they reach nothing beyond this
+node.
+
 **Work → Evidence** browses captured candidates without requiring an ID. Reviews,
 sessions, and work items link to the corresponding owner and channel; a peer's
 candidates are read from that owner. A missing local candidate is not evidence
@@ -725,7 +746,8 @@ request changes with a summary and findings, and what it rests on (`ran_checks`,
 `cited_evidence` or `diff_only`), which is shown on the review card;
 only your decision publishes or sends the work back. Its tools read and run, never
 publish: `recall`, `doc_read`, `doc_search`, `work_list`, `work_show`,
-`service_start`, `service_status`, `show_work`, and `review_verdict`. Where the
+`service_start`, `service_status`, `show_work`, `stash_get`, `stash_put`, and
+`review_verdict`. Where the
 change it reviews is already open on the forge, it can also turn that change
 back into a draft with `pr_ready` or `mr_ready` (`ready: false`) when it finds
 something blocking, so nobody merges it in the meantime.

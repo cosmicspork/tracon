@@ -26,6 +26,7 @@ pub mod schema;
 pub mod services;
 pub mod setup;
 pub mod show;
+pub mod stash;
 pub mod upstream;
 pub mod wait;
 pub mod work;
@@ -592,6 +593,11 @@ impl Tools {
         services::START,
         services::STATUS,
         show::SHOW,
+        // Bytes a reviewer would otherwise rebuild, such as "before"
+        // screenshots of the default branch, found again only for unchanged
+        // inputs.
+        stash::GET,
+        stash::PUT,
         review::VERDICT,
         github::PR_READY,
         gitlab::MR_READY,
@@ -622,8 +628,9 @@ impl Tools {
     /// What an external harness is not offered: a verdict is what a review
     /// session the node started gives on someone else's change. Nor does it
     /// run behind the node's proxy, beside the node's services, in a
-    /// workspace the node can fetch into, or in a repository the node can set
-    /// up: those tools refuse it, so it is not shown them.
+    /// workspace the node can fetch into or restore a stash into, or in a
+    /// repository the node can set up: those tools refuse it, so it is not
+    /// shown them.
     pub const NOT_EXTERNAL: &'static [&'static str] = &[
         review::VERDICT,
         branch::FETCH,
@@ -633,6 +640,8 @@ impl Tools {
         setup::DRAFT,
         setup::TRY,
         setup::PROPOSE,
+        stash::PUT,
+        stash::GET,
     ];
 
     /// Tool definitions for a channel, narrowed to what `audience` is offered.
@@ -686,6 +695,9 @@ impl Tools {
             // Showing work reaches the operator and nothing else: it is read
             // from the node's own snapshot and never leaves tracon.
             out.extend(show::definitions());
+            // The stash is read from and restored into a session's own
+            // workspace, and kept on this node for its repository only.
+            out.extend(stash::definitions());
             // Fetching a branch reads the forge with the repository's own
             // credential and moves one remote-tracking ref of this session's
             // workspace: nothing on the forge changes.
@@ -2189,6 +2201,18 @@ impl Tools {
                 .map_err(|error| error.to_string())?;
             *gate = audit::Gate::node("show-work");
             return show::call(access, ctx, args).await;
+        }
+        if matches!(name, stash::PUT | stash::GET) {
+            let access = self
+                .session
+                .get()
+                .ok_or("the stash is not available on this node")?;
+            access
+                .manager
+                .caller_active(ctx)
+                .map_err(|error| error.to_string())?;
+            *gate = audit::Gate::node("stash");
+            return stash::call(access, ctx, name, args).await;
         }
         if name == branch::FETCH {
             let access = self

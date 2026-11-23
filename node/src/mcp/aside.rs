@@ -105,7 +105,7 @@ mod tests {
     use super::*;
     use crate::mcp::{
         approvals, docs, egress, github, gitlab, memory, operator, review, services, setup, show,
-        work,
+        stash, work,
     };
     use crate::session::Phase;
 
@@ -119,6 +119,7 @@ mod tests {
         all.extend(operator::definitions());
         all.extend(egress::definitions());
         all.extend(show::definitions());
+        all.extend(stash::definitions());
         all.extend(setup::definitions());
         all.extend(work::definitions());
         all.extend(approvals::definitions());
@@ -161,6 +162,8 @@ mod tests {
             operator::REPORT_STATUS,
             operator::QUESTION_STATUS,
             show::SHOW,
+            stash::PUT,
+            stash::GET,
             approvals::STATUS,
         ];
         let mut silent = Vec::new();

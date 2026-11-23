@@ -508,6 +508,7 @@ const DATA = {
     holding('index', 'Search index', 'vector', 24_610, 25_165_824, null, 'Rebuilt from documents and memories. Not replicated.'),
     holding('workspaces', 'Workspaces', 'workspace', 37, 5_402_198_016, RUNTIME, 'This node only. Removing one ends resuming, exporting and restoring.'),
     holding('harness', 'Harness state', 'session', 211, 1_133_510_656, RUNTIME, 'This node only. Removing one ends resuming the session.'),
+    holding('stash', 'Artefact stash', 'repository', 3, 412_090_368, null, 'This node only, for sessions alone. Each repository keeps up to 1 GB; past that the least recently used entries are evicted, and a session rebuilds what it misses.'),
   ],
 }
 
