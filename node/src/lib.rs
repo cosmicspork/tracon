@@ -53,6 +53,7 @@ pub mod service;
 pub mod service_bundle;
 pub mod session;
 pub mod sidecars;
+pub mod stash;
 pub mod store;
 pub mod stream;
 pub mod telemetry;

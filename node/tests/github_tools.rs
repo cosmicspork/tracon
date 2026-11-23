@@ -1418,6 +1418,8 @@ async fn each_phase_lists_exactly_its_tools_of_the_channels() {
         "repo_setup_draft",
         "request_egress",
         "show_work",
+        "stash_put",
+        "stash_get",
         "review_verdict",
         "mr_status",
         "issue",
@@ -1445,6 +1447,13 @@ async fn each_phase_lists_exactly_its_tools_of_the_channels() {
     assert_eq!(review, narrowed(&|n| Tools::REVIEW_TOOLS.contains(&n)));
     // Its one forge write is drafting its review's change.
     assert!(review.iter().any(|n| n == "pr_ready"), "{review:?}");
+    // It keeps and restores bytes such as "before" screenshots like any session.
+    for offered in ["stash_get", "stash_put"] {
+        assert!(
+            review.iter().any(|n| n == offered),
+            "{offered} not in {review:?}"
+        );
+    }
     for withheld in ["pr_merge", "pr_comment", "submit_review"] {
         assert!(
             !review.iter().any(|n| n == withheld),
