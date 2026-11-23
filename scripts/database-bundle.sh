@@ -119,7 +119,7 @@ cleanup() {
 trap cleanup EXIT
 
 case "$service" in
-  postgres) wanted=("usr/lib/postgresql/$major/*" "usr/share/postgresql/$major/*" "usr/lib/$multiarch/*" "lib/$multiarch/*") ;;
+  postgres) wanted=("usr/lib/postgresql/$major/*" "usr/share/postgresql/*" "usr/lib/$multiarch/*" "lib/$multiarch/*") ;;
   redis) wanted=('usr/local/bin/redis-server' 'usr/local/bin/redis-cli' "usr/lib/$multiarch/*" "lib/$multiarch/*") ;;
 esac
 
@@ -159,19 +159,34 @@ case "$service" in
     mkdir -p "$dest/pg/usr/lib/postgresql" "$dest/pg/usr/share/postgresql"
     cp -a "$rootfs/usr/lib/postgresql/$major" "$dest/pg/usr/lib/postgresql/$major"
     cp -a "$rootfs/usr/share/postgresql/$major" "$dest/pg/usr/share/postgresql/$major"
-    # Links followed, so the tree is files and directories only.
-    # An absolute link is read against the image's root, never this host's.
+    # Links followed, so the tree is files and directories only. Each is
+    # read where it is in the image: an absolute one against the image's
+    # root, never this host's, and a relative one from its own directory
+    # there, since what it names may be outside what the bundle copies.
     find "$dest/pg" -type l | while read -r link; do
       target=$(readlink "$link")
       case "$target" in
         /*) source="$rootfs$target" ;;
-        *) source="$(dirname "$link")/$target" ;;
+        *) source="$(dirname "$rootfs${link#"$dest/pg"}")/$target" ;;
       esac
       if [ -f "$source" ]; then
         cp --remove-destination "$source" "$link"
       else
+        echo "database-bundle: dropping ${link#"$dest/"}, a link to $target, which the image does not have" >&2
         rm -f "$link"
       fi
+    done
+    # The image diverts Debian's postgresql.conf.sample to `.dpkg` and links
+    # share/postgresql/<major>/ to its own copy one level up, edited to
+    # listen on every address. initdb needs the sample beside the rest of
+    # share/; upstream's is the one wanted, since `run` says where to listen.
+    sample="$dest/pg/usr/share/postgresql/$major/postgresql.conf.sample"
+    if [ -f "$rootfs/usr/share/postgresql/postgresql.conf.sample.dpkg" ]; then
+      cp --remove-destination "$rootfs/usr/share/postgresql/postgresql.conf.sample.dpkg" "$sample"
+    fi
+    for needed in postgresql.conf.sample pg_hba.conf.sample pg_ident.conf.sample postgres.bki; do
+      [ -f "$dest/pg/usr/share/postgresql/$major/$needed" ] \
+        || die "the bundle has no share/postgresql/$major/$needed, which initdb needs"
     done
     for client in psql pg_dump pg_restore pg_isready; do
       [ -x "$dest/pg/usr/lib/postgresql/$major/bin/$client" ] && wrap "$client" "pg/usr/lib/postgresql/$major/bin/$client"
