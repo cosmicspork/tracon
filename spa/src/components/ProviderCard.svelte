@@ -136,7 +136,11 @@
     const outcome = await save(modelEdits, [])
     modelsBusy = false
     if (outcome.kind === 'saved') {
-      modelsSaved = outcome.result.restart_required ? 'Saved to node.toml; new sessions see it once the node restarts.' : 'Saved to node.toml.'
+      // The node asks the harness again as the save lands; the pickers
+      // follow when it answers, and Settings says so if it cannot.
+      modelsSaved = outcome.result.restart_required
+        ? 'Saved to node.toml; the rest applies once the node restarts.'
+        : 'Saved to node.toml; the pickers follow once the harness answers.'
     } else {
       modelsError = said(outcome)
     }

@@ -70,7 +70,7 @@
     triggerPatch,
     type ReviewSource,
   } from '../lib/bindings'
-  import { modelSummary, recentModelValues } from '../lib/models'
+  import { modelSummary, probeFailureLine, recentModelValues } from '../lib/models'
   import { hashToken, loginUrl, mintToken } from '../lib/settings'
   import { contextOf, saveOps, type SaveOutcome } from '../lib/config-form'
   import { router } from '../lib/router.svelte'
@@ -179,16 +179,15 @@
   }
 
   // --- the model catalogue ----------------------------------------------
-  // One catalogue per node, probed when a provider connects — and that probe
-  // can miss: the harness may not have been up yet, or the credential arrived
-  // by handoff rather than through a sign-in here. Asking again beats making
-  // the operator disconnect and sign in a second time. It sits under the
-  // provider rows because it belongs to all of them at once, and it reports
-  // the count per provider so an absent one is visible rather than merely
-  // subtracted from a total.
+  // The node probes its catalogue again whenever what it would find changes:
+  // a provider connected, its declared models saved, a provider removed, a
+  // boundary that passes. Only a probe that failed needs the operator, so
+  // that is all this says, with a retry; the count per provider afterwards
+  // shows a connected provider that still offers nothing.
   let modelNote = $state('')
+  const probeFailure = $derived(selectedNodeIsServing ? probeFailureLine(store.node?.models_probe_failure, clock.now) : null)
 
-  function refreshModels() {
+  function retryProbe() {
     modelNote = ''
     return act('models', async () => {
       modelNote = modelSummary(await api.refreshModels(), selectedProviders)
@@ -833,13 +832,15 @@
       <div class="empty">No providers on {selectedNodeName}.</div>
     {/if}
     {#if addProviderNote}<small>{addProviderNote}</small>{/if}
-    {#if selectedNodeIsServing}
-      <div class="acts">
-        <button class="lnk" onclick={refreshModels} disabled={busy !== ''}>
-          {busy === 'models' ? 'Asking the harness…' : 'Refresh models'}
+    {#if probeFailure}
+      <div class="acts" role="status">
+        <small class="bad">{probeFailure}</small>
+        <button class="lnk" onclick={retryProbe} disabled={busy !== ''}>
+          {busy === 'models' ? 'Asking the harness…' : 'Retry'}
         </button>
-        {#if modelNote}<small>{modelNote}</small>{:else}<Help label="About refreshing models">The harness gets exactly the declared list. Refresh re-reads it.</Help>{/if}
       </div>
+    {:else if modelNote}
+      <div class="acts"><small>{modelNote}</small></div>
     {/if}
   </Card>
 

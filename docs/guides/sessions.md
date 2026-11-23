@@ -62,16 +62,16 @@ signing in Codex for `work` with a work account leaves `personal` on the account
 had. Each sign-in is listed with its account and channels, renews on its own, and is
 disconnected on its own; the node names the channels that lose the provider before a
 disconnect goes ahead.
-A connected provider whose models never appear has a stale catalogue — the probe
-runs when the provider connects, and can miss if the harness was not up yet or the
-credential arrived by handoff: **Settings → Connections → Refresh models**, under the
-provider rows, asks the harness again without disconnecting and signing in a second
-time, and reports what came back per provider. The catalogue itself is
-declared, not discovered: **Settings → Connections → Declared models** edits each
-provider's model list (id, picker name, context and output limits, reasoning,
-attachments, and for the native harness parallel tool calls and reasoning effort) and
-writes it to `node.toml`; sessions started after the next restart
-see the change.
+The catalogue is declared, not discovered: **Settings → Connections → Declared
+models** edits each provider's model list (id, picker name, context and output
+limits, reasoning, attachments, and for the native harness parallel tool calls and
+reasoning effort) and writes it to `node.toml`. The change applies without a
+restart: the node asks the harness for its model list again as soon as the save
+lands, so the pickers, and the next session, follow it. It asks again whenever what
+it would find changes — a provider connected, disconnected or removed from
+`node.toml` (its models leave the pickers), its key set, or the boundary passing a
+check. When the last of those probes failed, the Providers card in Settings says why
+and offers **Retry**; nowhere else does, and the pickers keep the list from before.
 When a peer runs the task, choose or name the forge repository
 (`github.com/owner/name`) the same way: the peer starts from its own clone of it,
 cloning it with its own channel forge credential (or anonymously) if it has none.

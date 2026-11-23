@@ -314,14 +314,16 @@ pub const KEYS: &[KeySpec] = &[
     restart("providers.*.login"),
     live("providers.*.price.input_per_mtok"),
     live("providers.*.price.output_per_mtok"),
-    restart("providers.*.models.id"),
-    restart("providers.*.models.name"),
-    restart("providers.*.models.context"),
-    restart("providers.*.models.output"),
-    restart("providers.*.models.reasoning"),
-    restart("providers.*.models.attachment"),
-    restart("providers.*.models.parallel_tools"),
-    restart("providers.*.models.reasoning_effort"),
+    // The declared models are read as they are when the probe runs and when
+    // a session is wired, so a save re-probes and the pickers follow.
+    live("providers.*.models.id"),
+    live("providers.*.models.name"),
+    live("providers.*.models.context"),
+    live("providers.*.models.output"),
+    live("providers.*.models.reasoning"),
+    live("providers.*.models.attachment"),
+    live("providers.*.models.parallel_tools"),
+    live("providers.*.models.reasoning_effort"),
     // [memory]
     live("memory.promote_at"),
     // [supervision]

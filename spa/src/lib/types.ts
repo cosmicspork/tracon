@@ -33,6 +33,11 @@ export interface NodeInfo {
    * serving node's row, and absent from older builds.
    */
   reconciling?: boolean
+  /**
+   * Why the node's last model probe failed, and when; null once one answers.
+   * Only on the serving node's row, and absent from older builds.
+   */
+  models_probe_failure?: ProbeFailure | null
   /** The channel this node prefers the composer to start on; only on the serving node's row. */
   default_channel?: string | null
   /** How the ledger names priorities; only on the serving node's row, absent from older builds. */
@@ -54,6 +59,12 @@ export interface NodeInfo {
    * the serving node's row, and absent from older builds.
    */
   policy?: { running: number; trusted: boolean; shipped: number }
+}
+
+/** A model probe that failed: why, and when. */
+export interface ProbeFailure {
+  error: string
+  at_ms: number
 }
 
 export interface ModelOption {

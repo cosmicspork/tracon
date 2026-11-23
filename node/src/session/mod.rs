@@ -759,6 +759,13 @@ impl OperatorAnswer {
     }
 }
 
+/// A model probe that failed: why, and when.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ProbeFailure {
+    pub error: String,
+    pub at_ms: i64,
+}
+
 /// Running sessions, by id. A session that has ended leaves the map; its rows
 /// and events stay in the store.
 #[derive(Clone)]
@@ -781,6 +788,12 @@ pub struct Manager {
     /// The node's own model probe presents this to the gateway; it may only
     /// read, and it names no channel.
     probe_token: String,
+    /// The model probe's last outcome, when it failed: what Settings says
+    /// beside its retry. Cleared by a probe that answers.
+    probe_failure: Arc<parking_lot::RwLock<Option<ProbeFailure>>>,
+    /// Held across one model probe, so two asked for at once (a save and a
+    /// boundary check) record their lists in the order they ran.
+    probing: Arc<Mutex<()>>,
     /// The hub client, once one exists: commands for sessions other nodes own
     /// are forwarded through it.
     mesh: Arc<std::sync::OnceLock<Arc<crate::mesh::client::MeshClient>>>,
@@ -876,6 +889,8 @@ impl Manager {
             tokens: Arc::new(Mutex::new(HashMap::new())),
             liveness: Arc::default(),
             probe_token: mint_token(),
+            probe_failure: Arc::default(),
+            probing: Arc::default(),
             mesh: Arc::new(std::sync::OnceLock::new()),
             providers: Arc::new(std::sync::OnceLock::new()),
             adapters: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -2233,6 +2248,21 @@ impl Manager {
         &self.probe_token
     }
 
+    /// Why the last model probe failed, if it did.
+    pub fn probe_failure(&self) -> Option<ProbeFailure> {
+        self.probe_failure.read().clone()
+    }
+
+    /// Record how a model probe ended: a failure is kept, an answer clears it.
+    pub fn set_probe_failure(&self, failure: Option<ProbeFailure>) {
+        *self.probe_failure.write() = failure;
+    }
+
+    /// Held for one model probe at a time.
+    pub async fn probing(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.probing.lock().await
+    }
+
     pub fn is_probe_token(&self, presented: &str) -> bool {
         constant_time_eq(self.probe_token.as_bytes(), presented.as_bytes())
     }
@@ -3382,12 +3412,14 @@ impl Manager {
         // channel could actually spend on are wired to the gateway with this
         // session's token as the placeholder key, so the only secret in the
         // container names the session. A provider the gateway would refuse is
-        // left out rather than offered and then denied mid-turn.
+        // left out rather than offered and then denied mid-turn. The
+        // declared models, and which providers the file still names, are
+        // read as they are now: what the picker offered is what is wired.
         let wiring = {
             let bindings = self.bindings(&spec.channel);
             let broker = self.tools.broker.read().unwrap();
             crate::gateway::model::harness_wiring(
-                &self.cfg,
+                &self.cfg.live(),
                 &self.backend.harness_host(),
                 &token,
                 |name, provider| {

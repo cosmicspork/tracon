@@ -610,6 +610,9 @@ pub(crate) fn node_json(s: &AppState) -> Result<serde_json::Value, ApiError> {
     let mut v = node_row_json(&n);
     v["reconciling"] = json!(crate::boundary::reconcile::running());
     v["providers"] = json!(providers_json(s));
+    // The last model probe, when it failed: Settings says why and offers to
+    // ask again. Only this node's own row carries it.
+    v["models_probe_failure"] = json!(s.manager.probe_failure());
     v["default_channel"] = json!(s.cfg.live().session.default_channel);
     v["work"] = work_json(s);
     // The policy this node runs beside the one its build ships, so Home can
@@ -6992,6 +6995,8 @@ async fn disconnect_local(
         .disconnect(name, sign_in, &crate::providers::LoginOwner::Local)
         .await
         .map_err(provider_err)?;
+    // The provider's models leave the pickers with it.
+    reprobe_models(s);
     Ok(json!({ "ok": true }))
 }
 
@@ -7229,15 +7234,89 @@ pub(crate) fn providers_json(s: &AppState) -> Vec<serde_json::Value> {
 /// Probe the harness for its model list through the gateway and record it on
 /// this node's row. Skipped when no model credential is usable here: the
 /// harness would list its catalogue, but nothing could be run against it.
+///
+/// One probe runs at a time. A probe that fails is remembered, with why, for
+/// Settings to say beside its retry; one that answers, or that finds nothing
+/// to probe, clears it. Either way the node is pushed to live clients.
 pub async fn probe_models_into_store(
     s: &AppState,
     backend: &dyn crate::boundary::Backend,
 ) -> Result<Vec<crate::adapter::ModelOption>, String> {
+    let _one = s.manager.probing().await;
+    let outcome = probe_models_once(s, backend).await;
+    // With no model credential left (the last provider removed) nothing on
+    // the list could run, so the list goes too.
+    let list = match &outcome {
+        Ok(models) => Some(models.as_slice()),
+        Err(ProbeEnd::NoCredential) => Some(&[][..]),
+        Err(ProbeEnd::Skipped(_) | ProbeEnd::Failed(_)) => None,
+    };
+    let failure = match &outcome {
+        Err(ProbeEnd::Failed(error)) => Some(crate::session::ProbeFailure {
+            error: error.clone(),
+            at_ms: crate::store::now_ms(),
+        }),
+        _ => None,
+    };
+    let mut changed = s.manager.probe_failure() != failure;
+    s.manager.set_probe_failure(failure);
+    if let (Some(models), Ok(Some(mut node))) = (list, s.store().get_node(&s.node_id)) {
+        let listed = serde_json::to_string(models).ok();
+        if node.models_json != listed || outcome.is_ok() {
+            node.models_json = listed;
+            let _ = s.store().put_node(&node);
+            changed = true;
+        }
+    }
+    // Push the node to any live client, so a model list (or why it could
+    // not be had) reaches the interface without a reload.
+    if changed {
+        if let Ok(v) = node_json(s) {
+            s.manager.bus().publish(crate::stream::Frame::Node(v));
+        }
+    }
+    outcome.map_err(|end| match end {
+        ProbeEnd::NoCredential => "no model credential".into(),
+        ProbeEnd::Skipped(why) | ProbeEnd::Failed(why) => why,
+    })
+}
+
+/// Why a model probe ended without a list: no model credential is usable
+/// here, there was nothing else to probe, or the harness could not be asked.
+enum ProbeEnd {
+    NoCredential,
+    Skipped(String),
+    Failed(String),
+}
+
+/// Probe the models again, in the background: after a save of the declared
+/// models, or a provider removed, so the pickers follow without a refresh.
+pub(crate) fn reprobe_models(s: &AppState) {
+    let s = s.clone();
+    tokio::spawn(async move {
+        let backend = s.manager.backend().clone();
+        let _ = probe_models_into_store(&s, backend.as_ref()).await;
+    });
+}
+
+/// Whether an edit of `node.toml` that changed `keys` changed a provider,
+/// and so what the model probe would find.
+pub(crate) fn touches_providers<S: AsRef<str>>(keys: &[S]) -> bool {
+    keys.iter().any(|key| {
+        let key = key.as_ref();
+        key == "providers" || key.starts_with("providers.")
+    })
+}
+
+async fn probe_models_once(
+    s: &AppState,
+    backend: &dyn crate::boundary::Backend,
+) -> Result<Vec<crate::adapter::ModelOption>, ProbeEnd> {
     let Ok(Some(node)) = s.store().get_node(&s.node_id) else {
-        return Err("node row missing".into());
+        return Err(ProbeEnd::Skipped("node row missing".into()));
     };
     if node.state != "ready" {
-        return Err("node is refused; no probe".into());
+        return Err(ProbeEnd::Skipped("node is refused; no probe".into()));
     }
     if !s
         .tools
@@ -7250,7 +7329,7 @@ pub async fn probe_models_into_store(
             "no model credential on this node; connect a provider on the Nodes screen. \
              Sessions cannot start until one is connected."
         );
-        return Err("no model credential".into());
+        return Err(ProbeEnd::NoCredential);
     }
     // The probe is offered exactly the providers a session could be: one the
     // gateway would refuse it contributes a catalogue of models that cannot
@@ -7258,7 +7337,7 @@ pub async fn probe_models_into_store(
     let wiring = {
         let broker = s.tools.broker.read().unwrap();
         crate::gateway::model::harness_wiring(
-            &s.cfg,
+            &s.cfg.live(),
             &backend.harness_host(),
             s.manager.probe_token(),
             |name, provider| {
@@ -7278,11 +7357,11 @@ pub async fn probe_models_into_store(
         s.adapter.as_ref(),
         &wiring,
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| ProbeEnd::Failed(e.to_string()))?;
     backend
         .import_volume(&scratch.volume, &scratch.dir)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| ProbeEnd::Failed(e.to_string()))?;
     let runner = backend.runner(scratch.mounts);
     let mut models = s
         .adapter
@@ -7319,7 +7398,7 @@ pub async fn probe_models_into_store(
             }
         }
     }
-    let mut models = models?;
+    let mut models = models.map_err(ProbeEnd::Failed)?;
     for model in &mut models {
         model.harnesses = s
             .manager
@@ -7327,15 +7406,6 @@ pub async fn probe_models_into_store(
             .into_iter()
             .map(str::to_string)
             .collect();
-    }
-    if let Ok(Some(mut node)) = s.store().get_node(&s.node_id) {
-        node.models_json = serde_json::to_string(&models).ok();
-        let _ = s.store().put_node(&node);
-        // Push the refreshed node to any live client, so a model list (or a
-        // refused state) reaches the interface without a reload.
-        if let Ok(v) = node_json(s) {
-            s.manager.bus().publish(crate::stream::Frame::Node(v));
-        }
     }
     tracing::info!(models = models.len(), "model list probed");
     Ok(models)
@@ -8380,7 +8450,10 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                         &crate::providers::LoginOwner::Peer(sender.to_string()),
                     )
                     .await
-                    .map(|_| json!({ "ok": true }))
+                    .map(|_| {
+                        reprobe_models(self);
+                        json!({ "ok": true })
+                    })
                     .map_err(provider_err),
                 Err(error) => Err(error),
             },
@@ -9060,6 +9133,7 @@ pub async fn put_config(
     // The live keys apply now; the others wait for a restart, which the
     // node's restart status names (`GET /api/restart`).
     let (restart_required, pending) = super::config_api::restart_owed(&s, &outcome).await;
+    super::config_api::reprobe_after(&s, &outcome);
     Ok(Json(json!({
         "changed": planned.changed,
         "restart_required": restart_required,
@@ -9759,5 +9833,20 @@ mod answer_refused_tests {
         assert_eq!(code, StatusCode::CONFLICT);
         assert!(json.get("stale").is_none(), "{json}");
         assert!(json["error"].get("kind").is_none(), "{json}");
+    }
+}
+
+#[cfg(test)]
+mod reprobe_tests {
+    use super::touches_providers;
+
+    #[test]
+    fn an_edit_of_a_provider_is_one_the_model_probe_follows() {
+        assert!(touches_providers(&["providers.openai-codex.models[0].id"]));
+        assert!(touches_providers(&["providers.acme.credential"]));
+        assert!(touches_providers(&["review.max_files", "providers"]));
+        assert!(!touches_providers(&["review.max_files"]));
+        assert!(!touches_providers(&["providersx.y"]));
+        assert!(!touches_providers::<&str>(&[]));
     }
 }
