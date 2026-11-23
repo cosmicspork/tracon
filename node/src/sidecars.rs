@@ -103,6 +103,17 @@ pub fn lookup<'a>(cfg: &'a Config, name: &str) -> Result<&'a Service, String> {
         .ok_or_else(|| format!("no service named {name:?}; {}", catalogue_names(cfg)))
 }
 
+/// The service's environment in the sandbox: the operator's, and where its
+/// data is kept when the session's repository keeps it
+/// (`crate::service_volume`). A `run` that finds no directory there keeps
+/// its data in one that goes with the sandbox, and starts empty.
+fn sandbox_env(service: &Service) -> BTreeMap<String, String> {
+    let mut env = service.env.clone();
+    env.entry(crate::service_volume::DATA_ENV.into())
+        .or_insert_with(|| crate::service_volume::target(&service.name));
+    env
+}
+
 fn sidecar(service: &Service, session_container: &str) -> Sidecar {
     Sidecar {
         name: sidecar_name(session_container, &service.name),
@@ -112,7 +123,7 @@ fn sidecar(service: &Service, session_container: &str) -> Sidecar {
         in_sandbox: InSandbox {
             service: service.name.clone(),
             argv: service.sandbox_argv(),
-            env: service.env.clone(),
+            env: sandbox_env(service),
             restart: service.restart,
             ready_within: Duration::from_secs(service.timeout_secs()),
         },
@@ -174,6 +185,26 @@ fn container(session: &SessionRow) -> Result<&str, String> {
         .ok_or_else(|| "this session has no container for a service to join".to_string())
 }
 
+/// What becomes of the service's data, as the session is told: kept for its
+/// repository where the repository's entry asks (`crate::service_volume`),
+/// otherwise gone with the sandbox.
+fn data_note(cx: &Context<'_>, service: &Service) -> &'static str {
+    let repo = crate::environment::origin_repo(cx.store, Some(&cx.session.id))
+        .ok()
+        .flatten();
+    let kept = repo
+        .is_some_and(|repo| crate::service_volume::kept_for(cx.cfg, &repo).contains(&service.name));
+    match kept {
+        true => "kept for this repository between sessions; only the operator resets it",
+        false => "starts empty and goes with this session's sandbox",
+    }
+}
+
+fn with_data(cx: &Context<'_>, service: &Service, mut out: Value) -> Value {
+    out["data"] = json!(data_note(cx, service));
+    out
+}
+
 /// Start `name` in the session's sandbox unless it is already running, then wait up
 /// to `wait` for it to answer.
 pub async fn start(cx: &Context<'_>, name: &str, wait: Duration) -> Result<Value, String> {
@@ -192,7 +223,8 @@ pub async fn start(cx: &Context<'_>, name: &str, wait: Duration) -> Result<Value
         }
         (cx.record)(event(service, &sidecar, STARTED));
     }
-    await_ready(cx, service, &sidecar, current.as_ref(), wait).await
+    let out = await_ready(cx, service, &sidecar, current.as_ref(), wait).await?;
+    Ok(with_data(cx, service, out))
 }
 
 /// Where `name` stands, waiting up to `wait` for a starting service.
@@ -206,7 +238,8 @@ pub async fn status(cx: &Context<'_>, name: &str, wait: Duration) -> Result<Valu
         return Ok(view(service, &current.state, current.detail.as_deref()));
     }
     let sidecar = sidecar(service, session_container);
-    await_ready(cx, service, &sidecar, Some(&current), wait).await
+    let out = await_ready(cx, service, &sidecar, Some(&current), wait).await?;
+    Ok(with_data(cx, service, out))
 }
 
 async fn await_ready(
@@ -418,6 +451,48 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_session_is_told_whether_its_repository_keeps_the_services_data() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let row = session(&store);
+        let mut cfg = cfg(30);
+        let runner = FakeRunner::default();
+        let record = recorder(store.clone());
+        let v = {
+            let cx = Context {
+                cfg: &cfg,
+                store: &store,
+                runner: &runner,
+                session: &row,
+                record: &record,
+            };
+            start(&cx, "browser", Duration::from_secs(1)).await.unwrap()
+        };
+        assert_eq!(
+            v["data"],
+            "starts empty and goes with this session's sandbox"
+        );
+        cfg.repo = vec![crate::config::Repo {
+            path: "/r".into(),
+            service_volumes: vec!["browser".into()],
+            ..Default::default()
+        }];
+        let cx = Context {
+            cfg: &cfg,
+            store: &store,
+            runner: &runner,
+            session: &row,
+            record: &record,
+        };
+        let v = status(&cx, "browser", Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            v["data"],
+            "kept for this repository between sessions; only the operator resets it"
+        );
+    }
+
     /// A service an older node ran as a container of its own is not one
     /// this node stops in a sandbox.
     #[tokio::test]
@@ -468,6 +543,12 @@ mod tests {
         );
         assert_eq!(in_sandbox.ready_within, Duration::from_secs(1));
         assert_eq!(in_sandbox.restart, crate::config::ServiceRestart::Always);
+        // Told where its data is kept, which only a repository that keeps
+        // it mounts.
+        assert_eq!(
+            in_sandbox.env["TRACON_SERVICE_DATA"],
+            "/var/lib/tracon-services/browser"
+        );
         assert_eq!(
             recorded(&store, "s1")["browser"].state,
             STARTED,

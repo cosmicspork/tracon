@@ -157,6 +157,14 @@ pub fn router(state: AppState) -> Router {
             get(admin::storage_schedule).post(admin::storage),
         )
         .route("/api/maintenance/data", get(admin::data))
+        .route(
+            "/api/maintenance/service-volumes",
+            get(admin::service_volumes),
+        )
+        .route(
+            "/api/maintenance/service-volumes/reset",
+            post(admin::reset_service_volume),
+        )
         .route("/api/admin/maintenance/install", post(admin::install))
         .route("/api/admin/maintenance/uninstall", post(admin::uninstall))
         .route("/api/admin/policy", get(policy_admin::status))

@@ -26,6 +26,7 @@
   import Passkeys from '../components/settings/Passkeys.svelte'
   import Maintenance from '../components/settings/Maintenance.svelte'
   import DataHeld from '../components/settings/DataHeld.svelte'
+  import ServiceVolumes from '../components/settings/ServiceVolumes.svelte'
   import McpServers from '../components/settings/McpServers.svelte'
   import Plugins from '../components/settings/Plugins.svelte'
   import Repositories from '../components/settings/Repositories.svelte'
@@ -1259,6 +1260,7 @@
   </Maintenance>
 
   <DataHeld />
+  <ServiceVolumes />
 {/if}
 </div>
 {/key}

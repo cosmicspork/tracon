@@ -286,11 +286,27 @@ enum RepoCommand {
         /// Seconds preparation, and each check, may take.
         #[arg(long)]
         timeout_secs: Option<u64>,
+        /// A catalogue service (postgres, redis) whose data the repository
+        /// keeps between sessions; repeat for several. Replaces the list;
+        /// one empty value clears it (the data stays until it is reset).
+        #[arg(long = "service-volume")]
+        service_volumes: Vec<String>,
     },
     /// Remove an entry. The repository goes back to the node-wide answer.
     Rm {
         /// The entry's `path`, exactly as written.
         path: String,
+    },
+    /// Each repository's persistent service volumes: what each weighs, when
+    /// a session last used it, and whether one holds it now.
+    Volumes,
+    /// Reset a repository's data for one service: its next session starts
+    /// the service empty. Refused while a session holds it.
+    ResetVolume {
+        /// The repository's path, or the end of it (`owner/name`).
+        repo: String,
+        /// The catalogue service (postgres, redis).
+        service: String,
     },
 }
 
@@ -1993,6 +2009,7 @@ async fn repo_command(command: RepoCommand) -> Result<()> {
             egress,
             session_egress,
             timeout_secs,
+            service_volumes,
         } => {
             let (mut entries, hash) = repo_entries().await?;
             let at = entries
@@ -2049,12 +2066,62 @@ async fn repo_command(command: RepoCommand) -> Result<()> {
             if let Some(seconds) = timeout_secs {
                 fields.insert("timeout_secs".into(), seconds.into());
             }
+            if !service_volumes.is_empty() {
+                fields.insert("service_volumes".into(), flag_list(service_volumes));
+            }
             match at {
                 Some(at) => entries[at] = entry,
                 None => entries.push(entry),
             }
             save_repo_entries(entries, &hash).await?;
             println!("saved; it applies to the next session and the next check");
+            Ok(())
+        }
+        RepoCommand::Volumes => {
+            let v = node_call(Method::GET, "/api/maintenance/service-volumes", None, None).await?;
+            let volumes = v["volumes"].as_array().cloned().unwrap_or_default();
+            if volumes.is_empty() {
+                println!("no service volumes; a [[repo]] entry's service_volumes makes one at its next session");
+            }
+            for volume in &volumes {
+                let mut notes = Vec::new();
+                if volume["live"].as_bool() == Some(true) {
+                    notes.push("held by a running session".to_string());
+                }
+                if volume["mounted"].as_bool() == Some(false) {
+                    notes.push("its entry no longer names the service".to_string());
+                }
+                let notes = match notes.is_empty() {
+                    true => String::new(),
+                    false => format!("  ({})", notes.join("; ")),
+                };
+                println!(
+                    "{}  {:<10} {:>9}  {}{notes}",
+                    volume["repo"].as_str().unwrap_or(""),
+                    volume["service"].as_str().unwrap_or(""),
+                    human_bytes(volume["bytes"].as_u64().unwrap_or(0)),
+                    volume["volume"].as_str().unwrap_or(""),
+                );
+            }
+            Ok(())
+        }
+        RepoCommand::ResetVolume { repo, service } => {
+            let repo = match std::path::Path::new(&repo).is_dir() {
+                true => std::fs::canonicalize(&repo)?.to_string_lossy().into_owned(),
+                false => repo,
+            };
+            let v = node_call(
+                Method::POST,
+                "/api/maintenance/service-volumes/reset",
+                Some(serde_json::json!({ "repo": repo, "service": service })),
+                None,
+            )
+            .await?;
+            println!(
+                "reset {}'s {} data; its next session starts it empty",
+                v["repo"].as_str().unwrap_or(&repo),
+                v["service"].as_str().unwrap_or(&service)
+            );
             Ok(())
         }
         RepoCommand::Rm { path } => {

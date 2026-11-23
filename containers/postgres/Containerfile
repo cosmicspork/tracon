@@ -1,0 +1,7 @@
+# The Postgres the `postgres` service bundle is assembled from. Nothing builds
+# or publishes this as an image: a session's sandbox runs the bundle under
+# its supervisor. The FROM line is the pin, read by scripts/database-bundle.sh
+# (what goes in the bundle, and the version it is named for), and moved by
+# Dependabot. A Debian image, so its libraries are held to the stock base's
+# glibc by the script.
+FROM docker.io/library/postgres:17.10-bookworm@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f

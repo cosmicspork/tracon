@@ -433,19 +433,24 @@ impl Service {
     }
 }
 
+/// Whether `name` is one a `[[service]]` may have: 1-32 lowercase letters,
+/// digits or `-`, not starting with `-`.
+pub fn valid_service_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 32
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !name.starts_with('-')
+}
+
 /// A service name is what a container name and a policy argument are built
 /// from, so it is held to what both can carry.
 pub fn validate_services(services: &[Service]) -> Result<(), String> {
     let mut seen = std::collections::BTreeSet::new();
     for service in services {
         let name = &service.name;
-        if name.is_empty()
-            || name.len() > 32
-            || !name
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-            || name.starts_with('-')
-        {
+        if !valid_service_name(name) {
             return Err(format!(
                 "service {name:?}: name must be 1-32 lowercase letters, digits or '-'"
             ));
@@ -1899,6 +1904,16 @@ pub struct Repo {
     /// warn_direct`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warn_direct: Option<bool>,
+    /// Catalogue services (`[[service]]` names: `postgres`, `redis`) whose
+    /// data this repository keeps between sessions: each gets a volume of its
+    /// own for this repository (`crate::service_volume`), mounted at
+    /// `/var/lib/tracon-services/<name>` in every session's sandbox, which
+    /// the service's bundle keeps its data in. It survives sessions; only
+    /// the operator resets it (Settings › Data, `tracon repo reset-volume`),
+    /// and it goes with the repository's data. A service not named here
+    /// starts empty in each session.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub service_volumes: Vec<String>,
 }
 
 /// The hosts each egress preset stands for. A preset is the registry and the
@@ -2072,6 +2087,18 @@ pub fn validate_repos(repos: &[Repo]) -> Result<(), String> {
         }
         if entry.timeout_secs == Some(0) {
             return Err(format!("repo {named}: timeout_secs must be at least 1"));
+        }
+        let mut volumes = std::collections::BTreeSet::new();
+        for name in &entry.service_volumes {
+            if !valid_service_name(name) {
+                return Err(format!(
+                    "repo {named}: service_volumes names {name:?}, which is not a service name \
+                     (1-32 lowercase letters, digits or '-')"
+                ));
+            }
+            if !volumes.insert(name) {
+                return Err(format!("repo {named}: service_volumes names {name} twice"));
+            }
         }
         if !entry.prepare_credentials.is_empty() {
             if entry

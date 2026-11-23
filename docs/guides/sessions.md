@@ -664,6 +664,50 @@ sessions, and work items link to the corresponding owner and channel; a peer's
 candidates are read from that owner. A missing local candidate is not evidence
 that a peer has none.
 
+## Databases a session can start
+
+A session starts what the node's `[[service]]` catalogue offers with
+`service_start`, by name, in its own sandbox: reached on its 127.0.0.1, gone
+when the session ends. Postgres and Redis are offered once their bundles are in
+the catalogue. Build them with `scripts/database-bundle.sh` and point an entry
+at one `<version>/<arch>` of each:
+
+```toml
+[[service]]
+name = "postgres"                     # superuser postgres, trust, on 127.0.0.1:5432
+bundle = "/srv/tracon/postgres/17.10/amd64"
+port = 5432
+
+[[service]]
+name = "redis"
+bundle = "/srv/tracon/redis/7.4.8/amd64"
+port = 6379
+```
+
+Each bundle carries its clients (`/opt/tracon-services/postgres/bin/psql`,
+`/opt/tracon-services/redis/bin/redis-cli`). By default a database starts empty
+in every session. A repository whose sessions should find what the last one left
+names the services in its entry:
+
+```toml
+[[repo]]
+path = "github.com/owner/app"
+service_volumes = ["postgres", "redis"]
+```
+
+(or **Settings → Repositories → Service data kept**, or `tracon repo set
+github.com/owner/app --service-volume postgres --service-volume redis`). Each
+gets a volume of its own for that repository, on every runtime, which survives
+its sessions: the services stop cleanly when the sandbox ends and their data is
+taken back then. With two sessions on the repository at once, the one that ends
+last is what the next session finds. The agent is told which it has (the
+`data` field of `service_start`'s answer), and nothing it does removes one.
+You reset it, and only while no session holds it: **Settings → System →
+Service data** or `tracon repo reset-volume github.com/owner/app postgres`. The
+data pane counts the volumes as Service data, and a sweep (`tracon gc`, the
+`[gc]` schedule) removes them with the repository's builds once no entry names
+the repository.
+
 ## Review sessions
 
 A review can also get a second opinion from a **review session**: a fresh session

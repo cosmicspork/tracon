@@ -25,6 +25,9 @@ export interface RepoForm {
   /** Presets and host names, separated by spaces or commas. */
   egress: string
   sessionEgress: boolean
+  /** Catalogue services whose data is kept between sessions, separated by
+   *  spaces or commas. */
+  serviceVolumes: string
   /** What the entry says that this form does not edit (`commits`, `style`),
    *  carried back as it came, so comparing the entry with what was loaded
    *  finds no change in them. */
@@ -59,13 +62,14 @@ export function blankForm(): RepoForm {
     prepare: '',
     egress: '',
     sessionEgress: false,
+    serviceVolumes: '',
     kept: {},
     origin: null,
   }
 }
 
 export function toForm(entry: RepoEntry): RepoForm {
-  const { path, image, dockerfile, context, build, checks, timeout_secs, prepare, egress, session_egress, ...kept } = entry
+  const { path, image, dockerfile, context, build, checks, timeout_secs, prepare, egress, session_egress, service_volumes, ...kept } = entry
   return {
     path,
     source: build?.length ? 'build' : dockerfile ? 'dockerfile' : image ? 'image' : 'harness',
@@ -79,6 +83,7 @@ export function toForm(entry: RepoEntry): RepoForm {
     prepare: prepare.join('\n'),
     egress: egress.join(' '),
     sessionEgress: session_egress === true,
+    serviceVolumes: (service_volumes ?? []).join(' '),
     kept,
   }
 }
@@ -103,6 +108,8 @@ export function toEntry(form: RepoForm): RepoEntry {
   const timeout = Number(form.timeout)
   if (form.timeout.trim() && Number.isFinite(timeout) && timeout > 0) entry.timeout_secs = Math.floor(timeout)
   if (form.sessionEgress) entry.session_egress = true
+  const volumes = words(form.serviceVolumes)
+  if (volumes.length) entry.service_volumes = volumes
   return entry
 }
 
@@ -122,6 +129,8 @@ export function problems(forms: RepoForm[]): string[] {
     else if (form.source === 'build' && lines(form.build).length === 0) found.push(`${named}: give at least one build step.`)
     else if (form.sessionEgress && words(form.egress).length === 0)
       found.push(`${named}: sessions are given its egress, and its egress is empty.`)
+    else if (new Set(words(form.serviceVolumes)).size !== words(form.serviceVolumes).length)
+      found.push(`${named}: a service's data is named twice.`)
     seen.add(path)
   }
   return found
@@ -240,4 +249,4 @@ export function replayRepos(
 }
 
 /// The fields of entry `index` as a refusal may name them.
-export const REPO_FIELDS = ['path', 'image', 'dockerfile', 'context', 'build', 'checks', 'timeout_secs', 'prepare', 'egress', 'session_egress']
+export const REPO_FIELDS = ['path', 'image', 'dockerfile', 'context', 'build', 'checks', 'timeout_secs', 'prepare', 'egress', 'session_egress', 'service_volumes']

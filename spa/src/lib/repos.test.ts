@@ -24,6 +24,7 @@ test('an entry survives the form unchanged', () => {
     { path: 'github.com/owner/notes', checks: [], prepare: [], egress: [] },
     { path: 'owner/pinned', image: 'localhost/tc@sha256:abc', prepare: [], egress: ['example.org'] },
     { path: '/src/plain', prepare: [], egress: [] },
+    { path: '/src/db', prepare: [], egress: [], service_volumes: ['postgres', 'redis'] },
     {
       path: 'github.com/owner/stepped',
       build: ['apt-get update', 'apt-get install -y --no-install-recommends jq'],
@@ -245,4 +246,11 @@ test('a refusal of a repository field lands on the form it came from', () => {
     { op: 'set', key: 'repo[0].egress', value: ['npm'] },
   ])
   expect(screen).toEqual([undefined, 'repo[0].egress'])
+})
+
+test('the services whose data a repository keeps are words, and each is named once', () => {
+  const form = { ...blankForm(), path: '/src/app', source: 'harness' as const, serviceVolumes: ' postgres, redis ' }
+  expect(toEntry(form).service_volumes).toEqual(['postgres', 'redis'])
+  expect(toEntry({ ...form, serviceVolumes: '' }).service_volumes).toBeUndefined()
+  expect(problems([{ ...form, serviceVolumes: 'postgres postgres' }])).toEqual(["/src/app: a service's data is named twice."])
 })

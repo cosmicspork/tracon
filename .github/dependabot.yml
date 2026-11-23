@@ -36,3 +36,25 @@ updates:
     ignore:
       - dependency-name: "*ubuntu"
         update-types: ["version-update:semver-major", "version-update:semver-minor"]
+
+  # The Postgres and Redis the database bundles are built from, monthly and
+  # within their major version: a new major changes the data format a
+  # repository's kept volume holds. `databases.yml` smoke-tests each bump.
+  - package-ecosystem: docker
+    directory: /containers/postgres
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: build
+    ignore:
+      - dependency-name: "*postgres"
+        update-types: ["version-update:semver-major"]
+  - package-ecosystem: docker
+    directory: /containers/redis
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: build
+    ignore:
+      - dependency-name: "*redis"
+        update-types: ["version-update:semver-major"]
