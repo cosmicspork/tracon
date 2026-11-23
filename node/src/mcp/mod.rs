@@ -541,7 +541,8 @@ impl Audience {
 
 impl Tools {
     /// The tools a plan session gets: what it needs to read, ask and write its
-    /// plan, and to record work it finds. Nothing that closes the item,
+    /// plan, to show the operator what it proposes, and to record work it
+    /// finds. Nothing that closes the item,
     /// submits, sets anything up or writes to a forge or tracker; the reading
     /// forge and Jira tools are here, and the channel's credentials decide
     /// which of those it actually has.
@@ -561,6 +562,9 @@ impl Tools {
         work::WORK_DISCOVER,
         work::WORK_LIST,
         work::WORK_SHOW,
+        // A proposal of layouts or flows for the operator to choose from,
+        // shown in tracon and nowhere else.
+        show::SHOW,
         github::PR_STATUS,
         github::PR_THREADS,
         github::PR_FOR_BRANCH,

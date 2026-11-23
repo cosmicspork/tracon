@@ -753,6 +753,16 @@ candidate moves past that commit, and lists the required checks it ran there.
 None of it goes to the forge; the pull request gets prose only. A harness you run
 yourself shows work on a review it submitted, from that review's worktree.
 
+An agent can also show a **proposal**: `show_work` with `proposal: true`, usually
+an HTML page bundled with what it loads, setting out layouts or flows for you to
+choose from. It is attached and rendered like any other shown work, but under
+**Proposals** rather than **Shown work**, tagged *proposal* on the session and the
+review, in the session log, and in a reviewer's orientation, so it is never read as
+an account of what was built; it is not counted among the session's claims. A
+**plan session** is offered `show_work` for this alone: everything it shows is a
+proposal, and it is told to say in its plan which option it assumes and to ask you
+when the choice is yours.
+
 Some of what a session builds is slow to rebuild and the same every time: "before"
 screenshots of the default branch are the first case. A session keeps such bytes for
 later sessions on the same repository with **`stash_put`** (`key`, `inputs`, `path`)

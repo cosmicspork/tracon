@@ -1868,6 +1868,12 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE publication ADD COLUMN step_started_ms INTEGER;
     ALTER TABLE publication ADD COLUMN steps_json TEXT;
     "#,
+    // 88: whether shown work is a proposal (`show_work` with `proposal`): a
+    // layout or flow put to the operator to choose from, not an account of
+    // work done. 0 on every row from before.
+    r#"
+    ALTER TABLE shown_work ADD COLUMN proposal INTEGER NOT NULL DEFAULT 0;
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

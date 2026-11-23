@@ -43,6 +43,11 @@ pub struct ShownWorkRow {
     pub document_hash: Option<String>,
     pub files: Vec<ShownFile>,
     pub created_ms: i64,
+    /// A proposal: layouts or flows put to the operator to choose from, not
+    /// an account of work done. Shown like any other shown work, and labelled
+    /// as a proposal wherever it appears.
+    #[serde(default)]
+    pub proposal: bool,
 }
 
 impl ShownWorkRow {
@@ -63,6 +68,7 @@ impl ShownWorkRow {
             document_hash: row.get("document_hash")?,
             files: serde_json::from_str(&files).unwrap_or_default(),
             created_ms: row.get("created_ms")?,
+            proposal: row.get::<_, i64>("proposal")? != 0,
         })
     }
 }
@@ -102,8 +108,8 @@ impl Store {
         conn.execute(
             "INSERT INTO shown_work
                 (id, channel, session_id, lane, review_id, head_sha, title, format, markdown,
-                 document_id, document_slug, document_hash, files_json, created_ms)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+                 document_id, document_slug, document_hash, files_json, created_ms, proposal)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             params![
                 row.id,
                 row.channel,
@@ -119,6 +125,7 @@ impl Store {
                 row.document_hash,
                 files,
                 row.created_ms,
+                row.proposal as i64,
             ],
         )?;
         Ok(())

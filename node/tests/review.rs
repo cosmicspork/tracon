@@ -7656,6 +7656,138 @@ async fn shown_work_is_on_the_review_until_the_candidate_moves() {
     assert_eq!(stale, [true, false], "{body}");
 }
 
+/// A proposal is shown work labelled as one: attached to the review its
+/// session submits like any other, with `proposal` set wherever it is read.
+#[tokio::test]
+async fn a_proposal_is_shown_on_the_review_labelled_as_one() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let worktree = std::path::Path::new(&f.worktree);
+    sh(
+        worktree,
+        "mkdir -p propose && printf '<title>Two layouts</title><p>A or B</p>' > propose/index.html",
+    );
+    let shown = f
+        .tool(
+            "s1",
+            "show_work",
+            json!({
+                "title": "Two layouts for the form",
+                "paths": ["propose"],
+                "entry": "propose/index.html",
+                "proposal": true,
+            }),
+        )
+        .await;
+    assert_eq!(shown["format"], "html", "{shown}");
+    assert_eq!(shown["proposal"], true, "{shown}");
+    assert!(
+        shown["note"].as_str().unwrap().contains("as a proposal"),
+        "{shown}"
+    );
+    let plain = f
+        .tool(
+            "s1",
+            "show_work",
+            json!({ "title": "What I did", "markdown": "did it" }),
+        )
+        .await;
+    assert_eq!(plain["proposal"], false, "{plain}");
+    let refused = f
+        .tool(
+            "s1",
+            "show_work",
+            json!({ "title": "x", "markdown": "y", "proposal": "yes" }),
+        )
+        .await;
+    assert!(
+        refused["error"].to_string().contains("true or false"),
+        "{refused}"
+    );
+
+    let id = review_id(&f.tool("s1", "submit_review", f.submit_args()).await);
+    let (status, body) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let labelled: Vec<_> = body["shown_work"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            (
+                item["title"].as_str().unwrap().to_string(),
+                item["proposal"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        labelled,
+        [
+            ("Two layouts for the form".to_string(), true),
+            ("What I did".to_string(), false),
+        ],
+        "{body}"
+    );
+    let (_, session) = f.call("GET", "/api/sessions/s1", None).await;
+    assert_eq!(session["shown_work"][0]["proposal"], true, "{session}");
+}
+
+/// A plan session has built nothing yet: it is offered `show_work`, and what
+/// it shows is a proposal, on the session, whether or not it says so.
+#[tokio::test]
+async fn a_plan_session_shows_proposals_only() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    f.store
+        .insert_session(&{
+            let mut r = support::rows::session_row("p1", "n1", "work");
+            r.repo_path = format!("workspace://s1-{}", test_name!());
+            r.branch = "feat/x".into();
+            r.harness_id = "omp".into();
+            r.harness_version = "18.0.4".into();
+            r.phase = "plan".into();
+            r.started_mono_ms = Some(0);
+            r
+        })
+        .unwrap();
+    let worktree = std::path::Path::new(&f.worktree);
+    sh(
+        worktree,
+        "mkdir -p propose && printf '<title>Flows</title>' > propose/flows.html",
+    );
+    let shown = f
+        .tool(
+            "p1",
+            "show_work",
+            json!({
+                "title": "Three sign-up flows",
+                "paths": ["propose"],
+                "entry": "propose/flows.html",
+            }),
+        )
+        .await;
+    assert_eq!(shown["proposal"], true, "{shown}");
+    assert_eq!(shown["format"], "html", "{shown}");
+    let (_, session) = f.call("GET", "/api/sessions/p1", None).await;
+    let items = session["shown_work"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{session}");
+    assert_eq!(items[0]["proposal"], true, "{session}");
+    assert_eq!(items[0]["title"], "Three sign-up flows", "{session}");
+
+    let refused = f
+        .tool(
+            "p1",
+            "show_work",
+            json!({ "title": "x", "markdown": "done", "proposal": false }),
+        )
+        .await;
+    assert!(
+        refused["error"]
+            .to_string()
+            .contains("what it shows is a proposal"),
+        "{refused}"
+    );
+}
+
 /// `submit_review`'s note is the operator's account of the submission, kept
 /// as shown work on the review at the commit it was submitted with. It goes
 /// stale when the candidate moves, and a resubmission's note is a fresh entry
