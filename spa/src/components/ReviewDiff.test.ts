@@ -19,10 +19,19 @@ const here = fileURLToPath(new URL('.', import.meta.url))
 const harness = `
   <script>
     import ReviewDiff from ${JSON.stringify(`${here}ReviewDiff.svelte`)}
-    const { diff, collapsed } = window.reviewDiff
+    const { diff, collapsed, contexts } = window.reviewDiff
+    // What the node's /context would answer, by path: both sides, or why not.
+    const context = contexts
+      ? async (path) => {
+          window.contextReads = (window.contextReads ?? 0) + 1
+          const c = contexts[path]
+          if (!c || c.why) throw new Error(c?.why ?? 'no such file')
+          return c
+        }
+      : undefined
   </script>
   <textarea id="reason"></textarea>
-  <ReviewDiff {diff} {collapsed} />
+  <ReviewDiff {diff} {collapsed} {context} />
 `
 const entry = `
   import { mount } from 'svelte'
@@ -94,9 +103,39 @@ const DIFF =
   '\n' +
   `diff --git a/src/new.rs b/src/new.rs\nnew file mode 100644\n--- /dev/null\n+++ b/src/new.rs\n@@ -0,0 +1,2 @@\n+pub fn new() {}\n+pub fn old() {}\n`
 
-type Opts = { width?: number; collapsed?: boolean; init?: string }
+// A file of forty lines with two lines changed far apart, so the diff leaves
+// out a line above the first hunk, eighteen between the two and seven after.
+const gapsBase = Array.from({ length: 40 }, (_, i) => `let v_${i + 1} = ${i + 1};`)
+const gapsHead = gapsBase.map((l, i) => (i === 4 || i === 29 ? l.replace(';', ' + 1;') : l))
+const hunk = (at: number) =>
+  [
+    `@@ -${at - 3},7 +${at - 3},7 @@`,
+    ...[at - 3, at - 2, at - 1].map((n) => ` ${gapsBase[n - 1]}`),
+    `-${gapsBase[at - 1]}`,
+    `+${gapsHead[at - 1]}`,
+    ...[at + 1, at + 2, at + 3].map((n) => ` ${gapsBase[n - 1]}`),
+  ].join('\n')
+const gapsFile = (path: string) =>
+  `diff --git a/${path} b/${path}\nindex 1111111..2222222 100644\n--- a/${path}\n+++ b/${path}\n${hunk(5)}\n${hunk(30)}\n`
+const GAPS =
+  gapsFile('src/gaps.rs') +
+  gapsFile('src/gone.rs') +
+  gapsFile('src/moved.rs') +
+  `diff --git a/logo.png b/logo.png\nindex 3333333..4444444 100644\nBinary files a/logo.png and b/logo.png differ\n` +
+  `diff --git a/old.rs b/renamed.rs\nsimilarity index 100%\nrename from old.rs\nrename to renamed.rs\n`
+const CONTEXTS = {
+  'src/gaps.rs': { base: gapsBase.join('\n') + '\n', head: gapsHead.join('\n') + '\n' },
+  'src/gone.rs': { why: 'the repository no longer holds 1111111, the file\'s base' },
+  // The worktree moved on: what it has is not what the diff was taken from.
+  'src/moved.rs': { base: null, head: gapsHead.map((l) => `${l} // later`).join('\n') },
+}
 
-async function open({ width = 1280, collapsed = false, init = '' }: Opts = {}, page?: Page): Promise<Page> {
+type Opts = { width?: number; collapsed?: boolean; init?: string; diff?: string; contexts?: object }
+
+async function open(
+  { width = 1280, collapsed = false, init = '', diff = DIFF, contexts }: Opts = {},
+  page?: Page,
+): Promise<Page> {
   page ??= await browser!.newPage({ viewport: { width, height: 800 } })
   const errors: string[] = []
   page.on('pageerror', (e) => errors.push(String(e)))
@@ -105,7 +144,7 @@ async function open({ width = 1280, collapsed = false, init = '' }: Opts = {}, p
   const html =
     `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>${css}</style>` +
     `<body style="margin:0;padding:0 16px"><div id="app"></div>` +
-    `<script>${init};window.reviewDiff = ${JSON.stringify({ diff: DIFF, collapsed })}</script><script type="module">${js}</script></body>`
+    `<script>${init};window.reviewDiff = ${JSON.stringify({ diff, collapsed, contexts })}</script><script type="module">${js}</script></body>`
   await page.route('http://tracon.test/**', (route) => route.fulfill({ contentType: 'text/html', body: html }))
   await page.goto('http://tracon.test/')
   await page.waitForSelector('.review-diff', { timeout: 5000 }).catch((e) => {
@@ -244,5 +283,166 @@ test.skipIf(!browser)('storage that refuses still shows and switches the diff', 
   expect(await mode(page)).toBe('Side by side')
   await page.getByRole('radio', { name: 'Unified' }).click()
   expect(await mode(page)).toBe('Unified')
+  await page.close()
+})
+
+/** The line numbers a file's gutters show, per column, in order (blank rows left out). */
+const numbers = (page: Page, path: string, column: 'before' | 'after') =>
+  page.evaluate(
+    ([path, column]) =>
+      [...document.querySelectorAll(`details[data-path="${path}"] .cm-lineNo-${column} .cm-gutterElement`)]
+        .filter((e) => (e as HTMLElement).style.visibility !== 'hidden')
+        .flatMap((e) => {
+          const stacked = e.querySelectorAll('.cm-deletedNumbers div')
+          return stacked.length ? [...stacked].map((d) => d.textContent) : [e.textContent]
+        })
+        .filter((t) => t !== ''),
+    [path, column],
+  )
+
+test.skipIf(!browser)('both sides carry their own line numbers, side by side and unified', async () => {
+  const page = await open()
+  await ready(page, 'README.md')
+  expect(await numbers(page, 'README.md', 'before')).toEqual(['1', '2', '3'])
+  expect(await numbers(page, 'README.md', 'after')).toEqual(['1', '2', '3'])
+  // A row well into the long file has its own number on each side.
+  const row = (column: string) =>
+    page.evaluate((column) => {
+      const ed = document.querySelector(`details[data-path="src/lib.rs"] .cm-merge-${column}`)!
+      const line = [...ed.querySelectorAll('.cm-line')].find((l) => l.textContent === '    let value_20 = compute(20);')!
+      const top = line.getBoundingClientRect().top
+      return [...ed.querySelectorAll('.cm-lineNo .cm-gutterElement')].find((g) => Math.abs(g.getBoundingClientRect().top - top) < 2)
+        ?.textContent
+    }, column)
+  expect(await row('a')).toBe('21')
+  expect(await row('b')).toBe('25')
+
+  // Unified: a before column and an after column, the deleted row numbered
+  // only before and the row replacing it only after.
+  await page.getByRole('radio', { name: 'Unified' }).click()
+  await ready(page, 'README.md')
+  expect(await numbers(page, 'README.md', 'before')).toEqual(['1', '2', '3'])
+  expect(await numbers(page, 'README.md', 'after')).toEqual(['1', '2', '3'])
+  const rows = await page.evaluate(() => {
+    const ed = document.querySelector('details[data-path="README.md"] .cm-editor')!
+    const deleted = ed.querySelector('.cm-deletedChunk')!.getBoundingClientRect().top
+    const mark = [...ed.querySelectorAll('.cm-lineNo-before .cm-deletedNumbers div')][0].getBoundingClientRect().top
+    return Math.abs(deleted - mark)
+  })
+  expect(rows).toBeLessThanOrEqual(4)
+  await page.close()
+})
+
+test.skipIf(!browser)('code is highlighted by its language, and the changed words inside a line stand out', async () => {
+  const page = await open()
+  await ready(page, 'src/lib.rs')
+  // `let` is a keyword in Rust: it takes the accent, not the plain ink.
+  await page.waitForFunction(() =>
+    [...document.querySelectorAll('details[data-path="src/lib.rs"] .cm-line span')].some((s) => s.textContent === 'let'),
+  )
+  const colours = await page.evaluate(() => {
+    const kw = [...document.querySelectorAll('details[data-path="src/lib.rs"] .cm-line span')].find((s) => s.textContent === 'let')!
+    const probe = document.body.appendChild(document.createElement('span'))
+    probe.style.color = 'var(--acc)'
+    const acc = getComputedStyle(probe).color
+    probe.remove()
+    return { kw: getComputedStyle(kw).color, acc }
+  })
+  expect(colours.kw).toBe(colours.acc)
+  // Only the words that changed are marked inside the replaced line.
+  const marked = await page.evaluate(() =>
+    [...document.querySelectorAll('details[data-path="README.md"] .cm-merge-b .cm-changedText')].map((e) => e.textContent).join(''),
+  )
+  expect(marked).toContain('for brokered calls')
+  expect(marked).not.toContain('A gateway')
+  await page.close()
+})
+
+test.skipIf(!browser)('wrapping long lines is the viewer\'s to turn on, and remembered', async () => {
+  const page = await open()
+  await ready(page, 'src/lib.rs')
+  expect(await page.locator('.cm-lineWrapping').count()).toBe(0)
+  await page.getByRole('button', { name: 'Wrap lines' }).click()
+  expect(await page.getByRole('button', { name: 'Wrap lines' }).getAttribute('aria-pressed')).toBe('true')
+  expect(await page.locator('details[data-path="src/lib.rs"] .cm-lineWrapping').count()).toBe(2)
+  expect(await page.evaluate(() => localStorage.getItem('tracon-diff-wrap'))).toBe('on')
+  await open({}, page)
+  await ready(page, 'src/lib.rs')
+  expect(await page.locator('details[data-path="src/lib.rs"] .cm-lineWrapping').count()).toBe(2)
+  await page.close()
+})
+
+test.skipIf(!browser)('the lines a hunk leaves out are counted, and shown from the pinned files on request', async () => {
+  const page = await open({ diff: GAPS, contexts: CONTEXTS })
+  await ready(page, 'src/gaps.rs')
+  const gaps = () =>
+    page.evaluate(() =>
+      [...document.querySelectorAll('details[data-path="src/gaps.rs"] .cm-merge-b .cm-gap')].map((g) => g.textContent),
+    )
+  expect(await gaps()).toEqual([
+    '⋯ 1 unchanged line aboveShow',
+    '⋯ 18 unchanged lines aboveShow',
+    '⋯ the rest of the fileShow',
+  ])
+  // Nothing is read until the reader asks.
+  expect(await page.evaluate(() => (window as unknown as { contextReads?: number }).contextReads ?? 0)).toBe(0)
+
+  await page.locator('details[data-path="src/gaps.rs"] .cm-merge-b .cm-gapShow[data-gap="1"]').click()
+  await page.waitForFunction(() =>
+    [...document.querySelectorAll('details[data-path="src/gaps.rs"] .cm-merge-b .cm-line')].some((l) => l.textContent === 'let v_15 = 15;'),
+  )
+  await ready(page, 'src/gaps.rs')
+  // The two hunks are one now, numbered through, the same on both sides.
+  expect(await gaps()).toEqual(['⋯ 1 unchanged line aboveShow', '⋯ 7 unchanged lines belowShow'])
+  const after = await numbers(page, 'src/gaps.rs', 'after')
+  expect(after).toEqual(Array.from({ length: 32 }, (_, i) => String(i + 2)))
+  expect(await numbers(page, 'src/gaps.rs', 'before')).toEqual(after)
+
+  for (const gap of ['2', '0']) {
+    const before = await gaps()
+    await page.locator(`details[data-path="src/gaps.rs"] .cm-merge-b .cm-gapShow[data-gap="${gap}"]`).click()
+    await page.waitForFunction(
+      (n) => document.querySelectorAll('details[data-path="src/gaps.rs"] .cm-merge-b .cm-gap').length === n,
+      before.length - 1,
+    )
+  }
+  await ready(page, 'src/gaps.rs')
+  expect(await numbers(page, 'src/gaps.rs', 'after')).toEqual(Array.from({ length: 40 }, (_, i) => String(i + 1)))
+  // Read once, however many gaps were opened.
+  expect(await page.evaluate(() => (window as unknown as { contextReads?: number }).contextReads)).toBe(1)
+  await page.close()
+})
+
+test.skipIf(!browser)('context that cannot be read, or does not match the diff, is labelled missing', async () => {
+  const page = await open({ diff: GAPS, contexts: CONTEXTS })
+  for (const [path, why] of [
+    ['src/gone.rs', "context unavailable: the repository no longer holds 1111111, the file's base"],
+    ['src/moved.rs', 'context unavailable: the changed file differs from the diff at line 2'],
+  ]) {
+    await ready(page, path)
+    await page.locator(`details[data-path="${path}"] .cm-merge-b .cm-gapShow[data-gap="1"]`).click()
+    await page.waitForSelector(`details[data-path="${path}"] .cm-gapMissing`)
+    const said = await page.evaluate(
+      (p) => [...document.querySelectorAll(`details[data-path="${p}"] .cm-merge-b .cm-gapMissing`)].map((e) => e.textContent),
+      path,
+    )
+    expect(said.length).toBe(3)
+    expect(new Set(said)).toEqual(new Set([why]))
+    expect(await page.locator(`details[data-path="${path}"] .cm-gapShow`).count()).toBe(0)
+  }
+  await page.close()
+})
+
+test.skipIf(!browser)('a binary file and a pure rename say what they are instead of showing nothing', async () => {
+  const page = await open({ diff: GAPS, contexts: CONTEXTS })
+  await page.waitForSelector('details[data-path="logo.png"] .empty')
+  expect(await page.locator('details[data-path="logo.png"] summary .note').textContent()).toBe('binary file')
+  expect(await page.locator('details[data-path="logo.png"] .empty').textContent()).toBe(
+    'Binary file: its contents are not shown as text.',
+  )
+  expect(await page.locator('details[data-path="renamed.rs"] summary .note').textContent()).toBe('renamed from old.rs')
+  expect(await page.locator('details[data-path="renamed.rs"] .empty').textContent()).toBe(
+    'Renamed from old.rs; the contents did not change.',
+  )
   await page.close()
 })

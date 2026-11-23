@@ -659,6 +659,21 @@
   /** The diff showing when the editor is not. */
   let reviewDiff = $state<ReturnType<typeof ReviewDiff> | null>(null)
 
+  /**
+   * How the diff reads a file whole for the lines a hunk leaves out: from
+   * what the revision pinned, never the worktree. `from`, for the diff since
+   * the last verdict, is the revision that diff starts from.
+   */
+  function pinnedContext(from?: string) {
+    return async (path: string) => {
+      const got = await api.reviewContext(id, path, from)
+      if (got.base.text === null && got.head.text === null) {
+        throw new Error(got.head.why ?? got.base.why ?? 'neither side of the file could be read')
+      }
+      return { base: got.base.text, head: got.head.text }
+    }
+  }
+
   /** Scroll to a file's changes, in the diff or the editor, whichever is showing. */
   async function showFile(path: string) {
     if (!editing && diffView === 'since' && !sinceReviewed?.files?.some((f) => f.path === path)) {
@@ -1481,9 +1496,14 @@
       </div>
     {/if}
     {#if diffView === 'since' && sinceReviewed?.diff}
-      <ReviewDiff bind:this={reviewDiff} diff={sinceReviewed.diff} collapsed={surface.phone} />
+      <ReviewDiff
+        bind:this={reviewDiff}
+        diff={sinceReviewed.diff}
+        collapsed={surface.phone}
+        context={pinnedContext(sinceReviewed.revision_id)}
+      />
     {:else}
-      <ReviewDiff bind:this={reviewDiff} diff={review.diff} collapsed={surface.phone} />
+      <ReviewDiff bind:this={reviewDiff} diff={review.diff} collapsed={surface.phone} context={pinnedContext()} />
     {/if}
   {/if}
 

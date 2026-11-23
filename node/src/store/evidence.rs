@@ -398,6 +398,22 @@ impl Store {
         Ok(())
     }
 
+    /// One file of a candidate's kept tree, by path; `None` when the tree was
+    /// not kept or has no such file.
+    pub fn candidate_file(&self, candidate_id: &str, path: &str) -> Result<Option<Vec<u8>>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Invalid("store lock poisoned".into()))?;
+        conn.query_row(
+            "SELECT content FROM candidate_file WHERE candidate_id=?1 AND path=?2",
+            [candidate_id, path],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub fn candidate_files(&self, candidate_id: &str) -> Result<Vec<CandidateFile>> {
         let conn = self
             .conn

@@ -11,23 +11,111 @@
   // shows; until it arrives, and if it cannot, each file reads as the plain
   // diff lines it always did.
   //
-  // Each file is a section of its own, so what comes later (line numbers,
-  // highlighting, moving file to file, rendering only the files in view)
-  // has one place per file to hang on.
+  // Each file is a section of its own, so what comes later (moving file to
+  // file, rendering only the files in view) has one place per file to hang on.
+  //
+  // The unchanged lines a hunk leaves out are counted on its header and, given
+  // `context`, shown on request: the file is read whole, once, from what the
+  // revision pinned, checked against the diff, and the gap written back into
+  // the file's diff as context. When it cannot be read, each gap says why.
   import { tick, untrack } from 'svelte'
 
   import Diff from './Diff.svelte'
-  import { splitDiff } from '../lib/diff'
-  import { defaultMode, fileSides, storedMode, storeMode, type DiffMode } from '../lib/diffview'
+  import { splitDiff, type DiffFile } from '../lib/diff'
+  import {
+    contextMismatch,
+    defaultMode,
+    expand,
+    fileSides,
+    noLines,
+    parseHunks,
+    storedMode,
+    storedWrap,
+    storeMode,
+    storeWrap,
+    type Context,
+    type DiffMode,
+    type Expanded,
+    type FileSides,
+  } from '../lib/diffview'
 
-  let { diff, collapsed = false }: { diff: string; collapsed?: boolean } = $props()
+  let {
+    diff,
+    collapsed = false,
+    context,
+  }: {
+    diff: string
+    collapsed?: boolean
+    /** Read one file whole on both sides, as the revision pinned it; absent, gaps are only counted. */
+    context?: (path: string) => Promise<Context>
+  } = $props()
 
   type MergeDiffInstance = {
     rowAt(clientY: number): { line: number; into: number } | null
     rowTop(line: number): number | null
   }
 
-  const files = $derived(splitDiff(diff).map((f) => ({ file: f, sides: fileSides(f) })))
+  const parsed = $derived(splitDiff(diff))
+
+  /** Each file's pinned sides once read, or why they could not be. */
+  let contexts = $state(new Map<string, Context | { why: string }>())
+  /** The gaps the reader opened, by file. */
+  let opened = $state(new Map<string, ReadonlySet<number>>())
+  const NONE: ReadonlySet<number> = new Set()
+
+  // A file's sides are rebuilt only when its own diff, context or open gaps
+  // change: new sides remake its editors, and opening a gap in one file must
+  // not remake every other.
+  type Shown = { file: DiffFile; sides: FileSides; view: Expanded; unavailable: string | null }
+  const memo = new Map<string, { file: DiffFile; ctx: unknown; open: ReadonlySet<number>; shown: Shown }>()
+  function show(file: DiffFile): Shown {
+    const ctx = contexts.get(file.path) ?? null
+    const open = opened.get(file.path) ?? NONE
+    const hit = memo.get(file.path)
+    if (hit && hit.file === file && hit.ctx === ctx && hit.open === open) return hit.shown
+    const usable = ctx && !('why' in ctx) ? ctx : null
+    const view = expand(file, usable, open)
+    const shown = { file, sides: fileSides(view.file), view, unavailable: ctx && 'why' in ctx ? ctx.why : null }
+    memo.set(file.path, { file, ctx, open, shown })
+    return shown
+  }
+  const files = $derived(parsed.map(show))
+
+  /** Read a file's pinned sides, once, and check them against its diff. */
+  async function readContext(file: DiffFile): Promise<boolean> {
+    if (!context) return false
+    const had = contexts.get(file.path)
+    if (had) return !('why' in had)
+    let got: Context | { why: string }
+    try {
+      const c = await context(file.path)
+      const lines = (t: string | null) => (t === null ? null : t.split('\n'))
+      const why =
+        c.base === null && c.head === null
+          ? 'neither side of the file could be read'
+          : contextMismatch(parseHunks(file).hunks, lines(c.base), lines(c.head))
+      got = why ? { why } : c
+    } catch (e) {
+      got = { why: e instanceof Error ? e.message : String(e) }
+    }
+    contexts = new Map(contexts).set(file.path, got)
+    return !('why' in got)
+  }
+
+  /** Show the unchanged lines of one gap of a file. */
+  async function openGap(file: DiffFile, gap: number) {
+    if (!(await readContext(file))) return
+    const next = new Set(opened.get(file.path) ?? NONE)
+    next.add(gap)
+    opened = new Map(opened).set(file.path, next)
+  }
+
+  /** Wrap long lines rather than scroll them sideways; the viewer's, remembered like the mode. */
+  let wrap = $state(storedWrap())
+  function toggleWrap() {
+    wrap = !wrap
+    storeWrap(wrap)
+  }
 
   let MergeDiff = $state<typeof import('./MergeDiff.svelte').default | null>(null)
   let loadError = $state(false)
@@ -172,8 +260,9 @@
         onclick={() => choose('unified')}>Unified</button
       >
     </div>
+    <button type="button" class="wrap" aria-pressed={wrap} class:on={wrap} onclick={toggleWrap}>Wrap lines</button>
   </div>
-  {#each files as { file, sides } (file.path)}
+  {#each files as { file, sides, view, unavailable } (file.path)}
     <details
       class="file"
       data-path={file.path}
@@ -183,17 +272,22 @@
     >
       <summary>
         <span class="path">{file.path}</span>
-        {#each sides.notes as n (n)}<span class="note">{n}</span>{/each}
+        {#each sides.notes as n (n)}<span class="note">{n === 'binary' ? 'binary file' : n}</span>{/each}
         {#if sides.hunks}<span class="stat">{stat(file.added, file.removed)}</span>{/if}
       </summary>
       {#if open.has(file.path)}
         <div class="body">
           {#if !sides.hunks}
-            <div class="empty">no lines to show</div>
+            <div class="empty">{noLines(sides)}</div>
           {:else if MergeDiff && mode}
             <MergeDiff
               {sides}
               {mode}
+              {wrap}
+              gaps={view.gaps}
+              tail={view.tail}
+              {unavailable}
+              onexpand={context ? (gap: number) => openGap(file, gap) : undefined}
               bind:this={
                 () => views.get(file.path),
                 (v) => {
@@ -227,6 +321,20 @@
     justify-content: flex-end;
     padding: 4px 0;
     background: var(--bg);
+  }
+  .wrap {
+    margin-left: 8px;
+    font: 12px var(--mono);
+    padding: 4px 10px;
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    background: var(--s1);
+    color: var(--dim);
+    cursor: pointer;
+  }
+  .wrap.on {
+    color: var(--ink);
+    background: var(--s3);
   }
   .modes {
     display: inline-flex;
