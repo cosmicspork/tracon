@@ -107,6 +107,19 @@ pub fn definitions() -> Vec<Value> {
                     "message": { "type": "string", "description": "The commit message the change ships with; the title, body and forge description never become it. Omitted, it is your one commit's own message, and that commit ships as it is, SHA and signature, when it sits directly on the base; with several commits beyond the base, `message` is required. Another message ships one new, unsigned commit of the reviewed tree (a repository set to keep its commits pushes them as written). The operator may edit it; the result says what ships (`ships`, `commit_message`, `drops_signatures`)." },
                     "branch": { "type": "string", "description": "The forge branch a new change is pushed to, e.g. feat/short-description. Defaults to your worktree's branch, or one named from the title. Fixed by a review's first submit; an existing change is pushed to its own branch. Naming the base itself (branch equal to base) pushes straight to it: approval fast-forwards the base, opens no change, and CI runs after the push; your work must build on origin/<base>, a rewrite is refused, and a base the forge protects (a pull request required, say) rejects the push, which the result's `direct.protection` says before the operator decides." },
                     "rewrite": { "type": "boolean", "description": "The branch's history was rewritten (rebase, amend), so the push replaces what the forge's branch holds, only over what it held at submit and always approved by the operator." },
+                    "threads": {
+                        "type": "array",
+                        "description": "With review_id: what this revision does about the operator's review threads that review_status returned. Name each thread it answers; `addressed: true` says this revision addresses it (the operator still resolves or reopens it), and `reply` says what you did, or why you left it.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "reply": { "type": "string" },
+                                "addressed": { "type": "boolean" },
+                            },
+                            "required": ["id"],
+                        },
+                    },
                 },
                 "required": ["title", "body", "provider", "project"],
             },
@@ -138,7 +151,10 @@ pub fn definitions() -> Vec<Value> {
                  `state: \"queued\"` with its `position` in line, or `held: true` once the \
                  node has stopped trying them, which is no rejection; if they fail it \
                  returns `state: \"submit_failed\"` with the same message submit_review \
-                 would have refused with, and nothing was submitted. While it waits, `reviewer` says what an AI reviewer of the \
+                 would have refused with, and nothing was submitted. Changes requested \
+                 returns the operator's `notes`, any edited `patch`, and `threads`: their \
+                 points still open, each bound to a revision, a path, a side and lines, \
+                 reading `unresolved`, `addressed` or `outdated`. While it waits, `reviewer` says what an AI reviewer of the \
                  latest revision is doing (`state`: starting, running, done, failed or none) \
                  and, once it has given one, its `verdict`, `summary` and `findings`; a \
                  verdict arriving ends the wait early. Its summary and findings are sent \
@@ -370,6 +386,9 @@ async fn submit(
         }
         None => None,
     };
+    // What the agent says of the operator's threads, checked against the
+    // review now and recorded with the revision it comes with.
+    let threads = threads_arg(store, args, resubmission.as_ref())?;
     // A client that gave up waiting may retry a submission that is still
     // running or already recorded. Same-commit submits from one worktree run
     // one at a time, and a fresh one finds the checks or the review the other
@@ -904,6 +923,7 @@ async fn submit(
         max_snapshot_bytes,
         authorship,
         ships,
+        threads,
     };
     // The operator's own toolchain is where an external harness's checks
     // run, never this node's container: nothing here can execute a command
@@ -1209,6 +1229,9 @@ struct Submission {
     authorship: Option<Value>,
     /// What an approval as submitted ships, from `what_ships`.
     ships: Value,
+    /// What the agent says of the operator's threads, recorded with the
+    /// revision once it is.
+    threads: Vec<crate::store::review_thread::ThreadAnswer>,
 }
 
 impl Submission {
@@ -1239,6 +1262,7 @@ impl Submission {
             max_snapshot_bytes,
             authorship,
             ships,
+            threads,
         } = self;
         let external = session.is_none();
         let source = if external {
@@ -1307,6 +1331,13 @@ impl Submission {
                     super::show::record_note(store, manager, ctx, &id, &capture.head_sha, note)
                 {
                     tracing::warn!(%error, review = %id, "submitter's note not stored");
+                }
+            }
+            // The threads this revision answers, said of this revision. Like
+            // the note, an answer that cannot be stored does not undo it.
+            if !threads.is_empty() {
+                if let Err(error) = store.answer_review_threads(&id, &revision.id, &threads) {
+                    tracing::warn!(%error, review = %id, "answers to review threads not stored");
                 }
             }
             let reviewer = keep_and_review(
@@ -4799,29 +4830,51 @@ pub(crate) fn publish_failed_view(
     })
 }
 
+/// How `review_status` tells the agent to answer the operator's threads.
+const THREADS_SAY: &str = " `threads` are the operator's points still open, each bound to the \
+     revision it was written on (`revision`) and, unless general, to a `path` and a `side` (`old` \
+     is the base, `new` the change), a line thread to `start_line`..`end_line` and the `lines` it \
+     was written on. A thread reading `outdated` was written on an earlier revision whose lines \
+     have changed since: it still means those lines, not whatever is there now. One reading \
+     `addressed` you have said you addressed, and waits on the operator to resolve or reopen. \
+     When you resubmit, name each thread the new revision answers in submit_review's `threads`, \
+     with `addressed: true` and a `reply` saying what you did, or a `reply` alone where you did \
+     not change it and say why.";
+
 /// What `review_status` answers for a review the operator has decided, or
 /// `None` while it waits on them.
-pub(crate) fn decided_review_view(r: &ReviewRow) -> Option<Value> {
+pub(crate) fn decided_review_view(store: &Store, r: &ReviewRow) -> Option<Value> {
     match r.state.as_str() {
         "revising" => {
             // A patch means the operator edited the diff rather than
             // describing the change. Applying it verbatim is the point:
             // it is what they want, and the agent is still the hand that
             // writes it to the worktree.
-            let message = if r.revision_patch.is_some() {
+            let mut message = if r.revision_patch.is_some() {
                 "Changes were requested, with an edited diff. Apply `patch` to the \
                  worktree exactly as given (`git apply`), make any further changes the \
                  notes ask for, commit, then call submit_review again with this \
                  review_id."
+                    .to_string()
             } else {
                 "Changes were requested. Make them, commit, then call submit_review \
                  again with this review_id."
+                    .to_string()
             };
+            // The operator's threads not yet resolved, each a point to answer.
+            let threads = review::threads::of_review(store, &r.id, true).unwrap_or_else(|error| {
+                tracing::warn!(%error, review = %r.id, "review threads not read");
+                Vec::new()
+            });
+            if !threads.is_empty() {
+                message.push_str(THREADS_SAY);
+            }
             Some(json!({
                 "review_id": r.id,
                 "state": "changes_requested",
                 "notes": r.verdict_reason,
                 "patch": r.revision_patch,
+                "threads": threads,
                 "message": message,
             }))
         }
@@ -5026,7 +5079,7 @@ async fn status(
                 "that id is a standalone narrative report; call report_status instead".into(),
             );
         }
-        if let Some(view) = decided_review_view(&r) {
+        if let Some(view) = decided_review_view(store, &r) {
             told_review(manager, ctx, &r);
             review_decided(manager, &r.id);
             return Ok(view);
@@ -5218,6 +5271,69 @@ fn external_caller(review_id: &str) -> String {
 pub(crate) fn review_decided(manager: &Manager, review_id: &str) {
     manager.review_starts().unkeep(review_id);
     manager.waits().forget(&external_caller(review_id));
+}
+
+/// `submit_review`'s `threads`: what this revision does about each of the
+/// operator's threads it names, which must be on the review it resubmits.
+fn threads_arg(
+    store: &Store,
+    args: &Value,
+    resubmission: Option<&ReviewRow>,
+) -> Result<Vec<crate::store::review_thread::ThreadAnswer>, String> {
+    let list = match args.get("threads") {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::Array(list)) if list.is_empty() => return Ok(Vec::new()),
+        Some(Value::Array(list)) => list,
+        Some(_) => return Err("`threads` is a list of {id, reply, addressed}".into()),
+    };
+    let review = resubmission
+        .ok_or("`threads` answers the threads of the review you resubmit: pass its review_id")?;
+    let mut answers = Vec::new();
+    for (i, item) in list.iter().enumerate() {
+        let n = i + 1;
+        let id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| format!("thread {n} in `threads` has no `id`"))?;
+        let on_review = store
+            .review_thread(id)
+            .map_err(|e| e.to_string())?
+            .is_some_and(|t| t.review_id == review.id);
+        if !on_review {
+            return Err(format!(
+                "{id} is not a thread on review {}; review_status lists its threads",
+                review.id
+            ));
+        }
+        let reply = match item.get("reply") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(reply)) if reply.len() > review::threads::MAX_COMMENT_BYTES => {
+                return Err(format!(
+                    "thread {id}'s reply is over {} KiB",
+                    review::threads::MAX_COMMENT_BYTES / 1024
+                ))
+            }
+            Some(Value::String(reply)) => Some(reply.trim().to_string()).filter(|r| !r.is_empty()),
+            Some(_) => return Err(format!("thread {id}'s `reply` is not a string")),
+        };
+        let addressed = match item.get("addressed") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(addressed)) => *addressed,
+            Some(_) => return Err(format!("thread {id}'s `addressed` is not true or false")),
+        };
+        if reply.is_none() && !addressed {
+            return Err(format!(
+                "thread {id} says nothing: give a `reply`, `addressed: true`, or both"
+            ));
+        }
+        answers.push(crate::store::review_thread::ThreadAnswer {
+            thread_id: id.to_string(),
+            reply,
+            addressed,
+        });
+    }
+    Ok(answers)
 }
 
 fn str_arg(args: &Value, key: &str) -> Result<String, String> {
@@ -5425,7 +5541,7 @@ mod tests {
         let mut r = review_at("sha1");
         r.state = "rejected".into();
         r.verdict_reason = Some("retargeting consumers".into());
-        let view = decided_review_view(&r).unwrap();
+        let view = decided_review_view(&Store::open_in_memory().unwrap(), &r).unwrap();
         assert_eq!(view["state"], "rejected");
         assert_eq!(view["reason"], "retargeting consumers");
         assert_eq!(

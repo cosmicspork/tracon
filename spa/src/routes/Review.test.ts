@@ -92,3 +92,23 @@ test('the opener is part of the review draft', () => {
   const apply = review.slice(review.indexOf('function applyDraft('))
   expect(apply.slice(0, apply.indexOf('\n  }\n'))).toContain('if (d.opener !== undefined) opener = d.opener')
 })
+
+test('review threads sit after the diff and before the verdict bar, and start from a line picked in the full diff only', () => {
+  const diff = markup.indexOf('<Diff\n        diff={review.diff}')
+  const threads = markup.indexOf('<ReviewThreads')
+  const bar = markup.indexOf('<div class="decide"')
+  expect(diff).toBeGreaterThan(-1)
+  expect(threads).toBeGreaterThan(diff)
+  expect(threads).toBeLessThan(bar)
+  // The full diff is this revision's, numbered as the node anchors; the
+  // since-last-verdict diff is not, and offers no picks.
+  expect(markup.slice(diff, threads)).toContain('onpick={threadsBlocked ? undefined : pickLine}')
+  expect(markup).toContain('<Diff diff={sinceReviewed.diff} perFile={surface.phone} />')
+})
+
+test('unresolved threads let a request for changes go without a note', () => {
+  const conditions = review.slice(review.indexOf('const conditions = $derived('))
+  expect(conditions.slice(0, conditions.indexOf('})\n'))).toContain('openThreads: unresolvedCount(threads)')
+  // Read with the rest of the review, and again with it.
+  expect(review.split('threads = d.threads ??').length - 1).toBe(2)
+})

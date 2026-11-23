@@ -3335,8 +3335,15 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
         Some(_) => serde_json::Value::Null,
         None => crate::mcp::review::reviewer_view(s.store(), &s.manager, r),
     };
+    // The operator's threads, each read on the latest revision. Held by the
+    // owner, which a mirror reads them from (`OWNER_FIELDS`).
+    let threads = match remote_owner {
+        Some(_) => Vec::new(),
+        None => crate::review::threads::of_review(s.store(), &id, false)?,
+    };
     Ok(json!({
         "review": r,
+        "threads": threads,
         "review_session_reason": review_session_reason,
         "review_session_starting": review_session_starting,
         "reviewer": reviewer,
@@ -3393,6 +3400,7 @@ const OWNER_FIELDS: &[&str] = &[
     "change_draft",
     "protection",
     "generated_details",
+    "threads",
 ];
 
 /// The review row's own fields the owner's reviewer writes, taken from the
@@ -4198,6 +4206,10 @@ pub(crate) async fn decide_local(
     decided
 }
 
+/// The note a request for changes carries when the operator wrote none
+/// beside its unresolved threads.
+pub const THREADS_SAY: &str = "See the unresolved review threads.";
+
 async fn decide_review_here(
     s: &AppState,
     id: &str,
@@ -4252,16 +4264,20 @@ async fn decide_review_here(
         "revise" => {
             // Changes requested. The review stays open as one evolving thread,
             // and the notes go back to the agent, which is still the only
-            // writer to the worktree.
-            let notes = b
-                .reason
-                .as_deref()
-                .map(str::trim)
-                .filter(|x| !x.is_empty())
-                .ok_or(ApiError(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    "asking for changes needs a note saying what to change".into(),
-                ))?;
+            // writer to the worktree. Unresolved threads say what to change
+            // on their own, so with any open the note may be left out.
+            let notes = match b.reason.as_deref().map(str::trim).filter(|x| !x.is_empty()) {
+                Some(notes) => notes,
+                None if s.store().review_has_open_threads(&id)? => THREADS_SAY,
+                None => {
+                    return Err(ApiError(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "asking for changes needs a note saying what to change, or an \
+                         unresolved thread"
+                            .into(),
+                    ))
+                }
+            };
             // Not trimmed: a patch's trailing newline is part of it, and
             // `git apply` calls a patch without one corrupt.
             let patch = b.patch.as_deref().filter(|p| !p.trim().is_empty());
@@ -7829,6 +7845,16 @@ fn forwarded_scope(s: &AppState, sender: &str, command: &proto::frame::Command) 
             owned_here(s, &review.node_id, "review")?;
             sender_in_channel(s, sender, &review.channel, "review")
         }
+        // A thread is changed where its review is owned, for a member of the
+        // review's channel; one mirrored here is its owner's to change.
+        C::ReviewThread { review_id, .. } => {
+            let review = s
+                .store()
+                .get_review(review_id)?
+                .ok_or(ApiError(StatusCode::NOT_FOUND, "no such review".into()))?;
+            owned_here(s, &review.node_id, "review")?;
+            sender_in_channel(s, sender, &review.channel, "review")
+        }
         _ => Ok(()),
     }
 }
@@ -8056,6 +8082,10 @@ impl crate::mesh::forward::CommandExecutor for AppState {
                 crate::http::evidence::forwarded_candidates(self, sender, query)
             }
             C::ReviewDetail { request } => forwarded_review_detail(self, sender, request).await,
+            // Scoped by `forwarded_scope`: owned here, the sender on its channel.
+            C::ReviewThread { review_id, change } => {
+                super::threads::forwarded(self, &review_id, change).await
+            }
             C::TransferImported {
                 transfer_id,
                 session_id,

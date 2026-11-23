@@ -1,6 +1,8 @@
 // Mirrors the node's serde output. Field names must match exactly; the node is
 // the source of truth and the interface renders what it is given.
 
+import type { ReviewThread } from './reviewThreads'
+
 export interface NodeInfo {
   id: string
   name: string
@@ -760,6 +762,12 @@ export interface ReviewDetails {
   shown_work?: ShownWork[]
   /** What changed since the operator last decided; null on a first revision. */
   since_reviewed?: SinceReviewed | null
+  /**
+   * The operator's review threads, each read on the latest revision. A
+   * mirrored review's are its owner's (empty when the owner was not read).
+   * Absent from a node that predates them.
+   */
+  threads?: ReviewThread[]
   /**
    * Who the commits are by, against the forge account approval publishes as.
    * Null when that account's identity could not be resolved, or for a

@@ -559,10 +559,13 @@ pub(crate) fn carried_note(carried: &[ReviewRow]) -> String {
         let (patch, read) = if r.revision_patch.is_some() {
             (
                 "An edited diff is attached: apply it to the worktree exactly as given.",
-                "the notes and the patch",
+                "the notes, any open review threads and the patch",
             )
         } else {
-            ("No edited diff is attached.", "the notes")
+            (
+                "No edited diff is attached.",
+                "the notes and any open review threads",
+            )
         };
         note.push_str(&format!(
             "\n\nThe operator sent the earlier session's {what} `{id}` ({}) back for \

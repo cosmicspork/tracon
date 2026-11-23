@@ -664,6 +664,30 @@ sessions, and work items link to the corresponding owner and channel; a peer's
 candidates are read from that owner. A missing local candidate is not evidence
 that a peer has none.
 
+### Review threads
+
+Feedback on a review can be a set of threads instead of one note. Under the diff,
+open a thread on the whole change, on a file, or on a line or range: pick a line
+number in the full diff to start one there, and another to make it a range. Each
+thread is bound to the revision on screen and, unless general, to a path and a side
+(the change, or the base). The node reads the lines from that revision's diff
+itself, and refuses a line the diff does not show.
+
+**Request changes** sends the threads still open to the agent with your note, which
+may be left out when a thread says it all, and with an edited diff if you made one.
+`review_status` returns them under `threads`, each with its revision, path, side,
+lines and comments. When the agent resubmits, it names in submit_review's `threads`
+each one the new revision answers, marked `addressed` with a reply, or replies
+alone where it left one as it was.
+
+Threads are kept across resubmission. Each reads one of four states: *unresolved*,
+*addressed* (the agent says so), *outdated*, or *resolved*. A line thread whose lines
+read differently on the new revision, or a file thread whose file's diff changed,
+is **outdated** there: it is never moved onto other code, and still shows the lines
+it was written on. Reply to a thread, resolve it, or reopen one that is addressed
+or resolved. A peer's review's threads are held by the node that owns the review:
+they are read from it and changed through it, and wait while it is unreachable.
+
 ## Review sessions
 
 A review can also get a second opinion from a **review session**: a fresh session

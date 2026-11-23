@@ -48,6 +48,7 @@ pub mod repo_image;
 pub mod reports;
 pub mod review_draft;
 pub mod review_session;
+pub mod review_thread;
 pub mod rollups;
 pub mod services;
 pub mod shown;
