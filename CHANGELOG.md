@@ -1,5 +1,62 @@
 # Changelog
 
+## [0.60.0](https://github.com/cosmicspork/tracon/compare/v0.59.0...v0.60.0) (2026-11-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* **mesh:** take presence from the hub and send hello only on change ([#1146](https://github.com/cosmicspork/tracon/issues/1146))
+* **mesh:** mirror reviews as events and push detail to watching peers ([#1147](https://github.com/cosmicspork/tracon/issues/1147))
+
+### Features
+
+* **mesh:** mirror reviews as events and push detail to watching peers ([#1147](https://github.com/cosmicspork/tracon/issues/1147)) ([af24639](https://github.com/cosmicspork/tracon/commit/af24639d78766e6a3c683e83b18b60b25c417163))
+* **mesh:** take presence from the hub and send hello only on change ([#1146](https://github.com/cosmicspork/tracon/issues/1146)) ([74bcb02](https://github.com/cosmicspork/tracon/commit/74bcb02174984980b58af445ed28f19bb0abcfa3))
+* **node,proto:** take a channel member's repository image from DOCR by a signed digest ([#1127](https://github.com/cosmicspork/tracon/issues/1127)) ([7b8bdaf](https://github.com/cosmicspork/tracon/commit/7b8bdafef50c1af834bd495e1e0f82a3c4741551))
+* **node,spa:** add a per-repository artefact stash for sessions (stash_put, stash_get) ([#1123](https://github.com/cosmicspork/tracon/issues/1123)) ([2166300](https://github.com/cosmicspork/tracon/commit/21663008474e8bf12c97d9f4af73901c596c7c24))
+* **node,spa:** add Postgres and Redis catalogue services with a persistent volume per repository ([#1124](https://github.com/cosmicspork/tracon/issues/1124)) ([3611d5c](https://github.com/cosmicspork/tracon/commit/3611d5c07c9f556ebca72310c1adfc0c4bb84cc5))
+* **node,spa:** addressable review threads bound to revision, path and side ([#1118](https://github.com/cosmicspork/tracon/issues/1118)) ([35c7cf8](https://github.com/cosmicspork/tracon/commit/35c7cf8265fb5e4419b0e6a55ce91c205fdce3f8))
+* **node,spa:** brokered provider CLI with an argv-prefix allow list ([#1126](https://github.com/cosmicspork/tracon/issues/1126)) ([eba30c9](https://github.com/cosmicspork/tracon/commit/eba30c9ff774e0cc2d092d8305906758a264c080))
+* **node,spa:** close a work item on merge, with optional explicit acceptance ([#1119](https://github.com/cosmicspork/tracon/issues/1119)) ([26fdaaa](https://github.com/cosmicspork/tracon/commit/26fdaaa778012420ae7d8ab201ae7d10f56b84aa))
+* **node,spa:** data contract v1, an export-only round of every record kind ([#1125](https://github.com/cosmicspork/tracon/issues/1125)) ([e6d00b4](https://github.com/cosmicspork/tracon/commit/e6d00b4cb8e6c6aa13aa56fe06ee2786001e41de))
+* **node,spa:** give the session workspace a read-only origin through the gateway ([#1122](https://github.com/cosmicspork/tracon/issues/1122)) ([2cf063f](https://github.com/cosmicspork/tracon/commit/2cf063fda3834521a60142b7ba731ea773a6375b))
+* **node,spa:** let an admin peer allow a node's admin cards with a signed statement ([#1134](https://github.com/cosmicspork/tracon/issues/1134)) ([01ab4a7](https://github.com/cosmicspork/tracon/commit/01ab4a71425961fb9b4b3677ccdcfad2342e54f6))
+* **node,spa:** let an admin peer run a node's plugin, grant, channel, recipe and restart actions ([#1136](https://github.com/cosmicspork/tracon/issues/1136)) ([718941a](https://github.com/cosmicspork/tracon/commit/718941a4be2fbd78e03005eaa225d73a602d23d8))
+* **node,spa:** narrow where a plugin is offered with [[plugin]] channels ([#1133](https://github.com/cosmicspork/tracon/issues/1133)) ([90346cf](https://github.com/cosmicspork/tracon/commit/90346cfbc073b53649a08ddf376bfbd62db59b46))
+* **node,spa:** preview the exact outgoing title and body as sanitized Markdown ([#1111](https://github.com/cosmicspork/tracon/issues/1111)) ([0a7d160](https://github.com/cosmicspork/tracon/commit/0a7d160dd94247aefa1d251eaf6b29ebc048e653))
+* **node,spa:** review diff line numbers, highlighting, wrap and pinned context ([#1129](https://github.com/cosmicspork/tracon/issues/1129)) ([952b703](https://github.com/cosmicspork/tracon/commit/952b7039603b1e5f7a69d78480ee32379eb2a79c))
+* **node,spa:** save the full conversation and scratchpad before each compaction or restart ([#1121](https://github.com/cosmicspork/tracon/issues/1121)) ([54452f8](https://github.com/cosmicspork/tracon/commit/54452f8455348b7cf033ac79bd9c8e2db620cab9))
+* **node,spa:** show design proposals with show_work, labelled as proposals ([#1114](https://github.com/cosmicspork/tracon/issues/1114)) ([317a715](https://github.com/cosmicspork/tracon/commit/317a715f0a94a6e87263116374240de0a9cb01c4))
+* **node,spa:** stage files sent with a prompt into the session's workspace ([#1113](https://github.com/cosmicspork/tracon/issues/1113)) ([16879a7](https://github.com/cosmicspork/tracon/commit/16879a71b4d652e1d43e3ed0158840cf8a3a18f6))
+* **node,spa:** web_fetch on the node, deny by default, with readable refusals ([#1117](https://github.com/cosmicspork/tracon/issues/1117)) ([ddbba60](https://github.com/cosmicspork/tracon/commit/ddbba6049a116934db2bcfb0531b9deb56e6d373))
+* **node:** build the default branch in the warm-up so checks start from its output ([#1115](https://github.com/cosmicspork/tracon/issues/1115)) ([f6ebf19](https://github.com/cosmicspork/tracon/commit/f6ebf192f8975b75c6544a45ad45e42adb668626))
+* **node:** list a plugin's tools without starting it ([#1135](https://github.com/cosmicspork/tracon/issues/1135)) ([dfa47dd](https://github.com/cosmicspork/tracon/commit/dfa47dd775cc74f0f4779c594db72dbc66082542))
+* **node:** run external harnesses' checks through the node with run_containers and check_run ([#1116](https://github.com/cosmicspork/tracon/issues/1116)) ([58d3a21](https://github.com/cosmicspork/tracon/commit/58d3a218d942e7921cc5c00e448d69e3602a6c7f))
+* **spa:** review diff file filter, change stepping and viewed files per revision ([#1130](https://github.com/cosmicspork/tracon/issues/1130)) ([5aefcbe](https://github.com/cosmicspork/tracon/commit/5aefcbe8b14c28f7cc3b624e78e53846bce300f2))
+* **spa:** side-by-side and unified review diff on CodeMirror's merge view ([#1108](https://github.com/cosmicspork/tracon/issues/1108)) ([8df4aaf](https://github.com/cosmicspork/tracon/commit/8df4aaf39516e9a30d74566a7da2a5697370424b))
+* **spa:** update and roll back plugins from Settings › Plugins ([#1104](https://github.com/cosmicspork/tracon/issues/1104)) ([c6eb56d](https://github.com/cosmicspork/tracon/commit/c6eb56d609e1c104b713bb4a0b80c1af2fcca0ef))
+
+
+### Bug Fixes
+
+* **hub:** bound frame pages by bytes ([#1143](https://github.com/cosmicspork/tracon/issues/1143)) ([3075fbc](https://github.com/cosmicspork/tracon/commit/3075fbc02f91991df107d42de58d9da86f97782d))
+* **hub:** log the binary's own target by default ([#1142](https://github.com/cosmicspork/tracon/issues/1142)) ([b6e0beb](https://github.com/cosmicspork/tracon/commit/b6e0bebf6544b7abc64f1a81a48734b1d0bbe61f))
+* **mesh:** say why the hub is unreachable and retry a dropped GET once ([#1145](https://github.com/cosmicspork/tracon/issues/1145)) ([8b4fae5](https://github.com/cosmicspork/tracon/commit/8b4fae501e44e796b80e8b186289dca2a2440195))
+* **mesh:** send snapshots only when changed and only where another node reads them ([#1144](https://github.com/cosmicspork/tracon/issues/1144)) ([abbf026](https://github.com/cosmicspork/tracon/commit/abbf026ebe3173bd1d480b6cd219af2c8f8673b6))
+* **node,hub:** pin enrollment's first key handoff to the inviter and check the sender's membership on the hub ([#1120](https://github.com/cosmicspork/tracon/issues/1120)) ([c961907](https://github.com/cosmicspork/tracon/commit/c96190740664656dcb607c7aa454afbbd29e320b))
+* **node,spa:** re-probe the model list after saving declared models or removing a provider ([#1112](https://github.com/cosmicspork/tracon/issues/1112)) ([30b2959](https://github.com/cosmicspork/tracon/commit/30b2959148b39c5a0eaa8d99021448a89d745875))
+* **node,spa:** take harness versions from the verified bundle manifest, not a version pod ([#1110](https://github.com/cosmicspork/tracon/issues/1110)) ([3466354](https://github.com/cosmicspork/tracon/commit/34663545f49725ff7298f02ac2f56d8aa205331a))
+* **node:** drop the removed version() from the remote_config test harness ([#1132](https://github.com/cosmicspork/tracon/issues/1132)) ([83720ca](https://github.com/cosmicspork/tracon/commit/83720ca7f7c8f49ddc30e9d21aa84721badda6a6))
+* **node:** give a Kubernetes pool's pods the scale-up grace from the start ([#1106](https://github.com/cosmicspork/tracon/issues/1106)) ([7fa4615](https://github.com/cosmicspork/tracon/commit/7fa46157df9521117a96b9a85ab0561bc73dd93f))
+* **node:** group plugin tools in the orientation by installed plugin ([#1109](https://github.com/cosmicspork/tracon/issues/1109)) ([1287686](https://github.com/cosmicspork/tracon/commit/1287686b00babb38091073514cee2da572a1043b))
+* **node:** refuse a tool the channel does not offer before policy or a card ([#1074](https://github.com/cosmicspork/tracon/issues/1074)) ([8fecd37](https://github.com/cosmicspork/tracon/commit/8fecd37836c14edacc38c6422c35fad8134fa9be))
+* **sandbox:** move the Ubuntu snapshot past the base image's packages ([#1141](https://github.com/cosmicspork/tracon/issues/1141)) ([347e20c](https://github.com/cosmicspork/tracon/commit/347e20c279b469f6d73b81e3a6703c3a89871cb9))
+
+
+### Performance Improvements
+
+* **spa:** keep large review diffs responsive ([#1131](https://github.com/cosmicspork/tracon/issues/1131)) ([018047e](https://github.com/cosmicspork/tracon/commit/018047e1b6fdcaf7a0d2a654d0cd16a5ebe56b0b))
+
 ## [0.59.0](https://github.com/cosmicspork/tracon/compare/v0.58.0...v0.59.0) (2026-11-22)
 
 
