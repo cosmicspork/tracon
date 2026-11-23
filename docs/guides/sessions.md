@@ -107,12 +107,21 @@ symlink leading out of the tree refused) and never written back. The harness see
 path; your Git configuration, hooks, and credentials stay outside. A workspace
 outlives its session — start another on it, export a checked snapshot, or download
 it as a zip — and publication happens from that snapshot through a separate,
-credential-bearing repository the node owns, never from the agent's clone. The clone
-has no remote of its own: an agent that needs a newer branch from the forge calls
-`fetch_branch`, which fetches on the node with the repository's credential and
-carries what the workspace lacks to it as a Git bundle. Only
-`refs/remotes/origin/<branch>` moves; rebasing or merging onto it is the agent's.
-It writes nothing to the forge and is never asked. A
+credential-bearing repository the node owns, never from the agent's clone. The
+clone's `origin` is read-only and served by the gateway:
+`http://<gateway>:<forward_port>/git/<channel>/<owner>/<name>.git`, named in the
+harness's own gitconfig together with the session's token. The gateway speaks Git's
+smart HTTP to the forge with the channel's brokered credential, which never enters
+the sandbox, so `git fetch`, `git pull` and rebasing onto a `main` that moved since
+launch work as anywhere else; each fetch is recorded on the session (`git_fetch`,
+with the commits and refs it asked for). It forwards that one repository and nothing
+else — another owner, name or channel is refused before a credential is looked up —
+and it answers a push (`git-receive-pack`) itself, with a message pointing at
+`submit_review`, so publication stays review-only however Git is invoked. LFS and
+submodules from other repositories are not served. `fetch_branch` stays as the
+brokered equivalent: it fetches on the node and carries what the workspace lacks to
+it as a Git bundle. Only `refs/remotes/origin/<branch>` moves; rebasing or merging
+onto it is the agent's. Neither writes anything to the forge, and neither is asked. A
 snapshot is the workspace as Git sees it: what its ignore rules exclude (a
 `target/`, a `node_modules/`) stays in the volume and is never exported.
 Nothing is removed on its own except a check run's copy once the check is over,

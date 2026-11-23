@@ -403,12 +403,22 @@ pub fn scratch_for(
     // Commits made in here are authored and committed as the operator's own
     // forge identity, so what is published reads as their work. With none,
     // Git asks for one rather than inventing a name.
+    //
+    // The workspace's `origin` is the gateway's read-only remote for its
+    // repository (named in the workspace's own `.git/config`); the session
+    // token it presents there lives and dies with the launch, here, and the
+    // forge's credential is never in either.
     std::fs::write(
         dir.join("gitconfig"),
         format!(
-            "{}[safe]\n\tdirectory = /work\n[advice]\n\tdetachedHead = false\n",
+            "{}[safe]\n\tdirectory = /work\n[advice]\n\tdetachedHead = false\n{}",
             identity
                 .map(crate::forge::Identity::gitconfig)
+                .unwrap_or_default(),
+            wiring
+                .git_origin
+                .as_deref()
+                .map(|url| crate::gateway::git::gitconfig(url, &wiring.token))
                 .unwrap_or_default()
         ),
     )?;
@@ -548,6 +558,58 @@ mod tests {
             "{config}"
         );
         assert!(!config.contains("tracon"), "{config}");
+        remove(session);
+    }
+
+    /// A session on a forge repository presents its own token to the
+    /// gateway's read-only `origin`, and to nothing else.
+    #[test]
+    fn the_harness_gitconfig_names_the_gateway_origin() {
+        let session = "test-materialize-origin";
+        release_state(session);
+        let wiring = Wiring {
+            token: "session-token".into(),
+            git_origin: Some("http://tracon-gw:7421/git/work/o/r.git".into()),
+            ..Default::default()
+        };
+        let scratch = scratch_for(
+            session,
+            Path::new("/ignored"),
+            Path::new("/ignored"),
+            PODMAN_HARNESS_HOME,
+            &crate::adapter::claude::ClaudeAdapter::new("2.1.295"),
+            &wiring,
+            "# Orientation",
+            None,
+        )
+        .unwrap();
+        let config = std::fs::read_to_string(scratch.dir.join("gitconfig")).unwrap();
+        assert!(
+            config.contains("[http \"http://tracon-gw:7421/git/work/o/r.git\"]"),
+            "{config}"
+        );
+        assert!(
+            config.contains("extraHeader = \"Authorization: Bearer session-token\""),
+            "{config}"
+        );
+        assert!(config.contains("directory = /work"), "{config}");
+        remove(session);
+
+        // Without one, no remote at all.
+        release_state(session);
+        let scratch = scratch_for(
+            session,
+            Path::new("/ignored"),
+            Path::new("/ignored"),
+            PODMAN_HARNESS_HOME,
+            &crate::adapter::claude::ClaudeAdapter::new("2.1.295"),
+            &Wiring::default(),
+            "# Orientation",
+            None,
+        )
+        .unwrap();
+        let config = std::fs::read_to_string(scratch.dir.join("gitconfig")).unwrap();
+        assert!(!config.contains("extraHeader"), "{config}");
         remove(session);
     }
 

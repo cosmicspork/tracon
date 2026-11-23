@@ -4771,8 +4771,8 @@ pub(crate) fn publish_failed_view(
         format!(
             "The change this review updates is no longer open, and a review's change is fixed \
              at its first submit, so resubmitting this review cannot publish it. Fetch {base} \
-             (`fetch_branch`, where you have it), rebase the commits not yet on it onto it, and \
-             submit them as a new review, without review_id.",
+             (`git fetch origin`, or `fetch_branch` where you have it), rebase the commits not \
+             yet on it onto it, and submit them as a new review, without review_id.",
             base = failed.base
         )
     } else {

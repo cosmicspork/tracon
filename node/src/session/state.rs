@@ -368,6 +368,10 @@ pub mod event_kind {
     /// because the method and path are not on the inference allowlist the
     /// credential is lent for (`provider`, `method`, `reason`, `attempt`).
     pub const GATEWAY_REFUSED: &str = "gateway_refused";
+    /// The workspace fetched from its read-only `origin` through the gateway
+    /// (`repository`, `protocol`, and `fetched`: each commit id asked for,
+    /// with the refs the forge's listing named it by).
+    pub const GIT_FETCH: &str = "git_fetch";
     /// The harness's own API changed the workspace tree behind tracon's back —
     /// a revert, an unrevert, a patch applied through the harness — with
     /// tracon's permission (`action`, `method`, `path`). It is recorded

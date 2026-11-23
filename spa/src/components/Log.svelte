@@ -5,6 +5,7 @@
     eventLine,
     turnEndLine,
     fallbackLine,
+    gitFetchLine,
     groupLog,
     policyLine,
     groupRunning,
@@ -308,6 +309,8 @@
         {/if}
       {:else if e.kind === 'gateway_refused'}
         <div class="mark crit">model call refused · {e.payload.provider} · {e.payload.reason}</div>
+      {:else if e.kind === 'git_fetch'}
+        <div class="mark">{gitFetchLine(e.payload)}</div>
       {:else if e.kind === 'workspace_changed'}
         <div class="mark wait">workspace changed by the harness · {e.payload.action} · anything bound to the tree as it was no longer holds</div>
       {:else if e.kind === 'ceiling'}

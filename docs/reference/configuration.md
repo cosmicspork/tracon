@@ -98,7 +98,8 @@ resource_prefix = "tracon"          # every runtime volume and container this no
 allow_hosts = ['^api\.anthropic\.com$', '^api\.openai\.com$', '^chatgpt\.com$',
                '^auth\.openai\.com$']  # harness egress; subscription sign-in runs in the node
 proxy_port = 8888
-forward_port = 7421
+forward_port = 7421                 # the harness's way to the node: models, tools, and the
+                                    # workspace's read-only `origin` (/git/<channel>/<owner>/<name>.git)
 # harness_listen = "127.0.0.1:7421" # or a socket path; the platform default is right
 # qa_proxy_port = 8890              # where a container reaches the node's per-client egress
                                     # proxy: preparation and sessions. Each presents its own

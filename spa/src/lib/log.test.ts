@@ -5,6 +5,7 @@ import {
   eventLine,
   turnEndLine,
   fallbackLine,
+  gitFetchLine,
   SILENT,
   groupLog,
   missingContext,
@@ -560,4 +561,18 @@ test('a turn says what it spent, and a compaction the harness counted nothing of
   expect(turnEndLine({ stop_reason: 'max_turn_requests', usage: { total_tokens: 900 } })).toBe(
     `turn stopped at the harness's request limit · ${formatTokens(900)} tokens · a prompt carries on`,
   )
+})
+
+test('a fetch from the read-only origin names what it brought', () => {
+  expect(
+    gitFetchLine({
+      repository: 'o/r',
+      protocol: 'v2',
+      fetched: [
+        { sha: '1111111111111111111111111111111111111111', refs: ['HEAD', 'refs/heads/main'] },
+        { sha: '2222222222222222222222222222222222222222', refs: [] },
+      ],
+    }),
+  ).toBe('git fetch from origin · o/r · main 111111111111 · 222222222222')
+  expect(gitFetchLine({})).toBe('git fetch from origin · origin')
 })
