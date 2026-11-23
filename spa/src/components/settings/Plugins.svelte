@@ -123,7 +123,7 @@
 
 <Card
   title="Plugins"
-  note="Plugins installed on this node, how each tool is answered by the signed policy and its [[plugin]] entry, and a process for each channel whose sessions used one. A process stops after its idle timeout, and an unhealthy one stays down until it is used again or restarted. Check for an update (it raises an update card, and nothing is installed until the card is allowed) and roll back to the previous version here. Install and remove with tracon plugin."
+  note="Plugins installed on this node, the channels each is offered on (its [[plugin]] channels and the credentials it declares decide), how each tool is answered by the signed policy and its [[plugin]] entry, and a process for each channel whose sessions used one. A process stops after its idle timeout, and an unhealthy one stays down until it is used again or restarted. Check for an update (it raises an update card, and nothing is installed until the card is allowed) and roll back to the previous version here. Install and remove with tracon plugin."
 >
   {#snippet actions()}
     {#if plugins?.length}
@@ -158,6 +158,12 @@
           <p class="meta">
             {#if plugin.previous}previous {plugin.previous.version}{:else}no previous version{/if}
           </p>
+          {#if plugin.offered_on}
+            <p class="meta" data-offered>
+              {plugin.offered_on.length ? `Offered on ${plugin.offered_on.join(', ')}` : 'Offered on no channel'}
+              {#if plugin.channels}· channels = [{plugin.channels.join(', ')}] in its [[plugin]] entry{/if}
+            </p>
+          {/if}
           <div class="acts">
             {#if note?.kind !== 'refused'}
               <button class="btn small" onclick={() => void checkUpdate(plugin)} disabled={!!inFlight || !!waiting}>

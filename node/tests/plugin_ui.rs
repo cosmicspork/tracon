@@ -666,3 +666,25 @@ async fn a_plugin_without_a_ui_gets_no_listener() {
     assert!(std::net::TcpListener::bind(("127.0.0.1", n.port)).is_ok());
     n.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_page_on_a_channel_the_entry_does_not_list_is_refused_and_starts_nothing() {
+    let n = node(
+        "portico",
+        true,
+        "portico-ch",
+        vec![PluginEntry {
+            name: "portico".into(),
+            channels: Some(vec!["elsewhere".into()]),
+            ..Default::default()
+        }],
+    )
+    .await;
+    let (status, body) = n.open("portico", "portico-ch").await;
+    assert_eq!(status, 403, "{body}");
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(message.contains("[[plugin]] channels"), "{message}");
+    assert_eq!(n.h.manager.plugin_uis().port("portico"), None);
+    assert!(n.h.manager.plugins().status().is_empty());
+    n.shutdown().await;
+}
