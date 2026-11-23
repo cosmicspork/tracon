@@ -205,6 +205,30 @@ fn main() {
         }),
     );
 
+    // image-statement: a node's signed word for an image it built and pushed.
+    let signer = Identity::from_seed(&seed(0xb1));
+    let statement = proto::image::ImageStatement::sign(
+        &signer,
+        "github.com/acme/app",
+        &"ab".repeat(32),
+        "linux/amd64",
+        &format!(
+            "registry.digitalocean.com/acme/tracon-repo-images@sha256:{}",
+            "cd".repeat(32)
+        ),
+        1_787_000_000_000,
+    );
+    write(
+        &out,
+        "image-statement.json",
+        json!({
+            "contract_version": CONTRACT_VERSION,
+            "signer_seed_hex": hx(&seed(0xb1)),
+            "statement": statement,
+            "signing_bytes_hex": hx(&statement.signing_bytes()),
+        }),
+    );
+
     // names: one id per kind, two UUIDv7s minted in the same millisecond, and
     // the edges (an empty id, a non-ASCII one).
     use proto::names::{generated, hash, kind};
