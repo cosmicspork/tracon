@@ -11,7 +11,9 @@
 //! - `TRACON_HUB_RELAY_ADDR` — also a raw TLS listener for the relay (off when unset; 443
 //!   behind a public address and a wildcard record for the domain), for a provider whose
 //!   egress admits only addresses. Needs `TRACON_HUB_RELAY_DOMAIN`.
-//! - `RUST_LOG` — tracing filter (default `hub=info,tower_http=info`).
+//! - `RUST_LOG` — tracing filter (default `tracon_hub=info,hub=info,tower_http=info`).
+//!   `tracon_hub` is this binary's own target and `hub` the library's; a filter
+//!   naming only `hub` hides the startup lines.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -156,7 +158,7 @@ async fn serve() {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("hub=info,tower_http=info")),
+                .unwrap_or_else(|_| EnvFilter::new("tracon_hub=info,hub=info,tower_http=info")),
         )
         .init();
 
