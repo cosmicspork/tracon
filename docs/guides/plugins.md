@@ -1,7 +1,8 @@
 # Plugins and other MCP servers
 
 Tools a session is offered beyond the node's own: another MCP server the node
-proxies, or a plugin the node installs, supervises and brokers. Writing a plugin
+proxies, a provider's command-line tool the node runs, or a plugin the node
+installs, supervises and brokers. Writing a plugin
 is [the plugin contract](../reference/plugins.md).
 
 ## Other MCP servers
@@ -21,6 +22,39 @@ sent, and runs once you allow it. A server that cannot be reached is reported to
 the caller, not put to you. `GET /api/mcp-servers` lists each server, whether it
 could be listed, and how a call to each tool is answered now. Only streamable HTTP
 is supported; a stdio server is not.
+
+## Provider CLIs
+
+A provider's own command-line tool (`aws`, `gcloud`, `wrangler`) can run on the
+node for an agent that never holds its credential: listing a bucket or
+invalidating a cache from inside the boundary. Each is a `[[provider_cli]]` in
+`node.toml` (see [the configuration reference](../reference/configuration.md)):
+the program, the broker credential (kind `env`) whose variables become its
+environment, the channels it serves, and the argument prefixes it may run under
+the policy. An execute session, or a harness you run yourself, calls
+`provider_cli_run` with the tool's name and its arguments as a list; no shell
+reads them.
+
+The program is held to the same rules as any program the node runs (`publish.gh`
+and the rest): out of an agent's reach, owned and writable by nobody but root or
+the node's user, and checked again just before every run. It may not be a shell
+or an interpreter, by its name or by where its links lead. It starts with nothing
+of the node's environment but a `PATH` the guard trusts, in an empty directory of
+its own that is also its `HOME`, so it reads no profile of yours beside the
+credential it is lent. An argument carrying a credential's value is refused.
+
+A run whose arguments begin with one of the entry's `allow` prefixes, word by
+word, is decided like any other tool call: a signed policy rule under the `tool`
+kind can allow `provider_cli_run`, scoped with `args` globs on `cli` and on
+`command` (the arguments joined by spaces), and a denial's substrings see the
+whole line. Without such a rule it is asked. A run under no prefix is always put
+to you, with the exact arguments, unless a signed rule denies it.
+
+What it prints is cut at 32 KiB a stream, and every credential value and every
+secret-looking line in it is redacted before the agent sees it. Every run is
+recorded on the session's log, or on the channel's external log for a harness
+you run yourself, as `provider_cli_ran`: the arguments, the exit status, and the
+size and SHA-256 of everything each stream printed.
 
 ## Plugins
 

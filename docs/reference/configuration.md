@@ -451,6 +451,23 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
                                     # is asked unless a policy rule allows `<name>__<tool>` by name
 # timeout_secs = 60                 # how long one call may take
 
+# [[provider_cli]]                  # a provider's command-line tool the node runs on its own host for
+                                    # an agent (`provider_cli_run`), which names only the tool and its
+                                    # arguments. Applies without a restart
+# name = "aws"                      # 1-24 lowercase letters, digits or '-'
+# binary = "/usr/local/bin/aws"     # an absolute path or a bare name on the node's PATH, held to the
+                                    # rules for a program the node runs (checked again before every
+                                    # run); never a shell or an interpreter, by name or by link
+# credential = "aws-ops"            # a broker credential of kind `env`, bound to the calling channel
+                                    # too: its variables are the program's environment, never its
+                                    # arguments. Left out, it runs with no credential
+# channels = ["ops"]                # who is offered it; empty means nobody
+# allow = ["s3 ls", "cloudfront create-invalidation"]  # argument prefixes, word by word: a run that
+                                    # begins with one is decided by the signed policy and its grants
+                                    # like any tool call; any other run is put to the operator. A
+                                    # signed denial refuses either way
+# timeout_secs = 120                # how long one run may take before it is killed
+
 # [plugins]
 # owners = ["cosmicspork"]          # GitHub owners whose releases `tracon plugin add` may install;
                                     # changed at the node only. A local archive is not held to it

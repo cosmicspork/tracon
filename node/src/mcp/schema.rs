@@ -290,6 +290,7 @@ fn registry() -> &'static HashMap<String, Value> {
             super::egress::definitions(),
             super::setup::definitions(),
             super::services::definitions_for(&[], ""),
+            super::provider_cli::definitions_for(&[], ""),
             work::definitions(),
             review::definitions(),
         ]

@@ -67,6 +67,7 @@ pub const GUARDED: &[(&str, PathKind)] = &[
     ("publish.git", PathKind::Executable),
     ("runtime.kubernetes.builder.buildctl", PathKind::Executable),
     ("runtime.apple.container", PathKind::Executable),
+    ("provider_cli.binary", PathKind::Executable),
     ("runtime.kubernetes.builder.tls_dir", PathKind::SecretDir),
     (
         "runtime.kubernetes.builder.docker_config",
@@ -99,6 +100,23 @@ fn program_names(key: &str) -> &'static [&'static str] {
         "runtime.kubernetes.builder.buildctl" => &["buildctl"],
         "runtime.apple.container" => &["container"],
         _ => &[],
+    }
+}
+
+/// The key every `[[provider_cli]]` entry's program is checked under.
+pub const PROVIDER_CLI_KEY: &str = "provider_cli.binary";
+
+/// A program whose links end at a shell or an interpreter is one, whatever
+/// its own name: `aws` linked to `/bin/sh` runs what it is handed.
+fn links_to_interpreter(path: &Path) -> Result<(), Problem> {
+    let resolved =
+        std::fs::canonicalize(path).map_err(|e| refuse(format!("{}: {e}", path.display())))?;
+    match crate::config::provider_cli_refused_program(&resolved.to_string_lossy()) {
+        true => Err(refuse(format!(
+            "is {}, a shell or an interpreter, which would run whatever its arguments say",
+            resolved.display()
+        ))),
+        false => Ok(()),
     }
 }
 
@@ -767,6 +785,14 @@ impl Guard {
         let name = Path::new(wanted)
             .file_name()
             .unwrap_or_else(|| OsStr::new(""));
+        // A provider's CLI may be called anything, except a shell or an
+        // interpreter: the node hands it arguments an agent chose.
+        let refuses_interpreters = key == PROVIDER_CLI_KEY;
+        if refuses_interpreters && crate::config::provider_cli_refused_program(wanted) {
+            return Err(refused(refuse(
+                "names a shell or an interpreter, which would run whatever its arguments say",
+            )));
+        }
         if !names.is_empty() && !names.iter().any(|n| OsStr::new(n) == name) {
             return Err(refused(refuse(format!(
                 "names a program called {:?}, and this key runs {}",
@@ -777,10 +803,11 @@ impl Guard {
         if wanted.contains('/') {
             let path = Path::new(wanted);
             plain_absolute(path).map_err(refused)?;
-            return self
-                .executable_at(path)
-                .map(|()| path.to_path_buf())
-                .map_err(refused);
+            self.executable_at(path).map_err(refused)?;
+            if refuses_interpreters {
+                links_to_interpreter(path).map_err(refused)?;
+            }
+            return Ok(path.to_path_buf());
         }
         let mut skipped = Vec::new();
         let candidates = self
@@ -793,7 +820,12 @@ impl Guard {
             if !candidate.is_absolute() || std::fs::symlink_metadata(&candidate).is_err() {
                 continue;
             }
-            match self.executable_at(&candidate) {
+            match self
+                .executable_at(&candidate)
+                .and_then(|()| match refuses_interpreters {
+                    true => links_to_interpreter(&candidate),
+                    false => Ok(()),
+                }) {
                 Ok(()) => return Ok(candidate),
                 Err(problem) => {
                     skipped.push(format!("{} ({})", candidate.display(), problem.reason))
@@ -1494,6 +1526,9 @@ fn values(cfg: &Config) -> Vec<(&'static str, String)> {
     for root in &cfg.external.repo_roots {
         out.push(("external.repo_roots", shown(root)));
     }
+    for cli in &cfg.provider_cli {
+        out.push(("provider_cli.binary", cli.binary.clone()));
+    }
     out
 }
 
@@ -2001,6 +2036,32 @@ mod tests {
         let gh = node.program("brew/bin/gh");
         let guard = node.guard();
         assert_eq!(guard.program("publish.gh", &shown(&gh)).unwrap(), gh);
+    }
+
+    #[test]
+    fn a_provider_cli_may_be_any_program_but_a_shell_or_an_interpreter() {
+        let node = Node::new();
+        let aws = node.program("brew/bin/aws");
+        let guard = node.guard();
+        assert_eq!(guard.program(PROVIDER_CLI_KEY, &shown(&aws)).unwrap(), aws);
+        // By name, whether or not it exists.
+        for name in ["bash", "/bin/sh", "python3.12", "env"] {
+            let refusal = guard.program(PROVIDER_CLI_KEY, name).unwrap_err();
+            assert!(
+                refusal.reason.contains("shell or an interpreter"),
+                "{name}: {refusal}"
+            );
+        }
+        // By where its link leads.
+        let linked = node.at("brew/bin/gcloud");
+        std::os::unix::fs::symlink(sh(), &linked).unwrap();
+        let refusal = guard
+            .program(PROVIDER_CLI_KEY, &shown(&linked))
+            .unwrap_err();
+        assert!(
+            refusal.reason.contains("shell or an interpreter"),
+            "{refusal}"
+        );
     }
 
     #[test]
@@ -2635,6 +2696,7 @@ mod tests {
             .do_token_file = Some("/x".into());
         cfg.embed.api_key_file = Some("/x".into());
         cfg.docs.export_dir = Some("/x".into());
+        cfg.provider_cli.push(Default::default());
         let listed: BTreeSet<&str> = values(&cfg).into_iter().map(|(key, _)| key).collect();
         let keys: BTreeSet<&str> = GUARDED.iter().map(|(key, _)| *key).collect();
         assert_eq!(listed, keys);
