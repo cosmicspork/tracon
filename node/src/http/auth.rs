@@ -569,7 +569,9 @@ impl axum::extract::FromRequestParts<super::api::AppState> for Administrator {
         parts: &mut axum::http::request::Parts,
         state: &super::api::AppState,
     ) -> Result<Self, Self::Rejection> {
-        if administrator_authenticated(&state.auth, state.store(), &parts.headers) {
+        if administrator_authenticated(&state.auth, state.store(), &parts.headers)
+            || confirmed_peer(parts)
+        {
             return Ok(Administrator);
         }
         Err(ApiError::new(
@@ -581,6 +583,15 @@ impl axum::extract::FromRequestParts<super::api::AppState> for Administrator {
             },
         ))
     }
+}
+
+/// An admin peer's request this node runs for it, confirmed there for exactly
+/// this request (`passkey::PeerAdmin`): it stands for the operator here.
+fn confirmed_peer(parts: &axum::http::request::Parts) -> bool {
+    parts
+        .extensions
+        .get::<super::passkey::PeerAdmin>()
+        .is_some_and(|p| p.confirmed)
 }
 
 /// The operator at the node, or an explicitly authenticated
@@ -595,7 +606,7 @@ impl axum::extract::FromRequestParts<super::api::AppState> for LocalOrAdministra
         parts: &mut axum::http::request::Parts,
         state: &super::api::AppState,
     ) -> Result<Self, Self::Rejection> {
-        if parts_are_local(parts) {
+        if parts_are_local(parts) || confirmed_peer(parts) {
             return Ok(LocalOrAdministrator);
         }
         <Administrator as axum::extract::FromRequestParts<_>>::from_request_parts(parts, state)

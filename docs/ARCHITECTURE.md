@@ -1594,10 +1594,13 @@ before the policy is consulted for the same reason.
 **Evidence reads preserve ownership.** Candidate lists and detail requests carry
 their runner/owner and ordinary channel. Mesh handlers authenticate both channel
 memberships, verify the candidate's actual channel and owner, refuse third-node
-relays, and bound responses. Peer UI detail is read-only; it never turns a remote
-ID into a local action. A peer's settings (its `node.toml` and its provider sign-ins)
-are visible and editable only from nodes it names in its `[mesh] admin_peers`; each
-change is confirmed on your node and checked again on the peer.
+relays, and bound responses. Peer UI detail never turns a remote ID into a local
+action. A peer's settings (its `node.toml`, its provider sign-ins, and the admin
+actions it lets a peer take: plugin updates, rollbacks and restarts, authority
+grants, reopening a channel to external harnesses and its notifications, repository
+recipes, a restart) are visible and changeable only from nodes it names in its
+`[mesh] admin_peers`; each change is confirmed on your node and checked again on the
+peer, which runs it through its own route.
 
 **What is reviewed is the tree; the commits and the branch are prose.** The
 candidate is a tree hash recorded at capture, and every check, verdict and grant
@@ -1916,7 +1919,7 @@ Invariants on top of the wire:
 - **A peer administers a node only with the operator's confirmation, made where
   the operator is.** An admin command from a peer (a provider sign-in, a read or
   edit of `node.toml`, a reviewer start, an answer that allows one of the owner's
-  admin cards) runs only if the owner's `[mesh] admin_peers` names the
+  admin cards, an `admin_request`) runs only if the owner's `[mesh] admin_peers` names the
   sender. Every one but a read also carries an admin statement
   (`spec/README.md`): the sending node's operator confirmed exactly that command on
   exactly that owner with the sender's passkey (at the sender's own machine, by
@@ -1926,9 +1929,24 @@ Invariants on top of the wire:
   that it is no older than two minutes, and spends it once. The owner never sees the
   passkey and never trusts the sender's description of the command: the statement
   binds the command's own bytes (for an answer, the card, the option and any edited
-  arguments). No peer changes who may reach or administer a node
-  or where it sends its credentials (`[auth]`, `[mesh]` with `admin_peers`, a
-  provider's upstream, credential and sign-in, the embedding endpoint and key).
+  arguments). An `admin_request` runs one of the owner's own
+  admin routes as its interface would, and only a route the owner's fixed list
+  (`http::peer_routes`) lets a peer reach: a plugin's update check, rollback and
+  restart; making and revoking authority grants; stopping and reopening a channel
+  to external harnesses, and its `notify` binding (no other binding: the rest are
+  the channel's own, handed out with its key); offering a repository recipe and
+  accepting one into `[[repo]]`; restarting the node and withdrawing a restart; and
+  reads of the lists those act on, which need no statement, as a `node.toml` read
+  needs none. The same list words the sender's prompt and decides what the owner
+  runs. The route sees the peer as its caller, standing for the operator only with a
+  spent statement, so it keeps its own checks; the owner logs what ran and pushes it
+  to its operator, naming the peer and the operator session that confirmed it. No
+  peer changes who may reach or administer a node or where it sends its credentials
+  (`[auth]`, `[mesh]` with `admin_peers`, a provider's upstream, credential and
+  sign-in, the embedding endpoint and key, the operator token and passkeys, the
+  mesh's members and hub sharing, credentials and forge tokens), and none signs
+  policy, sets up the boundary, installs or removes a plugin, or installs the
+  service: those are not on the list.
 - **A key handoff is taken only from a member.** A peer's `key_handoff` lands only
   for a channel the sender is a member of by the receiver's record (asked of the
   hub once more if the record lacks it, at most once a minute per sender), since a
@@ -2485,8 +2503,8 @@ Three surfaces, three answers, and the differences are the point.
   allowing a Dockerfile trial (a networked build outside the boundary),
   allowing an egress host for the repository, saving a fetch pattern to the
   channel's allow list, and allowing a plugin's install or update card. Most peer commands are authorised by channel membership; the
-  admin ones (a peer's provider sign-ins, its `node.toml`, and answers that
-  allow its admin cards) need the peer to name the sender in its `[mesh] admin_peers`
+  admin ones (a peer's provider sign-ins, its `node.toml`, answers that
+  allow its admin cards, and the admin routes it lets a peer reach) need the peer to name the sender in its `[mesh] admin_peers`
   and a statement the sender's operator confirmed with the sender's passkey
   (see [Mesh frames](#mesh-frames)). Each handler takes an `AdminAction` extractor, which
   reads the body once and hashes the request it is about to run:

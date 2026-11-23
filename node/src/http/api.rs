@@ -2790,6 +2790,7 @@ fn answered_by(s: &AppState, parts: &axum::http::request::Parts) -> String {
             format!("operator (browser {})", &h[..12.min(h.len())])
         }
         super::passkey::Caller::Other => "operator (token)".into(),
+        super::passkey::Caller::Peer(actor) => format!("operator ({actor})"),
     }
 }
 
@@ -8909,6 +8910,19 @@ impl crate::mesh::forward::CommandExecutor for AppState {
             // `authorise_forwarded` admitted the sender as an admin peer,
             // and for an edit spent the statement it carries.
             C::ConfigRead => Ok(super::config_api::peer_read(self).await),
+            C::AdminRequest {
+                method, path, body, ..
+            } => {
+                super::peer_admin::run_for_peer(
+                    self,
+                    sender,
+                    &method,
+                    &path,
+                    body,
+                    admitted.as_ref(),
+                )
+                .await
+            }
             C::ConfigPatch {
                 expected_hash, ops, ..
             } => match &admitted {

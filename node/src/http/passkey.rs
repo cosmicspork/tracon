@@ -227,9 +227,26 @@ pub(crate) enum Caller {
     Session(String),
     /// Anything else: a bearer token, or no credential the guard knew.
     Other,
+    /// An admin peer's request this node runs for it (`admin_request`), as
+    /// the audit names who confirmed it there.
+    Peer(String),
+}
+
+/// A request this node runs for an admin peer over the mesh, set by the node
+/// itself and never read from the request: no client can send it. `actor`
+/// names the peer and its operator session for the audit; `confirmed` says
+/// the peer's statement for exactly this request was checked and spent,
+/// which a read does not carry.
+#[derive(Clone, Debug)]
+pub(crate) struct PeerAdmin {
+    pub actor: String,
+    pub confirmed: bool,
 }
 
 pub(crate) fn caller(s: &AppState, parts: &Parts) -> Caller {
+    if let Some(peer) = parts.extensions.get::<PeerAdmin>() {
+        return Caller::Peer(peer.actor.clone());
+    }
     if auth::parts_are_local(parts) {
         return Caller::Local;
     }
@@ -537,8 +554,17 @@ pub(crate) fn authorize_op(
 ) -> Result<(), Refusal> {
     let session = match caller(s, parts) {
         Caller::Local => return Ok(()),
+        // Confirmed on the peer, for exactly this request, before it ran.
+        Caller::Peer(_)
+            if parts
+                .extensions
+                .get::<PeerAdmin>()
+                .is_some_and(|p| p.confirmed) =>
+        {
+            return Ok(())
+        }
         Caller::Session(h) => h,
-        Caller::Other => {
+        Caller::Peer(_) | Caller::Other => {
             return Err(Refusal::unavailable(
                 "no_session",
                 "an admin action from off the node needs a passkey, and a bearer token cannot \
@@ -801,7 +827,7 @@ pub async fn register_options(
                 (h, "step_up")
             }
         }
-        Caller::Other => {
+        Caller::Other | Caller::Peer(_) => {
             return Err(Refusal::unavailable(
                 "no_session",
                 "passkeys are enrolled from a signed-in browser",
@@ -891,7 +917,7 @@ pub async fn register_finish(
     let session = match caller(&s, &parts) {
         Caller::Local => LOCAL.to_string(),
         Caller::Session(h) => h,
-        Caller::Other => {
+        Caller::Other | Caller::Peer(_) => {
             return Err(Refusal::unavailable(
                 "no_session",
                 "passkeys are enrolled from a signed-in browser",

@@ -2,6 +2,7 @@
   // A channel binding is shared with its members; it is never a per-device filter.
   import { api } from '../lib/api'
   import { nodeDisplayName } from '../lib/names'
+  import { notifyEnabled } from '../lib/peer-admin'
   import { store } from '../lib/store.svelte'
   import Card from './settings/Card.svelte'
 
@@ -14,12 +15,7 @@
 
   const channels = $derived(store.channels.filter((channel) => !channel.archived))
 
-  function enabled(bindings: Record<string, unknown>): boolean {
-    const notify = (bindings.notify ?? {}) as Record<string, unknown>
-    if (typeof notify.enabled === 'boolean') return notify.enabled
-    // The former bridge configuration used a tray sink to mean no push.
-    return typeof notify.sink === 'string' ? notify.sink !== 'tray' : true
-  }
+  const enabled = notifyEnabled
 
   function nodeNames(ids: string[]): string {
     return ids
