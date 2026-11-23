@@ -1910,6 +1910,42 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX repo_image_statement_recipe
         ON repo_image_statement(repo, recipe_hash, platform);
     "#,
+    // 91: the operator's review threads (`store::review_thread`): each bound
+    // to the revision it was written on and, unless general, to a path and a
+    // side, and for a line thread to a range of lines whose text is kept in
+    // `anchor` (for a file thread, a hash of that file's diff). A thread is
+    // never moved: on a later revision whose lines differ it reads outdated.
+    // `state` is unresolved, addressed (the agent said so, on
+    // `addressed_revision_id`) or resolved. Each thread's comments, the
+    // operator's and the agent's, in order. Owned by the node that owns the
+    // review: a peer reads and changes them through it, never replicated.
+    r#"
+    CREATE TABLE review_thread (
+        id                    TEXT PRIMARY KEY,
+        review_id             TEXT NOT NULL REFERENCES review(id),
+        revision_id           TEXT NOT NULL REFERENCES review_revision(id),
+        kind                  TEXT NOT NULL,
+        path                  TEXT,
+        side                  TEXT,
+        start_line            INTEGER,
+        end_line              INTEGER,
+        anchor                TEXT,
+        state                 TEXT NOT NULL,
+        addressed_revision_id TEXT,
+        created_ms            INTEGER NOT NULL,
+        updated_ms            INTEGER NOT NULL
+    );
+    CREATE INDEX review_thread_review ON review_thread(review_id, created_ms);
+    CREATE TABLE review_thread_comment (
+        id          TEXT PRIMARY KEY,
+        thread_id   TEXT NOT NULL REFERENCES review_thread(id),
+        author      TEXT NOT NULL,
+        body        TEXT NOT NULL,
+        revision_id TEXT,
+        created_ms  INTEGER NOT NULL
+    );
+    CREATE INDEX review_thread_comment_thread ON review_thread_comment(thread_id, created_ms);
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

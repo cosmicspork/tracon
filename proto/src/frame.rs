@@ -548,6 +548,16 @@ pub enum Command {
     ReviewDetail {
         request: Value,
     },
+    /// The operator's change to a review thread on a review the receiver
+    /// holds: open one, reply to one, resolve or reopen one. `change` is the
+    /// owner's thread operation, carried opaquely; the owner checks the
+    /// sender is on the review's channel and anchors a new thread itself.
+    /// An older peer cannot read this op and answers that it runs an older
+    /// build.
+    ReviewThread {
+        review_id: String,
+        change: Value,
+    },
     /// A `[[repo]]` recipe offered to a channel co-member, which stages it
     /// for its operator to accept or decline; nothing is applied on receipt.
     /// `recipe` carries the repository's forge identity and how to build,

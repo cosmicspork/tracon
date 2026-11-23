@@ -3,6 +3,7 @@
 
 import type { NameKind } from './names'
 import type { AttachmentUpload, StagedAttachment } from './attachments'
+import type { ReviewThread, createBody } from './reviewThreads'
 import type {
   ChangeDraft,
   Askable,
@@ -679,6 +680,15 @@ export const api = {
    * by the node as the approval composes it; nothing is sent to the forge. */
   reviewOutgoing: (id: string, asked: OutgoingAsked) =>
     call<Outgoing>('POST', `/api/reviews/${id}/outgoing`, asked),
+  /** Open a review thread: general, on a file, or on a line or range of the revision shown. */
+  createReviewThread: (id: string, body: ReturnType<typeof createBody>) =>
+    call<{ threads: ReviewThread[] }>('POST', `/api/reviews/${id}/threads`, body),
+  replyToReviewThread: (id: string, thread: string, body: string) =>
+    call<{ threads: ReviewThread[] }>('POST', `/api/reviews/${id}/threads/${thread}/replies`, { body }),
+  resolveReviewThread: (id: string, thread: string) =>
+    call<{ threads: ReviewThread[] }>('POST', `/api/reviews/${id}/threads/${thread}/resolve`),
+  reopenReviewThread: (id: string, thread: string) =>
+    call<{ threads: ReviewThread[] }>('POST', `/api/reviews/${id}/threads/${thread}/reopen`),
   /** Retry a publication exactly as it was approved: the node reads the
    * title, body and outputs back from its journal, so nothing new is sent. */
   recoverPublication: (id: string, publicationId: string) =>

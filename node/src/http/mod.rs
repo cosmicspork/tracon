@@ -22,6 +22,7 @@ pub mod settings;
 mod spa;
 mod stream;
 pub mod strict;
+pub mod threads;
 
 use std::{net::SocketAddr, sync::Arc};
 
@@ -487,6 +488,19 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/reviews/{id}/publication/reconcile",
             post(api::reconcile_publication),
+        )
+        .route("/api/reviews/{id}/threads", post(threads::create))
+        .route(
+            "/api/reviews/{id}/threads/{thread}/replies",
+            post(threads::reply),
+        )
+        .route(
+            "/api/reviews/{id}/threads/{thread}/resolve",
+            post(threads::resolve),
+        )
+        .route(
+            "/api/reviews/{id}/threads/{thread}/reopen",
+            post(threads::reopen),
         )
         .route("/api/reviews/{id}/release", post(api::release_review))
         .route("/api/reviews/{id}/ready", post(api::mark_review_ready))

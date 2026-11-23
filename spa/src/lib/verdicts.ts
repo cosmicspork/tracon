@@ -24,6 +24,8 @@ export interface VerdictConditions {
    * review).
    */
   opener?: { required: boolean; text: string; where?: string | null } | null
+  /** Review threads the agent has still to answer; they say what to change on their own. */
+  openThreads?: number
 }
 
 /** Why `action` cannot be sent, or null when it can. */
@@ -46,7 +48,8 @@ export function unavailable(action: VerdictAction, c: VerdictConditions): string
     return null
   }
   if (!c.reason.trim()) {
-    return action === 'revise' ? 'say what should change' : 'say why you are rejecting it'
+    if (action === 'revise' && (c.openThreads ?? 0) > 0) return null
+    return action === 'revise' ? 'say what should change, or open a thread' : 'say why you are rejecting it'
   }
   return null
 }

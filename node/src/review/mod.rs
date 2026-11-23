@@ -15,6 +15,7 @@ pub mod prose;
 pub mod publish;
 pub mod report;
 pub mod since;
+pub mod threads;
 
 use std::path::{Component, Path, PathBuf};
 

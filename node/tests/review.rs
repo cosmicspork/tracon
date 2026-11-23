@@ -10269,3 +10269,260 @@ async fn a_resumed_publication_after_a_confirmed_push_plans_no_second_push() {
     assert_eq!(steps_planned(&frames), planned, "{frames:?}");
     assert_eq!(steps_taken(&frames), planned, "{frames:?}");
 }
+
+/// Feedback is a set of threads, each bound to the revision it was written
+/// on and, unless general, to a path and a side. They reach the agent with
+/// the request for changes, beside an edited patch, and outlive the
+/// resubmission: the agent says which it addressed, a line thread whose
+/// lines the new revision rewrote reads outdated there without moving, and
+/// the operator replies to, resolves and reopens them.
+#[tokio::test]
+async fn review_threads_are_answered_point_by_point_across_a_resubmission() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = review_id(&f.tool("s1", "submit_review", f.submit_args()).await);
+    let (_, detail) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    let first = detail["revision"]["id"].as_str().unwrap().to_string();
+    assert_eq!(detail["threads"], json!([]), "{detail}");
+
+    let open = |body: Value| {
+        let f = &f;
+        let id = id.clone();
+        async move {
+            f.call("POST", &format!("/api/reviews/{id}/threads"), Some(body))
+                .await
+        }
+    };
+    // a.txt is `base` then the added `change`, line 2 on the new side.
+    let (status, body) = open(json!({
+        "kind": "line", "path": "a.txt", "side": "new", "start_line": 2,
+        "body": "call it what it is", "revision_id": first,
+    }))
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = open(json!({
+        "kind": "line", "path": "a.txt", "start_line": 1, "end_line": 1, "body": "keep this",
+    }))
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _) =
+        open(json!({ "kind": "file", "path": "a.txt", "body": "tidy the file" })).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = open(json!({ "kind": "general", "body": "say why in the body" })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // Anchored only where this revision's diff shows something.
+    for refused in [
+        json!({ "kind": "line", "path": "a.txt", "start_line": 9, "body": "x" }),
+        json!({ "kind": "line", "path": "b.txt", "start_line": 1, "body": "x" }),
+        json!({ "kind": "file", "path": "a.txt", "body": "  " }),
+        json!({ "kind": "general", "path": "a.txt", "body": "x" }),
+    ] {
+        let (status, body) = open(refused.clone()).await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{refused}: {body}"
+        );
+    }
+    let threads = body["threads"].as_array().unwrap().clone();
+    assert_eq!(threads.len(), 4, "{body}");
+    let thread = |kind: &str, line: Option<i64>| {
+        threads
+            .iter()
+            .find(|t| t["kind"] == kind && t["start_line"].as_i64() == line)
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let (on_change, on_base) = (thread("line", Some(2)), thread("line", Some(1)));
+    let (on_file, general) = (thread("file", None), thread("general", None));
+    assert_eq!(threads[0]["revision_id"], first.as_str());
+    assert_eq!(threads[0]["side"], "new");
+    assert_eq!(threads[0]["lines"], "change");
+
+    // Changes requested on the threads alone, beside an edited patch.
+    let patch = "--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n base\n-change\n+changed\n";
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "revise", "patch": patch })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let status = f.status_tool(&id).await;
+    assert_eq!(status["state"], "changes_requested", "{status}");
+    assert_eq!(status["patch"], patch);
+    assert_eq!(status["notes"], tracon::http::api::THREADS_SAY);
+    let told = status["threads"].as_array().unwrap();
+    assert_eq!(told.len(), 4, "{status}");
+    assert!(told
+        .iter()
+        .all(|t| t["state"] == "unresolved" && t["revision"] == 1));
+    assert_eq!(told[0]["comments"][0]["author"], "operator");
+    assert_eq!(told[0]["comments"][0]["body"], "call it what it is");
+    let message = status["message"].as_str().unwrap();
+    assert!(
+        message.contains("git apply") && message.contains("`threads`"),
+        "{message}"
+    );
+
+    // The agent rewrites line 2 and says so; a thread not on this review is refused.
+    sh(
+        std::path::Path::new(&f.worktree),
+        "printf 'base\\nchanged\\n' > a.txt && git add -A && git commit -qm renamed",
+    );
+    let mut args = f.submit_args();
+    args["review_id"] = json!(id);
+    args["threads"] = json!([{ "id": "not-a-thread", "addressed": true }]);
+    let refused = f.tool("s1", "submit_review", args.clone()).await;
+    assert!(
+        refused["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("not a thread on review")),
+        "{refused}"
+    );
+    args["threads"] = json!([
+        { "id": on_change, "addressed": true, "reply": "renamed it `changed`" },
+        { "id": general, "reply": "the body says why already" },
+    ]);
+    let resubmitted = f.tool("s1", "submit_review", args).await;
+    assert_eq!(review_id(&resubmitted), id, "{resubmitted}");
+
+    let (_, detail) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    let second = detail["revision"]["id"].as_str().unwrap().to_string();
+    assert_ne!(second, first);
+    let read = |detail: &Value, thread: &str| {
+        detail["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["id"] == thread)
+            .unwrap()
+            .clone()
+    };
+    let changed = read(&detail, &on_change);
+    assert_eq!(changed["state"], "addressed", "{changed}");
+    assert_eq!(changed["outdated"], true, "{changed}");
+    assert_eq!(changed["addressed_revision"], 2);
+    // Still where it was written: revision 1's line 2, which read `change`.
+    assert_eq!(changed["revision_id"], first.as_str());
+    assert_eq!(changed["start_line"], 2);
+    assert_eq!(changed["lines"], "change");
+    assert_eq!(changed["comments"][1]["author"], "agent");
+    assert_eq!(changed["comments"][1]["revision"], 2);
+    let base = read(&detail, &on_base);
+    assert_eq!(
+        (base["state"].clone(), base["outdated"].clone()),
+        (json!("unresolved"), json!(false))
+    );
+    let file = read(&detail, &on_file);
+    assert_eq!(file["state"], "outdated", "{file}");
+    let said = read(&detail, &general);
+    assert_eq!(said["state"], "unresolved");
+    assert_eq!(said["comments"].as_array().unwrap().len(), 2);
+
+    // The operator replies, resolves and reopens.
+    let at = |thread: &str, what: &str| format!("/api/reviews/{id}/threads/{thread}/{what}");
+    let (status, _) = f
+        .call(
+            "POST",
+            &at(&general, "replies"),
+            Some(json!({ "body": "fair enough" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = f.call("POST", &at(&general, "resolve"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(read(&body, &general)["state"], "resolved");
+    let (status, _) = f.call("POST", &at(&general, "resolve"), None).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, body) = f.call("POST", &at(&on_change, "reopen"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(read(&body, &on_change)["state"], "outdated");
+    let (status, _) = f.call("POST", &at(&on_change, "reopen"), None).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, body) = f.call("POST", &at(&on_change, "resolve"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(read(&body, &on_change)["state"], "resolved");
+    let (status, _) = f.call("POST", &at(&on_change, "reopen"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/threads/nope/resolve"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // A new thread on the new revision is bound to it.
+    let (status, body) = open(json!({
+        "kind": "line", "path": "a.txt", "side": "new", "start_line": 2, "body": "now say why",
+    }))
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let newest = body["threads"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(newest["revision_id"], second.as_str());
+    assert_eq!(newest["lines"], "changed");
+    assert_eq!(newest["outdated"], false);
+
+    // The next request for changes carries what is still open, not what was resolved.
+    let (status, _) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "revise", "reason": "nearly" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let status = f.status_tool(&id).await;
+    let told = status["threads"].as_array().unwrap();
+    assert_eq!(told.len(), 4, "{status}");
+    assert!(told.iter().all(|t| t["id"] != general.as_str()));
+    assert_eq!(status["notes"], "nearly");
+    assert!(status["patch"].is_null());
+}
+
+/// Without a note and without an unresolved thread, a request for changes
+/// still says nothing, and is refused as before.
+#[tokio::test]
+async fn a_request_for_changes_needs_a_note_or_an_unresolved_thread() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = review_id(&f.tool("s1", "submit_review", f.submit_args()).await);
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/threads"),
+            Some(json!({ "kind": "general", "body": "x" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let thread = body["threads"][0]["id"].as_str().unwrap().to_string();
+    f.call(
+        "POST",
+        &format!("/api/reviews/{id}/threads/{thread}/resolve"),
+        None,
+    )
+    .await;
+    let (status, _) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "revise" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    // And threads are for a resubmission to answer, not a first submission.
+    let mut args = f.submit_args();
+    args["threads"] = json!([{ "id": thread, "addressed": true }]);
+    let refused = f.tool("s1", "submit_review", args).await;
+    assert!(
+        refused["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("pass its review_id")),
+        "{refused}"
+    );
+}
