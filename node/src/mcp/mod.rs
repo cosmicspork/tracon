@@ -14,6 +14,7 @@ pub mod branch;
 pub mod checking;
 pub mod docs;
 pub mod egress;
+pub mod fetch;
 pub mod github;
 pub mod gitlab;
 pub mod memory;
@@ -544,6 +545,7 @@ impl Tools {
         operator::ASK,
         operator::QUESTION_STATUS,
         operator::NOTIFY,
+        fetch::WEB_FETCH,
         work::WORK_READY,
         work::WORK_DISCOVER,
         work::WORK_LIST,
@@ -592,6 +594,9 @@ impl Tools {
         services::START,
         services::STATUS,
         show::SHOW,
+        // Reading a page the change refers to, under the channel's fetch
+        // allow list like any session's.
+        fetch::WEB_FETCH,
         review::VERDICT,
         github::PR_READY,
         gitlab::MR_READY,
@@ -628,6 +633,7 @@ impl Tools {
         review::VERDICT,
         branch::FETCH,
         egress::REQUEST,
+        fetch::WEB_FETCH,
         services::START,
         services::STATUS,
         setup::DRAFT,
@@ -683,6 +689,9 @@ impl Tools {
             // Asking for a host only asks: the operator's answer is what
             // opens anything, and it opens only this session's own grant.
             out.extend(egress::definitions());
+            // Fetching a page is decided URL by URL against the channel's
+            // fetch allow list, and asked otherwise (`fetch`).
+            out.extend(fetch::definitions());
             // Showing work reaches the operator and nothing else: it is read
             // from the node's own snapshot and never leaves tracon.
             out.extend(show::definitions());
@@ -2148,6 +2157,9 @@ impl Tools {
             };
             return result;
         }
+        if name == fetch::WEB_FETCH {
+            return self.web_fetch(ctx, args, gate).await;
+        }
         if matches!(name, setup::DRAFT | setup::TRY | setup::PROPOSE) {
             let access = self
                 .session
@@ -2326,6 +2338,61 @@ impl Tools {
             );
         }
         result
+    }
+
+    /// `web_fetch`: refused, fetched or asked, URL by URL (`fetch`). A
+    /// signed denial of the tool by name holds as for any tool.
+    async fn web_fetch(
+        &self,
+        ctx: &CallContext,
+        args: &Value,
+        gate: &mut audit::Gate,
+    ) -> Result<Value, String> {
+        let access = self
+            .session
+            .get()
+            .ok_or("web_fetch is not available on this node")?;
+        access
+            .manager
+            .caller_active(ctx)
+            .map_err(|error| error.to_string())?;
+        let url = fetch::normalize_url(args.get("url").and_then(Value::as_str).unwrap_or(""))?;
+        let by_name = self.decide(ctx, fetch::WEB_FETCH, args);
+        let decision = if by_name.verdict == Verdict::Deny {
+            by_name
+        } else {
+            fetch::decide(
+                &self.policy.read(),
+                &access.store,
+                &ctx.channel,
+                ctx.session_id(),
+                url.as_str(),
+            )
+        };
+        let gated = |verdict| audit::Gate {
+            decision: verdict,
+            decided_by: self.decided_by(&decision),
+            rule: decision.rule_id.clone(),
+            reason: decision.reason.clone(),
+            approval_id: None,
+        };
+        match decision.verdict {
+            Verdict::Deny => {
+                *gate = gated(audit::DENIED);
+                Err(fetch::refused(&url, &decision))
+            }
+            Verdict::Allow => {
+                *gate = gated(audit::POLICY_ALLOWED);
+                fetch::run(access, &self.policy, ctx, args, None).await
+            }
+            Verdict::Ask => {
+                let asked =
+                    fetch::asked_arguments(&url, args.get("pattern").and_then(Value::as_str))?;
+                let result = self.request_approval(ctx, fetch::WEB_FETCH, &asked).await;
+                *gate = audit::Gate::asked(&result, "node", Some("fetch-allow-list".into()));
+                result
+            }
+        }
     }
 
     /// The review whose change a `pr_ready` or `mr_ready` call names, when
@@ -2518,6 +2585,13 @@ impl Tools {
                     Some(&before_mutation),
                 )
                 .await
+            }
+            fetch::WEB_FETCH => {
+                let access = self
+                    .session
+                    .get()
+                    .ok_or("web_fetch is not available on this node")?;
+                fetch::run(access, &self.policy, ctx, args, approval).await
             }
             review::SUBMIT
             | review::STATUS
@@ -3637,7 +3711,10 @@ impl Tools {
                 ));
             }
         }
-        if option_id != OPTION_ALLOW_ONCE {
+        // Saving a fetch card's pattern to the channel fetches as allowing
+        // it once does, after the pattern is on the channel's allow list.
+        let saves_fetch = approval.tool == fetch::WEB_FETCH && option_id == fetch::OPTION_SAVE;
+        if option_id != OPTION_ALLOW_ONCE && !saves_fetch {
             let (state, reason, note) = if option_id == OPTION_REQUEST_CHANGES {
                 let Some(notes) = notes.or(reason) else {
                     return Err(SessionError::Unfit(vec![schema::FieldError {
@@ -3703,6 +3780,24 @@ impl Tools {
         // wrote the words.
         let edited = answer.arguments.as_ref().map(Value::to_string);
         let run_args = answer.arguments.unwrap_or(original);
+        // The pattern saved is the one the card holds as answered, and it
+        // must still be one the allow list can hold, covering the URL.
+        let saved_pattern = if saves_fetch {
+            let invalid = |message: String| {
+                SessionError::Unfit(vec![schema::FieldError {
+                    field: "pattern".into(),
+                    message,
+                }])
+            };
+            let url = fetch::normalize_url(run_args["url"].as_str().unwrap_or_default())
+                .map_err(invalid)?;
+            Some(
+                fetch::pattern_for(&url, run_args["pattern"].as_str().unwrap_or_default())
+                    .map_err(invalid)?,
+            )
+        } else {
+            None
+        };
         // What the operator read was a preview taken when the card opened.
         // Taken again now, so a target that has moved since (another card
         // changed the same row) is refused here, before anything is
@@ -3750,6 +3845,26 @@ impl Tools {
             return Err(no_longer_waiting());
         }
         let decided = access.store.get_approval(id)?.unwrap_or(approval);
+        if let Some(pattern) = saved_pattern {
+            access
+                .store
+                .authority_grant_insert(&crate::store::AuthorityGrantRow {
+                    id: uuid::Uuid::now_v7().to_string(),
+                    action: crate::authority::FETCH.into(),
+                    verdict: "allow".into(),
+                    target: pattern,
+                    channel: decided.channel.clone(),
+                    session_id: None,
+                    revision: None,
+                    expires_ms: None,
+                    revoked_ms: None,
+                    reason: format!(
+                        "saved to the channel's fetch allow list from approval {}",
+                        decided.id
+                    ),
+                    created_ms: crate::store::now_ms(),
+                })?;
+        }
         access
             .manager
             .approval_answered(&decided, RUNNING, by.as_deref())
@@ -4862,6 +4977,12 @@ fn prose_title(name: &str, args: &Value) -> Option<String> {
             first_line("body"),
         ),
         docs::DOC_WRITE | docs::DOC_EDIT | docs::DOC_DELETE => format!("{name} {}", id("slug")),
+        // What saving it adds is on the card too: that answer outlives the call.
+        fetch::WEB_FETCH => format!(
+            "fetch {} · saving adds {}",
+            id("url"),
+            text("pattern").unwrap_or("its origin")
+        ),
         docs::DOC_ARCHIVE => format!("{name} {} · {}", id("slug"), docs::archive_action(args)),
         memory::RETAIN => with(format!("{name} {}", id("kind")), first_line("body")),
         // A memory has no name; the page shows which one beside the change.

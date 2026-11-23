@@ -64,6 +64,7 @@ test('a peer leaves the answers that need the owning node’s passkey to that no
   expect(stepUpOptions(held('plugin_install'))).toEqual(['allow_once'])
   expect(stepUpOptions(held('request_egress'))).toEqual(['allow_repo'])
   expect(stepUpOptions(held('prepare_egress'))).toEqual(['allow_repo'])
+  expect(stepUpOptions(held('web_fetch'))).toEqual(['allow_channel'])
   expect(stepUpOptions(held('pr_comment'))).toEqual([])
   expect(stepUpOptions({ raw_input: JSON.stringify({ tool: 'repo_setup_try' }) })).toEqual([])
   expect(stepUpOptions({ raw_input: 'not json' })).toEqual([])

@@ -209,6 +209,13 @@ pub async fn create_authority_grant(
             "target must be a canonical non-empty identifier",
         ));
     }
+    // A fetch grant's target is a pattern the channel's allow list holds,
+    // held to what a card's "save to channel" would accept.
+    if action == crate::authority::FETCH {
+        if let Err(why) = crate::mcp::fetch::validate_pattern(&b.target) {
+            return Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, &why));
+        }
+    }
     if b.channel.trim().is_empty() || b.reason.trim().is_empty() {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -2752,6 +2759,17 @@ pub(crate) fn admin_answer(
                 field("version")
             ),
         }),
+        crate::mcp::fetch::WEB_FETCH if option_id == crate::mcp::fetch::OPTION_SAVE => {
+            Some(AdminAnswer {
+                what: "saving a fetch pattern lets every session on the channel fetch what it \
+                       covers without asking",
+                summary: format!(
+                    "Save {} to {}'s fetch allow list",
+                    field("pattern"),
+                    super::passkey::clean_text(&approval.channel, 100)
+                ),
+            })
+        }
         crate::mcp::egress::REQUEST | crate::mcp::egress::PREPARE
             if option_id == crate::store::approvals::OPTION_ALLOW_REPO =>
         {

@@ -119,6 +119,9 @@ const PRESENTATIONS: &[(&str, &str, &[&str], &[&str])] = &[
     (work::WORK_DELETE, "markdown", &[], &["id"]),
     (review::SUBMIT_REPORT, "markdown", &["body"], &["report_id"]),
     (super::egress::REQUEST, "markdown", &[], &["host"]),
+    // Which URL is the call; the operator may narrow or widen the pattern
+    // saving it adds, which must still cover the URL.
+    (super::fetch::WEB_FETCH, "markdown", &[], &["url"]),
     (
         super::setup::PROPOSE,
         "markdown",
@@ -288,6 +291,7 @@ fn registry() -> &'static HashMap<String, Value> {
             memory::definitions(),
             super::operator::definitions(),
             super::egress::definitions(),
+            super::fetch::definitions(),
             super::setup::definitions(),
             super::services::definitions_for(&[], ""),
             work::definitions(),

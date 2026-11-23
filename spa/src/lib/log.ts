@@ -7,7 +7,7 @@
 // break a run: every Claude Code call now carries a policy record, and letting
 // those through left no two calls side by side.
 
-import { nameOf } from './names'
+import { nameOf, shortHash } from './names'
 import { roomWords } from './capabilities'
 import { exhaustionNote } from './exhaustion'
 import { formatBytes } from './data'
@@ -779,6 +779,16 @@ export function eventLine(e: Event): EventLine | null {
     }
     case 'abandoned':
       return line('mark', ['abandoned', str(p.summary) || str(p.reason)])
+    case 'web_fetched': {
+      // What the agent read through the node, as evidence: where, what came
+      // back, and the body's digest.
+      const url = str(p.url)
+      if (str(p.error)) return line('crit', ['fetch failed', url, str(p.error)])
+      const moved = str(p.final_url) && str(p.final_url) !== url ? `→ ${str(p.final_url)}` : ''
+      const digest = str(p.sha256) ? `sha256 ${shortHash(str(p.sha256))}` : ''
+      const by = str(p.decided_by) === 'operator' ? 'the operator allowed it' : str(p.decided_by) === 'grant' ? "on the channel's fetch list" : ''
+      return line('sys', [`fetched ${url}`, moved, typeof p.status === 'number' ? String(p.status) : '', digest, by])
+    }
     default:
       return null
   }

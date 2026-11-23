@@ -285,6 +285,18 @@ fn push_node(out: &mut String, facts: &Facts) {
         )),
         None => {}
     }
+    // The harness's own fetch tool and `curl` meet the same boundary; said
+    // here so the 403 reads as a pointer to the tool that works, not a fault.
+    if offered(facts, crate::mcp::fetch::WEB_FETCH) {
+        out.push_str(&format!(
+            "- Web pages: `curl`, `wget` and your harness's own fetch tool are refused at the \
+             boundary (a 403 from the egress proxy, or a network error). Read a page with \
+             `{}` instead: the node fetches it for you, at once for a URL the channel's fetch \
+             allow list covers and once the operator answers for any other. A host a package \
+             manager needs is still `request_egress`'s.\n",
+            crate::mcp::fetch::WEB_FETCH
+        ));
+    }
     if let Some(prepared) = facts.prepared {
         push_preparation(out, prepared, facts.worktree);
     }
@@ -313,7 +325,7 @@ fn push_working_with(out: &mut String, policy: &Policy, facts: &Facts) {
 /// exactly one group, and a test keeps new tools from going unlisted.
 const TOOL_GROUPS: &[(&str, &[&str])] = {
     use crate::mcp::{
-        approvals, docs, egress, memory, operator, review, services, setup, show, work,
+        approvals, docs, egress, fetch, memory, operator, review, services, setup, show, work,
     };
     &[
         (
@@ -361,6 +373,7 @@ const TOOL_GROUPS: &[(&str, &[&str])] = {
             "Environment",
             &[
                 egress::REQUEST,
+                fetch::WEB_FETCH,
                 services::START,
                 services::STATUS,
                 setup::DRAFT,
@@ -1534,6 +1547,8 @@ mod tests {
         // network; one with a grant is told what it reaches and what a 403 is,
         // in the words the refusal itself uses.
         assert!(!text.contains("Network:"));
+        // Nor about web pages, without the tool that reads them.
+        assert!(!text.contains("Web pages:"));
         let opened = ["crates".to_string(), "npm".to_string()];
         for (egress, said) in [
             (
@@ -1548,6 +1563,19 @@ mod tests {
             assert!(told.contains("answers 403 until the operator opens it"));
             assert!(told.contains("`request_egress` waits"));
         }
+        // Offered `web_fetch`, the session is told that the harness's fetch
+        // tool and `curl` are refused, and what reads a page instead.
+        let fetching = ["recall".to_string(), "web_fetch".to_string()];
+        facts.tools = &fetching;
+        let (told, _) = assemble(&store, &Policy::shipped(), &facts);
+        assert!(
+            told.contains("harness's own fetch tool are refused"),
+            "{told}"
+        );
+        assert!(
+            told.contains("Read a page with `web_fetch` instead"),
+            "{told}"
+        );
         assert!(i("## Pinned documents") < i("Conventional commits"));
         assert!(!text.contains("not pinned"));
         assert!(!text.contains("HTML must not become orientation"));
@@ -1889,6 +1917,7 @@ mod tests {
         all.extend(docs::definitions(&crate::config::default_doc_kinds()));
         all.extend(operator::definitions());
         all.extend(egress::definitions());
+        all.extend(fetch::definitions());
         all.extend(show::definitions());
         all.extend(setup::definitions());
         all.extend(work::definitions());

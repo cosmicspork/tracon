@@ -130,8 +130,25 @@ impl Rule {
         if !self.kinds.is_empty() && !self.kinds.iter().any(|k| Some(k.as_str()) == req.kind) {
             return false;
         }
+        // A fetch is allowed only by a rule that names the fetch kind, never
+        // by one that names no kind: deny by default means an allow list.
+        if req.kind == Some(FETCH_KIND)
+            && self.verdict == Verdict::Allow
+            && !self.kinds.iter().any(|k| k == FETCH_KIND)
+        {
+            return false;
+        }
         if self.matches.is_empty() && self.args.is_empty() {
             return true;
+        }
+        // A fetch is matched on its URL by pattern (`fetch_pattern_matches`).
+        // A denial also matches as a substring, as every denial does.
+        if req.kind == Some(FETCH_KIND) && self.verdict != Verdict::Allow {
+            let url = req.resource.unwrap_or_default();
+            let haystack = req.haystack();
+            return self.matches.iter().any(|m| {
+                fetch_pattern_matches(m, url) || haystack.contains(&m.trim().to_ascii_lowercase())
+            });
         }
         match self.verdict {
             // An allow rule auto-approves without asking, so it must be precise:
@@ -183,6 +200,13 @@ impl Rule {
                     .iter()
                     .any(|pat| pat.trim().eq_ignore_ascii_case(req.action.trim()));
             return named && self.args.iter().all(|(key, want)| want.admits(key, req));
+        }
+        if req.kind == Some(FETCH_KIND) {
+            return req.resource.is_some_and(|url| {
+                self.matches
+                    .iter()
+                    .any(|pat| fetch_pattern_matches(pat, url))
+            });
         }
         let Some(command) = req.command else {
             // A file action is matched on its path: a pattern ending in `/` is
@@ -371,6 +395,41 @@ pub fn session_grant(req: &Request) -> Option<SessionGrant> {
         key: format!("{kind}:{}:{resource}", req.action),
         label: "Allow this for this session".into(),
     })
+}
+
+/// The policy kind a `web_fetch` is decided under: its resource is the URL.
+pub const FETCH_KIND: &str = "fetch";
+
+/// Whether a fetch allow-list pattern covers `url`. A pattern with a scheme
+/// (`https://docs.rs/*`) is a glob over the whole URL; one without
+/// (`docs.rs`, `*.python.org`) is a glob over its host alone, on any scheme,
+/// port and path. `*` is the only wildcard, as everywhere in policy. Scheme
+/// and host compare without case, the rest of the URL as written.
+pub fn fetch_pattern_matches(pattern: &str, url: &str) -> bool {
+    let pattern = pattern.trim();
+    if pattern.is_empty() {
+        return false;
+    }
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    match pattern.split_once("://") {
+        Some((scheme, rest)) => {
+            let (host, path) = match rest.find('/') {
+                Some(at) => rest.split_at(at),
+                None => (rest, ""),
+            };
+            let pattern = format!(
+                "{}://{}{path}",
+                scheme.to_ascii_lowercase(),
+                host.to_ascii_lowercase()
+            );
+            glob(&pattern, parsed.as_str())
+        }
+        None => parsed
+            .host_str()
+            .is_some_and(|host| glob(&pattern.to_ascii_lowercase(), host)),
+    }
 }
 
 /// `*` matches any run of characters; nothing else is special.
