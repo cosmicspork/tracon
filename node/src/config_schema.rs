@@ -315,6 +315,7 @@ pub const KEYS: &[KeySpec] = &[
     live("plugin.ask"),
     live("plugin.deny"),
     live("plugin.require_preview"),
+    live("plugin.channels"),
     // [providers.<name>]
     restart("providers.*.credential"),
     restart("providers.*.upstream"),

@@ -576,6 +576,11 @@ pub struct PluginEntry {
     /// allowed without one. Reject and Request changes never need one.
     #[serde(skip_serializing_if = "is_on")]
     pub require_preview: bool,
+    /// Channels the plugin is offered on, besides what its credentials
+    /// allow. Unset, every channel the credential rule offers it to; an
+    /// empty list, none, as `[[mcp_server]] channels` reads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channels: Option<Vec<String>>,
 }
 
 impl Default for PluginEntry {
@@ -588,11 +593,19 @@ impl Default for PluginEntry {
             ask: Vec::new(),
             deny: Vec::new(),
             require_preview: true,
+            channels: None,
         }
     }
 }
 
 impl PluginEntry {
+    /// Whether the operator lets the plugin run on `channel` at all.
+    pub fn allows_channel(&self, channel: &str) -> bool {
+        self.channels
+            .as_ref()
+            .is_none_or(|channels| channels.iter().any(|c| c == channel))
+    }
+
     pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 900;
     pub const DEFAULT_TIMEOUT_SECS: u64 = 60;
 
@@ -648,6 +661,11 @@ pub fn validate_plugins(plugins: &Plugins, entries: &[PluginEntry]) -> Result<()
         ] {
             if tools.iter().any(|t| t.trim().is_empty()) {
                 return Err(format!("plugin {name}: {list} has an empty entry"));
+            }
+        }
+        if let Some(channels) = &entry.channels {
+            if channels.iter().any(|c| c.trim().is_empty()) {
+                return Err(format!("plugin {name}: channels has an empty entry"));
             }
         }
     }
@@ -5007,6 +5025,16 @@ mod tests {
             .unwrap()
             .contains("require_preview = false"));
         assert_eq!(Config::default().plugins.owners, ["cosmicspork"]);
+        // Channels: unset is every channel, and stays unwritten; an empty
+        // list is none, and is written as one.
+        assert_eq!(parsed.plugin[0].channels, None);
+        assert!(parsed.plugin[0].allows_channel("anything"));
+        let narrowed: Config =
+            toml::from_str("[[plugin]]\nname = \"hora\"\nchannels = []\n").unwrap();
+        assert!(!narrowed.plugin[0].allows_channel("personal"));
+        assert!(toml::to_string(&narrowed.plugin[0])
+            .unwrap()
+            .contains("channels = []"));
         let ok = parsed.plugin[0].clone();
         for (owners, entries, says) in [
             (vec!["cosmic/spork"], vec![ok.clone()], "not a GitHub owner"),
@@ -5027,6 +5055,14 @@ mod tests {
                     ..ok.clone()
                 }],
                 "ask has an empty entry",
+            ),
+            (
+                vec![],
+                vec![PluginEntry {
+                    channels: Some(vec![" ".into()]),
+                    ..ok.clone()
+                }],
+                "channels has an empty entry",
             ),
         ] {
             let plugins = Plugins {

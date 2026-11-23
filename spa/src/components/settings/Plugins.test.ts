@@ -138,6 +138,26 @@ async function open(routes: Record<string, Reply>): Promise<{ page: Page; seen: 
 
 const row = (page: Page, name: string) => page.locator(`li[data-plugin="${name}"]`)
 
+test.skipIf(!browser)('each plugin says where it is offered, and what its channels narrow it to', async () => {
+  const { page } = await open({
+    'GET /api/plugins': {
+      body: {
+        plugins: [
+          { ...RELEASED, channels: ['personal'], offered_on: ['personal'] },
+          { ...LOCAL, channels: [], offered_on: [] },
+        ],
+      },
+    },
+  })
+  expect(await row(page, 'sql-review').locator('[data-offered]').innerText()).toBe(
+    'Offered on personal · channels = [personal] in its [[plugin]] entry',
+  )
+  expect(await row(page, 'tickets').locator('[data-offered]').innerText()).toBe(
+    'Offered on no channel · channels = [] in its [[plugin]] entry',
+  )
+  await page.close()
+})
+
 test.skipIf(!browser)('a plugin whose active build is the latest says it is up to date', async () => {
   const { page, seen } = await open({
     'GET /api/plugins': { body: { plugins: [RELEASED] } },

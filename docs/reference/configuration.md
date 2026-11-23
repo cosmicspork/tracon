@@ -513,6 +513,11 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
 # require_preview = true            # Allow on its cards needs the plugin's preview of the call as it
                                     # would run to have been shown; false allows without one
                                     # (for a plugin with no previews). Reject is always open
+# channels = ["personal"]           # where it is offered and run, within what its credentials allow;
+                                    # unset is every such channel, [] is none. Elsewhere its tools are
+                                    # not listed, calls, pages, previews and format conversions are
+                                    # refused, and no process starts. Applies without a restart; a
+                                    # process already running on a channel dropped from it stops when idle
 
 [providers.anthropic]               # anthropic, openai and openai-codex are built in; add others the same way
 credential = "anthropic"
