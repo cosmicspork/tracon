@@ -236,7 +236,9 @@ back-filled afterwards. It is a recovery route, deliberately not a second
 supported managed harness. The node's own state recovers from `node-identity.seed`
 and `node.db`; the corpus exports as plain Markdown and re-imports by filename;
 vectors are derived and rebuild with `tracon doc reindex`; and a session package
-reads offline with `tracon session show`. [docs/RECOVERY.md](docs/RECOVERY.md) has
+reads offline with `tracon session show`, and the whole node exports as one signed
+JSONL file ([data contract v1](docs/reference/data-contract.md)) that `tracon data show`
+reads the same way. [docs/RECOVERY.md](docs/RECOVERY.md) has
 the whole of it.
 
 Contributions are welcome — open an issue or a PR.

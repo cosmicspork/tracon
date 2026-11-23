@@ -165,6 +165,7 @@ pub fn router(state: AppState) -> Router {
             "/api/maintenance/service-volumes/reset",
             post(admin::reset_service_volume),
         )
+        .route("/api/maintenance/export", get(admin::export))
         .route("/api/admin/maintenance/install", post(admin::install))
         .route("/api/admin/maintenance/uninstall", post(admin::uninstall))
         .route("/api/admin/policy", get(policy_admin::status))
