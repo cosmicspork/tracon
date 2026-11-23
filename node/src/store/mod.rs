@@ -2230,8 +2230,8 @@ impl Store {
     ) -> Result<Vec<ReviewOutcome>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, state, verdict_reason, publish_result, edited_title, edited_body,
-                claimed_ms, resolved_mono_ms, updated_ms, checks_json
+            "SELECT id, state, verdict_reason, publish_result, edited_title,
+                claimed_ms, resolved_mono_ms, updated_ms
              FROM review WHERE node_id=?1 AND channel=?2 AND kind != ?3
              AND state IN ('approved','rejected') AND updated_ms >= ?4
              ORDER BY updated_ms DESC LIMIT ?5",
@@ -2246,11 +2246,14 @@ impl Store {
                         verdict_reason: r.get(2)?,
                         publish_result: r.get(3)?,
                         edited_title: r.get(4)?,
-                        edited_body: r.get(5)?,
-                        claimed_ms: r.get(6)?,
-                        resolved_mono_ms: r.get(7)?,
-                        updated_ms: r.get(8)?,
-                        checks_json: r.get(9)?,
+                        // Left out: an approved body and its checks run to
+                        // kilobytes each, and every listing carried up to
+                        // 200 of them. A peer reads them from the owner.
+                        edited_body: None,
+                        claimed_ms: r.get(5)?,
+                        resolved_mono_ms: r.get(6)?,
+                        updated_ms: r.get(7)?,
+                        checks_json: None,
                     })
                 },
             )?
@@ -2275,8 +2278,8 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let n = conn.execute(
             "UPDATE review SET state=?4, verdict_reason=?5, publish_result=?6, edited_title=?7,
-                edited_body=?8, claimed_ms=?9, resolved_mono_ms=?10, updated_ms=?11,
-                checks_json=?12, publication_failed=NULL
+                edited_body=COALESCE(?8, edited_body), claimed_ms=?9, resolved_mono_ms=?10,
+                updated_ms=?11, checks_json=COALESCE(?12, checks_json), publication_failed=NULL
              WHERE id=?1 AND node_id=?2 AND channel=?3 AND kind != ?13
              AND (state IN ('new','claimed','revising','publishing')
                   OR (state='gone' AND gone_confirmed_ms IS NULL))",
@@ -3224,11 +3227,14 @@ mod records {
         pub verdict_reason: Option<String>,
         pub publish_result: Option<String>,
         pub edited_title: Option<String>,
+        /// Not listed by the owner any more (see `decided_review_outcomes`);
+        /// kept so an outcome that names one still applies it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         pub edited_body: Option<String>,
         pub claimed_ms: Option<i64>,
         pub resolved_mono_ms: Option<i64>,
         pub updated_ms: i64,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         pub checks_json: Option<String>,
     }
 
