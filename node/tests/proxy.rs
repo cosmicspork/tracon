@@ -163,13 +163,40 @@ async fn a_grant_opens_its_own_hosts_and_nobody_elses() {
         ),
         "{other}"
     );
+    // The body says the same, and then, for a session, what reads a web
+    // page instead of a retry through another client.
     assert!(
-        other.ends_with("add it to this repository's egress\n"),
+        other.contains(
+            "\r\n\r\nnot reachable from a session; add it to this repository's egress\n\n"
+        ),
         "{other}"
+    );
+    assert!(
+        other.ends_with(&format!(
+            "\n\n{}\n",
+            tracon::gateway::proxy::SESSION_REFUSAL_HINT
+        )),
+        "{other}"
+    );
+    // A preparation is not an agent: its refusal is the sentence alone.
+    let unlisted = exchange(
+        addr,
+        &connect("api.anthropic.com", &basic("prepare", &prepare)),
+    )
+    .await;
+    assert!(unlisted.starts_with("HTTP/1.1 403"), "{unlisted}");
+    assert!(
+        unlisted.ends_with(
+            "\r\n\r\nnot reachable from preparation; add it to this repository's egress\n"
+        ),
+        "{unlisted}"
     );
     assert_eq!(
         *refused.lock().unwrap(),
-        [(Some("s1".to_string()), "127.0.0.1".to_string())]
+        [
+            (Some("s1".to_string()), "127.0.0.1".to_string()),
+            (None, "api.anthropic.com".to_string())
+        ]
     );
 
     // A user name proves nothing, and neither does a revoked or absent token.
