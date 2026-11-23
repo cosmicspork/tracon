@@ -35,6 +35,16 @@ pub fn offered(manifest: &manifest::Manifest, available: &[&str]) -> bool {
             .any(|binding| manifest.credentials.iter().any(|c| c.matches(binding)))
 }
 
+/// What the plugin is called to a person or a session: its `[ui]` title,
+/// the one name a manifest gives besides `name`, when it has one.
+pub fn display_name(manifest: &manifest::Manifest) -> Option<&str> {
+    manifest
+        .ui
+        .as_ref()
+        .map(|ui| ui.title.trim())
+        .filter(|title| !title.is_empty())
+}
+
 /// The longest release body an install card carries.
 const CHANGELOG_CHARS: usize = 8_000;
 

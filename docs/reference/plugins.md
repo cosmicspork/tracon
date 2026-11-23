@@ -125,7 +125,7 @@ Top level:
 | Field | Type | Default | Rule |
 |---|---|---|---|
 | `entry` | string | required | A plain path under `ui/` that is a file in the archive. |
-| `title` | string | required | Not blank. |
+| `title` | string | required | Not blank. The plugin's display name: its page is titled with it, and a session's orientation lists the plugin's tools under it (under `name` when there is no `[ui]`). |
 
 Each validation error starts with `tracon-plugin.toml:` and names the field, for
 example:

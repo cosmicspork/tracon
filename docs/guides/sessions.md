@@ -181,8 +181,10 @@ tracon's own account of the installation. It opens with the work: the item and i
 phase, what the phase must produce, and the plan. Then the
 environment: the node and its harness, the worktree and repository, the network the
 session may reach and how its dependencies were prepared. Then how to work with the
-node: the tools this channel actually serves, grouped by purpose (a harness that
-defers tool definitions shows the model only their names, so this is its map), how
+node: the tools this channel actually serves, the node's own grouped by purpose and
+each offered plugin's under that plugin, by its `[ui]` title if it has one and its
+name otherwise, and each `[[mcp_server]]`'s under the server's name (a harness that defers tool definitions shows the model only their
+names, so this is its map), how
 a call the operator decides and a wait answer, and the rules the node refuses
 outright, including the fact that a refusal comes back as the rule's reason rather
 than as an auth error. A review session's evidence and diff follow. It is generated

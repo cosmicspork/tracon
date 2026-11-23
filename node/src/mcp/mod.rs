@@ -756,6 +756,37 @@ impl Tools {
         out
     }
 
+    /// Each plugin, then each `[[mcp_server]]`, that may offer tools to
+    /// `channel`, by the name its tools are namespaced under
+    /// (`<name>__<tool>`), with what a session is told it is called: a
+    /// plugin's manifest display name (its `[ui]` title) when it has one,
+    /// else its name. The orientation groups their tools under these, from
+    /// what is installed and configured rather than from names in the node's
+    /// source.
+    pub fn tool_namespaces(&self, channel: &str, node_id: &str) -> Vec<(String, String)> {
+        let broker = self.broker.read().unwrap();
+        let available = broker.available_to(channel, node_id);
+        let mut out: Vec<(String, String)> = self
+            .active_plugins(&available)
+            .into_iter()
+            .map(|(name, build)| {
+                let label = crate::plugin::display_name(&build.manifest)
+                    .unwrap_or(&name)
+                    .to_string();
+                (name, label)
+            })
+            .collect();
+        out.extend(
+            self.cfg
+                .live()
+                .mcp_server
+                .iter()
+                .filter(|server| server.serves(channel))
+                .map(|server| (server.name.clone(), server.name.clone())),
+        );
+        out
+    }
+
     /// Every installed plugin's active build, by name, offered to a channel
     /// that may use `available`.
     fn active_plugins(&self, available: &[&str]) -> Vec<(String, crate::store::plugins::Build)> {

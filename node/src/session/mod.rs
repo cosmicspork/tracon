@@ -3686,6 +3686,7 @@ impl Manager {
                 .iter()
                 .filter_map(|t| t["name"].as_str().map(str::to_string))
                 .collect();
+            let namespaces = self.tools.tool_namespaces(&spec.channel, &self.node_id);
             let services: Vec<String> = self
                 .tools
                 .cfg
@@ -3707,6 +3708,7 @@ impl Manager {
                     project_id: project.as_ref().map(|p| p.id.as_str()),
                     project_name: project.as_ref().map(|p| p.name.as_str()),
                     tools: &tool_names,
+                    namespaces: &namespaces,
                     services: &services,
                     worktree: "/work",
                     phase: spec.phase.as_str(),
