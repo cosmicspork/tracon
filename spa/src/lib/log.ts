@@ -815,6 +815,24 @@ export function eventLine(e: Event): EventLine | null {
       const tone = state === 'failed' ? 'crit' : state === 'ready' ? 'ok' : 'mark'
       return line(tone, [`service ${str(p.name) || 'unnamed'} ${state}`, str(p.detail)])
     }
+    case 'provider_cli_ran': {
+      // What a provider CLI the node ran for the agent did: its arguments
+      // and how it ended.
+      const argv = Array.isArray(p.argv) ? p.argv.filter((a) => typeof a === 'string').join(' ') : ''
+      const head = `ran ${str(p.cli) || 'a provider CLI'}${argv ? ` ${argv}` : ''}`
+      const how = p.approval_id ? 'allowed by the operator' : ''
+      if (str(p.error)) return line('crit', [head, str(p.error)])
+      if (p.timed_out === true) return line('crit', [head, 'stopped at its timeout', how])
+      const code = num(p.exit)
+      // The digests stay in the record; the line says how much was printed.
+      const stdout = num(((p.stdout ?? {}) as Record<string, unknown>).bytes)
+      return line(code === 0 ? 'mark' : 'crit', [
+        head,
+        code === null ? 'killed' : `exit ${code}`,
+        how,
+        stdout !== null ? `${stdout} bytes of output` : '',
+      ])
+    }
     case 'abandoned':
       return line('mark', ['abandoned', str(p.summary) || str(p.reason)])
     case 'web_fetched': {

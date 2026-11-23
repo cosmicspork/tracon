@@ -296,6 +296,13 @@ pub const KEYS: &[KeySpec] = &[
     live("mcp_server.ask"),
     live("mcp_server.deny"),
     live("mcp_server.timeout_secs"),
+    // [[provider_cli]]
+    live("provider_cli.name"),
+    live("provider_cli.binary").exec(),
+    live("provider_cli.credential"),
+    live("provider_cli.channels"),
+    live("provider_cli.allow"),
+    live("provider_cli.timeout_secs"),
     // [plugins], [[plugin]]
     live("plugins.owners").host_only(),
     restart("plugins.ui_port_first"),
@@ -560,6 +567,8 @@ pub const NOT_BY_PEER: &[(&str, &str)] = &[
     ("mcp_server.url", WHERE_CREDENTIALS_GO),
     ("mcp_server.credential", WHERE_CREDENTIALS_GO),
     ("mcp_server.header", WHERE_CREDENTIALS_GO),
+    ("provider_cli.binary", WHERE_CREDENTIALS_GO),
+    ("provider_cli.credential", WHERE_CREDENTIALS_GO),
 ];
 
 /// Keys inside a [`NOT_BY_PEER`] table a peer this node lets administer it
