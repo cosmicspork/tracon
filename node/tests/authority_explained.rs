@@ -359,7 +359,7 @@ async fn every_action_a_grant_can_carry_is_explained() {
     h.store.insert_session(&session_row("s1")).unwrap();
     let view = explain(&h, "s1").await;
 
-    for action in ["merge", "publish", "deploy", "plugin_call"] {
+    for action in ["merge", "publish", "deploy", "plugin_call", "fetch"] {
         assert!(
             tracon::authority::valid_action(action),
             "{action} is no longer an action the node accepts; fix this list"

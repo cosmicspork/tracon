@@ -1179,7 +1179,7 @@
         </div>
       {:else}
         <div class="grid">
-          <label><span>Action</span><select bind:value={grant.action}><option value="merge">merge</option><option value="publish">publish</option><option value="plugin_call">plugin call</option><option value="deploy">deploy</option><option value="terminal">terminal</option></select></label>
+          <label><span>Action</span><select bind:value={grant.action}><option value="merge">merge</option><option value="publish">publish</option><option value="plugin_call">plugin call</option><option value="deploy">deploy</option><option value="terminal">terminal</option><option value="fetch">fetch</option></select></label>
           <label><span>Decision</span><select bind:value={grant.verdict}><option value="ask">ask · safe default</option><option value="allow">allow</option><option value="deny">deny</option></select></label>
           <label><span>Resource type</span><select bind:value={grantResource}><option value="repository">pull or merge request</option><option value="deployment">GitLab deployment</option><option value="plugin">consequential plugin call</option><option value="advanced">advanced canonical target</option></select></label>
           <label><span>Channel scope</span><input bind:value={grant.channel} placeholder={store.node?.default_channel ?? 'personal'} /></label>
@@ -1196,6 +1196,9 @@
         </details>
         {#if grant.action === 'terminal'}
           <p class="why">Target: <code>terminal:&lt;session id&gt;:&lt;workspace path&gt;</code>. Session required. <Help label="About terminal grants">Opens a shell in that session's workspace. Commands typed there run without further decisions; the node records the shell, where, and traffic volume only.</Help></p>
+        {/if}
+        {#if grant.action === 'fetch'}
+          <p class="why">Target: a URL pattern (<code>https://docs.rs/*</code>) or a host (<code>*.python.org</code>), with <code>*</code> the only wildcard. <Help label="About fetch grants">The channel's fetch allow list: an allowed pattern lets web_fetch fetch what it covers without asking, a denied one refuses it. A signed policy denial still wins.</Help></p>
         {/if}
         <div class="acts"><button class="btn p" onclick={reviewGrant} disabled={busy !== ''}>Review grant</button><small>Empty channel: node default.</small></div>
       {/if}

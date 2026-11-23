@@ -120,7 +120,7 @@ describe('the approval page source', () => {
   const answer = page.slice(page.indexOf('async function answer('), page.indexOf('</script>'))
 
   test('follows an accepted Allow instead of leaving at once', () => {
-    const allow = answer.indexOf("if (optionId === 'allow_once')")
+    const allow = answer.indexOf("if (optionId === 'allow_once'")
     expect(allow).toBeGreaterThan(-1)
     expect(answer.indexOf('await follow()')).toBeGreaterThan(allow)
     expect(answer.indexOf('await follow()')).toBeLessThan(answer.indexOf('leaveAfterVerdict('))

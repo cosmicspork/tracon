@@ -20,16 +20,25 @@ pub const DEPLOY: &str = "deploy";
 /// jira-review plugin's, are still listed and match nothing.
 pub const PLUGIN_CALL: &str = "plugin_call";
 
+/// A channel's fetch allow list (`mcp::fetch`): a grant's target is a URL
+/// pattern (`policy::fetch_pattern_matches`) a `web_fetch` may fetch
+/// unasked on that channel, or, denied, never. "Save to channel" on a fetch
+/// card adds one.
+pub const FETCH: &str = "fetch";
+
 /// The policy kind the forge actions are decided under.
 pub const AUTHORITY_KIND: &str = "authority";
 
 pub fn valid_action(action: &str) -> bool {
-    matches!(action, MERGE | PUBLISH | DEPLOY | PLUGIN_CALL)
+    matches!(action, MERGE | PUBLISH | DEPLOY | PLUGIN_CALL | FETCH)
 }
 
 /// The policy kind one action is decided under.
-pub fn kind_of(_action: &str) -> &'static str {
-    AUTHORITY_KIND
+pub fn kind_of(action: &str) -> &'static str {
+    match action {
+        FETCH => crate::policy::FETCH_KIND,
+        _ => AUTHORITY_KIND,
+    }
 }
 
 pub fn policy_decision(

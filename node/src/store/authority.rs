@@ -98,6 +98,34 @@ impl Store {
         Ok(rows)
     }
 
+    /// Every live grant of `action` on `channel` that holds for
+    /// `session_id`, whatever its target: for an action whose targets are
+    /// patterns (`fetch`), which the caller matches itself.
+    pub fn authority_grants_of_action(
+        &self,
+        channel: &str,
+        session_id: Option<&str>,
+        action: &str,
+        at_ms: i64,
+    ) -> Result<Vec<AuthorityGrantRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM authority_grant
+             WHERE action=?1 AND channel=?2
+               AND (session_id IS NULL OR session_id=?3)
+               AND revoked_ms IS NULL
+               AND (expires_ms IS NULL OR expires_ms > ?4)
+             ORDER BY created_ms DESC",
+        )?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![action, channel, session_id, at_ms],
+                AuthorityGrantRow::from_row,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn authority_grant(&self, id: &str) -> Result<Option<AuthorityGrantRow>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(

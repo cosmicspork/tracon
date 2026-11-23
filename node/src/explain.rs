@@ -77,6 +77,7 @@ const AUTHORITY_ACTIONS: &[&str] = &[
     authority::PUBLISH,
     authority::DEPLOY,
     authority::PLUGIN_CALL,
+    authority::FETCH,
 ];
 
 pub fn session_authority(

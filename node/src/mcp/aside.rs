@@ -118,6 +118,7 @@ mod tests {
         all.extend(docs::definitions(&crate::config::default_doc_kinds()));
         all.extend(operator::definitions());
         all.extend(egress::definitions());
+        all.extend(crate::mcp::fetch::definitions());
         all.extend(show::definitions());
         all.extend(setup::definitions());
         all.extend(work::definitions());
