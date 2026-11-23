@@ -73,33 +73,38 @@ now (runs, asked or refused) and by which rule. That answer is the signed policy
 channel no rule is scoped to, with the plugin's `[[plugin]]` entry applied. Settings ›
 Plugins shows the same.
 
-The node runs a plugin as one process per channel, started when a session on a channel
-it is offered to first lists its tools. A process stops once it has gone unused for its
-`[[plugin]]` entry's `idle_timeout_secs` (15 minutes by default). It also stops when the
-plugin is updated, rolled back or removed, and when the node shuts down; the next use
-starts the version active then. The node checks the build's digest again and runs its
-`exec` with `--socket <path> --data <dir>` appended (and `--node-socket <path>` for a
-plugin that calls the node). The environment is empty except for
+The node runs a plugin as one process per channel, started when it is first used there:
+a call to one of its tools, a card's preview, a request from its page, or a format
+conversion. Listing tools does not start it, once the node knows what the active build
+lists. It learns that from the build's first start, kept in the node's database across
+restarts, so only the first listing after an install, update or rollback starts the
+build (on the channel that listed) to find out. A process stops once it has gone unused
+for its `[[plugin]]` entry's `idle_timeout_secs` (15 minutes by default). It also stops
+when the plugin is updated, rolled back or removed, and when the node shuts down; the
+next use starts the version active then. The node checks the build's digest again and
+runs its `exec` with `--socket <path> --data <dir>` appended (and `--node-socket <path>`
+for a plugin that calls the node). The environment is empty except for
 `TRACON_PLUGIN_TOKEN` (fresh for each start and held only in the node's memory),
 `TRACON_NODE_KEY` (the node id) and `TRACON_CONTRACT=1`. Credentials are never in it:
 they are lent per call. The socket is in a 0700 directory of the node's runtime
 directory (`$XDG_RUNTIME_DIR/tracon/p/`, or `/tmp/tracon-<uid>/tracon/p/` where that is
-unset), and the plugin's data and working directory is
-`<state dir>/plugins/data/<name>/<channel>/`, also 0700. A process is ready once MCP
+unset), and the plugin's data and working directory is `<state
+dir>/plugins/data/<name>/<channel>/`, also 0700. A process is ready once MCP
 `initialize` answers on its socket within 30 seconds and its `tools/list` names exactly
 the tools its manifest declares. A plugin that lists a tool it does not declare, or
-leaves out one it does, is unhealthy at once with the difference as its last error
-(`its tools disagree with its manifest: lists x not declared; declares y not listed`),
-offers nothing, and is not started again for that build until you restart, update or
-roll it back. One that exits or is not ready is
-started again after a wait that doubles from 1 second to 60; if it fails again after the
-60-second wait it is marked unhealthy and left down until it is next used or restarted.
-Its output is kept in memory and in `<state dir>/plugins/logs/<name>/<channel>.log`,
-rotated at 1 MiB with three kept. `tracon plugin ls` shows each process's state, pid,
-uptime, restarts and last error, `tracon plugin logs <name> --channel <c>` its last
-lines, and `tracon plugin restart <name> --channel <c>` starts it afresh, or starts it
-on a channel where it has not run yet. Settings › Plugins shows the same. A `when_idle`
-node restart waits for running plugin processes as it waits for turns.
+leaves out one it does, is unhealthy at once with the difference as its last error (`its
+tools disagree with its manifest: lists x not declared; declares y not listed`), offers
+nothing, not even what an earlier start of the build listed, and is not started again
+for that build until you restart, update or roll it back. One that exits or is not ready
+is started again after a wait that doubles from 1 second to 60; if it fails again after
+the 60-second wait it is marked unhealthy and left down until it is next used or
+restarted. Its output is kept in memory and in `<state
+dir>/plugins/logs/<name>/<channel>.log`, rotated at 1 MiB with three kept. `tracon
+plugin ls` shows each process's state, pid, uptime, restarts and last error, `tracon
+plugin logs <name> --channel <c>` its last lines, and `tracon plugin restart <name>
+--channel <c>` starts it afresh, or starts it on a channel where it has not run yet.
+Settings › Plugins shows the same. A `when_idle` node restart waits for running plugin
+processes as it waits for turns.
 
 A plugin's tools are offered to execute sessions and external harnesses as
 `<plugin>__<tool>`, beside the node's own, on a channel that binds a credential the

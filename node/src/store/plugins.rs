@@ -6,6 +6,7 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
 use super::{now_ms, Result, Store, StoreError};
+use crate::mcp::upstream::RemoteTool;
 use crate::plugin::manifest::Manifest;
 
 /// Its first install waits on its card; nothing of it is active.
@@ -108,6 +109,16 @@ impl PluginRow {
     }
 }
 
+/// What a plugin build's `tools/list` named at a start that agreed with its
+/// manifest: kept for the active build alone, so the node can offer its
+/// tools without starting it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Listed {
+    /// The archive digest of the build that listed them.
+    pub digest: String,
+    pub tools: Vec<RemoteTool>,
+}
+
 fn text<T: Serialize>(value: Option<&T>) -> Result<Option<String>> {
     value
         .map(serde_json::to_string)
@@ -174,7 +185,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let n = conn.execute(
             "UPDATE plugin SET version=?2, digest=?3, tree_digest=?4, manifest=?5,
-                state='active', previous=?6, pending=NULL, updated_ms=?7
+                state='active', previous=?6, pending=NULL, listed=NULL, updated_ms=?7
              WHERE name=?1 AND json_extract(pending, '$.approval_id') = ?8",
             rusqlite::params![
                 name,
@@ -222,7 +233,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let n = conn.execute(
             "UPDATE plugin SET version=?2, digest=?3, tree_digest=?4, manifest=?5,
-                previous=?6, updated_ms=?7
+                previous=?6, listed=NULL, updated_ms=?7
              WHERE name=?1 AND digest=?8 AND state='active'",
             rusqlite::params![
                 name,
@@ -246,12 +257,55 @@ impl Store {
             true => conn.execute("DELETE FROM plugin WHERE name=?1", [name])?,
             false => conn.execute(
                 "UPDATE plugin SET version=NULL, digest=NULL, tree_digest=NULL, manifest=NULL,
-                    previous=NULL, pending=NULL, state='removed', updated_ms=?2
+                    previous=NULL, pending=NULL, listed=NULL, state='removed', updated_ms=?2
                  WHERE name=?1",
                 rusqlite::params![name, now_ms()],
             )?,
         };
         Ok(n == 1)
+    }
+
+    /// What `name`'s active build listed at its last start that agreed with
+    /// its manifest, if that is still the active build.
+    pub fn plugin_listed(&self, name: &str) -> Result<Option<Listed>> {
+        let conn = self.conn.lock().unwrap();
+        let row: Option<(Option<String>, Option<String>)> = conn
+            .query_row(
+                "SELECT digest, listed FROM plugin WHERE name=?1 AND state='active'",
+                [name],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((Some(active), Some(listed))) = row else {
+            return Ok(None);
+        };
+        // A row that no longer parses is only a lost cache: the next start
+        // lists the tools again.
+        Ok(serde_json::from_str::<Listed>(&listed)
+            .ok()
+            .filter(|l| l.digest == active))
+    }
+
+    /// Keep what `listed.digest`'s build listed, while it is `name`'s active
+    /// build. False when another build is active now.
+    pub fn plugin_set_listed(&self, name: &str, listed: &Listed) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE plugin SET listed=?3 WHERE name=?1 AND digest=?2 AND state='active'",
+            rusqlite::params![name, listed.digest, serde_json::to_string(listed)?],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// Forget what `name`'s build `digest` listed: a start of it disagreed
+    /// with its manifest.
+    pub fn plugin_clear_listed(&self, name: &str, digest: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE plugin SET listed=NULL WHERE name=?1 AND digest=?2",
+            rusqlite::params![name, digest],
+        )?;
+        Ok(())
     }
 
     /// The loopback port `name`'s UI is served on: the one it was given,
@@ -409,6 +463,64 @@ mod tests {
         let row = store.plugin_get("sql-review").unwrap().unwrap();
         assert_eq!(row.active.as_ref().unwrap().digest, "d1");
         assert_eq!(row.previous.as_ref().unwrap().digest, "d2");
+    }
+
+    fn listed(digest: &str) -> Listed {
+        Listed {
+            digest: digest.into(),
+            tools: vec![RemoteTool {
+                name: "a__t".into(),
+                remote: "t".into(),
+                description: format!("from {digest}"),
+                input_schema: serde_json::json!({ "type": "object" }),
+            }],
+        }
+    }
+
+    #[test]
+    fn what_a_build_listed_is_kept_for_it_until_another_build_is_active() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .plugin_stage_pending("a", "o/a", &pending("1.0.0", "d1", "a1"))
+            .unwrap();
+        // Nothing active yet: nothing to keep.
+        assert!(!store.plugin_set_listed("a", &listed("d1")).unwrap());
+        store.plugin_activate_pending("a", "a1").unwrap();
+        assert_eq!(store.plugin_listed("a").unwrap(), None);
+        // Only for the active build.
+        assert!(!store.plugin_set_listed("a", &listed("d9")).unwrap());
+        assert!(store.plugin_set_listed("a", &listed("d1")).unwrap());
+        assert_eq!(store.plugin_listed("a").unwrap(), Some(listed("d1")));
+        // A start that disagreed forgets it, and only for its own build.
+        store.plugin_clear_listed("a", "d9").unwrap();
+        assert!(store.plugin_listed("a").unwrap().is_some());
+        store.plugin_clear_listed("a", "d1").unwrap();
+        assert_eq!(store.plugin_listed("a").unwrap(), None);
+
+        // An update, the same build installed again, a rollback and a
+        // removal each forget it.
+        let mut card = 1;
+        let mut install = |store: &Store, version: &str, digest: &str| {
+            card += 1;
+            let id = format!("a{card}");
+            store
+                .plugin_stage_pending("a", "o/a", &pending(version, digest, &id))
+                .unwrap();
+            store.plugin_activate_pending("a", &id).unwrap().unwrap();
+        };
+        store.plugin_set_listed("a", &listed("d1")).unwrap();
+        install(&store, "1.1.0", "d2");
+        assert_eq!(store.plugin_listed("a").unwrap(), None);
+        store.plugin_set_listed("a", &listed("d2")).unwrap();
+        install(&store, "1.1.0", "d2");
+        assert_eq!(store.plugin_listed("a").unwrap(), None);
+        store.plugin_set_listed("a", &listed("d2")).unwrap();
+        store.plugin_rollback("a").unwrap().unwrap();
+        assert_eq!(store.plugin_listed("a").unwrap(), None);
+        store.plugin_set_listed("a", &listed("d1")).unwrap();
+        store.plugin_remove("a", false).unwrap();
+        assert_eq!(store.plugin_listed("a").unwrap(), None);
+        assert!(!store.plugin_set_listed("a", &listed("d1")).unwrap());
     }
 
     #[test]

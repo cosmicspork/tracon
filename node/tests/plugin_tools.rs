@@ -247,6 +247,56 @@ impl Rig {
             .expect("an instance")
     }
 
+    /// This rig's node as it is once restarted: a new manager and tools on
+    /// the same store, state and configuration, with nothing in memory.
+    fn restarted(&self) -> Rig {
+        let identity = proto::keys::Identity::from_seed(&[7; 32]);
+        let policy = self.tools.policy.clone();
+        let tools = Arc::new(Tools {
+            broker: self.tools.broker.clone(),
+            cfg: self.tools.cfg.clone(),
+            policy: policy.clone(),
+            http: reqwest::Client::new(),
+            session: Default::default(),
+            upstream: Default::default(),
+        });
+        let manager = Manager::new(
+            self.store.clone(),
+            Bus::new(),
+            self.tools.cfg.clone(),
+            self.node.clone(),
+            tools.clone(),
+            policy,
+            Arc::new(tracon::runner::local::LocalBackend),
+        );
+        manager.plugins().set_signer(identity);
+        let _ = tools.session.set(SessionAccess {
+            store: self.store.clone(),
+            manager: manager.clone(),
+        });
+        Rig {
+            store: self.store.clone(),
+            tools,
+            manager,
+            state: self.state.clone(),
+            node: self.node.clone(),
+            ctx: self.ctx.clone(),
+            bare: self.bare.clone(),
+        }
+    }
+
+    /// The plugin `plugin`'s tools as a `tools/list` on `ctx` offers them.
+    async fn offered(&self, ctx: &CallContext, plugin: &str) -> Vec<Value> {
+        let prefix = format!("{plugin}__");
+        self.rpc(ctx, "tools/list", json!({})).await["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| t["name"].as_str().unwrap().starts_with(&prefix))
+            .cloned()
+            .collect()
+    }
+
     /// Allow approval `id` and wait for the call it holds to settle.
     async fn approve(&self, id: &str) -> approvals::ApprovalRow {
         self.allow(id, None).await.unwrap();
@@ -433,6 +483,7 @@ async fn a_plugin_whose_tools_disagree_with_its_manifest_is_refused() {
         .await
         .is_err());
     assert_eq!(rig.lines("fake", "mismatch", "started"), 1);
+    assert!(rig.manager.plugins().listed("fake").is_none());
 
     // Fixed and restarted, it serves.
     std::fs::write(rig.data("fake", "mismatch").join("tools"), FAKE_TOOLS).unwrap();
@@ -447,6 +498,66 @@ async fn a_plugin_whose_tools_disagree_with_its_manifest_is_refused() {
         .iter()
         .any(|t| t == "fake__query"));
     echo(&rig.call("fake__query", json!({})).await);
+    rig.manager.plugins().shutdown().await;
+}
+
+#[tokio::test]
+async fn listing_a_plugins_known_tools_starts_no_process() {
+    let entry = PluginEntry {
+        idle_timeout_secs: 1,
+        ..allow("fake", &["query"])
+    };
+    let rig = rig("lazy", vec![entry], Policy::shipped());
+    // The first listing of a build starts it once, to learn its tools.
+    let first = rig.offered(&rig.ctx, "fake").await;
+    assert_eq!(first.len(), 4, "{first:?}");
+    assert_eq!(rig.lines("fake", "lazy", "started"), 1);
+    let fail = first.iter().find(|t| t["name"] == "fake__fail").unwrap();
+    assert!(
+        fail["inputSchema"]["properties"]["operation_id"].is_object(),
+        "{fail}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while rig.status("fake", "lazy").state != State::Stopped {
+        assert!(Instant::now() < deadline, "an idle stop");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Listed again, its tools are offered exactly as before, and nothing
+    // starts.
+    assert_eq!(rig.offered(&rig.ctx, "fake").await, first);
+    assert_eq!(rig.lines("fake", "lazy", "started"), 1);
+    assert_eq!(rig.status("fake", "lazy").state, State::Stopped);
+    // Nor once the node restarts: what the build listed is kept.
+    rig.manager.plugins().shutdown().await;
+    let rig = rig.restarted();
+    assert_eq!(rig.offered(&rig.ctx, "fake").await, first);
+    assert_eq!(rig.lines("fake", "lazy", "started"), 1);
+    assert!(rig
+        .manager
+        .plugins()
+        .status()
+        .iter()
+        .all(|i| i.plugin != "fake"));
+    // So does the schema an approval page reads.
+    assert!(rig.tools.plugin_schema("fake__fail").is_some());
+
+    // A call starts it.
+    echo(&rig.call("fake__query", json!({})).await);
+    assert_eq!(rig.lines("fake", "lazy", "started"), 2);
+
+    // An update forgets what the build before listed: the next listing
+    // starts the new build to learn its own.
+    support::plugin::install_build(
+        &rig.store,
+        &rig.state,
+        &FAKE.replace("version = \"1.0.0\"", "version = \"1.1.0\""),
+        &"fd".repeat(32),
+    );
+    rig.manager.plugins().stop_plugin("fake").await;
+    assert_eq!(rig.offered(&rig.ctx, "fake").await.len(), 4);
+    assert_eq!(rig.lines("fake", "lazy", "started"), 3);
+    assert_eq!(rig.status("fake", "lazy").version.as_deref(), Some("1.1.0"));
     rig.manager.plugins().shutdown().await;
 }
 
