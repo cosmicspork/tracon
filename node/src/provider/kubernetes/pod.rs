@@ -311,11 +311,13 @@ pub(crate) fn refusal_error(
 /// it, and a check reports it as its result.
 pub const UNSCHEDULABLE: &str = "unschedulable";
 
-/// What a pod the scheduler kept unschedulable past
-/// `[runtime.kubernetes] unschedulable_grace_secs` is reported as: the
-/// scheduler's own words first, then, where it names a resource this pod
-/// requests, the request and the `[runtime.kubernetes.resources.*]` key
-/// that sizes it.
+/// What a pod the scheduler kept unschedulable past its grace is reported
+/// as: the scheduler's own words first, then, where it names a resource this
+/// pod requests, the request and the `[runtime.kubernetes.resources.*]` key
+/// that sizes it, then what the cluster's autoscaler said of it and the key
+/// that set the grace: `[runtime.kubernetes.pool] scale_up_grace_secs` for a
+/// pod in a pool (`pooled`) unless the autoscaler would add no node for it,
+/// else `[runtime.kubernetes] unschedulable_grace_secs`.
 pub(crate) fn unschedulable_error(
     name: &str,
     said: &str,
@@ -323,6 +325,7 @@ pub(crate) fn unschedulable_error(
     resources: &KubeResources,
     waited: Duration,
     scale_up: &ScaleUp,
+    pooled: bool,
 ) -> RunnerError {
     let sized = sizing.sized(resources);
     let table = format!("[runtime.kubernetes.resources.{}]", sizing.as_str());
@@ -357,6 +360,10 @@ pub(crate) fn unschedulable_error(
                 why.trim()
             ));
             "[runtime.kubernetes] unschedulable_grace_secs"
+        }
+        ScaleUp::Unsaid if pooled => {
+            message.push_str("; the cluster autoscaler reported no scale-up for it");
+            "[runtime.kubernetes.pool] scale_up_grace_secs"
         }
         ScaleUp::Unsaid => "[runtime.kubernetes] unschedulable_grace_secs",
     };

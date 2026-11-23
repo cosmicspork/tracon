@@ -837,8 +837,7 @@ fn refused(error: RunnerError) -> ProviderError {
 /// condition `False` with reason `Unschedulable`, for lack of room on the
 /// node's machine (affinity binds it there) or in its pool, or for anything
 /// else that keeps it off (a taint, a cordon). It waits rather than fails,
-/// so `connect` gives it `unschedulable_grace` before it says so, or a
-/// pool's `scale_up_grace` once the autoscaler is adding a node for it.
+/// so `connect` gives it a grace before it says so (`unschedulable_grace`).
 fn unschedulable(status: &PodStatus) -> Option<String> {
     let condition = status.conditions.as_deref()?.iter().find(|c| {
         c.type_ == "PodScheduled"
@@ -846,6 +845,21 @@ fn unschedulable(status: &PodStatus) -> Option<String> {
             && c.reason.as_deref() == Some("Unschedulable")
     })?;
     Some(condition.message.clone().unwrap_or_default())
+}
+
+/// How long `connect` lets a pod stay unschedulable, given what the cluster's
+/// autoscaler has said of it (`scale_up`): `unschedulable_grace`, or for a
+/// pod in a pool the pool's `scale_up_grace` from the start, since a pool at
+/// zero needs minutes for a node and an autoscaler may say nothing of the pod
+/// for a while (DigitalOcean's has gone past a minute without a word). Only
+/// its saying that no node it could add would take the pod
+/// (`NotTriggerScaleUp`) cuts that back to `unschedulable_grace`.
+fn unschedulable_grace(k: &KubeSpec, scale_up: &ScaleUp) -> Duration {
+    match scale_up {
+        ScaleUp::NotTriggered(_) => k.unschedulable_grace,
+        _ if k.pool.is_set() => k.scale_up_grace().max(k.unschedulable_grace),
+        _ => k.unschedulable_grace,
+    }
 }
 
 impl KubeSandboxProvider {
@@ -1231,8 +1245,8 @@ impl KubeSandboxProvider {
 
     /// What the cluster's autoscaler has said of the pod `name` (of `uid`,
     /// when known, so an earlier pod of the same name is not read), from
-    /// its events. `None` when they cannot be read: the pod is then given
-    /// the shorter grace, as where no autoscaler runs.
+    /// its events. `None` when they cannot be read: the pod is then judged
+    /// on what was last read, the pool's longer grace while nothing was.
     async fn scale_up_of(&self, name: &str, uid: Option<&str>) -> Option<ScaleUp> {
         let events: Api<Event> =
             Api::namespaced(self.client.clone(), &self.options.spec.env.namespace);
@@ -1674,11 +1688,11 @@ impl SandboxProvider for KubeSandboxProvider {
                             let waited = since.elapsed();
                             let k = &self.options.spec;
                             // Read again every so often, and always before
-                            // the shorter grace gives the pod up, unless a
-                            // node is already on its way.
+                            // the grace gives the pod up, unless a node is
+                            // already on its way.
                             let look = k.pool.is_set()
                                 && !matches!(scale_up, ScaleUp::Triggered(_))
-                                && (waited >= k.unschedulable_grace
+                                && (waited >= unschedulable_grace(k, &scale_up)
                                     || scale_read.is_none_or(|at| at.elapsed() >= SCALE_UP_POLL));
                             if look {
                                 scale_read = Some(tokio::time::Instant::now());
@@ -1689,11 +1703,7 @@ impl SandboxProvider for KubeSandboxProvider {
                                     scale_up = read;
                                 }
                             }
-                            let grace = match scale_up {
-                                ScaleUp::Triggered(_) => k.scale_up_grace().max(k.unschedulable_grace),
-                                _ => k.unschedulable_grace,
-                            };
-                            if waited >= grace {
+                            if waited >= unschedulable_grace(k, &scale_up) {
                                 return Err(fail(
                                     pod::UNSCHEDULABLE,
                                     refused(pod::unschedulable_error(
@@ -1703,6 +1713,7 @@ impl SandboxProvider for KubeSandboxProvider {
                                         &k.resources,
                                         waited,
                                         &scale_up,
+                                        k.pool.is_set(),
                                     )),
                                 ));
                             }

@@ -92,11 +92,14 @@ and an emptyDir at `/tmp` that `TMPDIR` names.
   connection only from the address of the pod its token was issued to, and both
   NetworkPolicies select pods by label, not by machine. A pool the cluster's autoscaler
   grows from zero is waited for: while the pool has no node, it has room
-  (`capacity.awaits_node` in the placement event); a pod the scheduler has no place for
-  whose events say the autoscaler is adding a node (`TriggeredScaleUp`) waits up to
-  `scale_up_grace_secs` (600) for it, and a session's start waits that much longer than
-  its usual 90 seconds; one the autoscaler will not place (`NotTriggerScaleUp`: the
-  pool is at its largest) is given up after `unschedulable_grace_secs` as before, the
+  (`capacity.awaits_node` in the placement event); a pod in the pool the scheduler has
+  no place for waits up to `scale_up_grace_secs` (600), counted from when it was first
+  unschedulable, whether or not the autoscaler has reported a scale-up
+  (`TriggeredScaleUp`) yet: some autoscalers say nothing of the pod for over a minute.
+  This covers session pods and the startup harness version probe alike, and a
+  session's start waits that much longer than its usual 90 seconds. Only a pod the
+  autoscaler says it will not place (`NotTriggerScaleUp`: the pool is at its largest,
+  or the pod fits none of its nodes) is given up after `unschedulable_grace_secs`, the
   scheduler's and the autoscaler's words in its refusal, so a check stops short of room
   and joins the line of checks waiting for it. `start_timeout_secs` still bounds every
   start, and a check's own timeout counts the wait. The `runtime` check refuses a pool
@@ -126,7 +129,8 @@ and an emptyDir at `/tmp` that `TMPDIR` names.
   says so (`capacity.unread`).
 - **A pod that cannot be scheduled.** While any sandbox pod starts, the node reads its
   `PodScheduled` condition. One the scheduler keeps `Unschedulable` (no room, a taint, a
-  cordon) for `[runtime.kubernetes] unschedulable_grace_secs` (60 by default) is given
+  cordon) for `[runtime.kubernetes] unschedulable_grace_secs` (60 by default; with a
+  sandbox pool, `scale_up_grace_secs` unless the autoscaler will not place it) is given
   up: a session's pod, before its harness starts, is deleted and the session placed
   again with this runtime counted full, so it moves to DigitalOcean under `overflow` or
   `prefer` (or the operator is asked, as placement asks), and otherwise ends with the

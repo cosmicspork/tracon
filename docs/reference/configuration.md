@@ -200,8 +200,10 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
                                     # kubernetes.io/arch for its base's architecture
 # tolerations = [{ key = "workload", value = "tracon-sandbox", effect = "NoSchedule" }]
                                     # the pool's taints; operator "Equal" (default) or "Exists"
-# scale_up_grace_secs = 600         # how long a pod the cluster autoscaler is adding a node for
-                                    # may wait for it, in place of unschedulable_grace_secs
+# scale_up_grace_secs = 600         # how long a pod in the pool may stay unschedulable, from the
+                                    # start, in place of unschedulable_grace_secs, so a pool at zero
+                                    # has time to add a node; a NotTriggerScaleUp from the cluster
+                                    # autoscaler still gives it up after unschedulable_grace_secs
 # internal_cidrs = []               # (under [runtime.kubernetes]) address blocks the per-client
                                     # egress proxy refuses besides the private ones (RFC 1918,
                                     # 100.64.0.0/10, fc00::/7), which it always refuses in a
