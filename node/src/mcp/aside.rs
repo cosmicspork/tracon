@@ -46,6 +46,7 @@ const SESSION_ONLY: &[&str] = &[
     "A session sees its own project unless it names another.",
     "In a review session it goes on the review you are reviewing, marked with that review's \
      candidate.",
+    "In a plan session everything shown is a proposal.",
 ];
 
 /// `tool` as `audience` reads it.

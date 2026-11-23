@@ -14,6 +14,10 @@
 //! stale once the candidate moves, and the required checks it ran on that
 //! commit. None of it leaves tracon: publication sends the forge prose only.
 //!
+//! A proposal is shown the same way and labelled as what it is: layouts or
+//! flows put to the operator to choose from, not an account of work done.
+//! A plan session, which has built nothing yet, shows only proposals.
+//!
 //! Like the operator interventions it is dispatched before the policy is
 //! consulted. It writes nothing anyone else reads and reaches no forge, so a
 //! signed bundle that predates it cannot turn showing work into a question.
@@ -62,7 +66,11 @@ pub fn definitions() -> Vec<Value> {
                         `review_id` to attach it to one review only. A harness you run yourself \
                         must pass `review_id`, and paths are read from that review's worktree. \
                         In a review session it goes on the review you are reviewing, marked with \
-                        that review's candidate.",
+                        that review's candidate. Pass `proposal: true` for layouts or flows you \
+                        propose rather than work you did: usually an HTML page bundled with \
+                        `paths` and `entry`, showing the options for the operator to choose \
+                        from. It is shown like any other shown work, labelled as a proposal. In \
+                        a plan session everything shown is a proposal.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -75,6 +83,7 @@ pub fn definitions() -> Vec<Value> {
                 },
                 "entry": { "type": "string", "description": "With `paths`: the .html file to render, one of the files shown." },
                 "review_id": { "type": "string", "description": "The review this belongs to. Defaults to every review of this session." },
+                "proposal": { "type": "boolean", "description": "True when this proposes layouts or flows for the operator to choose from, rather than accounting for work done. Defaults to true in a plan session, which cannot pass false." },
             },
             "required": ["title"],
         },
@@ -135,6 +144,11 @@ pub async fn call(
     if markdown.trim().is_empty() && paths.is_empty() {
         return Err("nothing to show: pass `markdown`, `paths`, or both".into());
     }
+    let proposal = match args.get("proposal") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(proposal)) => Some(*proposal),
+        Some(_) => return Err("proposal is true or false".into()),
+    };
 
     // A review session shows work on the one review it was started for, and
     // nowhere else: what it ran is about that candidate, not about any review
@@ -145,6 +159,26 @@ pub async fn call(
             .map_err(|e| e.to_string())?
             .filter(|session| session.phase == "review"),
         None => None,
+    };
+    // A plan session has built nothing yet: what it shows is a proposal, put
+    // to the operator before the work is done.
+    let planning = match ctx.session_id() {
+        Some(id) if reviewing.is_none() => store
+            .get_session(id)
+            .map_err(|e| e.to_string())?
+            .is_some_and(|session| session.phase == "plan"),
+        _ => false,
+    };
+    let proposal = match (planning, proposal) {
+        (true, Some(false)) => {
+            return Err(
+                "a plan session has built nothing to account for yet: what it shows is a \
+                 proposal. Leave out `proposal`, or pass true"
+                    .into(),
+            )
+        }
+        (true, _) => true,
+        (false, proposal) => proposal.unwrap_or(false),
     };
     let named = args.get("review_id").and_then(Value::as_str);
     let review = match (&reviewing, named) {
@@ -322,6 +356,7 @@ pub async fn call(
         document_hash: document.as_ref().map(|(doc, _)| doc.hash.clone()),
         files,
         created_ms: now_ms(),
+        proposal,
     };
     store.insert_shown_work(&row).map_err(|e| e.to_string())?;
     manager.record_for(
@@ -337,6 +372,7 @@ pub async fn call(
             "channel": row.channel,
             "slug": row.document_slug,
             "files": row.files.len(),
+            "proposal": proposal,
         }),
     );
     let skipped = document.map(|(_, skipped)| skipped).unwrap_or_default();
@@ -346,8 +382,14 @@ pub async fn call(
         "head_sha": head_sha,
         "review_id": row.review_id,
         "files": row.files.len(),
-        "note": "Shown to the operator in tracon beside the diff, marked with the commit above; \
-                 it goes stale once the candidate moves. Nothing here is sent to the forge.",
+        "proposal": proposal,
+        "note": if proposal {
+            "Shown to the operator in tracon as a proposal to choose from, not as work done, \
+             marked with the commit above. Nothing here is sent to the forge."
+        } else {
+            "Shown to the operator in tracon beside the diff, marked with the commit above; \
+             it goes stale once the candidate moves. Nothing here is sent to the forge."
+        },
     });
     if !skipped.is_empty() {
         out["skipped"] = json!(skipped);
@@ -404,6 +446,7 @@ pub fn record_note(
         document_hash: None,
         files: Vec::new(),
         created_ms: now_ms(),
+        proposal: false,
     };
     store.insert_shown_work(&row).map_err(|e| e.to_string())?;
     manager.record_for(

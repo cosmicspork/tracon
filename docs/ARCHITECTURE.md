@@ -1490,6 +1490,13 @@ like those checks, attaches to the review the agent names or else to every revie
 session, and is dispatched before the policy is consulted, like the operator
 interventions: it reaches the operator and nothing else.
 
+A row with `proposal` set is a proposal rather than an account: layouts or flows put to
+the operator to choose from. It is stored, attached and rendered the same way and
+labelled as a proposal wherever it is read (the review and session pages, the session
+log, a reviewer's orientation), and the outcome record leaves it out of the claims a
+check could back. A plan session is offered `show_work` and everything it shows is a
+proposal; it cannot pass `proposal: false`.
+
 **Narrative reports are not publication candidates.** `submit_report` creates an
 owner/channel/session-bound report without Git or a repository. Acknowledgement
 and requests for changes compare the inspected content hash atomically; mirrors

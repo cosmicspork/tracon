@@ -26,6 +26,7 @@
   import { clock } from '../lib/clock.svelte'
   import { formatTokens } from '../lib/format'
   import { requestName } from '../lib/verdicts'
+  import { shownEventLine } from '../lib/shown'
   import { formatSpan, runFailures, runMs, runRunning, transcript, type CallRow } from '../lib/transcript'
   import { renderMessage } from '../lib/markdown'
   import type { Event } from '../lib/types'
@@ -278,7 +279,7 @@
       {:else if e.kind === 'plan_artifact'}
         <div class="mark ok">plan written · <PlanLink channel={String(e.payload.channel ?? '')} slug={String(e.payload.slug)} /> · ends the phase</div>
       {:else if e.kind === 'work_shown'}
-        <div class="mark ok">work shown · {e.payload.title} · at {String(e.payload.head_sha ?? '').slice(0, 12)}{e.payload.files ? ` · ${e.payload.files} ${e.payload.files === 1 ? 'file' : 'files'}` : ''} · in tracon only</div>
+        <div class="mark ok">{shownEventLine(e.payload)}</div>
       {:else if e.kind === 'forge_follow'}
         {@const changes = Array.isArray(e.payload.changes) ? (e.payload.changes as string[]) : []}
         {@const url = typeof e.payload.url === 'string' ? e.payload.url : null}

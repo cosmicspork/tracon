@@ -113,6 +113,8 @@ pub struct ShownSummary {
     pub head_sha: String,
     pub stale: bool,
     pub created_ms: i64,
+    /// A proposal for the operator to choose from, not an account of work done.
+    pub proposal: bool,
 }
 
 /// The request the work's change was published as, from the snapshots
@@ -593,6 +595,7 @@ pub fn view(store: &Store, subject: &Subject) -> Result<Option<Continuation>> {
                 head_sha: w.row.head_sha,
                 stale: w.stale,
                 created_ms: w.row.created_ms,
+                proposal: w.row.proposal,
             });
         }
     }

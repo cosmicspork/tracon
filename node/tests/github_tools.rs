@@ -1401,6 +1401,8 @@ async fn each_phase_lists_exactly_its_tools_of_the_channels() {
         "work_discover",
         "pr_status",
         "run_wait",
+        // A proposal of layouts or flows, shown in tracon only.
+        "show_work",
     ] {
         assert!(
             plan.iter().any(|n| n == offered),
@@ -1417,7 +1419,6 @@ async fn each_phase_lists_exactly_its_tools_of_the_channels() {
         "run_dispatch",
         "repo_setup_draft",
         "request_egress",
-        "show_work",
         "review_verdict",
         "mr_status",
         "issue",

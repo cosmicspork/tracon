@@ -109,7 +109,7 @@ const items = [item('old', true, 'the earlier note'), item('new', false, 'the cu
 
 // The page is served from an address of its own, so the hash it opens at is
 // the router's, as it is when a link lands on the review.
-async function open(hash = '', onReview = true): Promise<Page> {
+async function open(hash = '', onReview = true, shown: ShownWork[] = items): Promise<Page> {
   const page = await browser!.newPage({ viewport: { width: 390, height: 844 } })
   const errors: string[] = []
   page.on('pageerror', (e) => errors.push(String(e)))
@@ -118,7 +118,7 @@ async function open(hash = '', onReview = true): Promise<Page> {
   const html =
     `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>${css}</style>` +
     `<body style="margin:0;padding:0 16px"><div id="app"></div>` +
-    `<script>window.shown = ${JSON.stringify({ items, onReview })}</script><script type="module">${js}</script></body>`
+    `<script>window.shown = ${JSON.stringify({ items: shown, onReview })}</script><script type="module">${js}</script></body>`
   await page.route('http://tracon.test/**', (route) => route.fulfill({ contentType: 'text/html', body: html }))
   await page.goto(`http://tracon.test/${hash}`)
   await page.waitForSelector('article', { timeout: 3000 }).catch((e) => {
@@ -152,5 +152,31 @@ test.skipIf(!browser)('on a session nothing folds, as a session has no candidate
   const page = await open('', false)
   expect(await page.locator('details.fold').count()).toBe(0)
   expect(await page.getByText('the earlier note').isVisible()).toBe(true)
+  await page.close()
+})
+
+test.skipIf(!browser)('a proposal is shown under a heading of its own and tagged as one, apart from accounts of work', async () => {
+  const proposal: ShownWork = { ...item('p', false, 'layout A or layout B'), title: 'Two layouts', proposal: true }
+  const page = await open('', true, [item('new', false, 'the current note'), proposal])
+  const sections = page.locator('section.shown')
+  expect(await sections.count()).toBe(2)
+  const work = sections.nth(0)
+  const proposals = sections.nth(1)
+  expect(await work.locator('.h4').innerText()).toContain('Shown work')
+  expect(await work.locator('#shown-p').count()).toBe(0)
+  expect(await proposals.locator('.h4').innerText()).toContain('Proposals')
+  expect(await proposals.locator('.h4').innerText()).toContain('not an account of work done')
+  expect(await proposals.locator('#shown-p .tag.proposal').innerText()).toBe('proposal')
+  expect(await proposals.getByText('layout A or layout B').isVisible()).toBe(true)
+  expect(await work.locator('.tag.proposal').count()).toBe(0)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(0)
+  await page.close()
+})
+
+test.skipIf(!browser)('with only proposals, no shown-work heading claims an account of work', async () => {
+  const proposal: ShownWork = { ...item('p', false, 'flows'), proposal: true }
+  const page = await open('', false, [proposal])
+  expect(await page.getByText('Shown work').count()).toBe(0)
+  expect(await page.locator('.h4', { hasText: 'Proposals' }).isVisible()).toBe(true)
   await page.close()
 })

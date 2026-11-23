@@ -933,6 +933,11 @@ export interface ShownWork {
   stale_reason: string | null
   /** The required checks the node ran on `head_sha`. */
   checks: { command: string | null; outcome: string; source_outcome: string | null }[]
+  /**
+   * A proposal: layouts or flows put to the operator to choose from, not an
+   * account of work done. Absent from nodes before proposals.
+   */
+  proposal?: boolean
 }
 
 /** What an approval shows on the forge. The review's title and body are the
@@ -2597,7 +2602,7 @@ export interface Continuation {
       head_sha: string
       created_ms: number
     }[]
-    shown: { id: string; session_id: string | null; title: string; head_sha: string; stale: boolean; created_ms: number }[]
+    shown: { id: string; session_id: string | null; title: string; head_sha: string; stale: boolean; created_ms: number; proposal?: boolean }[]
   }
   follow: ContinuationFollow | null
   /** `close`: the task is open and the operator may close it. */

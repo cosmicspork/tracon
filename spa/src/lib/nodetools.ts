@@ -185,7 +185,7 @@ function callLine(tool: string, rawInput: unknown): string {
     case 'request_egress':
       return line(`Ask to reach ${str(a.host) || 'a host'}`, clip(str(a.why), 48))
     case 'show_work':
-      return line('Show work', clip(str(a.title)))
+      return line(a.proposal === true ? 'Show a proposal' : 'Show work', clip(str(a.title)))
     case 'fetch_branch':
       return `Fetch origin/${str(a.branch) || 'a branch'}`
     case 'pr_status':
