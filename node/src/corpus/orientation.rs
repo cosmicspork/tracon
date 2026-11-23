@@ -621,8 +621,9 @@ fn push_work(out: &mut String, facts: &Facts, missing: &mut Vec<Missing>) {
                  your final chat message, so the summary goes there. A screenshot, a page or \
                  files for the operator go to `show_work`. Work you find but should not do now \
                  goes to `work_discover`, against this item. Submitting is not closing, and \
-                 closing is not yours: the item stays open through CI and review until the \
-                 operator closes it. Once the change is published and this session sits idle, \
+                 closing is not yours: the item stays open through CI and review until its \
+                 change merges, which closes it (an item set to need acceptance waits for the \
+                 operator to accept it), or until the operator closes it. Once the change is published and this session sits idle, \
                  the node suspends it, and it is carried on when a CI failure or a review \
                  comment needs an answer.\n\n",
             );
@@ -1832,6 +1833,7 @@ mod tests {
             closed_by_session: None,
             created_ms: 1,
             updated_ms: 1,
+            ..Default::default()
         }
     }
 
@@ -2431,10 +2433,11 @@ mod tests {
         // Closing is not what submitting does, and #1085 moves work further
         // away from closing merely because a change was published.
         assert!(text.contains("Submitting is not closing"), "{text}");
-        // Nor is closing the session's to do: the operator closes the item
-        // once its change is merged, so the tool is not named at all.
+        // Nor is closing the session's to do: the merge of its change closes
+        // the item, or the operator does, so the tool is not named at all.
         assert!(!text.contains("`work_close`"), "{text}");
         assert!(text.contains("until the operator closes it"), "{text}");
+        assert!(text.contains("change merges, which closes it"), "{text}");
 
         // The review's prose is the pull request's description: the agent is
         // told who reads it, and where a note for the operator goes instead.

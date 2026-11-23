@@ -1179,6 +1179,17 @@ export interface WorkItem {
   discovered_by_lane?: string | null
   phase_plan_slug: string | null
   closed_by_session: string | null
+  /** `merge`: the item closes when its change merges. `operator`: it waits
+   *  after the merge for the operator to accept it. Absent from older nodes. */
+  acceptance?: 'merge' | 'operator'
+  /** The change the item's work was last published as. */
+  change_url?: string | null
+  /** The candidate that change carries: what a merge and an acceptance are of. */
+  change_candidate?: string | null
+  /** Where the change stands on its forge. */
+  change_state?: 'published' | 'merged' | 'closed' | null
+  /** The candidate the operator accepted; it counts only while it is `change_candidate`. */
+  accepted_candidate?: string | null
   created_ms: number
   updated_ms: number
 }
@@ -2596,6 +2607,7 @@ export type NextActionKind =
   | 'continue'
   | 'change_approach'
   | 'merge'
+  | 'accept'
   | 'close'
 
 /** The request the work's change was published as, as the node last saw it. */
@@ -2639,6 +2651,8 @@ export interface Continuation {
     shown: { id: string; session_id: string | null; title: string; head_sha: string; stale: boolean; created_ms: number }[]
   }
   follow: ContinuationFollow | null
-  /** `close`: the task is open and the operator may close it. */
-  actions: { continue_from: string | null; abandon: boolean; close: boolean }
+  /** `close`: the task is open and the operator may close it. `accept`: the
+   *  candidate an acceptance would judge, for a task set to need one; absent
+   *  from older nodes. */
+  actions: { continue_from: string | null; abandon: boolean; close: boolean; accept?: string | null }
 }

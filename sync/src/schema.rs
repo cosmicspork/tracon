@@ -254,6 +254,20 @@ const STEPS: &[&str] = &[
     );
     CREATE INDEX IF NOT EXISTS entity_name_lookup ON entity_name(channel, kind, name COLLATE NOCASE);
     "#,
+    // Step 11: how an item ends once its work is published. `acceptance` is
+    // `merge` (close when the change merges) or `operator` (stay open after
+    // the merge until the operator accepts it); the change columns say what
+    // was published, as which candidate, and where it stands; and the
+    // acceptance names the candidate it judged, so a new candidate carries
+    // none. A peer that predates the columns leaves the fields out of its
+    // rows, so a row from one keeps whatever this replica already holds.
+    r#"
+    ALTER TABLE work_item ADD COLUMN acceptance TEXT NOT NULL DEFAULT 'merge';
+    ALTER TABLE work_item ADD COLUMN change_url TEXT;
+    ALTER TABLE work_item ADD COLUMN change_candidate TEXT;
+    ALTER TABLE work_item ADD COLUMN change_state TEXT;
+    ALTER TABLE work_item ADD COLUMN accepted_candidate TEXT;
+    "#,
 ];
 
 /// Install or upgrade the replicated schema. Safe to call on every open.

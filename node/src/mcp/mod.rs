@@ -512,8 +512,8 @@ impl Audience {
                 );
                 if name == work::WORK_CLOSE {
                     format!(
-                        "{refusal}: the operator closes the item a session holds, once its \
-                         change is merged; until then it stays open for CI and review"
+                        "{refusal}: the operator closes the item a session holds, or its \
+                         change's merge does; until then it stays open for CI and review"
                     )
                 } else if name == review::VERDICT {
                     format!(
@@ -580,8 +580,8 @@ impl Tools {
 
     /// What an execute session is not offered: everything else is its to use.
     /// A verdict is a review session's account of someone else's change, and
-    /// closing the item is the operator's call: the item stays open through
-    /// CI and review until they close it.
+    /// closing the item is not the session's call: the item stays open
+    /// through CI and review until its change merges or the operator closes it.
     pub const NOT_EXECUTE: &'static [&'static str] =
         &[review::VERDICT, work::WORK_CLOSE, check_run::CHECK_RUN];
 

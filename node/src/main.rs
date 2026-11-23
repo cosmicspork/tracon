@@ -542,7 +542,7 @@ enum WorkCommand {
         /// A project's name or id, or `none`.
         #[arg(long)]
         project: Option<String>,
-        /// ready | blocked | in_session | open | closed
+        /// ready | blocked | in_session | published | open | closed
         #[arg(long)]
         state: Option<String>,
         /// Words every item must contain in its title or body.

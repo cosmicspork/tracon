@@ -102,6 +102,8 @@
   const ready = $derived(visible.filter((i) => workState(i) === 'ready'))
   const blocked = $derived(visible.filter((i) => workState(i) === 'blocked'))
   const inSession = $derived(visible.filter((i) => workState(i) === 'insession'))
+  // Published and not yet merged, or merged and waiting on the operator's acceptance.
+  const published = $derived(visible.filter((i) => workState(i) === 'published'))
   const closed = $derived(visible.filter((i) => workState(i) === 'closed'))
   const openCount = $derived(items.filter((i) => workState(i) !== 'closed').length)
   const closedCount = $derived(items.length - openCount)
@@ -246,6 +248,8 @@
       <div class="empty">Everything open is blocked. <button class="lnk" type="button" onclick={openForm}>Add a task</button></div>
     {:else if inSession.length}
       <div class="empty">A session is on it. <button class="lnk" type="button" onclick={openForm}>Add a task</button></div>
+    {:else if published.length}
+      <div class="empty">What is open is published and waits on its merge. <button class="lnk" type="button" onclick={openForm}>Add a task</button></div>
     {:else}
       <div class="empty">Nothing open here.</div>
     {/if}
@@ -266,6 +270,13 @@
     <div class="h5">In session <b>{inSession.length}</b></div>
     <div class="rows">
       {#each inSession as v (v.id)}<WorkRow item={v} {titles} {levels} project={label(v)} />{/each}
+    </div>
+  {/if}
+
+  {#if published.length}
+    <div class="h5">Published <b>{published.length}</b></div>
+    <div class="rows">
+      {#each published as v (v.id)}<WorkRow item={v} {titles} {levels} project={label(v)} />{/each}
     </div>
   {/if}
 

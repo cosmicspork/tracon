@@ -1596,7 +1596,9 @@ two minutes the node reads each change it opened, using the brokered credential 
 same status call the forge tools make. That covers CI, draft or ready, open, merged or
 closed, the review decision, and comments. It records what moved as a `forge_follow`
 event on the submitting session, so the event lands on that session's work item too, and
-pushes it named ("CI failed on `node`", "marked ready", "2 new comments"). The first
+pushes it named ("CI failed on `node`", "marked ready", "2 new comments"). It also
+records where the change stands on the submitting session's work item, and the merge
+closes that item unless it waits for the operator's acceptance. The first
 look is a baseline, not news. A change that has merged or closed is not read again.
 Following never merges, approves, retries or comments. It polls rather than taking
 webhooks, which would need the node reachable from the forge. A review with no
@@ -2040,9 +2042,21 @@ it unattended; `work_update` and `work_delete` are put to the operator, and are
 scoped to the caller's channel. Neither closes or deletes an item a session holds:
 closing ends the holder, which is the operator's call alone. A session is not
 offered `work_close` and cannot close its own item through `work_update`, and
-publishing its change does not close it either; the item stays open through CI and
-review until the operator closes the task (`POST /api/work/{id}/close`), which ends
-the session holding it, a suspended one at once.
+publishing its change does not close it either: publishing marks the item published
+(its change's address, the candidate it carries, and `published`), and the item stays
+open through CI and review until that change merges. Following the change carries its
+state onto the item (`published`, `merged`, or `closed` without merging), and the merge
+closes the item and ends the session holding it, a suspended one at once, so a plain
+coding task ends at merge with no extra step. An item can instead be set to need the
+operator's acceptance (`acceptance = "operator"`, from the task page or `work_update`;
+`merge` is the default): it then stays open after the merge until the operator accepts
+it (`POST /api/work/{id}/accept`). An acceptance names the candidate it judged and
+counts only while the item's change still carries that candidate, so a new
+publication inherits no earlier verdict; an acceptance of a candidate the item no
+longer carries is refused. These columns replicate with the item (sync schema step 11),
+so every node and `work_list`/`work_show` read the published-but-unmerged state the same
+way (`change.awaiting`: `merge` or `acceptance`). The operator can still close the task
+at any time (`POST /api/work/{id}/close`).
 
 **Work items are an opt-in structure, not a requirement.** A plain prompt starts
 an execute session claiming no item, plan, or review lifecycle at all. Naming an
@@ -2064,7 +2078,8 @@ read from recorded state, and the next action follows fixed rules over those rec
 so it cannot claim more than they say. Once the work is published, the next action
 follows the request through the `forge_follow` snapshots recorded on its sessions
 ("PR #149 is open · merge it", "CI failed on `node` · continue", "2 new comments ·
-continue", "PR #149 merged · close the task"); following only reads, so none of
+continue", "PR #149 merged · accept it to close the task" for an item that waits
+for acceptance); following only reads the forge, so none of
 that starts a session on its own. It offers three verbs. Continue carries the
 work on from the last ended or suspended attempt's workspace, in that attempt's phase, except
 that a plan session which wrote its plan is carried on by executing it. Change

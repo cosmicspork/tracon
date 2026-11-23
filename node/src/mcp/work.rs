@@ -2,9 +2,10 @@
 //! (the tool sorts, the model picks), `work_discover` records work found
 //! mid-session linked to its origin instead of evaporating with the
 //! session, and `work_close` closes the item a harness the operator runs
-//! names. A session the node started never closes the item it holds: that
-//! is the operator's call, once its change has landed, so until then the
-//! item stays open for CI failures and review comments to come back to.
+//! names. A session the node started never closes the item it holds: the
+//! item closes when its published change merges (or, for an item set to
+//! need it, once the operator accepts the candidate that merged), so until
+//! then it stays open for CI failures and review comments to come back to.
 
 use serde_json::{json, Value};
 
@@ -83,7 +84,10 @@ pub fn definitions() -> Vec<Value> {
             "name": WORK_LIST,
             "description": "The work ledger on this channel in the order sessions take it: each \
                             item's id, title, state, what blocks it, priority (with its level's \
-                            name), project and the session holding it. No bodies; work_show reads \
+                            name), project, the session holding it, and its published change: \
+                            `change.awaiting` is `merge` while the change is published but not \
+                            merged, `acceptance` once it merged on an item that waits for the \
+                            operator to accept it. No bodies; work_show reads \
                             one. A session sees its own project unless it names another. A harness \
                             you run yourself sees the whole channel, or one project by `project` or \
                             by a `worktree` of its repository.",
@@ -94,7 +98,9 @@ pub fn definitions() -> Vec<Value> {
                     "worktree": { "type": "string", "description": "Only for a harness you run yourself: a worktree of the project's repository." },
                     "state": {
                         "type": "string",
-                        "enum": ["ready", "blocked", "in_session", "open", "closed", "all"],
+                        "enum": ["ready", "blocked", "in_session", "published", "open", "closed", "all"],
+                        "description": "`published`: open items whose change is published and \
+                                        waits on its merge or on the operator's acceptance.",
                         "default": "open",
                     },
                     "query": { "type": "string", "description": "Words every item must contain in its title or body." },
@@ -105,7 +111,10 @@ pub fn definitions() -> Vec<Value> {
         json!({
             "name": WORK_SHOW,
             "description": "One work item in full: its body, priority, project, readiness, the \
-                            items it waits on, what was discovered from it, and its sessions. \
+                            items it waits on, what was discovered from it, its sessions, and its \
+                            published change and how the item ends: on merge (`acceptance`: \
+                            `merge`), or only once the operator accepts the merged candidate \
+                            (`operator`). \
                             Without an `id`, the item this session holds. An id may be \
                             shortened to its first 6 or more characters.",
             "inputSchema": {
@@ -118,7 +127,8 @@ pub fn definitions() -> Vec<Value> {
         json!({
             "name": WORK_UPDATE,
             "description": "Change a work item on this channel: its title, body, priority, the \
-                            items it waits on, its project, or reopen or close it. Only the fields \
+                            items it waits on, its project, whether it needs the operator's \
+                            acceptance after its change merges, or reopen or close it. Only the fields \
                             given change. Closing this session's own item, or one another session \
                             is working on, is refused: the operator closes those. The operator is \
                             asked first. An asked call \
@@ -135,6 +145,13 @@ pub fn definitions() -> Vec<Value> {
                     "project": { "type": "string", "description": "A project's name or id, or `none`." },
                     "worktree": { "type": "string", "description": "Only for a harness you run yourself: set the project to this worktree's repository." },
                     "state": { "type": "string", "enum": ["open", "closed"] },
+                    "acceptance": {
+                        "type": "string",
+                        "enum": ["merge", "operator"],
+                        "description": "`merge`: the item closes when its change merges. \
+                                        `operator`: it stays open after the merge until the \
+                                        operator accepts the candidate that merged.",
+                    },
                     "summary": { "type": "string", "description": "Why, when closing." },
                 },
                 "required": ["id"],
@@ -223,9 +240,13 @@ fn item_json(
         })),
         "deps": item.deps,
         "holder": view.session_id,
+        "acceptance": item.acceptance,
     });
     if !blocked_by.is_empty() {
         v["blocked_by"] = json!(blocked_by);
+    }
+    if let Some(change) = change_json(item) {
+        v["change"] = change;
     }
     if with_body {
         v["body"] = json!(item.body);
@@ -235,6 +256,21 @@ fn item_json(
         v["updated_ms"] = json!(item.updated_ms);
     }
     v
+}
+
+/// The item's published change, as the ledger tools show it: where it is,
+/// where it stands (`published`, `merged`, `closed`), and what the item
+/// still waits on before it closes (`merge`, `acceptance`, or `abandoned`
+/// for a change closed without merging). `None` when nothing is published.
+fn change_json(item: &tracon_sync::work::WorkItem) -> Option<Value> {
+    let url = item.change_url.as_ref()?;
+    Some(json!({
+        "url": url,
+        "state": item.change_state,
+        "candidate": item.change_candidate,
+        "accepted": item.accepted(),
+        "awaiting": item.landing(),
+    }))
 }
 
 /// The project an argument names: `none` clears it, anything else is a
@@ -288,13 +324,13 @@ pub(crate) async fn external_project(
 
 /// Why a session's `work_update` closing the item it holds is refused, or
 /// `None` when it is not that call. Closing ends the session on the item, and
-/// that is the operator's call: the item stays open through CI and review
-/// until they close it.
+/// that is not the holder's call: the item stays open through CI and review
+/// until its change merges, or the operator closes it.
 fn closing_own(ctx: &CallContext, held: Option<&str>, item: &str, closing: bool) -> Option<String> {
     (closing && !ctx.is_external() && held == Some(item)).then(|| {
         format!(
-            "{item} is the item this session holds; the operator closes it, once its change \
-             is merged"
+            "{item} is the item this session holds; its change's merge closes it, or the \
+             operator closes it"
         )
     })
 }
@@ -453,8 +489,8 @@ pub async fn call(
         // No session is offered it (`Tools::NOT_EXECUTE`); said again here
         // so a call that reaches this anyway closes nothing.
         WORK_CLOSE => Err(
-            "the operator closes the item a session holds; it stays open \
-                           through CI and review until they do"
+            "the operator closes the item a session holds, or its change's merge does; it \
+             stays open through CI and review until then"
                 .into(),
         ),
         WORK_LIST => {
@@ -556,6 +592,7 @@ pub async fn call(
                 title: args["title"].as_str().map(str::to_string),
                 body: args["body"].as_str().map(str::to_string),
                 priority: priority_arg(cfg, &args["priority"])?,
+                acceptance: args["acceptance"].as_str().map(str::to_string),
                 ..Default::default()
             };
             if let Some(deps) = args["deps"].as_array() {
