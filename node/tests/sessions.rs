@@ -7414,6 +7414,116 @@ async fn a_compaction_is_recorded_as_it_starts_not_only_when_it_ends() {
     tracon::session::materialize::remove(&id);
 }
 
+/// Before the operator's compaction runs, the session's conversation and
+/// scratchpad are saved into its harness-state package, and read back from
+/// the session: listed, opened, and exported whole.
+#[tokio::test]
+async fn a_compaction_is_saved_first_and_read_back_from_the_session() {
+    state::isolate();
+    let (o, _adapter, operator) = reopening("saved-context").await;
+    let id = o.row.id.clone();
+    let scratch = tracon::config::Config::state_dir()
+        .join("local-runtime")
+        .join(tracon::workspace::scratch_volume_name(&id));
+    // The agent's notes, as its sandbox would have handed them back.
+    std::fs::create_dir_all(scratch.join("scratchpad/plans")).unwrap();
+    std::fs::write(
+        scratch.join("scratchpad/plans/next.md"),
+        "the view is next\n",
+    )
+    .unwrap();
+    let since = o
+        .store
+        .events_after(&id, 0, 2000)
+        .unwrap()
+        .last()
+        .map_or(0, |e| e.seq);
+
+    o.manager.compact(&id).await.unwrap();
+    until_row(&o.store, &id, "compacted", |s| {
+        s.turn_active == 0 && !events_of(&o.store, &id, "context_compacted").is_empty()
+    })
+    .await;
+    let kinds: Vec<String> = o
+        .store
+        .events_after(&id, since, 2000)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.kind)
+        .filter(|k| k.starts_with("context_"))
+        .collect();
+    assert_eq!(
+        kinds,
+        ["context_compacting", "context_saved", "context_compacted"],
+        "saved before the harness compacted, once: {kinds:?}"
+    );
+    let saved = &events_of(&o.store, &id, "context_saved")[0];
+    assert_eq!(saved["before"], "compaction", "{saved}");
+    assert_eq!(saved["trigger"], "manual", "{saved}");
+    assert_eq!(saved["scratchpad_files"], 1, "{saved}");
+    assert!(saved["error"].is_null(), "{saved}");
+    // Beside the harness state, never in the sandbox's mounts.
+    assert!(scratch
+        .join("saved/0001-compaction/conversation.md")
+        .is_file());
+
+    let (st, v) =
+        support::http::call(&operator, "GET", &format!("/api/sessions/{id}/saved"), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["saves"].as_array().unwrap().len(), 1, "{v}");
+    assert_eq!(v["saves"][0]["name"], "0001-compaction", "{v}");
+
+    let (st, v) = support::http::call(
+        &operator,
+        "GET",
+        &format!("/api/sessions/{id}/saved/1"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let conversation = v["conversation"].as_str().unwrap();
+    let kickoff = events_of(&o.store, &id, "user_prompt")[0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(conversation.contains(&kickoff), "{conversation}");
+    assert!(conversation.contains("## Orientation"), "{conversation}");
+    assert_eq!(v["files"][0]["path"], "scratchpad/plans/next.md", "{v}");
+
+    let (st, v) = support::http::call(
+        &operator,
+        "GET",
+        &format!("/api/sessions/{id}/saved/1/export"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["kind"], "tracon.saved_context", "{v}");
+    assert_eq!(v["session_id"], id.as_str(), "{v}");
+    assert_eq!(v["manifest"]["before"], "compaction", "{v}");
+    assert_eq!(v["files"][0]["text"], "the view is next\n", "{v}");
+
+    let (st, _) = support::http::call(
+        &operator,
+        "GET",
+        &format!("/api/sessions/{id}/saved/9"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+
+    // The orientation told the agent where its scratchpad is.
+    let told = events_of(&o.store, &id, "orientation")[0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        told.contains("Your scratchpad is `/root/scratchpad`"),
+        "{told}"
+    );
+    tracon::session::materialize::remove(&id);
+}
+
 /// A suspended session is asked the same way: it wakes as itself, on its
 /// workspace and in its conversation, and is not carried on as a new one.
 #[tokio::test]

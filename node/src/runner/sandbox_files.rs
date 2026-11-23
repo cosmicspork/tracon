@@ -1423,6 +1423,19 @@ pub async fn turn_ended(name: &str) {
     }
 }
 
+/// Take the trees of the running sandbox of this name back now, as a
+/// turn's end does: before the node saves what it holds of them
+/// (`session::saved`). `None` when no running session's sandbox of that
+/// name takes trees back (its files are mounted, or it has ended), so the
+/// node's copy is already all there is.
+pub async fn sync_named(name: &str) -> Option<Result<(), FilesError>> {
+    let inner = named(name)?;
+    if inner.conn.is_closed() {
+        return None;
+    }
+    Some(inner.sync_logged("save").await)
+}
+
 /// The sandbox of this name is about to be removed: take its trees back
 /// first.
 pub async fn finish_named(name: &str) {

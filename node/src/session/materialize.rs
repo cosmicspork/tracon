@@ -435,6 +435,17 @@ pub fn scratch_for(
         format!("{home}/.gitconfig"),
         true,
     ));
+    // The agent's own notes, kept across its context: in its scratch volume,
+    // taken back with its harness state and saved with its conversation
+    // before each compaction (`session::saved`). What a reopening finds in
+    // the volume is kept; the staging only makes sure it exists.
+    std::fs::create_dir_all(dir.join(crate::session::saved::SCRATCHPAD))?;
+    mounts.push(Mount::at(
+        &volume,
+        crate::session::saved::SCRATCHPAD,
+        crate::session::saved::scratchpad_target(home),
+        false,
+    ));
 
     Ok(Scratch {
         dir,

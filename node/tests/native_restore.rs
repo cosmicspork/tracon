@@ -19,6 +19,7 @@ use tracon::adapter::{
     LaunchSpec, ModelOption, ProtocolSupport, Resume, TurnResult,
 };
 use tracon::runner::Runner;
+use tracon::session::saved::Saver;
 use tracon::session::supervisor::{Command, Prompted, Relaunch, Supervisor};
 use tracon::store::{now_ms, Store, UsageRow};
 use tracon::stream::Bus;
@@ -187,7 +188,14 @@ impl Rig {
         .with_relaunch(Relaunch {
             adapter: Arc::new(adapter.clone()),
             spec: spec(),
-        });
+        })
+        // Saved as the native harness's would be: its journal is where
+        // `NativeAdapter` says it is.
+        .with_saver(Saver::new(
+            Arc::new(tracon::runner::local::LocalBackend),
+            Arc::new(tracon::adapter::native::NativeAdapter::new("1.0.0")),
+            &id,
+        ));
         tokio::spawn(sup.run(events, cmd_rx));
         let rig = Self {
             store,
@@ -197,6 +205,39 @@ impl Rig {
         };
         rig.wait("running", |r| r.state() == "running").await;
         rig
+    }
+
+    /// The session's scratch volume, as the local backend keeps it.
+    fn scratch(&self) -> std::path::PathBuf {
+        tracon::config::Config::state_dir()
+            .join("local-runtime")
+            .join(tracon::workspace::scratch_volume_name(&self.id))
+    }
+
+    /// The harness's journal and a note in the scratchpad, in the node's copy
+    /// of the session's harness state.
+    fn keeps_a_journal_and_notes(&self) {
+        let journal = self.scratch().join("harness/run/sessions");
+        std::fs::create_dir_all(&journal).unwrap();
+        std::fs::write(
+            journal.join("h-1.jsonl"),
+            "{\"kind\":\"tool_result\",\"content\":\"every byte of the output\"}\n",
+        )
+        .unwrap();
+        // Another conversation's journal is not this one's.
+        std::fs::write(journal.join("h-other.jsonl"), "not this one\n").unwrap();
+        let pad = self.scratch().join("scratchpad");
+        std::fs::create_dir_all(&pad).unwrap();
+        std::fs::write(pad.join("notes.md"), "the validator is in src/check.rs\n").unwrap();
+    }
+
+    fn kinds(&self) -> Vec<String> {
+        self.store
+            .events_after(&self.id, 0, 500)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.kind)
+            .collect()
     }
 
     fn state(&self) -> String {
@@ -592,4 +633,124 @@ async fn a_subagents_calls_are_recorded_under_its_spawn() {
     assert_eq!(ask["tool_call_id"], "c1/c2");
     assert_eq!(ask["parent"], "c1");
     assert_eq!(ask["title"], "[look] read src/lib.rs");
+}
+
+/// A harness started again rebuilds its context from its record: what the
+/// dead process held is saved first, the log's conversation with the
+/// journal and the scratchpad, in the session's harness-state package.
+#[tokio::test]
+async fn a_restart_saves_the_conversation_and_scratchpad_first() {
+    let rig = Rig::start().await;
+    rig.keeps_a_journal_and_notes();
+    rig.prompt("do the thing").await;
+    rig.calls("Bash").await;
+    rig.die().await;
+    rig.wait("the restart", |r| !r.events("harness_restarted").is_empty())
+        .await;
+
+    let kinds = rig.kinds();
+    let saved_at = kinds.iter().position(|k| k == "context_saved").unwrap();
+    let restarted_at = kinds.iter().position(|k| k == "harness_restarted").unwrap();
+    assert!(saved_at < restarted_at, "{kinds:?}");
+    let saved = &rig.events("context_saved")[0];
+    assert_eq!(saved["before"], "restart", "{saved}");
+    assert_eq!(saved["index"], 1, "{saved}");
+    assert_eq!(saved["transcript_files"], 1, "{saved}");
+    assert_eq!(saved["scratchpad_files"], 1, "{saved}");
+    assert_eq!(saved["synced"], false, "no sandbox ran it: {saved}");
+
+    let (got, files) =
+        tracon::session::saved::read(&tracon::runner::local::LocalBackend, &rig.id, 1, true)
+            .await
+            .unwrap()
+            .expect("the save is there");
+    assert_eq!(got.manifest.before, "restart");
+    assert_eq!(got.manifest.harness, "native");
+    assert_eq!(got.manifest.harness_session_id, "h-1");
+    assert!(
+        got.conversation.contains("do the thing"),
+        "{}",
+        got.conversation
+    );
+    assert!(
+        got.conversation.contains("### Tool call: Bash"),
+        "{}",
+        got.conversation
+    );
+    let text = |path: &str| {
+        files
+            .iter()
+            .find(|f| f["path"] == path)
+            .unwrap_or_else(|| panic!("{path} in {files:?}"))["text"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert!(text("transcript/harness/run/sessions/h-1.jsonl").contains("every byte"));
+    assert_eq!(
+        text("scratchpad/notes.md"),
+        "the validator is in src/check.rs\n"
+    );
+    assert!(
+        !files
+            .iter()
+            .any(|f| f["path"].as_str().unwrap().contains("h-other")),
+        "{files:?}"
+    );
+    // In the scratch volume, beside the harness state, where the harness is
+    // never given it.
+    assert!(rig.scratch().join("saved/0001-restart/save.json").is_file());
+    assert!(rig
+        .scratch()
+        .join("harness/run/sessions/h-1.jsonl")
+        .is_file());
+}
+
+/// A compaction the harness starts on its own is saved as it says it has
+/// begun, once; one that said nothing as it began is saved as it ends.
+#[tokio::test]
+async fn a_compaction_the_harness_starts_is_saved_once_as_it_begins() {
+    let rig = Rig::start().await;
+    rig.keeps_a_journal_and_notes();
+    rig.prompt("fill the window").await;
+    let tx = rig.adapter.events.lock().unwrap().last().unwrap().clone();
+    tx.send(HarnessEvent::Other(json!({
+        "sessionUpdate": "context_compacting",
+        "trigger": "threshold",
+    })))
+    .await
+    .unwrap();
+    tx.send(HarnessEvent::Other(json!({
+        "sessionUpdate": "context_compacted",
+        "trigger": "threshold",
+        "summary": "fixed the validator",
+    })))
+    .await
+    .unwrap();
+    rig.wait("the save", |r| !r.events("context_saved").is_empty())
+        .await;
+    let saved = &rig.events("context_saved")[0];
+    assert_eq!(saved["before"], "compaction", "{saved}");
+    assert_eq!(saved["trigger"], "threshold", "{saved}");
+    assert_eq!(saved["transcript_files"], 1, "{saved}");
+
+    // No start said: saved at its end.
+    tx.send(HarnessEvent::Other(json!({
+        "sessionUpdate": "context_compacted",
+        "trigger": "overflow",
+    })))
+    .await
+    .unwrap();
+    rig.wait("the second save", |r| r.events("context_saved").len() == 2)
+        .await;
+    let second = &rig.events("context_saved")[1];
+    assert_eq!(second["index"], 2, "{second}");
+    assert_eq!(second["trigger"], "overflow", "{second}");
+    let saves = tracon::session::saved::list(&tracon::runner::local::LocalBackend, &rig.id)
+        .await
+        .unwrap();
+    let names: Vec<_> = saves.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(names, ["0001-compaction", "0002-compaction"]);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(rig.events("context_saved").len(), 2, "each saved once");
 }
