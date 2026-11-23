@@ -46,7 +46,9 @@ const PREV = 'c41e8b07a3d9f2e6b5c1a8d4e7f0b3c9a2d6e5f1'
 const FIRST = '2a9e4c7b1f8d3a6e0c5b9f2d7a4e1c8b6f3d0a95'
 const BASE_SHA = 'e8b1d4a7c0f3e6b9d2a5c8f1e4b7d0a3c6f9e2b5'
 const TREE = '5c0a7e2d9b4f1c6e3a8d5b2f9c4e1a7d0b6f3e8c'
-const ID = 'r-rate'
+// Ids, not names: an address with a name in it is resolved first (#1031).
+const ID = '7d3f9a1c-5e2b-4c1d-9a0f-3b6e8d2c4a71'
+const REPORT_ID = '9e4b2c7a-1f3d-4a8e-b6c5-2d7f0e9a3b18'
 
 /** Small `*_ms` values are offsets from now, as in api.json; durations are not. */
 function stamp(v, now) {
@@ -510,7 +512,7 @@ const REPORT_HASH = 'b2c7e19f04a6d83c5e1f7a9b0d4c2e8f6a3b5d1c9e7f0a2b4d6c8e1f3a5
 function report(o = {}) {
   return {
     ...review({
-      id: 'r-report',
+      id: REPORT_ID,
       kind: 'report',
       title: 'Why the nightly import has been slow since Tuesday',
       body:
@@ -596,7 +598,7 @@ export default [
   }),
 
   state('large', 'A 42-file mechanical rename', {
-    note: 'Many files in the list and a long diff in its scroll box; phone shows the per-file accordion.',
+    note: 'Many files in the list, each with its diff under its own header; phone shows them folded.',
     detail: raw(
       details({
         review: {
@@ -756,6 +758,37 @@ export default [
     ),
   }),
 
+  state('diff-unified', 'The diff switched to unified', {
+    note: 'Deletions above the lines that replace them, changed words marked; the choice is remembered on this device.',
+    since: '#1087',
+    sizes: ['desktop'],
+    act: async (page) => {
+      await page.getByRole('radio', { name: 'Unified' }).click()
+      await settle(page, 500)
+    },
+  }),
+
+  state('diff-phone-file-open', 'Phone, one file of the diff opened', {
+    note: 'Unified by default on a narrow screen; the other files stay folded.',
+    since: '#1087',
+    sizes: ['phone'],
+    act: async (page) => {
+      await page.locator('summary', { hasText: 'src/gateway/mod.rs' }).click()
+      await settle(page, 500)
+    },
+  }),
+
+  state('diff-phone-side-by-side', 'Phone, side by side chosen', {
+    note: 'Side by side still aligns on a narrow screen; each side scrolls sideways with the other.',
+    since: '#1087',
+    sizes: ['phone'],
+    act: async (page) => {
+      await page.getByRole('radio', { name: 'Side by side' }).click()
+      await page.locator('summary', { hasText: 'src/gateway/mod.rs' }).click()
+      await settle(page, 500)
+    },
+  }),
+
   state('since-full', 'Resubmission, switched to the full change', {
     since: '#396',
     detail: raw(
@@ -876,7 +909,7 @@ export default [
     since: '#381',
     detail: raw(details({ publication: { readiness: READY, latest: publication({ note: 'GitHub answered 502 Bad Gateway' }) } })),
     api: {
-      'POST /api/reviews/r-rate/publication/recover': { status: 502, body: { error: { code: 502, message: 'GitHub answered 502 Bad Gateway while reading the branch; nothing was pushed' } } },
+      [`POST /api/reviews/${ID}/publication/recover`]: { status: 502, body: { error: { code: 502, message: 'GitHub answered 502 Bad Gateway while reading the branch; nothing was pushed' } } },
     },
     act: async (page) => {
       await click(page, 'Retry publication')
@@ -1281,7 +1314,7 @@ export default [
     note: 'Every file binary, new without a base, or deleted: the "nothing here can be edited" banner.',
     sizes: ['desktop'],
     detail: raw(details({ review: { diff: KINDS_DIFF, files: files(KINDS_PATHS), added: 2, removed: 10 } })),
-    api: { '/api/reviews/r-rate/file': (req) => ({ path: req.query.path, text: null }) },
+    api: { [`/api/reviews/${ID}/file`]: (req) => ({ path: req.query.path, text: null }) },
     act: async (page) => {
       await click(page, 'Edit the diff')
       await settle(page, 800)
@@ -1347,23 +1380,23 @@ export default [
 
   // Narrative reports render through ReportReview.
   state('report', 'Narrative report awaiting acknowledgement', {
-    rid: 'r-report',
+    rid: REPORT_ID,
     note: 'The report body rendered as Markdown (headings, a list, inline code), with a long unbroken URL, and the decision form.',
     detail: raw(reportDetail()),
   }),
 
   state('report-revising', 'Narrative report, changes requested', {
-    rid: 'r-report',
+    rid: REPORT_ID,
     detail: raw(reportDetail({ state: 'revising', verdict_reason: 'Measure option 2 before suggesting it.' })),
   }),
 
   state('report-acknowledged', 'Narrative report, acknowledged', {
-    rid: 'r-report',
+    rid: REPORT_ID,
     detail: raw(reportDetail({ state: 'acknowledged', verdict_reason: 'Go with batching.', session_id: 's-run', lane: null })),
   }),
 
   state('report-refused', 'Narrative report, decision refused', {
-    rid: 'r-report',
+    rid: REPORT_ID,
     note: 'A note typed and Request changes pressed after the report was resubmitted.',
     api: {
       'POST /api/reviews/*/verdict': { status: 409, body: { error: { code: 409, message: 'this report was resubmitted while it was being decided; reload it and decide again' } } },
@@ -1377,7 +1410,7 @@ export default [
   }),
 
   state('report-unavailable', 'Narrative report in a state this node cannot read', {
-    rid: 'r-report',
+    rid: REPORT_ID,
     note: 'A mirrored report whose state is not one ReportReview knows: the receipt-unavailable banner.',
     detail: raw(reportDetail({ state: 'gone', node_id: PEER })),
   }),

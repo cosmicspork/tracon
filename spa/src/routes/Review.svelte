@@ -2,6 +2,7 @@
   import ReportReview from '../components/ReportReview.svelte'
   import Name from '../components/Name.svelte'
   import Diff from '../components/Diff.svelte'
+  import ReviewDiff from '../components/ReviewDiff.svelte'
   import { splitDiff } from '../lib/diff'
   import CommitMessage from '../components/CommitMessage.svelte'
   import ShownWork from '../components/ShownWork.svelte'
@@ -328,8 +329,8 @@
 
   // Editing the diff, desktop only. The phone directs; it does not edit.
   let editing = $state(false)
-  // CodeMirror is most of a megabyte and the phone never opens it, so it is
-  // fetched when the operator asks to edit rather than on every page load.
+  // The editor is fetched when the operator asks to edit rather than on every
+  // page load; the diff fetches CodeMirror itself, once it shows.
   let DiffEditor = $state<typeof import('../components/DiffEditor.svelte').default | null>(null)
   let loadingFiles = $state(false)
   let fileError = $state<string | null>(null)
@@ -655,15 +656,18 @@
     return failuresOf(run) || run.log.trimEnd().split('\n').slice(-12).join('\n')
   }
 
+  /** The diff showing when the editor is not. */
+  let reviewDiff = $state<ReturnType<typeof ReviewDiff> | null>(null)
+
   /** Scroll to a file's changes, in the diff or the editor, whichever is showing. */
   async function showFile(path: string) {
     if (!editing && diffView === 'since' && !sinceReviewed?.files?.some((f) => f.path === path)) {
       diffView = 'full'
       await tick()
     }
-    const at = CSS.escape(path)
+    if (!editing) return reviewDiff?.showFile(path)
     document
-      .querySelector(editing ? `.filehead[data-path="${at}"]` : `.diff [data-path="${at}"]`)
+      .querySelector(`.filehead[data-path="${CSS.escape(path)}"]`)
       ?.scrollIntoView({ block: 'start', behavior: 'smooth' })
   }
 
@@ -1477,9 +1481,9 @@
       </div>
     {/if}
     {#if diffView === 'since' && sinceReviewed?.diff}
-      <Diff diff={sinceReviewed.diff} perFile={surface.phone} />
+      <ReviewDiff bind:this={reviewDiff} diff={sinceReviewed.diff} collapsed={surface.phone} />
     {:else}
-      <Diff diff={review.diff} perFile={surface.phone} />
+      <ReviewDiff bind:this={reviewDiff} diff={review.diff} collapsed={surface.phone} />
     {/if}
   {/if}
 
