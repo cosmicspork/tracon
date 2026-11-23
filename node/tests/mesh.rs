@@ -145,31 +145,136 @@ async fn pair_managed() -> (Node, Node, support::mesh::TestHub) {
     (a, b, test_hub)
 }
 
+/// Read the member list until `check` holds, for a hub that learns of a
+/// stream opening or closing on its own time.
+async fn until(node: &Node, check: impl Fn(&Node) -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        node.client.refresh_members().await.unwrap();
+        if check(node) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "member list never settled"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 #[tokio::test]
-async fn hello_makes_a_peer_visible_and_presence_ages_it_out() {
+async fn hello_makes_a_peer_known_and_its_event_stream_makes_it_reachable() {
     state::isolate();
     let (a, b) = pair().await;
     let mut b_sub = b.bus.subscribe();
-    a.client.hello().await.unwrap();
+    assert!(a.client.hello().await.unwrap());
     assert_eq!(b.client.pull_once().await.unwrap(), 1);
-    let nodes = b.store.list_nodes().unwrap();
-    let peer = nodes.iter().find(|n| n.id == a.id.node_id()).unwrap();
+    let peer = b.store.get_node(&a.id.node_id()).unwrap().unwrap();
     assert_eq!(peer.name, "alpha");
     assert_eq!(peer.is_self, 0);
-    assert_eq!(peer.reachable, 1);
-    assert!(peer.last_seen_ms.is_some());
+    // A hello is news about the peer, not presence: it is not connected.
+    assert_eq!(peer.reachable, 0);
     let f = next_frame(&mut b_sub).await;
     assert!(matches!(f, Frame::Node(ref v) if v["id"] == a.id.node_id() && v["is_self"] == false));
     assert!(matches!(b.client.snapshot().hub, HubState::Connected));
 
-    // Long after the last hello, the peer dims; the change is published.
-    b.client.presence_tick(now_ms() + 3 * 60_000 + 1);
-    let peer = b.store.get_node(&a.id.node_id()).unwrap().unwrap();
-    assert_eq!(peer.reachable, 0);
-    let f = next_frame(&mut b_sub).await;
-    assert!(matches!(f, Frame::Node(ref v) if v["reachable"] == false));
+    // A holds its events stream: the hub lists it connected, and B marks it
+    // reachable with the hub's last-seen.
+    let listening = {
+        let client = a.client.clone();
+        tokio::spawn(async move { client.sse_once().await })
+    };
+    let peer_id = a.id.node_id();
+    until(&b, |b| b.client.peer_reachable(&peer_id)).await;
+    assert!(b
+        .store
+        .get_node(&peer_id)
+        .unwrap()
+        .unwrap()
+        .last_seen_ms
+        .is_some());
+    loop {
+        if matches!(next_frame(&mut b_sub).await, Frame::Node(ref v) if v["reachable"] == true) {
+            break;
+        }
+    }
+
+    // A's stream ends: B dims it, and says so.
+    listening.abort();
+    until(&b, |b| !b.client.peer_reachable(&peer_id)).await;
+    loop {
+        if matches!(next_frame(&mut b_sub).await, Frame::Node(ref v) if v["reachable"] == false) {
+            break;
+        }
+    }
+    // A hello now does not bring it back.
+    assert!(a.client.hello_at(now_ms() + 31 * 60_000).await.unwrap());
+    b.client.pull_once().await.unwrap();
+    assert!(!b.client.peer_reachable(&peer_id));
     // A's own hello echoed back changes nothing on A.
     assert_eq!(a.client.pull_once().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn a_hello_is_sent_when_it_says_something_new_or_after_half_an_hour() {
+    state::isolate();
+    let (a, b) = pair().await;
+    let now = now_ms();
+    assert!(a.client.hello_at(now).await.unwrap());
+    // Nothing new: not sent again, however often asked within the half hour.
+    assert!(!a.client.hello_at(now + 1_000).await.unwrap());
+    assert!(!a.client.hello_at(now + 29 * 60_000).await.unwrap());
+    // Only the time of the boundary check moved: still no news.
+    let mut row = a.store.get_node(&a.id.node_id()).unwrap().unwrap();
+    row.checked_at_ms = Some(now + 5);
+    a.store.put_node(&row).unwrap();
+    assert!(!a.client.hello_at(now + 29 * 60_000).await.unwrap());
+    // Half an hour on, it is said again.
+    assert!(a.client.hello_at(now + 30 * 60_000).await.unwrap());
+    // Something new is said at once.
+    row.name = "alpha-renamed".into();
+    a.store.put_node(&row).unwrap();
+    assert!(a.client.hello_at(now + 30 * 60_000 + 1).await.unwrap());
+    assert_eq!(b.client.pull_once().await.unwrap(), 3);
+    let peer = b.store.get_node(&a.id.node_id()).unwrap().unwrap();
+    assert_eq!(peer.name, "alpha-renamed");
+}
+
+/// A running node reads the member list again as soon as the hub pokes
+/// `members`, not at its next periodic refresh minutes later.
+#[tokio::test]
+async fn a_members_poke_refreshes_presence_at_once() {
+    state::isolate();
+    let (a, b) = pair().await;
+    // B runs its loops, holding its own events stream.
+    let _tap = b.client.spawn();
+    let peer_id = a.id.node_id();
+    // Let B's first member read, from its loops starting, go by first.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(!b.client.peer_reachable(&peer_id));
+    let listening = {
+        let client = a.client.clone();
+        tokio::spawn(async move { client.sse_once().await })
+    };
+    // The periodic refresh is five heartbeats (minutes) away; only the poke
+    // can bring this within the deadline.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !b.client.peer_reachable(&peer_id) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no refresh on the members poke"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    listening.abort();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while b.client.peer_reachable(&peer_id) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no refresh on the members poke"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
 }
 
 #[tokio::test]
@@ -511,7 +616,8 @@ async fn a_refusal_leaves_the_hub_connected() {
 
     // The hub answers, and says no: it is up, and the refusal is recorded.
     assert!(hub.members.remove(&a.id.node_id()).unwrap());
-    assert!(a.client.hello().await.is_err());
+    // Nothing new would wait half an hour; past that, it asks.
+    assert!(a.client.hello_at(now_ms() + 31 * 60_000).await.is_err());
     let snap = a.client.snapshot();
     assert!(matches!(snap.hub, HubState::Connected));
     assert_eq!(
@@ -1036,19 +1142,21 @@ async fn a_returning_peer_is_sent_what_could_not_be_queued_for_it() {
     a.client.dispatch_policy_rollout("r1").unwrap();
     assert_eq!(target(&a, "r1").status, "offline");
 
-    // B's hello brings its key and makes it reachable; that is the moment.
+    // B's hello brings its key; the hub listing it connected makes it
+    // reachable, and that is the moment.
     b.client.hello().await.unwrap();
     a.client.pull_once().await.unwrap();
+    a.client.note_hub_presence(&b.id.node_id(), true);
     assert_eq!(target(&a, "r1").status, "sent");
 
-    // Gone quiet, then heard from again: a presence tick that finds it fresh
-    // retries what was left unqueued in between.
-    a.client.presence_tick(now_ms() + 60 * 60_000);
+    // Gone, then back: the hub listing it connected again retries what was
+    // left unqueued in between.
+    a.client.note_hub_presence(&b.id.node_id(), false);
     assert!(!a.client.peer_reachable(&b.id.node_id()));
     a.store
         .mark_policy_rollout_offline("r1", &b.id.node_id(), "outbox error")
         .unwrap();
-    a.client.presence_tick(now_ms());
+    a.client.note_hub_presence(&b.id.node_id(), true);
     let t = target(&a, "r1");
     assert_eq!(t.status, "sent");
     assert_eq!(t.attempts, 2);
@@ -1061,6 +1169,7 @@ async fn an_unconfirmed_rollout_is_resent_only_after_the_wait_and_only_to_a_reac
     b.client.hello().await.unwrap();
     a.client.pull_once().await.unwrap();
     let peer = b.id.node_id();
+    a.client.note_hub_presence(&peer, true);
     assert!(a.client.peer_reachable(&peer));
     policy_rollout(&a, &b, "r1", "version = 7\n", "00", &"11".repeat(32));
     a.client.dispatch_policy_rollout("r1").unwrap();
@@ -1082,7 +1191,7 @@ async fn an_unconfirmed_rollout_is_resent_only_after_the_wait_and_only_to_a_reac
 
     // An unreachable peer is not sent the same frame over and over: the hub
     // already holds one for it.
-    a.client.presence_tick(now + 2 * wait);
+    a.client.note_hub_presence(&peer, false);
     assert!(!a.client.peer_reachable(&peer));
     assert_eq!(
         a.client
@@ -1281,9 +1390,11 @@ async fn a_revoke_sent_while_the_peer_was_offline_arrives_when_it_returns() {
     a.client.dispatch_credential_revoke(&id).unwrap();
     assert_eq!(revoke_status(&a, &id), "offline");
 
-    // B's hello brings its key and makes it reachable; the revoke follows.
+    // B's hello brings its key; the hub listing it connected makes it
+    // reachable, and the revoke follows.
     b.client.hello().await.unwrap();
     a.client.pull_once().await.unwrap();
+    a.client.note_hub_presence(&b.id.node_id(), true);
     assert_eq!(revoke_status(&a, &id), "sent");
     a.client.drain_once().await.unwrap();
     b.client.pull_once().await.unwrap();
@@ -1348,6 +1459,7 @@ async fn an_unanswered_revoke_is_abandoned_after_its_last_send() {
     let (a, b) = pair().await;
     b.client.hello().await.unwrap();
     a.client.pull_once().await.unwrap();
+    a.client.note_hub_presence(&b.id.node_id(), true);
     let id = a
         .store
         .create_credential_revoke("glab", Some("0190-a"), 0, &[b.id.node_id()])
@@ -1379,6 +1491,7 @@ async fn an_abandoned_revoke_is_sent_again_when_its_peer_comes_back() {
     b.client.hello().await.unwrap();
     a.client.pull_once().await.unwrap();
     let peer = b.id.node_id();
+    a.client.note_hub_presence(&peer, true);
     let id = a
         .store
         .create_credential_revoke("glab", Some("0190-a"), 0, std::slice::from_ref(&peer))
@@ -1386,14 +1499,14 @@ async fn an_abandoned_revoke_is_sent_again_when_its_peer_comes_back() {
     assert!(a.store.abandon_credential_revoke(&id, &peer).unwrap());
 
     // Still reachable: nothing is sent.
-    a.client.presence_tick(now_ms());
+    a.client.note_hub_presence(&peer, true);
     assert_eq!(revoke_status(&a, &id), "abandoned");
-    a.client.presence_tick(now_ms() + 60 * 60_000);
+    a.client.note_hub_presence(&peer, false);
     assert!(!a.client.peer_reachable(&peer));
     assert_eq!(revoke_status(&a, &id), "abandoned");
 
-    // Heard from again: the revoke goes out anew.
-    a.client.presence_tick(now_ms());
+    // Back again: the revoke goes out anew.
+    a.client.note_hub_presence(&peer, true);
     let target = a.store.credential_revoke_targets(&id).unwrap().remove(0);
     assert_eq!(target.status, "sent", "{target:?}");
     assert_eq!(target.attempts, 1);

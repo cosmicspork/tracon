@@ -1,5 +1,6 @@
 //! tracon hub: the always-on relay. It verifies who is speaking, appends sealed
-//! frames per channel with a monotonic sequence, pokes members to pull, and
+//! frames per channel with a monotonic sequence, pokes members to pull, says
+//! which members are connected (holding an events stream), and
 //! brokers enrollment slots. It holds no channel keys and opens no frame.
 //!
 //! [`app`] builds the router over trait-object stores so tests run the same

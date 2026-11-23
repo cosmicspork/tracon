@@ -184,6 +184,14 @@ pub struct MeshClient {
     /// to be pushed; `push_wake` says there are some.
     review_dirty: Mutex<std::collections::HashSet<String>>,
     push_wake: Notify,
+    /// Peer node id → whether the hub last listed it connected (holding an
+    /// events stream). The hub's word is the only presence there is: a
+    /// peer's own frames never mark it reachable.
+    hub_presence: Mutex<HashMap<String, bool>>,
+    /// Wakes the member refresh (the hub poked `members` or `sync`).
+    members_wake: Notify,
+    /// The last hello sent: a hash of what it said, and when.
+    hello_sent: Mutex<Option<(u64, i64)>>,
 }
 
 /// How often a refused handoff from one sender may have the member list read
@@ -196,6 +204,9 @@ const REREAD_BACKOFF_MS: i64 = 5 * 60_000;
 /// one listing starts reading again, so a peer with a long history of them
 /// is repaired over several listings rather than all at once.
 const GONE_REREADS_PER_LISTING: usize = 8;
+/// An unchanged hello is said again this often, so a peer that missed one
+/// (pruned past retention, say) still learns this node's state.
+const HELLO_REFRESH_MS: i64 = 30 * 60_000;
 
 impl MeshClient {
     pub fn new(
@@ -274,6 +285,9 @@ impl MeshClient {
             review_sent: Mutex::new(review_sent),
             review_dirty: Mutex::new(std::collections::HashSet::new()),
             push_wake: Notify::new(),
+            hub_presence: Mutex::new(HashMap::new()),
+            members_wake: Notify::new(),
+            hello_sent: Mutex::new(None),
         })
     }
 
@@ -455,7 +469,7 @@ impl MeshClient {
         let c = self.clone();
         tokio::spawn(async move { c.heartbeat_loop().await });
         let c = self.clone();
-        tokio::spawn(async move { c.presence_loop().await });
+        tokio::spawn(async move { c.members_loop().await });
         let c = self.clone();
         tokio::spawn(async move { c.watch_loop().await });
         tap_tx
@@ -1388,15 +1402,6 @@ impl MeshClient {
             }
             _ => {}
         }
-        // A peer heard from again after going quiet gets what was held back
-        // for it; its hello is what marks it reachable, so this is the moment.
-        let returning = matches!(payload, Payload::Hello { .. } | Payload::Node(_))
-            && !self
-                .store
-                .get_node(sender)
-                .ok()
-                .flatten()
-                .is_some_and(|n| n.reachable != 0);
         // The reviews a listing names, read before the payload is consumed:
         // those it leaves out are asked of their owner once it is applied.
         let listed = match &payload {
@@ -1422,10 +1427,6 @@ impl MeshClient {
                         self.bus
                             .publish_untapped(Frame::ReviewDetail { review_id: id });
                     }
-                }
-                if returning {
-                    self.reconcile_deliveries(Some(sender));
-                    self.reread_after_return(sender);
                 }
                 if let Some(listed) = listed {
                     self.reread_unlisted_reviews(sender, &env.channel, &listed);
@@ -1713,7 +1714,17 @@ impl MeshClient {
 
     /// Announce this node on `@mesh`: posted directly, not queued, because a
     /// stale hello is worse than none.
-    pub async fn hello(&self) -> Result<(), HubError> {
+    /// Say this node's state on `@mesh` when it changed since the last hello,
+    /// [`HELLO_REFRESH_MS`] after that one, or after the hub came back.
+    /// Returns whether one was sent. Presence does not ride on it: the hub
+    /// sees for itself who is connected.
+    pub async fn hello(&self) -> Result<bool, HubError> {
+        self.hello_at(now_ms()).await
+    }
+
+    /// [`Self::hello`] at a given time, for tests of the refresh.
+    #[doc(hidden)]
+    pub async fn hello_at(&self, now: i64) -> Result<bool, HubError> {
         let Some(row) = self
             .store
             .get_node(&self.node_id())
@@ -1728,6 +1739,14 @@ impl MeshClient {
             crate::provider::digitalocean::runtime::global().and_then(|rt| rt.advertised())
         {
             node["do_templates"] = adverts;
+        }
+        let said = hello_hash(&node);
+        let due = match *self.hello_sent.lock().unwrap() {
+            Some((hash, at)) => hash != said || now - at >= HELLO_REFRESH_MS,
+            None => true,
+        };
+        if !due {
+            return Ok(false);
         }
         let payload = Payload::Hello {
             node,
@@ -1746,7 +1765,8 @@ impl MeshClient {
         match self.post("/v0/frames", body).await {
             Ok(_) => {
                 self.set_state_ok();
-                Ok(())
+                *self.hello_sent.lock().unwrap() = Some((said, now));
+                Ok(true)
             }
             Err(e) => {
                 self.note_failure(&e);
@@ -1858,6 +1878,10 @@ impl MeshClient {
             if m["role"].as_str() == Some("hub") {
                 continue;
             }
+            self.hub_presence
+                .lock()
+                .unwrap()
+                .insert(id.to_string(), m["connected"].as_bool().unwrap_or(false));
             let _ = self.store.node_channels_set(id, &channels);
             closed += self
                 .store
@@ -1889,6 +1913,7 @@ impl MeshClient {
                     harnesses_json: None,
                 });
             }
+            let _ = self.store.set_last_seen(id, m["last_seen_ms"].as_i64());
         }
         // A membership response is a snapshot, not an incremental add list.
         // Clear departed peers' channel grants so authorization never trusts a
@@ -1905,6 +1930,7 @@ impl MeshClient {
                     .expire_permissions_off_channels(&node.id)
                     .unwrap_or_default();
                 self.peers.lock().unwrap().remove(&node.id);
+                self.hub_presence.lock().unwrap().remove(&node.id);
             }
         }
         if closed > 0 {
@@ -1913,29 +1939,45 @@ impl MeshClient {
             }
         }
         self.set_state_ok();
+        self.presence_tick();
         Ok(n)
     }
 
-    /// Recompute which peers count as reachable: the hub is up and the peer
-    /// said hello within three heartbeats. Publishes a node frame per change.
-    pub fn presence_tick(&self, now: i64) {
+    /// Recompute which peers count as reachable: the hub is up and lists the
+    /// peer connected (holding its events stream). Publishes a node frame per
+    /// change. A peer becoming reachable is the one moment a returning peer
+    /// is caught up: what was held back for it is sent, and its reviews whose
+    /// reading failed meanwhile are read again.
+    pub fn presence_tick(&self) {
         let hub_up = matches!(self.state.borrow().hub, HubState::Connected);
-        let window = 3 * self.cfg.mesh.heartbeat_secs as i64 * 1000;
+        let connected = self.hub_presence.lock().unwrap().clone();
         for n in self.store.list_nodes().unwrap_or_default() {
             if n.is_self != 0 {
                 continue;
             }
-            let fresh = n.last_seen_ms.is_some_and(|t| now - t < window);
-            let reachable = hub_up && fresh;
+            let reachable = hub_up && connected.get(&n.id).copied().unwrap_or(false);
             if self.store.set_reachable(&n.id, reachable).unwrap_or(false) {
                 if let Ok(Some(row)) = self.store.get_node(&n.id) {
                     self.bus.publish_untapped(Frame::Node(row.to_json()));
                 }
                 if reachable {
                     self.reconcile_deliveries(Some(&n.id));
+                    self.reread_after_return(&n.id);
                 }
             }
         }
+    }
+
+    /// Set a peer's hub-reported presence and recompute reachability, as a
+    /// member list naming it would. For tests that drive a peer's coming and
+    /// going without holding real event streams.
+    #[doc(hidden)]
+    pub fn note_hub_presence(&self, peer: &str, connected: bool) {
+        self.hub_presence
+            .lock()
+            .unwrap()
+            .insert(peer.to_string(), connected);
+        self.presence_tick();
     }
 
     pub fn wake_pull(&self) {
@@ -1998,8 +2040,10 @@ impl MeshClient {
         }
     }
 
-    /// One connection to `/v0/events`; every `frames`/`sync` event wakes a pull.
-    async fn sse_once(&self) -> Result<(), HubError> {
+    /// One connection to `/v0/events`, held until it ends: `frames` wakes a
+    /// pull, `members` a member refresh, `sync` both. Holding it is what the
+    /// hub counts as this node being connected.
+    pub async fn sse_once(&self) -> Result<(), HubError> {
         let path = "/v0/events";
         let ts = now_unix();
         let mut req = self.http.get(format!("{}{}", self.hub_url, path));
@@ -2022,8 +2066,14 @@ impl MeshClient {
             while let Some(i) = buf.find('\n') {
                 let line = buf[..i].trim().to_string();
                 buf.drain(..=i);
-                if line == "event: frames" || line == "event: sync" {
-                    self.pull_wake.notify_one();
+                match line.as_str() {
+                    "event: frames" => self.pull_wake.notify_one(),
+                    "event: members" => self.members_wake.notify_one(),
+                    "event: sync" => {
+                        self.pull_wake.notify_one();
+                        self.members_wake.notify_one();
+                    }
+                    _ => {}
                 }
             }
         }
@@ -2034,10 +2084,11 @@ impl MeshClient {
         let every = Duration::from_secs(self.cfg.mesh.heartbeat_secs.max(5));
         let mut n: u64 = 0;
         loop {
-            if n.is_multiple_of(5) {
-                let _ = self.refresh_members().await;
-            }
-            if self.hello().await.is_ok() && n.is_multiple_of(10) {
+            // Says something only when this node's state changed, or after a
+            // while, or after the hub came back; presence is the hub's own.
+            let _ = self.hello().await;
+            let hub_up = matches!(self.state.borrow().hub, HubState::Connected);
+            if hub_up && n.is_multiple_of(10) {
                 self.send_snapshots();
                 self.send_rollups();
                 // Also what picks up a rollout `tracon policy push` wrote to
@@ -2131,10 +2182,19 @@ impl MeshClient {
         }
     }
 
-    async fn presence_loop(&self) {
+    /// The member list, read again when the hub pokes `members` (a member
+    /// connected or disconnected) or `sync`, and every five heartbeats
+    /// regardless. Presence comes from it.
+    async fn members_loop(&self) {
+        let every = Duration::from_secs(5 * self.cfg.mesh.heartbeat_secs.max(5));
         loop {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            self.presence_tick(now_ms());
+            if let Err(e) = self.refresh_members().await {
+                self.note_failure(&e);
+            }
+            tokio::select! {
+                _ = self.members_wake.notified() => {}
+                _ = tokio::time::sleep(every) => {}
+            }
         }
     }
 
@@ -2262,10 +2322,18 @@ impl MeshClient {
             let down_ms = now - down_since.unwrap_or(now);
             tracing::info!(down_ms, "hub reachable");
             self.delivered.store(0, Ordering::Relaxed);
+            // Say hello again at the next heartbeat: frames may have been
+            // lost while the hub was away.
+            *self.hello_sent.lock().unwrap() = None;
             self.bus
                 .publish_untapped(Frame::Mesh(serde_json::json!(self.snapshot())));
             self.pull_wake.notify_one();
             self.drain_wake.notify_one();
+            // Who is connected may have changed while the hub was away: read
+            // the member list again, and until then count peers reachable as
+            // the hub last listed them.
+            self.members_wake.notify_one();
+            self.presence_tick();
             self.reconcile_deliveries(None);
         }
     }
@@ -2284,7 +2352,7 @@ impl MeshClient {
         if was_up {
             self.bus
                 .publish_untapped(Frame::Mesh(serde_json::json!(self.snapshot())));
-            self.presence_tick(now);
+            self.presence_tick();
         }
     }
 
@@ -2336,6 +2404,23 @@ pub(crate) fn error_chain(e: &dyn std::error::Error) -> String {
         source = s.source();
     }
     out
+}
+
+/// What a hello says, hashed without the fields that change with no news for
+/// a peer: the receiver sets presence itself, and the boundary check's time
+/// moves on every check.
+fn hello_hash(node: &Value) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut said = node.clone();
+    if let Some(o) = said.as_object_mut() {
+        for volatile in ["checked_at_ms", "reachable", "last_seen_ms", "is_self"] {
+            o.remove(volatile);
+        }
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    said.to_string().hash(&mut h);
+    proto::CONTRACT_VERSION.hash(&mut h);
+    h.finish()
 }
 
 fn now_unix() -> u64 {

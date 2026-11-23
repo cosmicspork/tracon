@@ -14,6 +14,7 @@ use serde_json::{json, value::RawValue, Value};
 use tokio_stream::{wrappers::BroadcastStream, Stream, StreamExt};
 
 use crate::auth::{now_ms, now_unix, Owner};
+use crate::pokes::Poke;
 use crate::store::{ClaimOutcome, Fill, Member, RenewedOutcome, Take, PAGE_MAX_BYTES};
 use crate::AppState;
 
@@ -33,11 +34,15 @@ pub(crate) fn member_of(
     state: &AppState,
     owner: &Owner,
 ) -> Result<Member, (StatusCode, Json<Value>)> {
-    state
+    let member = state
         .members
         .get(&owner.hex())
         .map_err(io)?
-        .ok_or_else(|| err(StatusCode::FORBIDDEN, "not a member of this hub"))
+        .ok_or_else(|| err(StatusCode::FORBIDDEN, "not a member of this hub"))?;
+    // Last-seen is recorded for members only, so a stranger signing requests
+    // with throwaway keys cannot grow it.
+    state.pokes.seen(&owner.0, now_ms());
+    Ok(member)
 }
 
 fn in_channel(m: &Member, channel: &str) -> Result<(), (StatusCode, Json<Value>)> {
@@ -197,17 +202,24 @@ pub struct FramesPage {
     latest: u64,
 }
 
-/// Payload-free pokes. Subscribed before the response is built so a poke
-/// racing the handshake is not lost. Heartbeat comment every 25 s keeps the
-/// ingress from timing the stream out.
+/// Payload-free pokes: `frames` (pull), `members` (a member connected or
+/// disconnected; read the list again) and `sync` (pokes were lost; do both).
+/// Subscribed before the response is built so a poke racing the handshake is
+/// not lost. An open stream is what makes its member connected; the guard
+/// travels with the stream and lets go when the stream is dropped. Heartbeat
+/// comment every 25 s keeps the ingress from timing the stream out, and is
+/// how a stream whose node vanished is found closed.
 pub async fn events(
     State(s): State<AppState>,
     Extension(owner): Extension<Owner>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)> {
     member_of(&s, &owner)?;
-    let stream = BroadcastStream::new(s.pokes.subscribe(&owner.0)).map(|r| {
+    let (rx, guard) = s.pokes.open_stream(&owner.0, now_ms());
+    let stream = BroadcastStream::new(rx).map(move |r| {
+        let _held = &guard;
         let ev = match r {
-            Ok(()) => Event::default().event("frames"),
+            Ok(Poke::Frames) => Event::default().event("frames"),
+            Ok(Poke::Members) => Event::default().event("members"),
             Err(_) => Event::default().event("sync"),
         };
         Ok(ev.data("1"))
@@ -215,12 +227,39 @@ pub async fn events(
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(25))))
 }
 
+/// A member as listed: its record, and its presence as this hub sees it
+/// (never stored with the record).
+#[derive(Serialize)]
+pub struct ListedMember {
+    #[serde(flatten)]
+    member: Member,
+    /// Holds an open `/v0/events` stream.
+    connected: bool,
+    /// Its last authenticated request as a member since this hub started.
+    last_seen_ms: Option<i64>,
+}
+
 pub async fn list_members(
     State(s): State<AppState>,
     Extension(owner): Extension<Owner>,
-) -> Result<Json<Vec<Member>>, (StatusCode, Json<Value>)> {
+) -> Result<Json<Vec<ListedMember>>, (StatusCode, Json<Value>)> {
     member_of(&s, &owner)?;
-    Ok(Json(s.members.list().map_err(io)?))
+    let members = s.members.list().map_err(io)?;
+    Ok(Json(
+        members
+            .into_iter()
+            .map(|member| {
+                let presence = key32(&member.node_id)
+                    .map(|k| s.pokes.presence_of(&k))
+                    .unwrap_or_default();
+                ListedMember {
+                    connected: presence.connected(),
+                    last_seen_ms: presence.last_seen_ms,
+                    member,
+                }
+            })
+            .collect(),
+    ))
 }
 
 // --------------------------------------------------------------- rollups

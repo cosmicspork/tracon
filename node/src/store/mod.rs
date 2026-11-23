@@ -1861,6 +1861,16 @@ impl Store {
         Ok(())
     }
 
+    /// A peer's last request to the hub, as the hub reports it.
+    pub fn set_last_seen(&self, id: &str, last_seen_ms: Option<i64>) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE node SET last_seen_ms=?2 WHERE id=?1 AND is_self=0",
+            rusqlite::params![id, last_seen_ms],
+        )?;
+        Ok(())
+    }
+
     /// Mark a peer reachable or not; returns whether the flag changed.
     pub fn set_reachable(&self, id: &str, reachable: bool) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
