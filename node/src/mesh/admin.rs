@@ -2,7 +2,8 @@
 //!
 //! A node takes admin commands (reading and editing its `node.toml`, signing
 //! its providers in and out, starting a reviewer on its models, allowing one
-//! of its admin cards) only from
+//! of its admin cards, running one of the admin routes it lets a peer reach)
+//! only from
 //! the peers its own `[mesh]
 //! admin_peers` names. Membership of a channel, or of the mesh, is not
 //! enough: it says which node asked, not that this node's operator lets that
@@ -53,6 +54,7 @@ pub fn is_admin_command(command: &Command) -> bool {
             | Command::ConfigRead
             | Command::ConfigPatch { .. }
             | Command::StartReviewer { .. }
+            | Command::AdminRequest { .. }
     )
 }
 
@@ -63,6 +65,7 @@ fn statement_of(command: &Command) -> Option<&AdminStatement> {
         | Command::ProviderDisconnect { statement, .. }
         | Command::StartReviewer { statement, .. } => statement.as_ref(),
         Command::ConfigPatch { statement, .. } => Some(statement),
+        Command::AdminRequest { statement, .. } => statement.as_deref(),
         _ => None,
     }
 }
@@ -113,6 +116,14 @@ pub fn admit(
     admin_member(store, cfg, self_id, sender)?;
     if matches!(command, Command::ConfigRead) {
         return Ok(None);
+    }
+    // A read of a list a peer's admin action works on needs no statement,
+    // as `ConfigRead` needs none; which reads there are is the owner's
+    // allowlist's to say (`http::peer_routes`).
+    if let Command::AdminRequest { method, .. } = command {
+        if method == "GET" {
+            return Ok(None);
+        }
     }
     if let Command::ConfigPatch { not_after_ms, .. } = command {
         if now > not_after_ms.saturating_add(DEADLINE_SKEW_MS) {

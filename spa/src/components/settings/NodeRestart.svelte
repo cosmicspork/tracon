@@ -4,25 +4,51 @@
   // restarts and what a restart applies, and has the same single Restart
   // control as the banner (`RestartAction`). Not gated on being at the node:
   // off it, the passkey prompt confirms the restart, and a refusal is shown
-  // inline.
+  // inline. A peer that names this node in its `[mesh] admin_peers` is
+  // restarted the same way from here; its status is read from it.
   import { onMount } from 'svelte'
   import Card from './Card.svelte'
+  import NodePicker from './NodePicker.svelte'
   import RestartAction from '../RestartAction.svelte'
+  import { api } from '../../lib/api'
+  import { peerFailure } from '../../lib/peer-admin'
   import { EXIT_MECHANISM, restartAsk, restartCard } from '../../lib/restart'
   import { store } from '../../lib/store.svelte'
+  import type { RestartStatus } from '../../lib/types'
 
-  const status = $derived(store.restart)
+  /** The node restarted: empty for this one, or a peer's id. */
+  let node = $state('')
+  let peer = $state<RestartStatus | null>(null)
+  let failure = $state('')
+
+  const status = $derived(node ? peer : store.restart)
   const view = $derived(status ? restartCard(status) : null)
   const ask = $derived(status ? restartAsk(status) : null)
+
+  async function pick(next: string) {
+    node = next
+    peer = null
+    failure = ''
+    if (!next) return void store.refreshRestart()
+    try {
+      const read = await api.restartStatus(next)
+      if (node === next) peer = read
+    } catch (cause) {
+      if (node === next) failure = peerFailure(store.nodes, next, cause)
+    }
+  }
 
   onMount(() => {
     void store.refreshRestart()
   })
 </script>
 
-<Card title="Restart" note="Restart this node: running turns are waited for or ended as you choose, and this page reconnects when it is back.">
-  {#if !status || !view}
-    <p class="dim">Reading how this node restarts…</p>
+<Card title="Restart" note="Restart this node, or a peer that lists it in [mesh] admin_peers: running turns are waited for or ended as you choose, and this page reconnects when this node is back.">
+  {#snippet actions()}<NodePicker value={node} onchange={(next) => void pick(next)} />{/snippet}
+  {#if failure}
+    <p class="blocked">{failure}</p>
+  {:else if !status || !view}
+    <p class="dim">Reading how the node restarts…</p>
   {:else}
     <dl>
       <div>
@@ -39,7 +65,9 @@
     {#if ask?.kind === 'unavailable'}
       <p class="blocked">Restart unavailable: {ask.reason}.</p>
     {/if}
-    <div class="act"><RestartAction variant="card" /></div>
+    <div class="act">
+      {#key node}<RestartAction variant="card" {node} {peer} onstatus={(fresh) => (peer = fresh)} />{/key}
+    </div>
   {/if}
 </Card>
 

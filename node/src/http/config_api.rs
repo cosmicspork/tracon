@@ -958,6 +958,17 @@ async fn on_peer(
     node_id: &str,
     command: proto::frame::Command,
 ) -> Result<Value, Refused> {
+    on_peer_status(s, node_id, command)
+        .await
+        .map(|(_, body)| body)
+}
+
+/// As [`on_peer`], with the status the peer's route answered: any success.
+pub(crate) async fn on_peer_status(
+    s: &AppState,
+    node_id: &str,
+    command: proto::frame::Command,
+) -> Result<(StatusCode, Value), Refused> {
     use crate::mesh::forward::CommandError;
     let mesh = s.mesh.as_ref().ok_or_else(|| {
         peer_refusal(
@@ -983,8 +994,8 @@ async fn on_peer(
         return Err(peer_refusal(
             StatusCode::GATEWAY_TIMEOUT,
             "unreachable",
-            "that node is unreachable; its configuration is read and changed only while it is \
-             connected, never queued, so try again when it returns"
+            "that node is unreachable; it is administered only while it is connected, never \
+             queued, so try again when it returns"
                 .into(),
         ));
     }
@@ -1015,7 +1026,7 @@ async fn on_peer(
         .and_then(|n| u16::try_from(n).ok())
         .and_then(|n| StatusCode::from_u16(n).ok());
     match status {
-        Some(StatusCode::OK) => Ok(answer["body"].clone()),
+        Some(status) if status.is_success() => Ok((status, answer["body"].clone())),
         Some(status) => Err(relay_refusal(
             status,
             &answer["body"],

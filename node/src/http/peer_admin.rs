@@ -102,8 +102,9 @@ pub(crate) fn confirm(
     let session = match passkey::caller(s, parts) {
         Caller::Local => "local".to_string(),
         Caller::Session(hash) => hash.chars().take(12).collect(),
-        // `authorize_op` refuses any other caller before this.
-        Caller::Other => {
+        // `authorize_op` refuses any other caller before this, and a peer's
+        // request never administers a third node through this one.
+        Caller::Other | Caller::Peer(_) => {
             return Err(Refusal::unavailable(
                 "no_session",
                 "an admin action on a peer needs a signed-in browser or the node itself",
@@ -118,4 +119,165 @@ pub(crate) fn confirm(
         &session,
         now_ms(),
     ))
+}
+
+/// The most a peer admin request's body may be.
+const MAX_REQUEST_BODY: usize = 256 * 1024;
+
+/// A: `/api/nodes/{id}/admin/{*rest}`, any method: run `/api/{rest}` on peer
+/// `id` as its own interface would, for an operator administering it from
+/// here. Only the routes the peer lets an admin peer reach
+/// (`peer_routes`) are sent. A read needs no confirmation; anything else is
+/// confirmed here with a prompt naming the peer and what the request does
+/// there, and signed for exactly this request on exactly that peer, which
+/// checks it again. The peer's answer comes back as its own route gave it;
+/// a refusal is relayed as this node's, never as a challenge to answer here.
+pub(crate) async fn relay(
+    axum::extract::State(s): axum::extract::State<AppState>,
+    axum::extract::Path((node_id, rest)): axum::extract::Path<(String, String)>,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    match relay_here(&s, &node_id, &rest, req).await {
+        Ok(response) => response,
+        Err(refused) => refused.into_response(),
+    }
+}
+
+async fn relay_here(
+    s: &AppState,
+    node_id: &str,
+    rest: &str,
+    req: axum::extract::Request,
+) -> Result<axum::response::Response, Refused> {
+    let (parts, body) = req.into_parts();
+    let bytes = axum::body::to_bytes(body, MAX_REQUEST_BODY)
+        .await
+        .map_err(|_| ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "request body too large"))?;
+    passkey::json_or_empty(&parts.headers, &bytes)?;
+    if node_id == s.node_id {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "that is this node: use its own route",
+        )
+        .into());
+    }
+    if parts.uri.query().is_some() {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "an admin request to a peer carries no query",
+        )
+        .into());
+    }
+    let body: Option<serde_json::Value> = match bytes.is_empty() {
+        true => None,
+        false => Some(serde_json::from_slice(&bytes).map_err(|e| {
+            ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("bad body: {e}"))
+        })?),
+    };
+    let method = parts.method.as_str().to_string();
+    let path = format!("/api/{rest}");
+    let line = super::peer_routes::describe(
+        &method,
+        &path,
+        body.as_ref().unwrap_or(&serde_json::Value::Null),
+    )
+    .map_err(|why| ApiError::new(StatusCode::FORBIDDEN, why))?;
+    let mut command = proto::frame::Command::AdminRequest {
+        method,
+        path,
+        body,
+        statement: None,
+    };
+    if let Some(line) = line {
+        let summary = summary_for(s, node_id, &line)?;
+        let op_hash = crate::mesh::admin::op_hash(node_id, &command);
+        let signed = confirm(s, &parts, node_id, &op_hash, &summary)?;
+        if let proto::frame::Command::AdminRequest { statement, .. } = &mut command {
+            *statement = Some(Box::new(signed));
+        }
+    }
+    let (status, body) = super::config_api::on_peer_status(s, node_id, command).await?;
+    Ok((status, axum::Json(body)).into_response())
+}
+
+/// B: an admin peer's `admin_request`, run through this node's own route for
+/// it. `admitted` is the statement `mesh::admin::admit` checked and spent;
+/// only a read runs without one. The route sees a [`passkey::PeerAdmin`]
+/// caller, which stands for the operator here only when confirmed. A write
+/// that went through is logged and pushed to the operator, naming the peer.
+pub(crate) async fn run_for_peer(
+    s: &AppState,
+    sender: &str,
+    method: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+    admitted: Option<&crate::mesh::admin::Admitted>,
+) -> Result<serde_json::Value, ApiError> {
+    use tower::ServiceExt;
+    let line = super::peer_routes::describe(
+        method,
+        path,
+        body.as_ref().unwrap_or(&serde_json::Value::Null),
+    )
+    .map_err(|why| ApiError::new(StatusCode::FORBIDDEN, why))?;
+    let peer = match (&line, admitted) {
+        (None, _) => passkey::PeerAdmin {
+            actor: format!("peer {} (read)", crate::mesh::admin::short(sender)),
+            confirmed: false,
+        },
+        (Some(_), Some(admitted)) => passkey::PeerAdmin {
+            actor: admitted.actor(),
+            confirmed: true,
+        },
+        (Some(_), None) => {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "an admin action from a peer must carry its operator's statement",
+            ))
+        }
+    };
+    let method_ = axum::http::Method::from_bytes(method.as_bytes())
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "bad method"))?;
+    let mut builder = axum::http::Request::builder().method(method_).uri(path);
+    let bytes = match &body {
+        Some(body) => {
+            builder = builder.header(axum::http::header::CONTENT_TYPE, "application/json");
+            body.to_string()
+        }
+        None => String::new(),
+    };
+    let mut req = builder
+        .body(axum::body::Body::from(bytes))
+        .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?;
+    let actor = peer.actor.clone();
+    req.extensions_mut().insert(peer);
+    let res = super::router(s.clone())
+        .oneshot(req)
+        .await
+        .unwrap_or_else(|never| match never {});
+    let status = res.status();
+    let bytes = axum::body::to_bytes(res.into_body(), 4 << 20)
+        .await
+        .unwrap_or_default();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+        serde_json::Value::String(String::from_utf8_lossy(&bytes).into_owned())
+    });
+    let mut answer = serde_json::json!({ "status": status.as_u16(), "body": body });
+    if let (Some(line), true) = (&line, status.is_success()) {
+        tracing::info!(%actor, action = %line, "admin action run for a peer");
+        let (store, cfg) = (s.store().clone(), s.cfg.clone());
+        let (title, text) = (
+            "Changed from a peer".to_string(),
+            format!("{line}, by {actor}"),
+        );
+        let id = uuid::Uuid::now_v7().to_string();
+        // What ran and for whom, beside the route's answer: the sender
+        // relays only the body.
+        answer["audit"] = serde_json::json!({ "actor": actor, "action": line, "push": id });
+        tokio::spawn(async move {
+            crate::notify::send_operator(&store, &cfg, &id, title, text, "/settings".into(), &[])
+                .await;
+        });
+    }
+    Ok(answer)
 }

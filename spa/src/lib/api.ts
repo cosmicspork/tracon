@@ -329,6 +329,19 @@ export function answerBody(
   }
 }
 
+/**
+ * Where `path` (`/api/...`) runs on `node`: this node's own route when `node`
+ * is empty, or the peer's, run there over the mesh (`/api/nodes/{id}/admin/...`).
+ * A peer answers only if its `[mesh] admin_peers` names this node (a refusal of
+ * kind `not_admin_peer` says so), runs only the admin routes it lets a peer
+ * reach, and takes no query. A write is confirmed here, with a prompt naming
+ * the peer.
+ */
+export function nodePath(node: string | undefined, path: string): string {
+  if (!node) return path
+  return `/api/nodes/${encodeURIComponent(node)}/admin/${path.replace(/^\/api\//, '')}`
+}
+
 export const api = {
   login: (token: string) => call<{ ok: boolean }>('POST', '/api/login', { token }),
   logout: () => call<{ ok: boolean }>('POST', '/api/logout'),
@@ -336,29 +349,34 @@ export const api = {
   nodes: () => call<NodeInfo[]>('GET', '/api/nodes'),
   mesh: () => call<MeshState>('GET', '/api/mesh'),
   awake: () => call<AwakeState>('GET', '/api/awake'),
-  restartStatus: () => call<RestartStatus>('GET', '/api/restart'),
-  restart: (mode: RestartMode, expected_hash: string, confirm = false) =>
-    call<RestartStatus>('POST', '/api/admin/restart', { mode, expected_hash, confirm }),
-  cancelRestart: () => call<RestartStatus>('DELETE', '/api/admin/restart'),
-  channels: () => call<ChannelInfo[]>('GET', '/api/channels'),
+  // `node`, where a function takes one, is a peer to run it on (`nodePath`);
+  // empty is this node.
+  restartStatus: (node = '') => call<RestartStatus>('GET', nodePath(node, '/api/restart')),
+  restart: (mode: RestartMode, expected_hash: string, confirm = false, node = '') =>
+    call<RestartStatus>('POST', nodePath(node, '/api/admin/restart'), { mode, expected_hash, confirm }),
+  cancelRestart: (node = '') => call<RestartStatus>('DELETE', nodePath(node, '/api/admin/restart')),
+  channels: (node = '') => call<ChannelInfo[]>('GET', nodePath(node, '/api/channels')),
   /** Optional hub aggregate; never substitutes for this node's local metrics. */
   hubRollups: (channel: string) =>
     call<HubRollups>('GET', `/api/mesh/rollups?channel=${encodeURIComponent(channel)}`),
   /** Shared channel rules: save locally, then report whether distribution was queued. */
-  putChannelBindings: (name: string, patch: Record<string, unknown>) =>
+  putChannelBindings: (name: string, patch: Record<string, unknown>, node = '') =>
     call<{
       name: string
       bindings: Record<string, unknown>
       handed_to: number | null
       delivery: { state: 'local' | 'queued' | 'failed'; handed_to: number | null; error: string | null }
-    }>('PUT', `/api/channels/${encodeURIComponent(name)}/bindings`, patch),
-  authorityGrants: () =>
-    call<{ policy: { version: number; rules: PolicyRule[]; trusted: boolean }; grants: AuthorityGrant[] }>('GET', '/api/authority/grants'),
+    }>('PUT', nodePath(node, `/api/channels/${encodeURIComponent(name)}/bindings`), patch),
+  authorityGrants: (node = '') =>
+    call<{ policy: { version: number; rules: PolicyRule[]; trusted: boolean }; grants: AuthorityGrant[] }>(
+      'GET',
+      nodePath(node, '/api/authority/grants'),
+    ),
   // Push: this node pushes to the phones subscribed here.
-  createAuthorityGrant: (grant: Omit<AuthorityGrant, 'id' | 'revoked_ms' | 'created_ms'>) =>
-    call<AuthorityGrant>('POST', '/api/authority/grants', grant),
-  revokeAuthorityGrant: (id: string) =>
-    call<{ revoked: string }>('DELETE', `/api/authority/grants/${encodeURIComponent(id)}`),
+  createAuthorityGrant: (grant: Omit<AuthorityGrant, 'id' | 'revoked_ms' | 'created_ms'>, node = '') =>
+    call<AuthorityGrant>('POST', nodePath(node, '/api/authority/grants'), grant),
+  revokeAuthorityGrant: (id: string, node = '') =>
+    call<{ revoked: string }>('DELETE', nodePath(node, `/api/authority/grants/${encodeURIComponent(id)}`)),
   exportTransfer: (body: {
     candidate_id: string
     context?: { documents?: string[]; memories?: string[]; note?: string }
@@ -532,7 +550,7 @@ export const api = {
   /** Remove a repository's data for one service; its next session starts it empty. Loopback only. */
   resetServiceVolume: (volume: string) =>
     call<{ reset: string; repo: string; service: string }>('POST', '/api/maintenance/service-volumes/reset', { volume }),
-  plugins: () => call<{ plugins: PluginSummary[] }>('GET', '/api/plugins'),
+  plugins: (node = '') => call<{ plugins: PluginSummary[] }>('GET', nodePath(node, '/api/plugins')),
   /** The last lines a plugin's instance on `channel` wrote. */
   pluginLogs: (name: string, channel: string, lines = 200) =>
     call<{ lines: string[] }>(
@@ -543,18 +561,27 @@ export const api = {
   pluginUi: (name: string, channel: string) =>
     call<PluginUiOpen>('POST', `/api/plugins/${encodeURIComponent(name)}/ui`, channel ? { channel } : {}),
   /** Start a plugin's instance afresh, its backoff cleared; answered once ready or failed. */
-  pluginRestart: (name: string, channel: string) =>
-    call<{ instance: PluginInstance; error?: string }>('POST', `/api/plugins/${encodeURIComponent(name)}/restart`, {
-      channel,
-    }),
+  pluginRestart: (name: string, channel: string, node = '') =>
+    call<{ instance: PluginInstance; error?: string }>(
+      'POST',
+      nodePath(node, `/api/plugins/${encodeURIComponent(name)}/restart`),
+      { channel },
+    ),
   /** Fetch a plugin's latest release and raise its update card on `channel`
       (the node's default when empty), unless the active build is it already.
       Nothing is installed until the card is allowed. */
-  pluginUpdate: (name: string, channel: string) =>
-    call<PluginOffered>('POST', `/api/plugins/${encodeURIComponent(name)}/update`, channel ? { channel } : {}),
+  pluginUpdate: (name: string, channel: string, node = '') =>
+    call<PluginOffered>(
+      'POST',
+      nodePath(node, `/api/plugins/${encodeURIComponent(name)}/update`),
+      channel ? { channel } : {},
+    ),
   /** Make a plugin's previous build active again, with no card: an admin action. */
-  pluginRollback: (name: string) =>
-    call<{ active: PluginBuild; previous: PluginBuild }>('POST', `/api/plugins/${encodeURIComponent(name)}/rollback`),
+  pluginRollback: (name: string, node = '') =>
+    call<{ active: PluginBuild; previous: PluginBuild }>(
+      'POST',
+      nodePath(node, `/api/plugins/${encodeURIComponent(name)}/rollback`),
+    ),
   mcpServers: (refresh = false) =>
     call<{ servers: McpServerStatus[] }>('GET', `/api/mcp-servers${refresh ? '?refresh=true' : ''}`),
   storageSweep: (apply: boolean, caches: boolean) =>
@@ -595,11 +622,11 @@ export const api = {
     call<void>('POST', `/api/sessions/${id}/budget`, { budget_tokens: budgetTokens }),
   stop: (id: string) => call<void>('POST', `/api/sessions/${id}/stop`),
   /** Refuse every external harness on a channel until started again. */
-  externalStop: (channel: string) =>
-    call<void>('POST', `/api/external/${encodeURIComponent(channel)}/stop`),
-  externalStart: (channel: string) =>
-    call<void>('POST', `/api/external/${encodeURIComponent(channel)}/start`),
-  external: () => call<ExternalView>('GET', '/api/external'),
+  externalStop: (channel: string, node = '') =>
+    call<void>('POST', nodePath(node, `/api/external/${encodeURIComponent(channel)}/stop`)),
+  externalStart: (channel: string, node = '') =>
+    call<void>('POST', nodePath(node, `/api/external/${encodeURIComponent(channel)}/start`)),
+  external: (node = '') => call<ExternalView>('GET', nodePath(node, '/api/external')),
   externalEvents: (channel: string, after = 0) =>
     call<{ events: ExternalEvent[] }>(
       'GET',
@@ -897,13 +924,23 @@ export const api = {
       expected_hash: expectedHash,
       ops,
     }),
-  repoEnvironments: () => call<RepoEnvironments>('GET', '/api/repos/environments'),
+  repoEnvironments: (node = '') => call<RepoEnvironments>('GET', nodePath(node, '/api/repos/environments')),
   buildRepoEnvironment: (repo: string) =>
     call<{ repo: string; since_ms: number }>('POST', '/api/repos/environments/build', { repo }),
-  offerRecipe: (body: { path?: string; repo?: string; channel: string; to_nodes?: string[]; note?: string }) =>
-    call<{ repo: string; expires_ms: number; results: RecipeOfferResult[] }>('POST', '/api/repos/offer', body),
-  recipeOffers: () => call<{ offers: RecipeOffer[] }>('GET', '/api/repos/offers'),
-  recipeOffer: (id: string, path = '', replaceImage = false, keepCredentials = false) => {
+  offerRecipe: (
+    body: { path?: string; repo?: string; channel: string; to_nodes?: string[]; note?: string },
+    node = '',
+  ) =>
+    call<{ repo: string; expires_ms: number; results: RecipeOfferResult[] }>(
+      'POST',
+      nodePath(node, '/api/repos/offer'),
+      body,
+    ),
+  recipeOffers: (node = '') => call<{ offers: RecipeOffer[] }>('GET', nodePath(node, '/api/repos/offers')),
+  recipeOffer: (id: string, path = '', replaceImage = false, keepCredentials = false, node = '') => {
+    // A peer's offer is compared as it would be placed by default: a
+    // request to a peer takes no query.
+    if (node) return call<RecipeOfferView>('GET', nodePath(node, `/api/repos/offers/${encodeURIComponent(id)}`))
     const query = new URLSearchParams()
     if (path) query.set('path', path)
     if (replaceImage) query.set('replace_image', 'true')
@@ -914,10 +951,11 @@ export const api = {
   acceptRecipeOffer: (
     id: string,
     body: { path: string; replace_image: boolean; keep_credentials: boolean; viewed_hash: string },
+    node = '',
   ) =>
     call<{ accepted: boolean; path: string; changed: boolean; restart_required: boolean; building: boolean }>(
       'POST',
-      `/api/repos/offers/${encodeURIComponent(id)}/accept`,
+      nodePath(node, `/api/repos/offers/${encodeURIComponent(id)}/accept`),
       body,
     ),
   startHeldBuild: (path: string, lendingHash: string) =>
