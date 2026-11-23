@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 import { chromium, type Browser, type Page } from 'playwright-core'
-import { compile } from 'svelte/compiler'
+import { compile, compileModule } from 'svelte/compiler'
 
 const here = fileURLToPath(new URL('.', import.meta.url))
 
@@ -19,7 +19,11 @@ const here = fileURLToPath(new URL('.', import.meta.url))
 const harness = `
   <script>
     import ReviewDiff from ${JSON.stringify(`${here}ReviewDiff.svelte`)}
-    const { diff, collapsed, contexts } = window.reviewDiff
+    import { ViewedFiles } from ${JSON.stringify(`${here}../lib/viewedFiles.svelte.ts`)}
+    import { splitDiff } from ${JSON.stringify(`${here}../lib/diff.ts`)}
+    const { diff, collapsed, contexts, revision } = window.reviewDiff
+    // The reader's viewed marks, as the review screen keeps them, when asked for.
+    const viewed = revision ? new ViewedFiles('rv', revision, splitDiff(diff)) : undefined
     // What the node's /context would answer, by path: both sides, or why not.
     const context = contexts
       ? async (path) => {
@@ -31,7 +35,7 @@ const harness = `
       : undefined
   </script>
   <textarea id="reason"></textarea>
-  <ReviewDiff {diff} {collapsed} {context} />
+  <ReviewDiff {diff} {collapsed} {context} {viewed} />
 `
 const entry = `
   import { mount } from 'svelte'
@@ -60,6 +64,14 @@ async function build(): Promise<string> {
             loader: 'js',
           }))
           b.onLoad({ filter: /\.svelte$/ }, ({ path }) => ({ contents: compiled(readFileSync(path, 'utf8'), path), loader: 'js' }))
+          // A rune module: TypeScript out first, then Svelte's runes.
+          b.onLoad({ filter: /\.svelte\.ts$/ }, ({ path }) => ({
+            contents: compileModule(new Bun.Transpiler({ loader: 'ts' }).transformSync(readFileSync(path, 'utf8')), {
+              filename: path,
+              generate: 'client',
+            }).js.code,
+            loader: 'js',
+          }))
         },
       },
     ],
@@ -130,10 +142,10 @@ const CONTEXTS = {
   'src/moved.rs': { base: null, head: gapsHead.map((l) => `${l} // later`).join('\n') },
 }
 
-type Opts = { width?: number; collapsed?: boolean; init?: string; diff?: string; contexts?: object }
+type Opts = { width?: number; collapsed?: boolean; init?: string; diff?: string; contexts?: object; revision?: string }
 
 async function open(
-  { width = 1280, collapsed = false, init = '', diff = DIFF, contexts }: Opts = {},
+  { width = 1280, collapsed = false, init = '', diff = DIFF, contexts, revision }: Opts = {},
   page?: Page,
 ): Promise<Page> {
   page ??= await browser!.newPage({ viewport: { width, height: 800 } })
@@ -144,7 +156,7 @@ async function open(
   const html =
     `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>${css}</style>` +
     `<body style="margin:0;padding:0 16px"><div id="app"></div>` +
-    `<script>${init};window.reviewDiff = ${JSON.stringify({ diff, collapsed, contexts })}</script><script type="module">${js}</script></body>`
+    `<script>${init};window.reviewDiff = ${JSON.stringify({ diff, collapsed, contexts, revision })}</script><script type="module">${js}</script></body>`
   await page.route('http://tracon.test/**', (route) => route.fulfill({ contentType: 'text/html', body: html }))
   await page.goto('http://tracon.test/')
   await page.waitForSelector('.review-diff', { timeout: 5000 }).catch((e) => {
@@ -444,5 +456,108 @@ test.skipIf(!browser)('a binary file and a pure rename say what they are instead
   expect(await page.locator('details[data-path="renamed.rs"] .empty').textContent()).toBe(
     'Renamed from old.rs; the contents did not change.',
   )
+  await page.close()
+})
+
+test.skipIf(!browser)('a filter narrows the files to the paths that contain it', async () => {
+  const page = await open({ diff: DIFF + GAPS })
+  const shown = () => page.evaluate(() => [...document.querySelectorAll('details.file:not([hidden])')].map((d) => d.getAttribute('data-path')))
+  expect((await shown()).length).toBe(8)
+  await page.getByLabel('Filter files by path').fill('SRC/G')
+  expect(await shown()).toEqual(['src/gaps.rs', 'src/gone.rs'])
+  expect(await page.locator('.bar .count').textContent()).toBe('2 of 8')
+  await page.getByLabel('Filter files by path').fill('nowhere')
+  expect(await shown()).toEqual([])
+  expect(await page.locator('.review-diff > .empty').textContent()).toContain('No file path contains')
+  await page.getByLabel('Filter files by path').fill('')
+  expect((await shown()).length).toBe(8)
+  // Each file has its own counts, and the bar the whole diff's.
+  expect(await page.locator('details[data-path="README.md"] summary .stat').textContent()).toBe('+1 −1')
+  expect(await page.locator('.bar .total').textContent()).toBe('+54 −37')
+  await page.close()
+})
+
+test.skipIf(!browser)('files fold and open, each or all at once', async () => {
+  const page = await open()
+  await ready(page, 'src/lib.rs')
+  await page.getByRole('button', { name: 'Fold all' }).click()
+  expect(await page.locator('details.file[open]').count()).toBe(0)
+  await page.getByRole('button', { name: 'Open all' }).click()
+  expect(await page.locator('details.file[open]').count()).toBe(3)
+  await page.close()
+})
+
+test.skipIf(!browser)('n and p step from change to change, and leave typing alone', async () => {
+  const page = await open()
+  await ready(page, 'src/lib.rs')
+  // Where the first row of the change nearest below the bar is.
+  const atTop = () =>
+    page.evaluate(() => {
+      const bar = document.querySelector('.bar')!.getBoundingClientRect().bottom
+      const rows = [...document.querySelectorAll('.cm-merge-b .cm-changedLine, .cm-merge-b .cm-changedLine ~ *')]
+      const r = rows.map((e) => e.getBoundingClientRect().top - bar).filter((t) => t >= 0)
+      return { scroll: Math.round(window.scrollY), first: Math.round(Math.min(...r)) }
+    })
+  await page.locator('body').click({ position: { x: 2, y: 790 } })
+  const seen: number[] = []
+  for (let i = 0; i < 4; i++) {
+    await page.keyboard.press('n')
+    await page.waitForTimeout(80)
+    seen.push((await atTop()).scroll)
+  }
+  // Each step goes further down, and puts a change just below the bar.
+  for (let i = 1; i < seen.length; i++) expect(seen[i]).toBeGreaterThan(seen[i - 1])
+  expect((await atTop()).first).toBeLessThanOrEqual(60)
+  await page.keyboard.press('p')
+  await page.waitForTimeout(80)
+  expect((await atTop()).scroll).toBe(seen[2])
+  // The buttons do the same.
+  await page.getByRole('button', { name: 'Next change' }).click()
+  await page.waitForTimeout(80)
+  expect((await atTop()).scroll).toBe(seen[3])
+  // Typing an n is typing, not a step.
+  await page.locator('#reason').focus()
+  const typing = (await atTop()).scroll
+  await page.keyboard.press('n')
+  await page.waitForTimeout(80)
+  expect((await atTop()).scroll).toBe(typing)
+  expect(await page.locator('#reason').inputValue()).toBe('n')
+  await page.close()
+})
+
+test.skipIf(!browser)('past the last open change, n opens the next unviewed file at its first change', async () => {
+  const page = await open({ collapsed: true })
+  await page.keyboard.press('n')
+  await page.waitForSelector('details[data-path="README.md"][open] .cm-changedLine')
+  expect(await page.locator('details.file[open]').count()).toBe(1)
+  await page.close()
+})
+
+test.skipIf(!browser)('a viewed file folds, counts toward progress that says it is not approval, and survives a reload', async () => {
+  const page = await open({ revision: 'r1' })
+  await ready(page, 'README.md')
+  expect(await page.locator('.bar .progress').textContent()).toBe('0/3 viewed · not approval')
+  expect(await page.locator('.bar .progress').getAttribute('title')).toContain('approve nothing')
+  expect(await page.locator('details[data-path="README.md"] .seen').getAttribute('title')).toContain('does not approve')
+  await page.locator('details[data-path="README.md"] .seen input').check()
+  expect(await page.locator('details[data-path="README.md"]').getAttribute('open')).toBeNull()
+  expect(await page.locator('.bar .progress').textContent()).toBe('1/3 viewed · not approval')
+
+  // Reloaded on the same revision, it is still viewed, and starts folded.
+  await open({ revision: 'r1' }, page)
+  await page.waitForSelector('details[data-path="src/lib.rs"][open]')
+  expect(await page.locator('details[data-path="README.md"]').getAttribute('open')).toBeNull()
+  expect(await page.locator('details[data-path="README.md"] .seen input').isChecked()).toBe(true)
+
+  // Resubmitted with README.md changed again: its mark is cleared and it says why;
+  // src/new.rs, marked and left alone, keeps its mark.
+  await page.locator('details[data-path="src/new.rs"] .seen input').check()
+  const changed = DIFF.replace('+A gateway for brokered calls.', '+A gateway for every call.')
+  await open({ revision: 'r2', diff: changed }, page)
+  await page.waitForSelector('details[data-path="README.md"][open]')
+  expect(await page.locator('details[data-path="README.md"] .seen input').isChecked()).toBe(false)
+  expect(await page.locator('details[data-path="README.md"] .changed').textContent()).toBe('changed since you viewed it')
+  expect(await page.locator('details[data-path="src/new.rs"] .seen input').isChecked()).toBe(true)
+  expect(await page.locator('.bar .progress').textContent()).toBe('1/3 viewed · not approval')
   await page.close()
 })

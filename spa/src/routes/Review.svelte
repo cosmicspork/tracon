@@ -4,6 +4,7 @@
   import Diff from '../components/Diff.svelte'
   import ReviewDiff from '../components/ReviewDiff.svelte'
   import { splitDiff } from '../lib/diff'
+  import { ViewedFiles } from '../lib/viewedFiles.svelte'
   import CommitMessage from '../components/CommitMessage.svelte'
   import OutgoingPreview from '../components/OutgoingPreview.svelte'
   import ShownWork from '../components/ShownWork.svelte'
@@ -557,6 +558,15 @@
    */
   const ships = $derived(shipping(intent, shippedMessage(outputs, intent), reworded))
   const diffFiles = $derived(splitDiff(review?.diff ?? ''))
+  /**
+   * The files the reader has marked viewed on this revision, kept on this
+   * device. Their own progress through the change: never approval.
+   */
+  const viewed = $derived(
+    review && !isNarrativeReport(review)
+      ? new ViewedFiles(review.id, revision?.id ?? review.head_sha, diffFiles)
+      : undefined,
+  )
   const files = $derived.by(() => {
     try {
       return JSON.parse(review?.files ?? '[]') as { path: string; blob: string }[]
@@ -1457,6 +1467,7 @@
       {#each files as f (f.path)}
         <button type="button" class:moved={stale.includes(f.path)} onclick={() => showFile(f.path)}>
           <span class="p">{f.path}</span>
+          {#if viewed?.state(f.path) === 'viewed'}<span class="seen">viewed</span>{/if}
           <span class={stale.includes(f.path) ? 'bad' : 'ok'}
             >{stale.includes(f.path) ? 'changed since submit' : 'unchanged'}</span
           >
@@ -1513,9 +1524,10 @@
         diff={sinceReviewed.diff}
         collapsed={surface.phone}
         context={pinnedContext(sinceReviewed.revision_id)}
+        {viewed}
       />
     {:else}
-      <ReviewDiff bind:this={reviewDiff} diff={review.diff} collapsed={surface.phone} context={pinnedContext()} />
+      <ReviewDiff bind:this={reviewDiff} diff={review.diff} collapsed={surface.phone} context={pinnedContext()} {viewed} />
     {/if}
   {/if}
 
@@ -2249,6 +2261,7 @@
     color: var(--acc);
   }
   .files .p {
+    flex: 1;
     min-width: 0;
     overflow-wrap: anywhere;
   }
@@ -2257,6 +2270,10 @@
   }
   .files .bad {
     color: var(--crit);
+  }
+  .files .seen {
+    color: var(--dim);
+    font-style: italic;
   }
   .draft-state {
     font: 12px var(--mono);
