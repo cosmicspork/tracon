@@ -239,6 +239,12 @@ impl MeshClient {
             cfg,
             http: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(10))
+                // A pooled connection idle longer than a proxy in front of
+                // the hub keeps it is closed under the next request, which
+                // then fails as if the hub were down. Pulls run every
+                // `poll_secs`, so connections are reused within a burst and
+                // rarely across the idle gap between them.
+                .pool_idle_timeout(HUB_POOL_IDLE)
                 .build()
                 .expect("http client"),
             state,
@@ -2000,10 +2006,7 @@ impl MeshClient {
         for (k, v) in signed_headers(&self.identity, "GET", path, b"", ts) {
             req = req.header(k, v);
         }
-        let res = req
-            .send()
-            .await
-            .map_err(|e| HubError::Transport(e.to_string()))?;
+        let res = req.send().await.map_err(|e| transport(&e))?;
         if !res.status().is_success() {
             return Err(HubError::Refused {
                 status: res.status().as_u16(),
@@ -2014,7 +2017,7 @@ impl MeshClient {
         let mut stream = res.bytes_stream();
         let mut buf = String::new();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| HubError::Transport(e.to_string()))?;
+            let chunk = chunk.map_err(|e| transport(&e))?;
             buf.push_str(&String::from_utf8_lossy(&chunk));
             while let Some(i) = buf.find('\n') {
                 let line = buf[..i].trim().to_string();
@@ -2146,11 +2149,7 @@ impl MeshClient {
         for (k, v) in signed_headers(&self.identity, "POST", path, &body, ts) {
             req = req.header(k, v);
         }
-        let res = req
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| HubError::Transport(e.to_string()))?;
+        let res = req.body(body).send().await.map_err(|e| transport(&e))?;
         let status = res.status();
         let text = res.text().await.unwrap_or_default();
         if !status.is_success() {
@@ -2185,15 +2184,26 @@ impl MeshClient {
     }
 
     async fn get_json(&self, path: &str) -> Result<Value, HubError> {
-        let ts = now_unix();
-        let mut req = self.http.get(format!("{}{}", self.hub_url, path));
-        for (k, v) in signed_headers(&self.identity, "GET", path, b"", ts) {
-            req = req.header(k, v);
-        }
-        let res = req
-            .send()
-            .await
-            .map_err(|e| HubError::Transport(e.to_string()))?;
+        let send = || {
+            let ts = now_unix();
+            let mut req = self.http.get(format!("{}{}", self.hub_url, path));
+            for (k, v) in signed_headers(&self.identity, "GET", path, b"", ts) {
+                req = req.header(k, v);
+            }
+            req.send()
+        };
+        // A GET is safe to send twice. One that failed before any answer,
+        // typically on a pooled connection the far side had just closed, is
+        // sent once more, on a fresh connection, before the hub counts as
+        // down: otherwise one stale connection dims every peer.
+        let res = match send().await {
+            Ok(res) => res,
+            Err(e) if e.is_connect() || e.is_request() => {
+                tracing::debug!(error = %error_chain(&e), path, "hub request failed; retrying once");
+                send().await.map_err(|e| transport(&e))?
+            }
+            Err(e) => return Err(transport(&e)),
+        };
         let status = res.status();
         let text = res.text().await.unwrap_or_default();
         if !status.is_success() {
@@ -2217,10 +2227,7 @@ impl MeshClient {
         for (k, v) in signed_headers(identity, "GET", path, b"", ts) {
             req = req.header(k, v);
         }
-        let res = req
-            .send()
-            .await
-            .map_err(|e| HubError::Transport(e.to_string()))?;
+        let res = req.send().await.map_err(|e| transport(&e))?;
         let status = res.status();
         let text = res.text().await.unwrap_or_default();
         if !status.is_success() {
@@ -2301,6 +2308,34 @@ impl MeshClient {
     pub(crate) fn note_refusal(&self, what: String) {
         self.state.send_modify(|s| s.last_refusal = Some(what));
     }
+}
+
+/// How long an idle connection to the hub is kept for reuse.
+const HUB_POOL_IDLE: Duration = Duration::from_secs(20);
+
+/// A transport failure with its causes. reqwest's own message is only
+/// "error sending request for url (…)"; why (a reset, a closed connection,
+/// DNS, TLS, a timeout) is in the source chain, and the log needs it.
+fn transport(e: &reqwest::Error) -> HubError {
+    HubError::Transport(error_chain(e))
+}
+
+/// `e` and each of its sources, joined with ": ", skipping a source whose
+/// message repeats the one before it.
+pub(crate) fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut last = out.clone();
+    let mut source = e.source();
+    while let Some(s) = source {
+        let msg = s.to_string();
+        if msg != last && !last.ends_with(&msg) {
+            out.push_str(": ");
+            out.push_str(&msg);
+        }
+        last = msg;
+        source = s.source();
+    }
+    out
 }
 
 fn now_unix() -> u64 {

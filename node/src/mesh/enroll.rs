@@ -158,7 +158,7 @@ async fn send(
         .body(body)
         .send()
         .await
-        .map_err(|e| EnrollError::Transport(e.to_string()))?;
+        .map_err(|e| EnrollError::Transport(super::client::error_chain(&e)))?;
     Ok((res.status().as_u16(), res.text().await.unwrap_or_default()))
 }
 
@@ -888,7 +888,7 @@ pub async fn accept(
         .json(&req)
         .send()
         .await
-        .map_err(|e| EnrollError::Transport(e.to_string()))?;
+        .map_err(|e| EnrollError::Transport(super::client::error_chain(&e)))?;
     if !res.status().is_success() {
         return Err(EnrollError::Refused {
             status: res.status().as_u16(),
