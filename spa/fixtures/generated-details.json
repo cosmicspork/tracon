@@ -1,0 +1,19 @@
+{
+  "//": "How the node composes a description under `[review] generated_details` (node/src/review/publish.rs, compose_generated_details). The node's tests and the interface's (src/lib/verdicts.test.ts) both check every case here, so the preview a mirrored review composes locally cannot drift from what the owner publishes. A null `published` means the approval is refused.",
+  "cases": [
+    {
+      "opener": "  Fixes the flaky sync.\n",
+      "body": "\n## What\n\nLong text.\n",
+      "published": "Fixes the flaky sync.\n\n<details>\n<summary>Generated details</summary>\n\n## What\n\nLong text.\n\n</details>"
+    },
+    { "opener": "Fixes the flaky sync.", "body": "", "published": "Fixes the flaky sync." },
+    { "opener": "Fixes the flaky sync.", "body": " \n\t", "published": "Fixes the flaky sync." },
+    { "opener": "", "body": "body", "published": null },
+    { "opener": " \n\t ", "body": "body", "published": null },
+    {
+      "opener": "Line one\nline two",
+      "body": "- a\n- b",
+      "published": "Line one\nline two\n\n<details>\n<summary>Generated details</summary>\n\n- a\n- b\n\n</details>"
+    }
+  ]
+}

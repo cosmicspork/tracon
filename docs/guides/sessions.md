@@ -573,7 +573,11 @@ A review either opens a new pull or merge request or updates one the branch
 already has (`change`, named at first submit). The review's title and body are the
 agent's summary for you; what reaches the forge is separate and editable before
 you approve: a description (a new change's, or a replacement for an existing
-one's), a comment, both, or — for an update — nothing but the push. Submit checks
+one's), a comment, both, or — for an update — nothing but the push. They are
+edited as Markdown source, and below them the review page shows what the forge
+gets, rendered (sanitized, nothing fetched) or as the exact source: the node
+composes it with the same function approval publishes with, so it includes
+anything the node adds, such as the opener and fold of `[review] generated_details`. Submit checks
 the forge first: a branch with an open change must name it, and an update must be
 an open change of that repository into that base. An update is pushed to the
 change's own branch, whatever the worktree's is called. A review that opened a

@@ -110,3 +110,35 @@ export function renderMessage(md: string): string {
 export function codeSpans(text: string): string {
   return escapeHtml(text).replace(/`([^`\n]+)`/g, '<code>$1</code>')
 }
+
+// What a forge shows of a pull or merge request's description, previewed
+// before it is sent: Markdown with a single newline kept as a break, as
+// GitHub and GitLab render one there, and nothing fetched. The forges allow
+// some HTML; of it only the bare `<details>` and `<summary>` tags are kept,
+// since the node folds the agent's text in them (`[review] generated_details`)
+// and the fold is what the preview has to show. Every other tag, and any
+// attribute, is shown as the text it is.
+const FOLD = /&lt;(\/?)(details|summary)&gt;/gi
+function forgeHtml(text: string): string {
+  return escapeHtml(text).replace(FOLD, (_, close: string, tag: string) => `<${close}${tag.toLowerCase()}>`)
+}
+const forge = new Marked({ gfm: true, breaks: true })
+forge.use({
+  renderer: {
+    html({ text }: Tokens.HTML | Tokens.Tag) {
+      return forgeHtml(text)
+    },
+    link({ href, title, tokens }: Tokens.Link) {
+      return link(this.parser.parseInline(tokens), href, title, true)
+    },
+    image({ title, text, tokens }: Tokens.Image) {
+      if (tokens) text = this.parser.parseInline(tokens, this.parser.textRenderer)
+      const label = text || title || 'image'
+      return `<span class="no-fetch">[${escapeHtml(label)}]</span>`
+    },
+  },
+})
+
+export function renderForge(md: string): string {
+  return forge.parse(md, { async: false }) as string
+}

@@ -93,6 +93,7 @@ import type { HtmlBundleSelection } from './html-bundle'
 import type { CreationOptionsJSON, RequestOptionsJSON } from './passkey'
 import type { DeviceApprovalView, DeviceProof, DeviceStart } from './device'
 import type { AnswerProblem, ApprovalDetails } from './approval'
+import type { Outgoing, OutgoingAsked } from './outgoing'
 
 /** A document edit that lost to another: the current state comes back. */
 export class DocConflict extends Error {
@@ -640,6 +641,10 @@ export const api = {
       opener?: string
     },
   ) => call<{ state: string; published?: string }>('POST', `/api/reviews/${id}/verdict`, verdict),
+  /** The exact text an approval with these edits would publish, composed
+   * by the node as the approval composes it; nothing is sent to the forge. */
+  reviewOutgoing: (id: string, asked: OutgoingAsked) =>
+    call<Outgoing>('POST', `/api/reviews/${id}/outgoing`, asked),
   /** Retry a publication exactly as it was approved: the node reads the
    * title, body and outputs back from its journal, so nothing new is sent. */
   recoverPublication: (id: string, publicationId: string) =>

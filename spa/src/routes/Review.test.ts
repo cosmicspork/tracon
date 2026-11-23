@@ -61,8 +61,27 @@ test('under generated details the opener sits above the agent text, which is col
   expect(snippet.slice(details)).toContain('{GENERATED_DETAILS}')
   expect(snippet.slice(details)).toContain('bind:value={body}')
   expect(snippet.slice(details)).toContain('bind:value={descBody}')
-  // And a preview of what the forge gets.
-  expect(snippet).toContain('{composed}')
+  // What the forge gets is previewed once, for every outgoing text, below.
+  expect(snippet).not.toContain('<OutgoingPreview')
+})
+
+test('the outgoing title and body are previewed below their source, as approval sends them', () => {
+  const at = markup.indexOf('<OutgoingPreview')
+  expect(at).toBeGreaterThan(-1)
+  expect(markup.indexOf('<OutgoingPreview', at + 1)).toBe(-1)
+  // After every editor of the text it shows.
+  expect(at).toBeGreaterThan(markup.indexOf('bind:value={title}'))
+  expect(at).toBeGreaterThan(markup.indexOf('bind:value={descBody}'))
+  expect(at).toBeGreaterThan(markup.indexOf('bind:value={comment}'))
+  // The node is asked with what approve would send it.
+  const preview = markup.slice(at, markup.indexOf('/>', at))
+  expect(preview).toContain('outputs: remoteOwner ? undefined : outputs')
+  expect(preview).toContain('opener: opening ? opener : undefined')
+  expect(preview).toContain('revision_id: revision?.id')
+  const decide = review.slice(review.indexOf('async function decide('))
+  const call = decide.slice(0, decide.indexOf('})\n'))
+  expect(call).toContain("outputs: verdict === 'approve' && !remoteOwner ? outputs : undefined")
+  expect(call).toContain("opener: verdict === 'approve' && opening ? opener : undefined")
 })
 
 test('the opener shows only where approval sends a description, and only with the setting on', () => {

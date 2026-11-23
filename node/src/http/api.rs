@@ -4338,22 +4338,19 @@ async fn decide_review_here(
             Ok(json!({ "state": "rejected" }))
         }
         "approve" => {
-            let title = b.title.as_deref().unwrap_or(r.approved_title()).to_string();
-            let mut body = b.body.as_deref().unwrap_or(r.approved_body()).to_string();
-            // Before anything is claimed or pushed: under
-            // `[review] generated_details` a description goes out only behind
-            // the operator's own opener, composed here and nowhere else.
-            let mut edited_outputs = b.outputs.clone();
-            if s.cfg.live().review.generated_details {
-                with_generated_details(
-                    &s,
-                    &r,
-                    decided_revision.as_deref(),
-                    b.opener.as_deref(),
-                    &mut body,
-                    &mut edited_outputs,
-                )?;
-            }
+            // Before anything is claimed or pushed. The review screen's
+            // preview of the outgoing text is read from the same function.
+            let (title, body, edited_outputs) = approval_text(
+                &s,
+                &r,
+                decided_revision.as_deref(),
+                &Approving {
+                    title: b.title.as_deref(),
+                    body: b.body.as_deref(),
+                    outputs: b.outputs.as_ref(),
+                    opener: b.opener.as_deref(),
+                },
+            )?;
             match crate::authority::publish_review(
                 &crate::authority::PublishContext {
                     store: s.store(),
@@ -4417,6 +4414,135 @@ async fn decide_review_here(
             format!("{other:?} is not a verdict"),
         )),
     }
+}
+
+/// What an approval was asked to send, as the operator edited it.
+struct Approving<'a> {
+    title: Option<&'a str>,
+    body: Option<&'a str>,
+    outputs: Option<&'a crate::review::publish::Outputs>,
+    opener: Option<&'a str>,
+}
+
+/// The title, body and edited outputs an approval hands publication: the
+/// operator's edits over the review's own text and, under
+/// `[review] generated_details`, the description behind the operator's own
+/// opener, composed here and nowhere else. The approval publishes exactly
+/// this, and `POST /api/reviews/{id}/outgoing` previews it, so what the
+/// operator reads is what the forge gets.
+fn approval_text(
+    s: &AppState,
+    r: &crate::store::ReviewRow,
+    decided_revision: Option<&str>,
+    asked: &Approving<'_>,
+) -> ApiResult<(String, String, Option<crate::review::publish::Outputs>)> {
+    let title = asked.title.unwrap_or(r.approved_title()).to_string();
+    let mut body = asked.body.unwrap_or(r.approved_body()).to_string();
+    let mut edited_outputs = asked.outputs.cloned();
+    if s.cfg.live().review.generated_details {
+        with_generated_details(
+            s,
+            r,
+            decided_revision,
+            asked.opener,
+            &mut body,
+            &mut edited_outputs,
+        )?;
+    }
+    Ok((title, body, edited_outputs))
+}
+
+/// What `POST /api/reviews/{id}/outgoing` takes: the approval as the screen
+/// would send it now.
+#[derive(Deserialize)]
+pub struct OutgoingBody {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub outputs: Option<crate::review::publish::Outputs>,
+    #[serde(default)]
+    pub opener: Option<String>,
+    /// The revision the screen is showing; the latest when absent.
+    #[serde(default)]
+    pub revision_id: Option<String>,
+}
+
+/// `POST /api/reviews/{id}/outgoing`: the exact text an approval with these
+/// edits would publish, without publishing anything. `description` is the
+/// title and body a new change opens with or an existing one is given, null
+/// when approval sends none; `comment` is the comment it posts; `refusal`
+/// is why the approval would be refused as written (an opener missing under
+/// `[review] generated_details`), with `description` then null. A review
+/// another node holds is composed there, so it is refused here.
+pub async fn review_outgoing(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(b): Json<OutgoingBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let r = s
+        .store()
+        .get_review(&id)?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such review".into()))?;
+    if r.kind == crate::store::reports::KIND {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "a report publishes nothing to a forge".into(),
+        ));
+    }
+    if r.node_id != s.node_id {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "this review belongs to another node, which composes what it publishes".into(),
+        ));
+    }
+    let target: crate::review::publish::Target = serde_json::from_str(&r.target)
+        .map_err(|e| ApiError(StatusCode::CONFLICT, format!("unreadable target: {e}")))?;
+    let revision = match b.revision_id.as_deref().filter(|id| !id.is_empty()) {
+        Some(seen) => Some(seen.to_string()),
+        None => s.store().latest_review_revision(&id)?.map(|rev| rev.id),
+    };
+    let intent = crate::authority::revision_intent(s.store(), revision.as_deref())
+        .map_err(|message| ApiError(StatusCode::CONFLICT, message))?;
+    let asked = Approving {
+        title: b.title.as_deref(),
+        body: b.body.as_deref(),
+        outputs: b.outputs.as_ref(),
+        opener: b.opener.as_deref(),
+    };
+    let (outputs, refusal) = match approval_text(&s, &r, revision.as_deref(), &asked) {
+        Ok((title, body, edited)) => (
+            crate::review::publish::Outputs::approved(
+                edited.as_ref(),
+                &intent.forge,
+                &target,
+                &title,
+                &body,
+            ),
+            None,
+        ),
+        Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, refusal)) => {
+            let mut outputs = crate::review::publish::Outputs::approved(
+                b.outputs.as_ref(),
+                &intent.forge,
+                &target,
+                r.approved_title(),
+                r.approved_body(),
+            );
+            outputs.description = None;
+            (outputs, Some(refusal))
+        }
+        Err(error) => return Err(error),
+    };
+    // A repository's first push and a push straight to the base open no
+    // change, so publication sends neither text (`review::publish`).
+    let opens = !target.initial && !target.direct;
+    Ok(Json(json!({
+        "description": outputs.description.filter(|_| opens),
+        "comment": outputs.comment.filter(|_| opens),
+        "refusal": refusal,
+    })))
 }
 
 /// Put the operator's opener over the description an approval sends, under

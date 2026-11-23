@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { codeSpans, render, renderMessage, renderWithoutFetching } from './markdown'
+import { codeSpans, render, renderForge, renderMessage, renderWithoutFetching } from './markdown'
 
 describe('markdown rendering', () => {
   test('escapes embedded HTML instead of trusting document authors', () => {
@@ -50,5 +50,32 @@ describe('markdown rendering', () => {
 describe('codeSpans', () => {
   test('sets code spans as code and escapes the rest', () => {
     expect(codeSpans('add `checks` to its [[repo]] <entry>')).toBe('add <code>checks</code> to its [[repo]] &lt;entry&gt;')
+  })
+})
+
+describe('renderForge', () => {
+  test('the generated-details fold renders as the forge folds it', () => {
+    const html = renderForge(
+      'Fixes the flaky sync.\n\n<details>\n<summary>Generated details</summary>\n\n## What\n\nLong text.\n\n</details>',
+    )
+    expect(html).toContain('<details>')
+    expect(html).toContain('<summary>Generated details</summary>')
+    expect(html).toContain('<h2>What</h2>')
+    expect(html).toContain('</details>')
+  })
+
+  test('any other HTML, and attributes on the fold, stay text', () => {
+    const html = renderForge('<details open onclick="x()">\n<script>alert(1)</script>\n<img src=x onerror=y>')
+    expect(html).not.toContain('<details')
+    expect(html).not.toContain('<script')
+    expect(html).not.toContain('<img')
+    expect(html).toContain('&lt;script&gt;')
+  })
+
+  test('nothing is fetched, unsafe links are dropped and a newline is a break', () => {
+    expect(renderForge('![chart](https://example.com/a.png)')).toContain('<span class="no-fetch">[chart]</span>')
+    expect(renderForge('[x](javascript:alert(1))')).not.toContain('href')
+    expect(renderForge('[x](https://example.com)')).toContain('target="_blank"')
+    expect(renderForge('one\ntwo')).toContain('<br>')
   })
 })

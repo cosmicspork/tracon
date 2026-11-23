@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { ReviewerView } from './types'
+import { readFileSync } from 'node:fs'
 import {
   basisLabel,
   checksState,
@@ -79,6 +80,17 @@ describe('verdict availability', () => {
       'Fixes the flaky sync.\n\n<details>\n<summary>Generated details</summary>\n\n## What\n\nLong text.\n\n</details>',
     )
     expect(composeGeneratedDetails('Fixes the flaky sync.', ' \n')).toBe('Fixes the flaky sync.')
+    expect(composeGeneratedDetails(' ', 'text')).toBeNull()
+  })
+
+  test('the description is composed as the node composes it', () => {
+    // The node's own tests check these same cases against what it publishes.
+    const fixture = JSON.parse(readFileSync(new URL('../../fixtures/generated-details.json', import.meta.url), 'utf8')) as {
+      cases: { opener: string; body: string; published: string | null }[]
+    }
+    for (const c of fixture.cases) {
+      expect(composeGeneratedDetails(c.opener, c.body)).toBe(c.published)
+    }
   })
 
   test('a verdict that sends a reason says it needs one', () => {

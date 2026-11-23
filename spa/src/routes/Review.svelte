@@ -5,6 +5,7 @@
   import ReviewDiff from '../components/ReviewDiff.svelte'
   import { splitDiff } from '../lib/diff'
   import CommitMessage from '../components/CommitMessage.svelte'
+  import OutgoingPreview from '../components/OutgoingPreview.svelte'
   import ShownWork from '../components/ShownWork.svelte'
   import CheckDetail from '../components/CheckDetail.svelte'
   import PublicationSteps from '../components/PublicationSteps.svelte'
@@ -54,7 +55,6 @@
     GENERATED_DETAILS,
     basisLabel,
     checksState,
-    composeGeneratedDetails,
     composerLabel,
     openerFor,
     lostOwner,
@@ -514,10 +514,6 @@
    * approval sends none, or the setting is off.
    */
   const opening = $derived(openerFor(generatedDetails && !closed, { change: change !== null, initial, describe }))
-  /** What the forge gets as the description, with the opener over it. */
-  const composed = $derived(
-    opening ? composeGeneratedDetails(opener, opening === 'description' ? descBody : body) : '',
-  )
   const conditions = $derived({
     busy,
     publishing,
@@ -1286,14 +1282,6 @@
         <textarea class="edit body grow" bind:value={descBody} use:autogrow={descBody} disabled={busy || publishing || surface.phone}></textarea>
       {/if}
     </details>
-    <details class="generated preview">
-      <summary
-        >What the forge gets <b
-          >{opener.trim() ? `your opener, then ${GENERATED_DETAILS} collapsed` : 'nothing until you write the opener'}</b
-        ></summary
-      >
-      {#if opener.trim()}<pre>{composed}</pre>{/if}
-    </details>
   {/snippet}
 
   {#if authorship && authorship.misattributed.length > 0}
@@ -1321,7 +1309,7 @@
     </div>
   {:else}
     <div class="h4">
-      Title and body <b>{closed ? 'as decided' : surface.phone ? 'edited on the desktop' : 'edit before approving if you want to'}</b>
+      Title and body <b>{closed ? 'as decided' : surface.phone ? 'edited on the desktop' : 'Markdown source · edit before approving; the preview below is what is sent'}</b>
     </div>
     <input class="edit" bind:value={title} disabled={busy || publishing || closed || surface.phone} />
     {#if opening === 'body'}
@@ -1357,6 +1345,30 @@
   {#if change && !describe && !(commenting && comment.trim())}
     <div class="note dim">Approving only pushes; the {noun}'s text is left as it is.</div>
   {/if}
+  {/if}
+  {#if !closed}
+    <!-- The source is edited above; this is exactly what approving sends. -->
+    <OutgoingPreview
+      {id}
+      {noun}
+      remote={remoteOwner !== null}
+      asked={{
+        title,
+        body,
+        outputs: remoteOwner ? undefined : outputs,
+        opener: opening ? opener : undefined,
+        revision_id: revision?.id,
+      }}
+      local={{
+        title,
+        body,
+        forge: remoteOwner ? intent.forge : outputs,
+        change: change !== null,
+        opensNone: initial || direct,
+        generatedDetails,
+        opener,
+      }}
+    />
   {/if}
   {#if edited && !closed}
     <div class="note">Edited · approving publishes this version</div>
@@ -2099,15 +2111,6 @@
   .generated summary {
     cursor: pointer;
     padding: 2px 0;
-  }
-  .generated pre {
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    font: 12px var(--mono);
-    background: var(--s2);
-    border-radius: 4px;
-    padding: 8px 10px;
-    margin: 4px 0 0;
   }
   .toggle {
     display: flex;
