@@ -83,6 +83,11 @@ pub struct Facts<'a> {
     pub project_id: Option<&'a str>,
     pub project_name: Option<&'a str>,
     pub tools: &'a [String],
+    /// Each plugin and MCP server that may offer the session tools, by the
+    /// name its tools are namespaced under, with the name they are grouped
+    /// under (`ToolRouter::tool_namespaces`). Its tools are the offered ones
+    /// named `<name>__<tool>`.
+    pub namespaces: &'a [(String, String)],
     /// The names in the node's service catalogue: what `service_start` can
     /// actually start, so nothing promises a service the node lacks.
     pub services: &'a [String],
@@ -307,18 +312,26 @@ fn push_working_with(out: &mut String, policy: &Policy, facts: &Facts) {
     out.push('\n');
 }
 
-/// The node's tools a session may be offered, by what they are for. A
+/// The node's own tools a session may be offered, by what they are for. A
 /// harness that defers tools shows the model their names alone
 /// (`adapter::claude`), so this is its map of them; every offered tool is in
-/// exactly one group, and a test keeps new tools from going unlisted.
+/// exactly one group, and a test keeps new tools from going unlisted. No
+/// plugin is named here: a plugin's tools are grouped under the plugin, from
+/// what is installed and offered (`tool_groups`).
 const TOOL_GROUPS: &[(&str, &[&str])] = {
     use crate::mcp::{
-        approvals, docs, egress, memory, operator, review, services, setup, show, work,
+        approvals, branch, docs, egress, memory, operator, review, services, setup, show, work,
     };
     &[
         (
             "Review",
-            &[review::SUBMIT, review::STATUS, show::SHOW, review::VERDICT],
+            &[
+                review::SUBMIT,
+                review::STATUS,
+                show::SHOW,
+                review::VERDICT,
+                branch::FETCH,
+            ],
         ),
         (
             "Work ledger",
@@ -370,25 +383,6 @@ const TOOL_GROUPS: &[(&str, &[&str])] = {
         ),
         ("GitHub", crate::mcp::github::TOOLS),
         ("GitLab", crate::mcp::gitlab::TOOLS),
-        // The `jira-review` plugin's tools, offered once it is installed; the
-        // node itself no longer talks to Jira. `transition` is consequential:
-        // it takes an `operation_id` and is asked unless a grant names it.
-        (
-            "Jira",
-            &[
-                "jira-review__issue",
-                "jira-review__search",
-                "jira-review__transitions",
-                "jira-review__comment",
-                "jira-review__update",
-                "jira-review__create",
-                "jira-review__link",
-                "jira-review__transition",
-            ],
-        ),
-        // The `sql-review` plugin's reads, as the shipped policy bundle names
-        // them; the node itself runs no SQL.
-        ("Database", &["sql-review__query", "sql-review__describe"]),
         (
             "Reporting a fault in tracon",
             &[operator::REPORT, operator::REPORT_STATUS],
@@ -396,37 +390,57 @@ const TOOL_GROUPS: &[(&str, &[&str])] = {
     ]
 };
 
-fn push_tool_index(out: &mut String, facts: &Facts) {
-    out.push_str("- Tools, by purpose:\n");
-    let mut listed = 0;
-    for (purpose, names) in TOOL_GROUPS {
-        let offered: Vec<String> = names
-            .iter()
-            .filter(|name| offered(facts, name))
-            .map(|name| format!("`{name}`"))
-            .collect();
-        if offered.is_empty() {
-            continue;
-        }
-        listed += offered.len();
-        out.push_str(&format!("  - {purpose}: {}\n", offered.join(", ")));
-    }
+/// The index's groups, in order, each with its offered tools: the node's
+/// purpose groups, then one per offered plugin under its display name (and
+/// per MCP server under its name), then "Other" for a node tool no group
+/// names. Every offered tool is in exactly
+/// one; a group with none offered is left out.
+fn tool_groups<'f>(facts: &'f Facts) -> Vec<(String, Vec<&'f str>)> {
+    let plugin_of = |tool: &str| {
+        facts.namespaces.iter().position(|(name, _)| {
+            tool.strip_prefix(name.as_str())
+                .is_some_and(|rest| rest.starts_with(crate::mcp::upstream::SEPARATOR))
+        })
+    };
+    let mut groups: Vec<(String, Vec<&str>)> = TOOL_GROUPS
+        .iter()
+        .map(|(purpose, names)| {
+            let offered: Vec<&str> = names
+                .iter()
+                .copied()
+                .filter(|name| offered(facts, name))
+                .collect();
+            (purpose.to_string(), offered)
+        })
+        .collect();
+    let mut namespaced: Vec<(String, Vec<&str>)> = facts
+        .namespaces
+        .iter()
+        .map(|(_, label)| (label.clone(), Vec::new()))
+        .collect();
     // A tool no group names is still the session's: listed rather than
     // hidden, until a group is given it.
-    if listed < facts.tools.len() {
-        let rest: Vec<String> = facts
-            .tools
-            .iter()
-            .filter(|tool| {
-                !TOOL_GROUPS
-                    .iter()
-                    .any(|(_, names)| names.contains(&tool.as_str()))
-            })
-            .map(|tool| format!("`{tool}`"))
-            .collect();
-        if !rest.is_empty() {
-            out.push_str(&format!("  - Other: {}\n", rest.join(", ")));
+    let mut rest = Vec::new();
+    for tool in facts.tools.iter().map(String::as_str) {
+        if TOOL_GROUPS.iter().any(|(_, names)| names.contains(&tool)) {
+            continue;
         }
+        match plugin_of(tool) {
+            Some(i) => namespaced[i].1.push(tool),
+            None => rest.push(tool),
+        }
+    }
+    groups.extend(namespaced);
+    groups.push(("Other".to_string(), rest));
+    groups.retain(|(_, tools)| !tools.is_empty());
+    groups
+}
+
+fn push_tool_index(out: &mut String, facts: &Facts) {
+    out.push_str("- Tools, by purpose:\n");
+    for (purpose, tools) in tool_groups(facts) {
+        let tools: Vec<String> = tools.iter().map(|tool| format!("`{tool}`")).collect();
+        out.push_str(&format!("  - {purpose}: {}\n", tools.join(", ")));
     }
 }
 
@@ -1512,6 +1526,7 @@ mod tests {
             project_name: Some("tracon"),
             tools: &["recall".into(), "retain".into()],
             services: &[],
+            namespaces: &[],
             worktree: "/work",
             phase: "execute",
             item: None,
@@ -1591,6 +1606,7 @@ mod tests {
                 project_name: None,
                 tools,
                 services: &[],
+                namespaces: &[],
                 worktree: "/work",
                 phase: "execute",
                 item: None,
@@ -1683,6 +1699,7 @@ mod tests {
                 project_name: Some("tracon"),
                 tools,
                 services: &[],
+                namespaces: &[],
                 worktree: "/work",
                 phase: "execute",
                 item: None,
@@ -1839,6 +1856,7 @@ mod tests {
             project_name: None,
             tools: &[],
             services: &[],
+            namespaces: &[],
             worktree: "/work",
             phase: "execute",
             item: None,
@@ -1877,7 +1895,9 @@ mod tests {
     }
 
     /// Every tool the node can offer is in one group of the index, so a new
-    /// tool is placed on purpose rather than falling under "Other".
+    /// tool is placed on purpose rather than falling under "Other", and so
+    /// is every tool an offered plugin lists: under that plugin, whatever it
+    /// names its tools.
     #[test]
     fn every_tool_is_in_exactly_one_group_of_the_index() {
         use crate::mcp::*;
@@ -1890,18 +1910,88 @@ mod tests {
         all.extend(operator::definitions());
         all.extend(egress::definitions());
         all.extend(show::definitions());
+        all.extend(branch::definitions());
         all.extend(setup::definitions());
         all.extend(work::definitions());
         all.extend(approvals::definitions());
         all.extend(services::definitions_for(&["browser"], "browser"));
-        for tool in &all {
-            let name = tool["name"].as_str().unwrap();
+        let node: Vec<String> = all
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_string())
+            .collect();
+        for name in &node {
             let groups = TOOL_GROUPS
                 .iter()
-                .filter(|(_, names)| names.contains(&name))
+                .filter(|(_, names)| names.contains(&name.as_str()))
                 .count();
             assert_eq!(groups, 1, "{name} is in {groups} groups");
+            // Nothing of the node's can be taken for a plugin's.
+            assert!(!name.contains(upstream::SEPARATOR), "{name}");
         }
+        let plugin = [
+            "jira-review__issue",
+            "jira-review__proposal_status",
+            "sql-review__query",
+            "sql-review__write",
+            "hoja__open",
+        ];
+        let mut tools = node.clone();
+        tools.extend(plugin.iter().map(|t| t.to_string()));
+        let plugins = [
+            ("jira-review".to_string(), "Jira".to_string()),
+            ("sql-review".to_string(), "sql-review".to_string()),
+            ("hoja".to_string(), "Hoja".to_string()),
+        ];
+        let mut facts = offering(&tools);
+        facts.namespaces = &plugins;
+        let groups = tool_groups(&facts);
+        for name in &tools {
+            let holding: Vec<&str> = groups
+                .iter()
+                .filter(|(_, tools)| tools.contains(&name.as_str()))
+                .map(|(purpose, _)| purpose.as_str())
+                .collect();
+            assert_eq!(holding.len(), 1, "{name} is in {holding:?}");
+            assert_ne!(holding[0], "Other", "{name}");
+        }
+    }
+
+    /// A plugin's offered tools are listed under the plugin, by its display
+    /// name or else its name, and an MCP server's under the server; one with
+    /// none offered gets no group, and a tool of no node group and no
+    /// namespace is still listed.
+    #[test]
+    fn plugin_tools_are_grouped_under_their_plugin() {
+        let tools: Vec<String> = [
+            "submit_review",
+            "jira-review__issue",
+            "jira-review__proposal_status",
+            "sql-review__write",
+            "sql-reviewer__query",
+            "linear__create_issue",
+        ]
+        .iter()
+        .map(|t| t.to_string())
+        .collect();
+        let plugins = [
+            ("sql-review".to_string(), "sql-review".to_string()),
+            ("jira-review".to_string(), "Jira".to_string()),
+            ("workboard".to_string(), "Workboard".to_string()),
+            ("linear".to_string(), "linear".to_string()),
+        ];
+        let mut facts = offering(&tools);
+        facts.namespaces = &plugins;
+        let mut text = String::new();
+        push_tool_index(&mut text, &facts);
+        assert_eq!(
+            text,
+            "- Tools, by purpose:\n  \
+             - Review: `submit_review`\n  \
+             - sql-review: `sql-review__write`\n  \
+             - Jira: `jira-review__issue`, `jira-review__proposal_status`\n  \
+             - linear: `linear__create_issue`\n  \
+             - Other: `sql-reviewer__query`\n"
+        );
     }
 
     #[test]
@@ -1931,6 +2021,7 @@ mod tests {
             project_name: None,
             tools: &[],
             services: &[],
+            namespaces: &[],
             worktree: "/work",
             phase: "execute",
             item: None,
@@ -1975,6 +2066,7 @@ mod tests {
             project_name: None,
             tools: &[],
             services: &[],
+            namespaces: &[],
             worktree: "/work",
             phase: "execute",
             item: None,
@@ -2020,6 +2112,7 @@ mod tests {
             project_name: None,
             tools: &[],
             services: &[],
+            namespaces: &[],
             worktree: "/work",
             phase: "execute",
             item: Some(&current),
@@ -2071,6 +2164,7 @@ mod tests {
             project_name: None,
             tools: &[],
             services: &[],
+            namespaces: &[],
             worktree: "/work",
             phase: "execute",
             item: None,
@@ -2120,6 +2214,7 @@ mod tests {
             project_name: None,
             tools: &[],
             services: &[],
+            namespaces: &[],
             worktree: "/work",
             phase: "execute",
             item: None,
@@ -2174,6 +2269,7 @@ mod tests {
             project_name: None,
             tools: &[],
             services: &[],
+            namespaces: &[],
             worktree: "/work",
             phase: "execute",
             item: None,
@@ -2220,6 +2316,7 @@ mod tests {
             project_name: None,
             tools: &[],
             services: &[],
+            namespaces: &[],
             worktree: "/work",
             phase: "execute",
             item: Some(&current),
@@ -2274,6 +2371,7 @@ mod tests {
             project_name: None,
             tools: &[],
             services: &[],
+            namespaces: &[],
             worktree: "/work",
             phase: "execute",
             item: Some(&item),
@@ -2351,6 +2449,7 @@ mod tests {
                 project_name: None,
                 tools: &[],
                 services: &[],
+                namespaces: &[],
                 worktree: "/work",
                 phase: "execute",
                 item: Some(&item),
@@ -2397,6 +2496,7 @@ mod tests {
             project_name: None,
             tools: &[],
             services: &[],
+            namespaces: &[],
             worktree: "/work",
             phase: "execute",
             item: None,
@@ -2609,6 +2709,34 @@ mod tests {
         }
     }
 
+    /// Facts for a session offered `tools`, with nothing else about it.
+    fn offering(tools: &[String]) -> Facts<'_> {
+        Facts {
+            node_name: "laptop",
+            node_id: "0123456789abcdef",
+            backend: "podman",
+            harness: "claude",
+            harness_version: "2.0.0",
+            channel: "work",
+            project_id: None,
+            project_name: None,
+            tools,
+            namespaces: &[],
+            services: &[],
+            worktree: "/work",
+            phase: "execute",
+            item: None,
+            plan_body: None,
+            ready: &[],
+            review: None,
+            manifest: Box::leak(Box::default()),
+            egress: None,
+            forge_repo: None,
+            prepared: None,
+            stale_base: None,
+        }
+    }
+
     fn reviewing<'a>(review: ReviewFacts<'a>, tools: &'a [String]) -> Facts<'a> {
         Facts {
             node_name: "laptop",
@@ -2621,6 +2749,7 @@ mod tests {
             project_name: None,
             tools,
             services: &[],
+            namespaces: &[],
             worktree: "/work",
             phase: "review",
             item: None,
@@ -2656,6 +2785,7 @@ mod tests {
                 project_name: None,
                 tools,
                 services: &[],
+                namespaces: &[],
                 worktree: "/work",
                 phase: "execute",
                 item: Some(&item),
