@@ -77,12 +77,12 @@ fn adapter() -> NativeAdapter {
     NativeAdapter::new(NativeAdapter::PINNED_VERSION)
 }
 
-#[tokio::test]
-async fn version_is_the_nodes_own() {
-    state::isolate();
-    let v = adapter().version(&runner()).await.unwrap();
-    assert_eq!(v.found, NativeAdapter::PINNED_VERSION);
-    assert!(v.matches());
+/// Its version is the one the harness bundle's manifest names for
+/// `tracon-agent`, which it pins at the node's own.
+#[test]
+fn its_version_is_the_bundles_tracon_agent() {
+    assert_eq!(adapter().bundle_component(), Some("tracon-agent"));
+    assert_eq!(adapter().pinned_version(), env!("CARGO_PKG_VERSION"));
 }
 
 #[tokio::test]

@@ -179,7 +179,7 @@ test('a harness row shows what was found, never the pinned version in its place'
   expect(harnessFact({ ...h, found: '1.4.2', mismatch: false, image_state: 'current' })).toBe('native 1.4.2')
   expect(harnessFact({ ...h, found: '1.3.0', mismatch: true, image_state: 'stale' })).toBe('native 1.3.0 (expects 1.4.2)')
   expect(harnessFact({ ...h, found: null, mismatch: true, image_state: 'missing' })).toBe('native not installed')
-  expect(harnessFact({ ...h, found: null, mismatch: false, image_state: 'unknown' })).toBe('native not probed')
+  expect(harnessFact({ ...h, found: null, mismatch: false, image_state: 'unknown' })).toBe('native no version yet')
 })
 
 test('a serving node that cannot run says so, unless a ready peer runs instead', () => {

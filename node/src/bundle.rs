@@ -101,6 +101,42 @@ pub struct ManifestComponent {
     pub sha256: String,
 }
 
+/// What the installed bundle says its components are, as the node records
+/// its harnesses' versions: read from the `manifest.json` of the bundle its
+/// sandboxes mount ([`effective`]), which the node checked against its
+/// `.sha256` and digests when it installed it, and checks again at each
+/// start. No sandbox is started for this.
+///
+/// `None` while no bundle is installed (nothing there yet, as while the node
+/// fetches it): no version is known, and none is a mismatch. A bundle that
+/// is there but whose manifest cannot be read is `Err`, which the node
+/// records as an unknown version and so as a mismatch.
+pub fn installed_versions(cfg: &Config) -> Option<Result<BTreeMap<String, String>, String>> {
+    let dir = effective(cfg)?;
+    manifest_versions(&dir)
+}
+
+/// [`installed_versions`] for the bundle at `dir`.
+pub fn manifest_versions(dir: &Path) -> Option<Result<BTreeMap<String, String>, String>> {
+    let path = dir.join("manifest.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(_) if !dir.join("bin/tracon-sandbox").is_file() => return None,
+        Err(e) => return Some(Err(format!("{}: {e}", path.display()))),
+    };
+    Some(
+        serde_json::from_str::<Manifest>(&text)
+            .map(|manifest| {
+                manifest
+                    .components
+                    .into_iter()
+                    .map(|(name, component)| (name, component.version))
+                    .collect()
+            })
+            .map_err(|e| format!("{}: {e}", path.display())),
+    )
+}
+
 pub(crate) fn sha256_file(path: &Path) -> std::io::Result<String> {
     let mut file = std::fs::File::open(path)?;
     let mut hash = Sha256::new();

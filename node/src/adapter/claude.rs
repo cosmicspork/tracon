@@ -21,8 +21,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::{
     AdapterError, ExitCause, HarnessAdapter, HarnessCompat, HarnessEvent, HarnessHandle,
-    HarnessVersion, LaunchSpec, Layout, ModelOption, PermissionReply, PermissionRequest,
-    ProtocolSupport, Resume, TurnResult,
+    LaunchSpec, Layout, ModelOption, PermissionReply, PermissionRequest, ProtocolSupport, Resume,
+    TurnResult,
 };
 use crate::adapter::types::{self, PermissionOption, ToolCall, ToolCallUpdate, Usage};
 use crate::runner::{RunKind, RunLabels, Runner, RunnerCommand, RunnerError, Spawned};
@@ -326,15 +326,6 @@ fn init_protocol(init: &Value) -> u32 {
         .and_then(Value::as_u64)
         .map(|v| v.try_into().unwrap_or(u32::MAX))
         .unwrap_or(ClaudeAdapter::PROTOCOL.min)
-}
-
-fn parse_version(out: &str) -> String {
-    // "2.1.295 (Claude Code)"
-    out.split_whitespace()
-        .next()
-        .filter(|t| t.chars().next().is_some_and(|c| c.is_ascii_digit()))
-        .unwrap_or("unknown")
-        .to_string()
 }
 
 /// The two options tracon's queue is built around. Claude Code's control
@@ -1156,6 +1147,10 @@ impl HarnessAdapter for ClaudeAdapter {
         Self::PROTOCOL
     }
 
+    fn bundle_component(&self) -> Option<&'static str> {
+        Some("claude")
+    }
+
     fn layout(&self) -> Layout {
         Self::layout()
     }
@@ -1255,24 +1250,6 @@ impl HarnessAdapter for ClaudeAdapter {
     /// line that run commands. `settings.local.json` is not a project source.
     fn refused_workspace_entries(&self) -> &'static [&'static str] {
         &[".claude/settings.json"]
-    }
-
-    async fn version(&self, runner: &dyn Runner) -> Result<HarnessVersion, AdapterError> {
-        let out = runner
-            .run_probe(RunnerCommand {
-                argv: vec![Self::BINARY.into(), "--version".into()],
-                name: crate::config::resource_name("claude-version"),
-                labels: RunLabels {
-                    harness: Some(Self::ID.into()),
-                    ..RunLabels::of(RunKind::Probe)
-                },
-                ..Default::default()
-            })
-            .await?;
-        Ok(HarnessVersion {
-            found: parse_version(&String::from_utf8_lossy(&out.stdout)),
-            pinned: self.pinned.clone(),
-        })
     }
 
     /// Claude Code has no model catalogue to ask for, so this reports what
@@ -1788,13 +1765,6 @@ mod tests {
             // The next result measures its rise from this one.
             assert_eq!(seen.map(|s| s.charged()), Some(940_000));
         }
-    }
-
-    #[test]
-    fn a_version_is_read_out_of_the_cli_banner() {
-        assert_eq!(parse_version("2.1.295 (Claude Code)\n"), "2.1.295");
-        assert_eq!(parse_version("something odd"), "unknown");
-        assert_eq!(parse_version(""), "unknown");
     }
 
     #[test]

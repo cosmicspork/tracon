@@ -187,7 +187,7 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
                                     # counts against the memory limit, so it must fit within it
 # [runtime.kubernetes.resources.session]   # a session's pod; [...resources.command] is a check's
 # cpu_request = "250m"              # or a preparation's (500m, 2Gi, 4Gi), [...resources.probe] a
-# memory_request = "1Gi"            # version or tool probe's (100m, 128Mi, 512Mi, no /dev/shm).
+# memory_request = "1Gi"            # tool probe's (100m, 128Mi, 512Mi, no /dev/shm).
 # memory_limit = "4Gi"              # Every pod renders its requests and memory limit, so a
 # cpu_limit = "2"                   # LimitRange never fills them in; no CPU limit unless one is
                                     # set (cpu_limit). A limit below its request is refused at load

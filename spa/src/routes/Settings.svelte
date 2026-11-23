@@ -1243,14 +1243,14 @@
         </ul>
       {/each}
       {#if store.node && nodeHarnesses(store.node).length}
-        <p class="dim">Harnesses <Help label="About harnesses">A session runs the harness its model's credential allows. The default breaks ties.</Help></p>
+        <p class="dim">Harnesses <Help label="About harnesses">A session runs the harness its model's credential allows. The default breaks ties. Each version is the one the node's verified harness bundle names; every sandbox checks it again as it starts.</Help></p>
         <ul class="checks">
           {#each nodeHarnesses(store.node) as h (h.id)}
             <li>
               <span class="chip" class:bad={h.mismatch} class:warn={h.image_state === 'stale' || h.image_state === 'missing'} class:off={!h.mismatch && h.image_state === 'unknown'}>{h.id}</span>
               {#if h.default}<em class="tag">default</em>{/if}
-              <small>pinned {h.pinned || 'image default'} · found {h.found ?? 'not probed'} · {imageNote(h)}</small>
-              {#if h.mismatch}<small class="crit">Sessions on {h.id} are refused until its image reports {h.pinned}.</small>{/if}
+              <small>pinned {h.pinned || 'image default'} · bundle {h.found ?? 'not installed yet'} · {imageNote(h)}</small>
+              {#if h.mismatch}<small class="crit">Sessions on {h.id} are refused until the harness bundle carries {h.pinned}.</small>{/if}
             </li>
           {/each}
         </ul>

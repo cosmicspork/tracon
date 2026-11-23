@@ -76,13 +76,13 @@ fn spec_env(env: Vec<(String, String)>) -> LaunchSpec {
     }
 }
 
-#[tokio::test]
-async fn version_is_parsed_from_the_runner() {
-    state::isolate();
-    let a = ClaudeAdapter::new("2.1.295");
-    let v = a.version(&FakeRunner).await.unwrap();
-    assert_eq!(v.found, "2.1.295");
-    assert!(v.matches());
+/// Its version is the one the harness bundle's manifest names for `claude`.
+#[test]
+fn its_version_is_the_bundles_claude() {
+    assert_eq!(
+        ClaudeAdapter::new("2.1.295").bundle_component(),
+        Some("claude")
+    );
 }
 
 #[tokio::test]

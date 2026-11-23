@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use tokio::sync::{mpsc, Mutex};
 
 use tracon::adapter::{
-    AdapterError, HarnessAdapter, HarnessCompat, HarnessEvent, HarnessHandle, HarnessVersion,
-    LaunchSpec, ModelOption, ProtocolSupport, TurnResult,
+    AdapterError, HarnessAdapter, HarnessCompat, HarnessEvent, HarnessHandle, LaunchSpec,
+    ModelOption, ProtocolSupport, TurnResult,
 };
 use tracon::runner::Runner;
 
@@ -78,12 +78,6 @@ impl HarnessAdapter for FakeAdapter {
             min: 1,
             max: 1,
         }
-    }
-    async fn version(&self, _r: &dyn Runner) -> Result<HarnessVersion, AdapterError> {
-        Ok(HarnessVersion {
-            found: "1.0.0".into(),
-            pinned: "1.0.0".into(),
-        })
     }
     async fn probe_models(
         &self,
@@ -153,9 +147,6 @@ impl HarnessAdapter for NamedFake {
     }
     fn protocol(&self) -> ProtocolSupport {
         self.inner.protocol()
-    }
-    async fn version(&self, r: &dyn Runner) -> Result<HarnessVersion, AdapterError> {
-        self.inner.version(r).await
     }
     async fn probe_models(
         &self,
