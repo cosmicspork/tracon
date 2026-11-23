@@ -10,11 +10,11 @@ use proto::enroll::{normalize_code, EnrollRequest};
 use proto::frame::{valid_channel, Envelope, MAX_FRAME_BYTES, MESH_CHANNEL};
 use proto::keys::key32;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, value::RawValue, Value};
 use tokio_stream::{wrappers::BroadcastStream, Stream, StreamExt};
 
 use crate::auth::{now_ms, now_unix, Owner};
-use crate::store::{ClaimOutcome, Fill, Member, RenewedOutcome, Take};
+use crate::store::{ClaimOutcome, Fill, Member, RenewedOutcome, Take, PAGE_MAX_BYTES};
 use crate::AppState;
 
 type ApiResult = Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)>;
@@ -135,14 +135,17 @@ pub async fn get_frames(
     State(s): State<AppState>,
     Extension(owner): Extension<Owner>,
     Query(q): Query<FramesQuery>,
-) -> ApiResult {
+) -> Result<Json<FramesPage>, (StatusCode, Json<Value>)> {
     if !valid_channel(&q.channel) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid channel name"));
     }
     let me = member_of(&s, &owner)?;
     in_channel(&me, &q.channel)?;
     let limit = q.limit.unwrap_or(200).clamp(1, 1000);
-    let page = s.frames.read(&q.channel, q.after, limit).map_err(io)?;
+    let page = s
+        .frames
+        .read(&q.channel, q.after, limit, PAGE_MAX_BYTES)
+        .map_err(io)?;
     // Behind retention: the caller's cursor points before the oldest frame we
     // still hold, so frames were lost to it. It must resync from a snapshot.
     if page.oldest > 0 && q.after + 1 < page.oldest {
@@ -153,22 +156,45 @@ pub async fn get_frames(
             ),
         ));
     }
-    let frames: Vec<Value> = page
+    // More remain whenever the page stops short of the latest seq, whether
+    // the count or the byte budget ended it. Frames are only pruned from the
+    // front, so nothing between the last frame and `latest` is missing.
+    let next = page
         .frames
-        .iter()
-        .map(|(seq, e)| {
-            json!({"seq": seq, "envelope": serde_json::from_str::<Value>(e).unwrap_or(Value::Null)})
+        .last()
+        .map(|f| f.0)
+        .filter(|last| *last < page.latest);
+    // Each stored envelope is passed through as written rather than parsed
+    // into a `Value` and serialized again, which held every page several
+    // times over. One that is not JSON goes out as null, as before.
+    let frames = page
+        .frames
+        .into_iter()
+        .map(|(seq, e)| FrameOut {
+            seq,
+            envelope: RawValue::from_string(e).ok(),
         })
         .collect();
-    let next = if page.frames.len() == limit {
-        page.frames.last().map(|f| f.0)
-    } else {
-        None
-    };
-    Ok((
-        StatusCode::OK,
-        Json(json!({"frames": frames, "next": next, "oldest": page.oldest, "latest": page.latest})),
-    ))
+    Ok(Json(FramesPage {
+        frames,
+        next,
+        oldest: page.oldest,
+        latest: page.latest,
+    }))
+}
+
+#[derive(Serialize)]
+pub struct FrameOut {
+    seq: u64,
+    envelope: Option<Box<RawValue>>,
+}
+
+#[derive(Serialize)]
+pub struct FramesPage {
+    frames: Vec<FrameOut>,
+    next: Option<u64>,
+    oldest: u64,
+    latest: u64,
 }
 
 /// Payload-free pokes. Subscribed before the response is built so a poke

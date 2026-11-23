@@ -18,6 +18,12 @@ use tempfile::NamedTempFile;
 
 // ---------------------------------------------------------------- frames
 
+/// The most envelope bytes one page carries past its first frame. A page is
+/// held in memory while it is served, and envelopes reach megabytes, so a
+/// count alone does not bound it: 200 envelopes of a busy channel OOM-killed
+/// a hub with 128Mi on every start.
+pub const PAGE_MAX_BYTES: usize = 4 * 1024 * 1024;
+
 /// One page of a channel's frames.
 #[derive(Debug, Default)]
 pub struct Page {
@@ -34,12 +40,20 @@ pub struct Page {
 pub trait FrameStore: Send + Sync {
     /// Append and return the assigned seq (1-based, per channel).
     fn append(&self, channel: &str, envelope: &str, now_ms: i64) -> io::Result<u64>;
-    /// Frames with `seq > after`, at most `limit`.
-    fn read(&self, channel: &str, after: u64, limit: usize) -> io::Result<Page>;
+    /// Frames with `seq > after`: at most `limit` of them and, past the
+    /// first, at most `max_bytes` of envelope in all. The first frame is
+    /// always returned, whatever its size, so a reader always advances.
+    fn read(&self, channel: &str, after: u64, limit: usize, max_bytes: usize) -> io::Result<Page>;
     /// Drop frames older than `older_than_ms` and, oldest first, until the
     /// channel is within `max_bytes`. Returns how many were dropped.
     fn prune(&self, channel: &str, older_than_ms: i64, max_bytes: u64) -> io::Result<usize>;
     fn channels(&self) -> io::Result<Vec<String>>;
+}
+
+/// Whether a frame of `len` bytes joins a page already holding `count` frames
+/// and `bytes` bytes.
+fn fits(count: usize, bytes: usize, len: usize, limit: usize, max_bytes: usize) -> bool {
+    count < limit && (count == 0 || bytes + len <= max_bytes)
 }
 
 struct MemChannel {
@@ -71,19 +85,22 @@ impl FrameStore for MemoryFrames {
         Ok(seq)
     }
 
-    fn read(&self, channel: &str, after: u64, limit: usize) -> io::Result<Page> {
+    fn read(&self, channel: &str, after: u64, limit: usize, max_bytes: usize) -> io::Result<Page> {
         let m = self.channels.lock().unwrap();
         let Some(c) = m.get(channel) else {
             return Ok(Page::default());
         };
+        let mut frames = Vec::new();
+        let mut bytes = 0;
+        for (seq, e, _) in c.frames.iter().filter(|(s, _, _)| *s > after) {
+            if !fits(frames.len(), bytes, e.len(), limit, max_bytes) {
+                break;
+            }
+            bytes += e.len();
+            frames.push((*seq, e.clone()));
+        }
         Ok(Page {
-            frames: c
-                .frames
-                .iter()
-                .filter(|(s, _, _)| *s > after)
-                .take(limit)
-                .map(|(s, e, _)| (*s, e.clone()))
-                .collect(),
+            frames,
             oldest: c
                 .frames
                 .front()
@@ -191,15 +208,19 @@ impl FrameStore for FsFrames {
         Ok(seq)
     }
 
-    fn read(&self, channel: &str, after: u64, limit: usize) -> io::Result<Page> {
+    fn read(&self, channel: &str, after: u64, limit: usize, max_bytes: usize) -> io::Result<Page> {
         let _g = self.lock.lock().unwrap();
         let files = self.scan(channel)?;
         let latest = self.next_seq(channel)?.saturating_sub(1);
         let mut frames = Vec::new();
+        let mut bytes = 0;
         for (seq, path) in files.range((after + 1)..) {
-            if frames.len() >= limit {
+            // Sized from metadata so a frame that will not fit is never read.
+            let len = fs::metadata(path)?.len() as usize;
+            if !fits(frames.len(), bytes, len, limit, max_bytes) {
                 break;
             }
+            bytes += len;
             frames.push((*seq, fs::read_to_string(path)?));
         }
         Ok(Page {
@@ -709,18 +730,31 @@ mod tests {
         assert_eq!(s.append("personal", "a", 10).unwrap(), 1);
         assert_eq!(s.append("personal", "bb", 20).unwrap(), 2);
         assert_eq!(s.append("work", "c", 30).unwrap(), 1);
-        let p = s.read("personal", 0, 10).unwrap();
+        let p = s.read("personal", 0, 10, PAGE_MAX_BYTES).unwrap();
         assert_eq!(p.frames, vec![(1, "a".into()), (2, "bb".into())]);
         assert_eq!((p.oldest, p.latest), (1, 2));
-        let p = s.read("personal", 1, 1).unwrap();
+        let p = s.read("personal", 1, 1, PAGE_MAX_BYTES).unwrap();
         assert_eq!(p.frames, vec![(2, "bb".into())]);
-        assert!(s.read("nope", 0, 10).unwrap().frames.is_empty());
+        assert!(s
+            .read("nope", 0, 10, PAGE_MAX_BYTES)
+            .unwrap()
+            .frames
+            .is_empty());
+        // The byte budget ends a page before the count does...
+        let p = s.read("personal", 0, 10, 2).unwrap();
+        assert_eq!(p.frames, vec![(1, "a".into())]);
+        assert_eq!(p.latest, 2);
+        // ...but a first frame larger than the budget still comes back alone.
+        let p = s.read("personal", 1, 10, 1).unwrap();
+        assert_eq!(p.frames, vec![(2, "bb".into())]);
+        let p = s.read("personal", 0, 10, 3).unwrap();
+        assert_eq!(p.frames.len(), 2);
         let mut ch = s.channels().unwrap();
         ch.sort();
         assert_eq!(ch, vec!["personal", "work"]);
         // Byte cap drops oldest first.
         assert_eq!(s.prune("personal", 0, 2).unwrap(), 1);
-        let p = s.read("personal", 0, 10).unwrap();
+        let p = s.read("personal", 0, 10, PAGE_MAX_BYTES).unwrap();
         assert_eq!(p.oldest, 2);
         assert_eq!(p.frames.len(), 1);
         // Seq keeps climbing after a prune.
@@ -746,7 +780,7 @@ mod tests {
         // Without the cache, the scan still finds the right next seq.
         fs::remove_file(dir.path().join("frames/personal/.seq")).unwrap();
         assert_eq!(s.append("personal", "f", 60).unwrap(), 5);
-        let p = s.read("personal", 3, 10).unwrap();
+        let p = s.read("personal", 3, 10, PAGE_MAX_BYTES).unwrap();
         assert_eq!(p.frames.iter().map(|f| f.0).collect::<Vec<_>>(), vec![4, 5]);
     }
 
