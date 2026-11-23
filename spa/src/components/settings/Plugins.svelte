@@ -1,12 +1,18 @@
 <script lang="ts">
   // Each installed plugin: how a call to each of its tools is answered now,
   // and the processes the node runs of it, one per channel that used it,
-  // with their state and the last lines each wrote.
-  // Installing, updating and removing stay with `tracon plugin`.
+  // with their state and the last lines each wrote. Checking for an update
+  // (which raises an update card) and rolling back are here; installing and
+  // removing stay with `tracon plugin`.
   import { onMount } from 'svelte'
   import Card from './Card.svelte'
   import { api } from '../../lib/api'
+  import { rollbackNote, rolledBack, updateFailure, updateNote, waitingCard, type PluginNote } from '../../lib/plugin-actions'
   import type { PluginInstance, PluginSummary } from '../../lib/types'
+
+  /** The channels an update card can go to; none picked is the node's
+      `[session] default_channel`. */
+  let { channels = [] }: { channels?: string[] } = $props()
 
   let plugins = $state<PluginSummary[] | null>(null)
   let error = $state('')
@@ -14,6 +20,14 @@
   /** Open log views, by `plugin/channel`. */
   let logs = $state<Record<string, string[] | string>>({})
   let restarting = $state<Record<string, boolean>>({})
+  /** The channel update cards go to: the one being viewed, or the node's default. */
+  let channel = $state('')
+  /** A request in flight for a plugin, by name. */
+  let acting = $state<Record<string, 'update' | 'rollback'>>({})
+  /** The plugin whose rollback waits on the in-page confirmation. */
+  let confirming = $state<string | null>(null)
+  /** What each row says of its last update check or rollback. */
+  let notes = $state<Record<string, PluginNote>>({})
 
   async function load() {
     busy = true
@@ -55,6 +69,38 @@
     }
   }
 
+  async function checkUpdate(plugin: PluginSummary) {
+    acting[plugin.name] = 'update'
+    delete notes[plugin.name]
+    try {
+      const offered = await api.pluginUpdate(plugin.name, channel)
+      notes[plugin.name] = updateNote(offered)
+      // A raised card is the row's pending build now.
+      if (!offered.up_to_date) await load()
+    } catch (cause) {
+      notes[plugin.name] = updateFailure(plugin, cause)
+    } finally {
+      delete acting[plugin.name]
+    }
+  }
+
+  async function rollback(plugin: PluginSummary) {
+    confirming = null
+    acting[plugin.name] = 'rollback'
+    delete notes[plugin.name]
+    try {
+      const now = await api.pluginRollback(plugin.name)
+      plugins = (plugins ?? []).map((p) => (p.name === plugin.name ? rolledBack(p, now) : p))
+      notes[plugin.name] = rollbackNote(now)
+      // The tools and rules shown are the active build's: read them again.
+      await load()
+    } catch (cause) {
+      notes[plugin.name] = { kind: 'error', text: cause instanceof Error ? cause.message : String(cause) }
+    } finally {
+      delete acting[plugin.name]
+    }
+  }
+
   function uptime(secs: number | null): string {
     if (secs === null) return ''
     if (secs < 60) return `up ${secs} s`
@@ -77,9 +123,18 @@
 
 <Card
   title="Plugins"
-  note="Plugins installed on this node, how each tool is answered by the signed policy and its [[plugin]] entry, and a process for each channel whose sessions used one. A process stops after its idle timeout, and an unhealthy one stays down until it is used again or restarted. Install, update and remove with tracon plugin."
+  note="Plugins installed on this node, how each tool is answered by the signed policy and its [[plugin]] entry, and a process for each channel whose sessions used one. A process stops after its idle timeout, and an unhealthy one stays down until it is used again or restarted. Check for an update (it raises an update card, and nothing is installed until the card is allowed) and roll back to the previous version here. Install and remove with tracon plugin."
 >
   {#snippet actions()}
+    {#if plugins?.length}
+      <label class="to">
+        Cards to
+        <select bind:value={channel} aria-label="Channel update cards go to">
+          <option value="">the default channel</option>
+          {#each channels as c (c)}<option value={c}>{c}</option>{/each}
+        </select>
+      </label>
+    {/if}
     <button class="btn" onclick={() => void load()} disabled={busy}>{busy ? 'Loading…' : 'Refresh'}</button>
   {/snippet}
   {#if error}
@@ -92,11 +147,57 @@
   {:else}
     <ul class="plugins">
       {#each plugins as plugin (plugin.name)}
-        <li>
+        {@const waiting = waitingCard(plugin)}
+        {@const note = notes[plugin.name]}
+        {@const inFlight = acting[plugin.name]}
+        <li data-plugin={plugin.name}>
           <div class="line">
             <span class="name">{plugin.name}</span>
             <span class="where">{plugin.active ? plugin.active.version : 'not active'} · {plugin.repo}</span>
           </div>
+          <p class="meta">
+            {#if plugin.previous}previous {plugin.previous.version}{:else}no previous version{/if}
+          </p>
+          <div class="acts">
+            {#if note?.kind !== 'refused'}
+              <button class="btn small" onclick={() => void checkUpdate(plugin)} disabled={!!inFlight || !!waiting}>
+                {inFlight === 'update' ? 'Checking…' : 'Check for update'}
+              </button>
+            {/if}
+            {#if plugin.previous && plugin.active}
+              <button
+                class="btn small"
+                onclick={() => (confirming = plugin.name)}
+                disabled={!!inFlight || !!waiting || confirming === plugin.name}
+              >
+                {inFlight === 'rollback' ? 'Rolling back…' : `Roll back to ${plugin.previous.version}`}
+              </button>
+            {/if}
+          </div>
+          {#if confirming === plugin.name && plugin.previous && plugin.active}
+            <div class="confirm" role="group" aria-label="Confirm the rollback">
+              <span>
+                Make {plugin.previous.version} active again in place of {plugin.active.version}? Both were approved, so no card is
+                raised; its processes stop.
+              </span>
+              <span class="acts">
+                <button class="btn small p" onclick={() => void rollback(plugin)} disabled={!!inFlight || !!waiting}>
+                  Roll back to {plugin.previous.version}
+                </button>
+                <button class="btn small" onclick={() => (confirming = null)}>Cancel</button>
+              </span>
+            </div>
+          {/if}
+          {#if waiting}
+            <p class="meta">
+              An update card for {plugin.pending?.version} is waiting. <a href="/approvals/{waiting}">Open the card</a>
+            </p>
+          {:else if note?.kind === 'card'}
+            <p class="meta">{note.text} <a href="/approvals/{note.approvalId}">Open the card</a></p>
+          {/if}
+          {#if note && note.kind !== 'card'}
+            <p class={note.kind === 'error' || note.kind === 'refused' ? 'crit' : 'meta'} role="status">{note.text}</p>
+          {/if}
           {#if plugin.tools?.length}
             <ul class="tools">
               {#each plugin.tools as tool (tool.name)}
@@ -187,6 +288,25 @@
   .acts {
     display: flex;
     gap: 6px;
+    flex-wrap: wrap;
+  }
+  .plugins > li > .acts {
+    margin-top: 6px;
+  }
+  .confirm {
+    display: grid;
+    gap: 6px;
+    margin-top: 6px;
+    padding: 8px;
+    border-radius: 4px;
+    background: var(--s2);
+  }
+  .to {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--ink2);
+    font-size: 0.9em;
   }
   .meta {
     margin: 2px 0 0;

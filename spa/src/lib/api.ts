@@ -22,7 +22,9 @@ import type {
   StorageScheduled,
   DataInventory,
   McpServerStatus,
+  PluginBuild,
   PluginInstance,
+  PluginOffered,
   PluginSummary,
   PluginUiOpen,
   DocKindInfo,
@@ -532,6 +534,14 @@ export const api = {
     call<{ instance: PluginInstance; error?: string }>('POST', `/api/plugins/${encodeURIComponent(name)}/restart`, {
       channel,
     }),
+  /** Fetch a plugin's latest release and raise its update card on `channel`
+      (the node's default when empty), unless the active build is it already.
+      Nothing is installed until the card is allowed. */
+  pluginUpdate: (name: string, channel: string) =>
+    call<PluginOffered>('POST', `/api/plugins/${encodeURIComponent(name)}/update`, channel ? { channel } : {}),
+  /** Make a plugin's previous build active again, with no card: an admin action. */
+  pluginRollback: (name: string) =>
+    call<{ active: PluginBuild; previous: PluginBuild }>('POST', `/api/plugins/${encodeURIComponent(name)}/rollback`),
   mcpServers: (refresh = false) =>
     call<{ servers: McpServerStatus[] }>('GET', `/api/mcp-servers${refresh ? '?refresh=true' : ''}`),
   storageSweep: (apply: boolean, caches: boolean) =>

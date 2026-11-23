@@ -62,6 +62,11 @@ the manifest and the release's notes, while the installed version stays active.
 it was installed, so no card is raised. `tracon plugin rm <name>` removes its builds and
 keeps its data under `<state dir>/plugins/data/<name>/`; `--purge` deletes that too.
 Rolling back and removing are admin actions, as is restarting a plugin's process.
+Settings › Plugins can do the first two as well: each plugin's row has **Check for
+update**, which raises the same update card on the channel picked in the card's header,
+and **Roll back to `<previous>`**, which asks in the page first. That works from the
+PWA on a node you reach through the hub, with a passkey confirming the rollback.
+Installing and removing stay with `tracon plugin`.
 `tracon plugin ls` lists what is installed, the version before it, and any build waiting
 on a card. It also lists each tool of the active build and how a call to it is answered
 now (runs, asked or refused) and by which rule. That answer is the signed policy's on a

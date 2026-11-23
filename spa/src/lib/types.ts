@@ -2383,10 +2383,36 @@ export interface PluginSummary {
     ui?: boolean
     ui_title?: string | null
   } | null
+  /** The build before the active one, which a rollback makes active again. */
+  previous?: PluginBuild | null
+  /** A build staged and put to the operator on an install or update card. */
+  pending?: (PluginBuild & { approval_id: string; approval_state: string | null }) | null
   instances: PluginInstance[]
   /** The active build's tools; empty while none is active, and from an older node. */
   tools?: PluginTool[]
 }
+
+/** One build of a plugin, as `GET /api/plugins` names it. */
+export interface PluginBuild {
+  version: string
+  digest: string
+}
+
+/** What `POST /api/plugins/{name}/update` answers: the active build is the
+    latest already, or the update card it raised (or found waiting, `new`
+    false). */
+export type PluginOffered =
+  | { up_to_date: true; version: string; digest: string }
+  | {
+      up_to_date?: undefined
+      name: string
+      version: string
+      from_version: string | null
+      digest: string
+      approval_id: string
+      channel: string
+      new: boolean
+    }
 
 /** A plugin's UI opened for one channel (`POST /api/plugins/{name}/ui`): the
     frame's address on the plugin's own loopback origin, with its capability token. */
