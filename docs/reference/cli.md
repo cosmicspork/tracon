@@ -15,6 +15,7 @@ Every `tracon` command. `--help` on any of them says more.
 | `tracon credential import\|ls\|rm\|share\|revokes` | what the broker holds (import is also on Settings); `revokes` lists which peers dropped a removed credential's copy and which are still owed a revoke |
 | `tracon doc import\|ls\|get\|put [--format html]\|rm\|archive\|unarchive\|export\|reindex` | documents (import and export are Markdown; `put` writes either format, converting a document in place; `archive` and `unarchive` change only the flag), and rebuilding the vector index from them; import, preview, replace, download, archive, and delete HTML bundles in Documents |
 | `tracon session show <package> [--jsonl]` | read a session package offline, with no node running |
+| `tracon data export [-o]`, `data show <export> [--jsonl] [--kind] [--documents DIR]` | everything the node holds as one signed JSONL file, and reading one with no node running ([data contract v1](data-contract.md)) |
 | `tracon session archive-legacy\|reopen --harness [--model]` | put sessions from a retired harness away read-only, and carry one forward onto a supported one, on its own model unless `--model` names another |
 | `tracon session continue <id>` | carry on a session a node restart cut off, or whose harness died and was not started again, on its workspace and harness (also the session's **Continue** button) |
 | `tracon session fork <id> [--to] [--branch] [--note] [--model] [--budget] [--task\|--new-task]` | fork a session: a new one from its branch and context, here or on another node of its channel, while it keeps running (also the session's **Move or fork** panel; see [More nodes](../guides/mesh.md#more-nodes)) |
@@ -42,5 +43,5 @@ set and no identity in it, only an explicit `TRACON_URL` is written to. `TRACON_
 `TRACON_TOKEN` point the commands at a remote node. The ones that act on this machine
 itself ignore both: `setup`, `check-boundary` (which asks this machine's node only when
 that node holds the Kubernetes sandbox port), `service`, `enroll`, `mesh id`,
-`credential import|ls|rm`, `policy keygen|init|sign|show`, and `session show`,
-which reads a file and needs no node at all. `--help` on any of them says more.
+`credential import|ls|rm`, `policy keygen|init|sign|show`, and `session show` and
+`data show`, which read a file and need no node at all. `--help` on any of them says more.

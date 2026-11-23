@@ -51,6 +51,7 @@ pub mod review_session;
 pub mod rollups;
 pub mod services;
 pub mod shown;
+pub mod snapshot;
 pub mod transfers;
 pub mod vectors;
 pub use corpus::*;

@@ -690,6 +690,68 @@ pub async fn data(State(s): State<AppState>) -> ApiResult<Json<crate::data::Inve
     Ok(Json(inventory))
 }
 
+/// `GET /api/maintenance/export`: everything this node holds, as data
+/// contract version 1 (`crate::contract`): one JSONL file, signed by the
+/// node, with credentials and keys left out. At the node itself, or for an
+/// explicitly authenticated administrator: it carries every transcript.
+pub async fn export(
+    _who: auth::LocalOrAdministrator,
+    State(s): State<AppState>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let store = s.store().clone();
+    let written = tokio::task::spawn_blocking(move || -> Result<_, String> {
+        let (identity, _) =
+            crate::mesh::identity::load_or_generate().map_err(|error| error.to_string())?;
+        let state_dir = crate::config::Config::state_dir();
+        // Unnamed and private to this process: removed when it is closed.
+        let mut file = tempfile::tempfile_in(&state_dir).map_err(|error| error.to_string())?;
+        {
+            let mut out = std::io::BufWriter::new(&mut file);
+            crate::contract::export(&store, &identity, &state_dir, &mut out)
+                .map_err(|error| error.to_string())?;
+        }
+        use std::io::Seek;
+        file.rewind().map_err(|error| error.to_string())?;
+        Ok((file, identity.node_id()))
+    })
+    .await;
+    let (file, node_id) = match written {
+        Ok(Ok(done)) => done,
+        Ok(Err(error)) => {
+            return ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error).into_response()
+        }
+        Err(error) => {
+            return ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+                .into_response()
+        }
+    };
+    use tokio_stream::StreamExt;
+    let body = tokio_util::codec::FramedRead::new(
+        tokio::fs::File::from_std(file),
+        tokio_util::codec::BytesCodec::new(),
+    )
+    .map(|chunk| chunk.map(|bytes| bytes.freeze()));
+    let name = format!(
+        "tracon-export-{}-{}.jsonl",
+        &node_id[..node_id.len().min(12)],
+        crate::store::now_ms()
+    );
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "application/x-ndjson")
+        .header(
+            axum::http::header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{name}\""),
+        )
+        .header("x-content-type-options", "nosniff")
+        .header(axum::http::header::CACHE_CONTROL, "no-store")
+        .body(axum::body::Body::from_stream(body))
+        .unwrap_or_else(|error| {
+            ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+        })
+}
+
 /// `POST /api/admin/maintenance/boundary-check`: rerun the fixed boundary
 /// checks for this serving node. It accepts no executable, command, or path.
 pub async fn boundary_check(

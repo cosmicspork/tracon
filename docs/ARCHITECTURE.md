@@ -2614,7 +2614,9 @@ delete. Tombstone semantics wait until replication makes a
 propagated delete matter, and that decision is due before it does. Plain-text export for every kind: no format readable
 only by this binary. Documents export as plain Markdown and import back by filename
 alone; a session package is JSON that `tracon session show` renders with nothing
-running; the vector index is derived and is rebuilt rather than restored.
+running; the whole node exports as data contract v1 (`node/src/contract.rs`,
+`docs/reference/data-contract.md`), every table placed under a kind or omitted with a
+reason, signed and read by `tracon data show` with nothing running; the vector index is derived and is rebuilt rather than restored.
 `RECOVERY.md` is the operator's copy of this, including the way out through a
 harness run directly and what that costs.
 

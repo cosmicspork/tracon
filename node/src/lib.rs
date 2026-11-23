@@ -11,6 +11,7 @@ pub mod bundle;
 pub mod config;
 pub mod config_schema;
 pub mod continuation;
+pub mod contract;
 pub mod corpus;
 pub mod data;
 pub mod do_harness;
