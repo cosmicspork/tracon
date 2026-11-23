@@ -414,7 +414,9 @@ pub fn derive(facts: &Facts) -> Outcome {
             backed_by,
         });
     }
-    for view in &facts.shown {
+    // A proposal claims nothing was done: it is options put to the operator,
+    // labelled as such where it is shown, and no check can back it.
+    for view in facts.shown.iter().filter(|view| !view.row.proposal) {
         let backed_by = backing(&facts.checks, &view.row.head_sha);
         claims.push(Claim {
             source: "shown_work".into(),
@@ -526,7 +528,12 @@ pub fn derive(facts: &Facts) -> Outcome {
     }
     for view in facts.shown.iter().filter(|view| view.stale) {
         uncertain.push(format!(
-            "Shown work \"{}\" is stale: {}",
+            "{} \"{}\" is stale: {}",
+            if view.row.proposal {
+                "The proposal"
+            } else {
+                "Shown work"
+            },
             view.row.title,
             view.stale_reason
                 .as_deref()
@@ -723,6 +730,51 @@ mod tests {
         assert!(out.uncertain.iter().any(|u| u.contains("No check has run")));
         assert_eq!(out.cost.gateway_tokens, 40);
         assert_eq!(out.cost.tokens_used, 40);
+    }
+
+    /// A proposal claims no work was done, so it is not counted among the
+    /// claims a check could back; staleness still says it is a proposal.
+    #[test]
+    fn a_proposal_is_not_a_claim() {
+        let mut with_shown = facts(vec![review("rv1", "pr", "bbb", "new")], Vec::new());
+        for (id, proposal) in [("w1", false), ("w2", true)] {
+            with_shown.shown.push(ShownWorkView {
+                row: crate::store::shown::ShownWorkRow {
+                    id: id.into(),
+                    channel: "personal".into(),
+                    session_id: Some("s1".into()),
+                    lane: None,
+                    review_id: None,
+                    head_sha: "aaa".into(),
+                    title: format!("{id} title"),
+                    format: "markdown".into(),
+                    markdown: "m".into(),
+                    document_id: None,
+                    document_slug: None,
+                    document_hash: None,
+                    files: Vec::new(),
+                    created_ms: 1,
+                    proposal,
+                },
+                stale: true,
+                stale_reason: Some("shown at aaa; the candidate is now bbb".into()),
+                checks: Vec::new(),
+            });
+        }
+        let out = derive(&with_shown);
+        let shown: Vec<_> = out
+            .claims
+            .iter()
+            .filter(|c| c.source == "shown_work")
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(shown, vec!["w1"]);
+        let text = out.uncertain.join("\n");
+        assert!(text.contains("Shown work \"w1 title\" is stale"), "{text}");
+        assert!(
+            text.contains("The proposal \"w2 title\" is stale"),
+            "{text}"
+        );
     }
 
     #[test]

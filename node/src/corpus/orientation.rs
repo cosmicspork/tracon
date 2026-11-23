@@ -648,6 +648,16 @@ fn push_work(out: &mut String, facts: &Facts, missing: &mut Vec<Missing>) {
                  this session open after the plan is written; the answer comes back as a \
                  prompt, and you revise the plan then.\n\n"
             ));
+            if offered(facts, crate::mcp::show::SHOW) {
+                out.push_str(
+                    "Where the plan turns on a choice of layout or flow, put the options to \
+                     the operator with `show_work`: a page in your workspace that sets them \
+                     out, passed as `paths` with `entry`. What a plan session shows is \
+                     labelled as a proposal, not as work done, and stays in tracon. Say in \
+                     the plan which one it assumes, and ask with `ask_operator` when the \
+                     choice is theirs to make.\n\n",
+                );
+            }
         }
         "execute" => {
             out.push_str(&format!(
@@ -659,8 +669,10 @@ fn push_work(out: &mut String, facts: &Facts, missing: &mut Vec<Missing>) {
                  changed, what you verified, what you did not, and what you want checked. It \
                  is shown on the review and never published, and the operator does not read \
                  your final chat message, so the summary goes there. A screenshot, a page or \
-                 files for the operator go to `show_work`.{} Work you find but should not do now \
-                 goes to `work_discover`, against this item. Submitting is not closing, and \
+                 files for the operator go to `show_work`, and so do layouts or flows you \
+                 propose for them to choose from, with `proposal: true`.{} Work you find but \
+                 should not do now goes to `work_discover`, against this item. Submitting is \
+                 not closing, and \
                  closing is not yours: the item stays open through CI and review until its \
                  change merges, which closes it (an item set to need acceptance waits for the \
                  operator to accept it), or until the operator closes it. Once the change is published and this session sits idle, \
@@ -982,7 +994,16 @@ fn push_evidence(
         );
         for item in &shown {
             let row = &item.row;
-            out.push_str(&format!("- **{}** ({})", row.title.trim(), row.format));
+            if row.proposal {
+                out.push_str(&format!(
+                    "- **{}** ({}, a proposal of how it could look or flow, not an account \
+                     of work done)",
+                    row.title.trim(),
+                    row.format
+                ));
+            } else {
+                out.push_str(&format!("- **{}** ({})", row.title.trim(), row.format));
+            }
             if let (Some(slug), true) = (&row.document_slug, doc_read) {
                 out.push_str(&format!(": `doc_read` `{slug}` for what it holds"));
             }
@@ -3071,6 +3092,7 @@ mod tests {
                     document_hash: None,
                     files: Vec::new(),
                     created_ms: 1,
+                    proposal: false,
                 })
                 .unwrap();
         }
@@ -3548,6 +3570,7 @@ mod tests {
                 document_hash: None,
                 files: Vec::new(),
                 created_ms: 1,
+                proposal: false,
             })
             .unwrap();
         let tools = vec!["review_verdict".to_string()];
@@ -3574,5 +3597,100 @@ mod tests {
             !text.contains("not the submitter's account of it"),
             "{text}"
         );
+    }
+
+    /// A plan session offered `show_work` is told it can put layouts or
+    /// flows to the operator, labelled as a proposal; one not offered it is
+    /// not told of a tool it cannot call.
+    #[test]
+    fn a_plan_session_is_told_it_can_show_a_proposal() {
+        let store = Store::open_in_memory().unwrap();
+        let item = item("Redesign the settings page", "Pick a layout.");
+        let manifest = crate::manifest::LaunchManifest::default();
+        let offered = ["show_work".to_string(), "doc_write".to_string()];
+        for (tools, told) in [(&offered[..], true), (&[][..], false)] {
+            let facts = Facts {
+                node_name: "n",
+                node_id: "id",
+                backend: "local",
+                harness: "fake",
+                harness_version: "1",
+                channel: "personal",
+                project_id: None,
+                project_name: None,
+                tools,
+                services: &[],
+                namespaces: &[],
+                worktree: "/work",
+                phase: "plan",
+                item: Some(&item),
+                plan_body: None,
+                ready: &[],
+                review: None,
+                manifest: &manifest,
+                egress: None,
+                forge_repo: None,
+                git_origin: false,
+                prepared: None,
+                stale_base: None,
+                scratchpad: None,
+            };
+            let (text, _) = assemble(&store, &Policy::shipped(), &facts);
+            assert!(text.contains("**plan session**"), "{text}");
+            assert_eq!(
+                text.contains("labelled as a proposal, not as work done"),
+                told,
+                "{text}"
+            );
+        }
+    }
+
+    /// A reviewer reads a proposal among the shown work as a proposal, not
+    /// as the submitter's account of what it built.
+    #[test]
+    fn a_proposal_is_labelled_as_one_for_the_reviewer() {
+        let store = Store::open_in_memory().unwrap();
+        let review = external_review(&store, "r6", "eeeeeeeeeeeeeeee");
+        for (id, title, proposal) in [("w6", "Two layouts", true), ("w7", "It works", false)] {
+            store
+                .insert_shown_work(&crate::store::shown::ShownWorkRow {
+                    id: id.into(),
+                    channel: "work".into(),
+                    session_id: None,
+                    lane: None,
+                    review_id: Some("r6".into()),
+                    head_sha: "eeeeeeeeeeeeeeee".into(),
+                    title: title.into(),
+                    format: "markdown".into(),
+                    markdown: "see".into(),
+                    document_id: None,
+                    document_slug: None,
+                    document_hash: None,
+                    files: Vec::new(),
+                    created_ms: 1,
+                    proposal,
+                })
+                .unwrap();
+        }
+        let tools = vec!["review_verdict".to_string()];
+        let facts = reviewing(
+            ReviewFacts {
+                row: &review,
+                session_id: "rs",
+                no_toolchain: None,
+                revision: None,
+                checks_configured: true,
+            },
+            &tools,
+        );
+        let (text, _) = assemble(&store, &Policy::shipped(), &facts);
+        assert!(
+            text.contains(
+                "- **Two layouts** (markdown, a proposal of how it could look or flow, not an \
+                 account of work done)"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("- **It works** (markdown)\n"), "{text}");
     }
 }

@@ -42,6 +42,7 @@ test('operator calls carry the question, the host or the title', () => {
   expect(nodeCallText('report_issue', { title: 'review_status lags' })).toBe('Report an issue · review_status lags')
   expect(nodeCallText('approval_status', { approval_id: 'a' })).toBe('Wait for an approval')
   expect(nodeCallText('show_work', { title: 'Before and after' })).toBe('Show work · Before and after')
+  expect(nodeCallText('show_work', { title: 'Two layouts', proposal: true })).toBe('Show a proposal · Two layouts')
 })
 
 test('forge calls name the change, run or pipeline', () => {

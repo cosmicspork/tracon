@@ -2,12 +2,15 @@
   // What an agent showed of its work (`show_work`): a written account, its own
   // page, or plain files. The account is the agent's; the commit, the stale
   // mark and the checks beside it are the node's. A page only ever renders on
-  // the isolated preview origin, sandboxed and with no network.
+  // the isolated preview origin, sandboxed and with no network. A proposal is
+  // shown the same way under a heading of its own, labelled as layouts or
+  // flows to choose from rather than an account of work done.
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
   import { renderWithoutFetching } from '../lib/markdown'
   import { router } from '../lib/router.svelte'
+  import { formatTag, splitShown } from '../lib/shown'
   import type { ShownWork } from '../lib/types'
 
   let {
@@ -21,6 +24,8 @@
     /** The review session's id: what it showed is marked as the reviewer's. */
     reviewer?: string | null
   } = $props()
+
+  const split = $derived(splitShown(items))
 
   /** Preview URLs for the pages opened in place, by shown-work id. */
   let opened = $state<Record<string, string>>({})
@@ -61,7 +66,10 @@
     {#if reviewer && item.session_id === reviewer}
       <span class="tag" title="shown by the review session, at the candidate it exercised">reviewer</span>
     {/if}
-    <span class="tag">{item.format === 'markdown' ? 'account' : item.format === 'html' ? 'page' : 'files'}</span>
+    {#if item.proposal}
+      <span class="tag proposal" title="layouts or flows proposed for you to choose from, not an account of work done">proposal</span>
+    {/if}
+    <span class="tag">{formatTag(item)}</span>
     <span class="mono" title={item.head_sha}>at {item.head_sha.slice(0, 12)}</span>
     {#if onReview && item.stale}
       <span class="chip warn" title={item.stale_reason ?? ''}>stale</span>
@@ -111,27 +119,40 @@
   </p>
 {/snippet}
 
-{#if items.length}
+{#snippet list(shown: ShownWork[])}
+  {#each shown as item (item.id)}
+    {#if folded(item)}
+      <article id="shown-{item.id}" class="stale" class:proposal={item.proposal}>
+        <details class="fold" open={router.hash === `#shown-${item.id}`}>
+          <summary>{@render head(item)}</summary>
+          <div class="body">{@render body(item)}</div>
+        </details>
+      </article>
+    {:else}
+      <article id="shown-{item.id}" class:proposal={item.proposal}>
+        {@render head(item)}
+        {@render body(item)}
+      </article>
+    {/if}
+  {/each}
+{/snippet}
+
+{#if split.work.length}
   <section class="shown">
     <div class="h4">
       Shown work
       <b>· the agent's account, to help you decide · not verification · it does not go to the forge</b>
     </div>
-    {#each items as item (item.id)}
-      {#if folded(item)}
-        <article id="shown-{item.id}" class="stale">
-          <details class="fold" open={router.hash === `#shown-${item.id}`}>
-            <summary>{@render head(item)}</summary>
-            <div class="body">{@render body(item)}</div>
-          </details>
-        </article>
-      {:else}
-        <article id="shown-{item.id}">
-          {@render head(item)}
-          {@render body(item)}
-        </article>
-      {/if}
-    {/each}
+    {@render list(split.work)}
+  </section>
+{/if}
+{#if split.proposals.length}
+  <section class="shown proposals">
+    <div class="h4">
+      Proposals
+      <b>· layouts or flows the agent proposes for you to choose from · not an account of work done · it does not go to the forge</b>
+    </div>
+    {@render list(split.proposals)}
   </section>
 {/if}
 
@@ -153,6 +174,9 @@
   }
   article.stale {
     border-left: 3px solid var(--wait);
+  }
+  article.proposal:not(.stale) {
+    border-left: 3px dashed var(--ink2);
   }
   header {
     display: flex;
