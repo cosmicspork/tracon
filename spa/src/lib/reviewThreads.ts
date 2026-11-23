@@ -5,11 +5,13 @@
 // one. A thread is never moved: on a later revision whose lines changed it
 // reads `outdated`, and still names the lines it was written on.
 //
-// The seam for a diff component: give it `numberLines` to know each line's
-// numbers, and have a click call back with the `Anchor` `anchorAt` makes.
-// `threadsOn` says which threads a line carries, to mark it.
+// The seam for a diff component: give it `numberLines` (a plain diff) or
+// `sideRows` (the merge view's two sides) to know each line's numbers, and
+// have a click call back with the `Anchor` `anchorAt` makes. `threadsOn`
+// says which threads a line carries, to mark it.
 
 import type { DiffLine } from './diff'
+import type { FileSides } from './diffview'
 
 export type ThreadKind = 'general' | 'file' | 'line'
 export type ThreadSide = 'old' | 'new'
@@ -93,6 +95,48 @@ export function numberLines(lines: DiffLine[]): Numbered[] {
     }
     return at
   })
+}
+
+/**
+ * Each row of a file's two merge-view sides as the `Numbered` line it is in
+ * the diff, numbered as `numberLines` numbers it, or null on a row that is
+ * no line (a hunk header, the empty row both sides end with). A row in a
+ * block is a removal (`a`) or an addition (`b`); every other row is shared
+ * by both sides in the same order, so the k-th such row of `a` is the k-th of
+ * `b`, and a context row carries both numbers on either side.
+ */
+export function sideRows(sides: FileSides): { a: (Numbered | null)[]; b: (Numbered | null)[] } {
+  const rowsA = sides.a.split('\n')
+  const rowsB = sides.b.split('\n')
+  const inA = new Set<number>()
+  const inB = new Set<number>()
+  for (const k of sides.blocks) {
+    for (let i = k.a; i < k.a + k.aN; i++) inA.add(i)
+    for (let i = k.b; i < k.b + k.bN; i++) inB.add(i)
+  }
+  const sharedA = sides.aLines.map((_, i) => i).filter((i) => !inA.has(i))
+  const sharedB = sides.bLines.map((_, i) => i).filter((i) => !inB.has(i))
+  const a: (Numbered | null)[] = sides.aLines.map(() => null)
+  const b: (Numbered | null)[] = sides.bLines.map(() => null)
+  const path = sides.path
+  for (const i of inA) {
+    const n = sides.aLines[i]
+    if (n !== null) a[i] = { text: `-${rowsA[i]}`, kind: 'del', path, old: n, new: null }
+  }
+  for (const i of inB) {
+    const n = sides.bLines[i]
+    if (n !== null) b[i] = { text: `+${rowsB[i]}`, kind: 'add', path, old: null, new: n }
+  }
+  sharedA.forEach((i, k) => {
+    const j = sharedB[k]
+    const old = sides.aLines[i]
+    const now = j === undefined ? null : sides.bLines[j]
+    if (old === null || now === null) return
+    const line: Numbered = { text: ` ${rowsA[i]}`, kind: 'ctx', path, old, new: now }
+    a[i] = line
+    b[j] = line
+  })
+  return { a, b }
 }
 
 /**

@@ -12,8 +12,9 @@
     perFile?: boolean
     /**
      * Given, each numbered line gets a gutter button that calls it: how a
-     * review thread is started on a line. A diff component that replaces
-     * this one calls it with the same `Numbered` line.
+     * review thread is started on a line. ReviewDiff passes it here while
+     * the merge view is loading or could not load; the merge view calls it
+     * with the same `Numbered` line.
      */
     onpick?: (line: Numbered) => void
     /** How many threads a line carries, to mark it. */

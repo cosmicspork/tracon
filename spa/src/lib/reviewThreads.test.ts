@@ -1,10 +1,12 @@
 import { expect, test } from 'bun:test'
-import { classifyLines } from './diff'
+import { classifyLines, splitDiff } from './diff'
+import { fileSides } from './diffview'
 import {
   anchorAt,
   anchorProblem,
   createBody,
   numberLines,
+  sideRows,
   threadsOn,
   unresolvedCount,
   whereLabel,
@@ -128,4 +130,88 @@ test('a thread is sent with only what its kind names', () => {
     end_line: 3,
     revision_id: undefined,
   })
+})
+
+// --- the merge view's rows -------------------------------------------------
+
+const MORE = `diff --git a/src/b.ts b/src/b.ts
+index 3..4 100644
+--- a/src/b.ts
++++ b/src/b.ts
+@@ -10,3 +10,3 @@ export function b() {
+ const x = 1
+-const y = 2
++const y = 3
+ const z = 4
+@@ -40,2 +40,3 @@
+ last()
++added()
+ end()
+diff --git a/new.txt b/new.txt
+new file mode 100644
+--- /dev/null
++++ b/new.txt
+@@ -0,0 +1,2 @@
++one
++two
+diff --git a/tail.txt b/tail.txt
+--- a/tail.txt
++++ b/tail.txt
+@@ -1,2 +1,2 @@
+ keep
+-old end
+\\ No newline at end of file
++new end
+\\ No newline at end of file`
+
+const key = (l: { kind: string; text: string; path: string | null; old: number | null; new: number | null }) =>
+  JSON.stringify([l.path, l.kind, l.text, l.old, l.new])
+
+test('every merge-view row is the numbered diff line it shows, as numberLines numbers it', () => {
+  for (const diff of [DIFF, MORE]) {
+    for (const file of splitDiff(diff)) {
+      const rows = sideRows(fileSides(file))
+      const fromRows = new Set([...rows.a, ...rows.b].flatMap((l) => (l ? [key(l)] : [])))
+      const fromDiff = numberLines(classifyLines(file.lines)).filter((l) => l.old !== null || l.new !== null)
+      expect([...fromRows].sort()).toEqual(fromDiff.map(key).sort())
+    }
+  }
+})
+
+test('the merge view numbers each side: a removal on the old, an addition on the new, context on both', () => {
+  const [b] = splitDiff(MORE)
+  const sides = fileSides(b)
+  const rows = sideRows(sides)
+  const rowA = (text: string) => rows.a[sides.a.split('\n').indexOf(text)]
+  const rowB = (text: string) => rows.b[sides.b.split('\n').indexOf(text)]
+  // Hunk headers are rows of both sides but no line.
+  expect(rows.a[0]).toBeNull()
+  expect(rows.b[0]).toBeNull()
+  expect(rowA('const y = 2')).toMatchObject({ path: 'src/b.ts', kind: 'del', old: 11, new: null })
+  expect(rowB('const y = 3')).toMatchObject({ path: 'src/b.ts', kind: 'add', old: null, new: 11 })
+  // A context row is the same line whichever side it is picked on.
+  expect(rowA('const z = 4')).toEqual(rowB('const z = 4'))
+  expect(rowA('const z = 4')).toMatchObject({ kind: 'ctx', old: 12, new: 12 })
+  // After an addition the two sides number context apart.
+  expect(rowB('end()')).toMatchObject({ kind: 'ctx', old: 41, new: 42 })
+  // The empty row both sides end with is no line.
+  expect(rows.a.at(-1)).toBeNull()
+  expect(rows.b.at(-1)).toBeNull()
+})
+
+test('a line picked in the merge view anchors and marks as one picked in the plain diff', () => {
+  const [a] = splitDiff(DIFF)
+  const sides = fileSides(a)
+  const rows = sideRows(sides)
+  const added = rows.b[sides.b.split('\n').indexOf('fn three() {}')]!
+  expect(anchorAt(added)).toEqual(anchorAt(at('+fn three() {}')))
+  const removed = rows.a[sides.a.split('\n').indexOf('fn two() {}')]!
+  expect(anchorAt(removed)).toEqual(anchorAt(at('-fn two() {}')))
+  const t = [thread({ start_line: 3, end_line: 3 })]
+  expect(threadsOn(t, added, 'rev1')).toHaveLength(1)
+  expect(threadsOn(t, removed, 'rev1')).toHaveLength(0)
+  // The context line after it is 5 on the new side: not on lines 2–3.
+  const ctx = rows.a[sides.a.split('\n').indexOf('fn five() {}')]!
+  expect(threadsOn([thread({ start_line: 5, end_line: 5 })], ctx, 'rev1')).toHaveLength(1)
+  expect(threadsOn([thread({ side: 'old', start_line: 4, end_line: 4 })], ctx, 'rev1')).toHaveLength(1)
 })

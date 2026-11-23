@@ -94,7 +94,7 @@ test('the opener is part of the review draft', () => {
 })
 
 test('review threads sit after the diff and before the verdict bar, and start from a line picked in the full diff only', () => {
-  const diff = markup.indexOf('<Diff\n        diff={review.diff}')
+  const diff = markup.indexOf('<ReviewDiff\n        bind:this={reviewDiff}\n        diff={review.diff}')
   const threads = markup.indexOf('<ReviewThreads')
   const bar = markup.indexOf('<div class="decide"')
   expect(diff).toBeGreaterThan(-1)
@@ -103,7 +103,8 @@ test('review threads sit after the diff and before the verdict bar, and start fr
   // The full diff is this revision's, numbered as the node anchors; the
   // since-last-verdict diff is not, and offers no picks.
   expect(markup.slice(diff, threads)).toContain('onpick={threadsBlocked ? undefined : pickLine}')
-  expect(markup).toContain('<Diff diff={sinceReviewed.diff} perFile={surface.phone} />')
+  expect(markup.slice(diff, threads)).toContain('marks={threadMarks}')
+  expect(markup).toContain('<ReviewDiff bind:this={reviewDiff} diff={sinceReviewed.diff} collapsed={surface.phone} />')
 })
 
 test('unresolved threads let a request for changes go without a note', () => {

@@ -547,6 +547,9 @@ again on top of it. A session's sandbox from a snapshot is never sent the node's
 its cache: the snapshot's `/cache` is the warm one. A candidate's preparation before its
 checks always runs, since it prepares a tree under review rather than a commit the
 snapshot was made from.
+The review's diff reads each file under its own header, side by side or unified:
+side by side, the two sides aligned row for row, when the screen is wide enough,
+unified when it is not, and the layout you pick is remembered on that device.
 You approve, reject with a reason, or — on a desktop — edit the diff and send it back as
 a request for changes. A request for changes is how a review comes back: the agent
 resubmits with the same `review_id`. A rejection is final: `submit_review` refuses a
@@ -668,7 +671,9 @@ that a peer has none.
 
 Feedback on a review can be a set of threads instead of one note. Under the diff,
 open a thread on the whole change, on a file, or on a line or range: pick a line
-number in the full diff to start one there, and another to make it a range. Each
+number in the full diff's gutter, side by side or unified, to start one there, and
+another to make it a range. Lines that carry a thread read bold in the gutter. The
+since-last-verdict diff offers no line numbers to pick. Each
 thread is bound to the revision on screen and, unless general, to a path and a side
 (the change, or the base). The node reads the lines from that revision's diff
 itself, and refuses a line the diff does not show.
