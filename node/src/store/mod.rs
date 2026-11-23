@@ -2231,7 +2231,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, state, verdict_reason, publish_result, edited_title,
-                claimed_ms, resolved_mono_ms, updated_ms
+                claimed_ms, resolved_mono_ms, updated_ms, checks_json
              FROM review WHERE node_id=?1 AND channel=?2 AND kind != ?3
              AND state IN ('approved','rejected') AND updated_ms >= ?4
              ORDER BY updated_ms DESC LIMIT ?5",
@@ -2246,14 +2246,16 @@ impl Store {
                         verdict_reason: r.get(2)?,
                         publish_result: r.get(3)?,
                         edited_title: r.get(4)?,
-                        // Left out: an approved body and its checks run to
-                        // kilobytes each, and every listing carried up to
-                        // 200 of them. A peer reads them from the owner.
+                        // Left out: an approved body runs to kilobytes, and
+                        // every listing carried up to 200 of them. A peer
+                        // reads it from the owner. The checks stay: they are
+                        // small, and a peer shows them for a decided review
+                        // without asking.
                         edited_body: None,
                         claimed_ms: r.get(5)?,
                         resolved_mono_ms: r.get(6)?,
                         updated_ms: r.get(7)?,
-                        checks_json: None,
+                        checks_json: r.get(8)?,
                     })
                 },
             )?

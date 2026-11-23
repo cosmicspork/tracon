@@ -367,10 +367,10 @@ async fn snapshots_go_only_where_read_and_only_when_changed() {
     );
 }
 
-/// A decided outcome carries no approved body or checks, and applying one
-/// leaves a peer's copies of them as they were.
+/// A decided outcome carries its checks but not the approved body, and
+/// applying one leaves a peer's copy of the body as it was.
 #[test]
-fn decided_outcomes_leave_out_bodies_and_checks() {
+fn decided_outcomes_carry_checks_but_not_bodies() {
     let owner = Store::open_in_memory().unwrap();
     let mut r = support::rows::review_row("r1", "s1", "approved");
     r.session_id = None;
@@ -383,7 +383,7 @@ fn decided_outcomes_leave_out_bodies_and_checks() {
     assert_eq!(outcomes.len(), 1);
     let wire = serde_json::to_value(&outcomes[0]).unwrap();
     assert!(wire.get("edited_body").is_none(), "{wire}");
-    assert!(wire.get("checks_json").is_none(), "{wire}");
+    assert_eq!(wire["checks_json"], "[{\"name\":\"ci\"}]", "{wire}");
 
     let peer = Store::open_in_memory().unwrap();
     let mut mirrored = support::rows::review_row("r1", "s1", "new");
@@ -397,7 +397,7 @@ fn decided_outcomes_leave_out_bodies_and_checks() {
     let after = peer.get_review("r1").unwrap().unwrap();
     assert_eq!(after.state, "approved");
     assert_eq!(after.edited_body.as_deref(), Some("held here"));
-    assert_eq!(after.checks_json.as_deref(), Some("[]"));
+    assert_eq!(after.checks_json.as_deref(), Some("[{\"name\":\"ci\"}]"));
 }
 
 #[tokio::test]
