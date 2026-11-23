@@ -547,6 +547,24 @@ again on top of it. A session's sandbox from a snapshot is never sent the node's
 its cache: the snapshot's `/cache` is the warm one. A candidate's preparation before its
 checks always runs, since it prepares a tree under review rather than a commit the
 snapshot was made from.
+
+The warm-up also builds the default branch, so checks do not compile it from nothing.
+After `prepare`, in the same sandbox, it runs the repository's checks the way a check
+runs (no egress, nothing lent, nothing fetched) with build output under `/cache`:
+Cargo's in `/cache/target` (`CARGO_TARGET_DIR`), Go's in `/cache/go-build` (`GOCACHE`).
+Whether they pass is only logged. The snapshot keeps that output, is keyed on the checks
+as well as the lockfiles and `prepare`, and so is rebuilt, output included, whenever the
+image, the base, a lockfile, `prepare` or the checks change, and removed with it. A
+review's checks from the snapshot are pointed at the same directories and get the cache
+read-only beneath a writable layer of their own that goes with each check: their builds
+start from the default branch's output and change nothing another check or session
+reads. On Podman this is an overlay (`podman run -v <cache>:/cache:O`); on a pod, an
+Apple VM or DigitalOcean it is the sandbox's own copy of the snapshot's `/cache`. A
+session's cache is never what a check builds on. Sessions start from the same output in
+their own copy of the cache. The cost is disk: on Podman each review's run cache, and
+each new session cache, is a copy of the snapshot's `/cache` with the output in it, a full
+copy where the storage has no reflinks. Only a repository with `prepare` has a snapshot,
+so only one with `prepare` gets build output.
 You approve, reject with a reason, or — on a desktop — edit the diff and send it back as
 a request for changes. A request for changes is how a review comes back: the agent
 resubmits with the same `review_id`. A rejection is final: `submit_review` refuses a

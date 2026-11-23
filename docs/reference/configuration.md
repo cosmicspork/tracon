@@ -254,8 +254,13 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
                                     # They reach only `egress`, over HTTPS. Rebuilt when the base,
                                     # a step or the egress changes (see "Repository recipes on the
                                     # stock base")
-# checks = ["just check"]           # in place of [supervision] checks
-# timeout_secs = 1800               # in place of [supervision] timeout_secs; covers preparation too
+# checks = ["just check"]           # in place of [supervision] checks. With `prepare`, the warm-up
+                                    # also runs them on the default branch to build it, keeping the
+                                    # output under /cache (CARGO_TARGET_DIR=/cache/target,
+                                    # GOCACHE=/cache/go-build) in the snapshot; each check starts from
+                                    # it, read-only beneath a writable layer of its own
+# timeout_secs = 1800               # in place of [supervision] timeout_secs; covers preparation, and
+                                    # each command of the warm-up's build
 # prepare = ["bun install --frozen-lockfile"]  # run once before a run's checks, on a copy each check
                                     # is then copied from, with a cache writable and `egress` reachable;
                                     # and on a session's workspace before its harness starts

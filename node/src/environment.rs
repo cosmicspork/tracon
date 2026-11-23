@@ -422,11 +422,28 @@ impl WorkspacePreparation {
     }
 }
 
-/// Where a session keeps its build output, under the cache mount, so it
-/// outlives the session. Only a session gets these: a check's cache is
-/// read-only and its build starts from nothing it did not prepare.
+/// Where build output is kept, under the cache mount rather than in the
+/// tree: Cargo's target directory and Go's build cache. The default branch's
+/// build in a repository's warm-up writes here, so its prepared snapshot
+/// carries the output in its own `/cache`
+/// (`sandbox_images::build_output`); a session builds on its own copy
+/// ([`session_build_env`]) and a check on its own writable layer over the
+/// snapshot's ([`prepared_check_env`]).
+pub fn build_env() -> Vec<(String, String)> {
+    [
+        ("CARGO_TARGET_DIR", "/cache/target"),
+        ("GOCACHE", "/cache/go-build"),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.to_string(), value.to_string()))
+    .collect()
+}
+
+/// Where a session keeps its build output, under its own cache mount, so it
+/// outlives the session. What a session writes there is never where a
+/// check reads: a check's `/cache` comes from the repository's snapshot.
 pub fn session_build_env() -> Vec<(String, String)> {
-    vec![("CARGO_TARGET_DIR".to_string(), "/cache/target".to_string())]
+    build_env()
 }
 
 /// Where each package manager keeps what it fetched, under the cache mount.
@@ -455,6 +472,18 @@ pub fn check_env() -> Vec<(String, String)> {
     let mut env = cache_env();
     env.push(("CARGO_NET_OFFLINE".into(), "true".into()));
     env.push(("UV_NO_CACHE".into(), "1".into()));
+    env
+}
+
+/// What a review's prepared check runs with: [`check_env`], and the build
+/// output under `/cache` ([`build_env`]) that the repository's warm-up built
+/// on its default branch. The check's `/cache` is read-only beneath a
+/// writable layer of its own (`Mount::overlay`, or the sandbox's own copy of
+/// its image's `/cache`), so it builds on that output without changing it,
+/// and what it writes goes with it.
+pub fn prepared_check_env() -> Vec<(String, String)> {
+    let mut env = check_env();
+    env.extend(build_env());
     env
 }
 
@@ -1176,13 +1205,27 @@ mod tests {
             session_cache_volume("tracon-cache-base-notes", "personal")
         );
         assert_ne!(mine, session_cache_volume("tracon-cache-base-app", "work"));
-        // Build output goes under the cache, and only a session is told so:
-        // a check's cache is read-only and shared names would point its
-        // build at it.
+        // Build output goes under the cache, apart from what a package
+        // manager fetched: a check that is not prepared from the snapshot
+        // (`check_env`) is not pointed at a read-only cache to build in.
         assert!(session_build_env()
             .iter()
             .all(|(name, value)| value.starts_with("/cache/")
-                && !cache_env().iter().any(|(shared, _)| shared == name)));
+                && !cache_env().iter().any(|(shared, _)| shared == name)
+                && !check_env().iter().any(|(shared, _)| shared == name)));
+    }
+
+    /// A prepared check builds where the warm-up and sessions do, over the
+    /// output the default branch's build left there, with nothing fetched.
+    #[test]
+    fn a_prepared_check_builds_where_the_warm_up_did() {
+        let env = prepared_check_env();
+        for pair in build_env().iter().chain(&check_env()) {
+            assert!(env.contains(pair), "{pair:?} missing from {env:?}");
+        }
+        assert!(env.contains(&("CARGO_TARGET_DIR".into(), "/cache/target".into())));
+        assert!(env.contains(&("CARGO_NET_OFFLINE".into(), "true".into())));
+        assert_eq!(session_build_env(), build_env());
     }
 
     /// An external review answers to the node's own clone of its project

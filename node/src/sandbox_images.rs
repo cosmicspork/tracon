@@ -77,8 +77,9 @@ use crate::store::{RepoImageStart, Store};
 /// `repo_image` rows of this kind are a repository's prepared snapshots.
 pub const SNAPSHOT: &str = "snapshot";
 
-/// Bumped when what goes into a snapshot changes.
-const SCHEME: &str = "1";
+/// Bumped when what goes into a snapshot changes: 2 added the default
+/// branch's build output under `/cache` ([`build_output`]).
+const SCHEME: &str = "2";
 
 /// On a snapshot image: the digest of the image it was made from.
 pub const FROM_LABEL: &str = "io.tracon.snapshot.from";
@@ -396,6 +397,10 @@ pub struct SnapshotInputs {
     pub lockfiles: Vec<Lockfile>,
     pub prepare: Vec<String>,
     pub egress: Vec<String>,
+    /// What the warm-up builds the default branch with after `prepare`, so
+    /// the snapshot carries the build output checks start from: the
+    /// repository's checks ([`build_output`]).
+    pub build: Vec<String>,
 }
 
 impl SnapshotInputs {
@@ -422,6 +427,15 @@ impl SnapshotInputs {
         }
         part("env");
         for (name, value) in crate::environment::cache_env() {
+            part(&name);
+            part(&value);
+        }
+        part("build");
+        for command in &self.build {
+            part(command);
+        }
+        part("build env");
+        for (name, value) in crate::environment::prepared_check_env() {
             part(&name);
             part(&value);
         }
@@ -470,6 +484,7 @@ pub async fn inputs(
         commit,
         prepare: environment.prepare.clone(),
         egress: environment.egress.clone(),
+        build: environment.checks.clone(),
     })
 }
 
@@ -793,21 +808,46 @@ async fn make_snapshot(
                 )
                 .await
                 .map_err(|stopped| stopped.to_string());
+                // The default branch built, on what `prepare` installed, so
+                // the snapshot's `/cache` holds the output its checks start
+                // from. A build that fails still leaves what it compiled.
+                let built = match &prepared {
+                    Ok(()) => build_output(&held, environment, &name, repo).await,
+                    Err(_) => false,
+                };
                 let prepared = match (prepared, &tracked) {
                     (Ok(()), Ok(tracked)) => held.remove_tracked(tracked).await,
                     (Ok(()), Err(error)) => Err(error.clone()),
                     (failed, _) => failed,
                 };
-                held.conclude(
-                    prepared,
-                    &reference,
-                    &[
-                        (FROM_LABEL.to_string(), inputs.image.clone()),
-                        (KEY_LABEL.to_string(), key.clone()),
-                        (COMMIT_LABEL.to_string(), inputs.commit.clone()),
-                    ],
-                )
-                .await
+                let labels = [
+                    (FROM_LABEL.to_string(), inputs.image.clone()),
+                    (KEY_LABEL.to_string(), key.clone()),
+                    (COMMIT_LABEL.to_string(), inputs.commit.clone()),
+                ];
+                let snapshot = match prepared {
+                    Ok(()) => match held.snapshot(&reference, &labels).await {
+                        // A runtime that reads the trees back to build the
+                        // snapshot (a pod's) may have no room for the build
+                        // output: the dependencies alone are still worth it.
+                        Err(error) if built => {
+                            tracing::warn!(
+                                repo = %repo.display(),
+                                %error,
+                                "the snapshot with the default branch's build output was not made; \
+                                 making it without"
+                            );
+                            match drop_build_output(&held, &name).await {
+                                Ok(()) => held.snapshot(&reference, &labels).await,
+                                Err(dropped) => Err(format!("{error}; {dropped}")),
+                            }
+                        }
+                        made => made,
+                    },
+                    Err(error) => Err(error),
+                };
+                held.finish().await;
+                snapshot
             }
             Err(error) => Err(error),
         };
@@ -847,6 +887,117 @@ async fn make_snapshot(
             let _ = store.finish_repo_image(&row, Err(&error), "", &[]);
             Err(error)
         }
+    }
+}
+
+/// Build the default branch in a warm-up's sandbox, after its `prepare`,
+/// so the snapshot carries the build output under `/cache`
+/// (`environment::build_env`: Cargo's target directory, Go's build cache)
+/// that a review's checks start from, each over a writable layer of its own
+/// (`review::checks::check_cache`). What builds it is the repository's own
+/// checks, run as a check runs (`environment::prepared_check_env`: nothing
+/// fetched, no egress grant, nothing lent), so the output is the very one
+/// they build; their outcome is not evidence of anything and is only
+/// logged. It is made with the snapshot, so a new image, base, lockfile or
+/// recipe rebuilds it, and it goes with the snapshot it is in. Whether any
+/// build ran.
+async fn build_output(held: &Held, environment: &RepoEnvironment, name: &str, repo: &Path) -> bool {
+    use crate::review::checks::{until_stopped, RunToCompletion};
+    let command = |step: &str, script: &str| RunnerCommand {
+        argv: crate::review::output::merged_shell(script),
+        env: crate::environment::prepared_check_env(),
+        workdir: Some(PREPARED_TREE.into()),
+        name: format!("{name}-{step}"),
+        image: Some(environment.image.clone()),
+        labels: crate::runner::RunLabels {
+            repo: environment.repo.clone(),
+            ..crate::runner::RunLabels::of(crate::runner::RunKind::Prepare)
+        },
+        ..Default::default()
+    };
+    // Made by the sandbox's user whether or not anything builds into them,
+    // so a check's writable layer over them is its own to write in.
+    let made = held
+        .run_capture(command("b", &make_build_dirs()))
+        .await
+        .is_ok_and(|output| output.status.success());
+    if !made {
+        tracing::warn!(repo = %repo.display(), "no build output: its directories could not be made");
+        return false;
+    }
+    let mut built = false;
+    for (step, check) in environment.checks.iter().enumerate() {
+        let cmd = command(&format!("b{step}"), check);
+        let running = cmd.name.clone();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(environment.timeout_secs);
+        let began = std::time::Instant::now();
+        let ran = until_stopped(
+            held.run_capture(cmd),
+            deadline,
+            &RunToCompletion,
+            Some((held as &dyn Runner, running.as_str())),
+        )
+        .await;
+        built = true;
+        let took = began.elapsed();
+        match ran {
+            Ok(Ok(output)) => tracing::info!(
+                repo = %repo.display(),
+                %check,
+                exit = output.status.code().unwrap_or(-1),
+                ?took,
+                "built the default branch for its checks"
+            ),
+            Ok(Err(error)) => {
+                tracing::warn!(repo = %repo.display(), %check, %error, "the default branch's build did not run")
+            }
+            Err(_) => tracing::warn!(
+                repo = %repo.display(),
+                %check,
+                ?took,
+                "the default branch's build timed out; the snapshot keeps what it built"
+            ),
+        }
+    }
+    built
+}
+
+/// The shell step that makes [`crate::environment::build_env`]'s directories.
+fn make_build_dirs() -> String {
+    let dirs: Vec<String> = crate::environment::build_env()
+        .into_iter()
+        .map(|(_, dir)| dir)
+        .collect();
+    format!("mkdir -p {}", dirs.join(" "))
+}
+
+/// Empty the build output directories again, for a snapshot that could not
+/// carry them.
+async fn drop_build_output(held: &Held, name: &str) -> Result<(), String> {
+    let dirs: Vec<String> = crate::environment::build_env()
+        .into_iter()
+        .map(|(_, dir)| dir)
+        .collect();
+    let script = format!(
+        "rm -rf {dirs} && {make}",
+        dirs = dirs.join(" "),
+        make = make_build_dirs()
+    );
+    let output = held
+        .run_capture(RunnerCommand {
+            argv: crate::review::output::merged_shell(&script),
+            workdir: Some(PREPARED_TREE.into()),
+            name: format!("{name}-drop"),
+            ..Default::default()
+        })
+        .await
+        .map_err(|error| format!("remove the build output: {error}"))?;
+    match output.status.success() {
+        true => Ok(()),
+        false => Err(format!(
+            "remove the build output: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )),
     }
 }
 
@@ -1476,6 +1627,7 @@ mod tests {
             }],
             prepare: vec!["npm ci".into()],
             egress: vec!["registry.npmjs.org".into()],
+            build: vec!["npm test".into()],
         }
     }
 
@@ -1572,6 +1724,15 @@ mod tests {
             },
             SnapshotInputs {
                 egress: vec![],
+                ..inputs()
+            },
+            // The build its output is made by: the checks.
+            SnapshotInputs {
+                build: vec!["npm test".into(), "npm run lint".into()],
+                ..inputs()
+            },
+            SnapshotInputs {
+                build: vec![],
                 ..inputs()
             },
         ];
