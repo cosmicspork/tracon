@@ -59,6 +59,9 @@ and an emptyDir at `/tmp` that `TMPDIR` names.
   its start. A browser's shared memory is the pod's `/dev/shm` (`[runtime.kubernetes]
   shm_size`, 1 GiB by default), counted against the session's memory limit (4 GiB by
   default).
+  A repository's kept service data (`service_volumes`) is a directory on the state claim
+  like a workspace, sent into the pod's own storage at start and taken back when it
+  ends.
 - **Files.** Nothing of the state claim is mounted, so the claim is the node's alone.
   Every directory a run names is an emptyDir of the pod's own, filled over the
   protocol and, for a session's workspace and own harness state, taken back at each

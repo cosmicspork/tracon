@@ -122,7 +122,7 @@ fn own(volume: &str) -> Option<&str> {
 /// node keeps rather than the runtime.
 pub fn backs(volume: &str) -> bool {
     own(volume).is_some_and(|rest| {
-        ["workspace-", "scratch-", "check-", "prep-"]
+        ["workspace-", "scratch-", "check-", "prep-", "svcdata-"]
             .iter()
             .any(|kind| rest.starts_with(kind))
             && !rest.starts_with("prep-cache-")
@@ -137,6 +137,15 @@ pub fn is_check(volume: &str) -> bool {
 
 fn is_workspace(volume: &str) -> bool {
     own(volume).is_some_and(|rest| rest.starts_with("workspace-"))
+}
+
+/// Whether a volume is a repository's persistent data for one catalogue
+/// service (`crate::service_volume`): sent into each session's sandbox and
+/// taken back only when it ends, once its services have stopped, so what
+/// comes back is what a database wrote on its way out rather than a copy of
+/// its files mid-write.
+pub fn is_service_data(volume: &str) -> bool {
+    own(volume).is_some_and(|rest| rest.starts_with("svcdata-"))
 }
 
 /// Whether a volume is a package cache (a session's, a repository's, a
@@ -197,6 +206,8 @@ pub fn sync_mode(volume: &str, kind: RunKind) -> Option<(Mode, Limits)> {
         // and never taken back: a cache is too large to return every turn,
         // and nothing a session leaves in one is anything another needs.
         RunKind::Session if is_cache(volume) => None,
+        // A database's files: larger than a checkout, and whole.
+        RunKind::Session if is_service_data(volume) => Some((Mode::Whole, PREPARED_LIMITS)),
         RunKind::Session if is_workspace(volume) => Some((Mode::Checkout, checkout_limits())),
         RunKind::Session => Some((Mode::Whole, checkout_limits())),
         // What it fetched, not the snapshot's cache it was sent over: the
@@ -287,6 +298,17 @@ impl FilesStore {
             return Err(FilesError::Name(volume.into()));
         }
         Ok(self.root.join(volume))
+    }
+
+    /// Keep `volume` here from now on, as an empty tree when it is not kept
+    /// yet, so every runtime's runner sends it in over the files channel
+    /// rather than leaving it to the runtime.
+    pub fn ensure(&self, volume: &str) -> Result<(), FilesError> {
+        let path = self.path(volume)?;
+        if std::fs::symlink_metadata(&path).is_err() {
+            std::fs::create_dir_all(&path)?;
+        }
+        Ok(())
     }
 
     /// Whether this store keeps the volume.
@@ -934,6 +956,7 @@ impl Plan {
                     // A session's sandbox holds its workspace's newer copy
                     // while it runs: a fetch's must not replace the node's.
                     refuse_live: kind == RunKind::Fetch,
+                    at_exit: is_service_data(&p.volume),
                 })
             })
             .collect();
@@ -1006,6 +1029,9 @@ struct Sync {
     nested: Vec<PathBuf>,
     /// Refuse to take it back while a running sandbox holds the volume.
     refuse_live: bool,
+    /// Taken back only by the last take-back, after the sandbox's services
+    /// have stopped: a service's data (`is_service_data`).
+    at_exit: bool,
 }
 
 struct Inner {
@@ -1037,7 +1063,7 @@ impl Inner {
         }
         let started = std::time::Instant::now();
         let mut taken = TreeSummary::default();
-        for sync in &self.syncs {
+        for sync in self.syncs.iter().filter(|s| !s.at_exit || why == WHY_EXIT) {
             let guard = crate::workspace::volume_lock(&sync.volume)
                 .lock_owned()
                 .await;
@@ -1112,6 +1138,20 @@ impl Inner {
         result.map(|_| ()).map_err(|(_, error)| error)
     }
 
+    /// Stop every service still running in the sandbox, which is ending
+    /// anyway, so a database takes its data to a clean stop before the
+    /// last take-back reads it. One that will not stop is logged; its data
+    /// comes back as it is, as after a crash.
+    async fn stop_services(&self) {
+        if self.conn.is_closed() {
+            return;
+        }
+        // Every one: the supervisor signals each and waits for it to go.
+        if let Err(error) = self.conn.services().stop(Vec::new()).await {
+            tracing::warn!(sandbox = %self.name, %error, "could not stop the sandbox's services before taking their data back");
+        }
+    }
+
     /// The last sync, once: what it returns is only ever the first call's.
     async fn finish(self: &Arc<Self>) -> Result<(), FilesError> {
         if self.finished.swap(true, Ordering::SeqCst) {
@@ -1119,6 +1159,9 @@ impl Inner {
         }
         if let Some(periodic) = self.periodic.lock().unwrap().take() {
             periodic.abort();
+        }
+        if self.syncs.iter().any(|s| s.at_exit) {
+            self.stop_services().await;
         }
         let taken = match self.syncs.is_empty() {
             true => Ok(()),

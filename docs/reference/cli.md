@@ -25,6 +25,7 @@ Every `tracon` command. `--help` on any of them says more.
 | `tracon work start <id> [--phase] [--node] [--branch] [--base] [--model] [--harness] [--budget] [--repo] [--json]` | start a plan or execute session on an item, here or on a peer, as the Composer does (see [Starting work](../guides/sessions.md#starting-work)) |
 | `tracon plugin add <owner/repo\|archive> [--channel]\|ls\|update [name]\|rollback <name>\|rm <name> [--purge]\|logs <name> --channel [-n]\|restart <name> --channel` | plugins: fetched and staged, then installed once you allow the install card; `logs` shows an instance's last lines and `restart` brings an unhealthy one back |
 | `tracon repo ls\|show\|set\|rm\|build [repo]` | the `[[repo]]` entries (also **Settings → Repositories**), and building a repository's image from its default-branch Dockerfile |
+| `tracon repo volumes\|reset-volume <repo> <service>` | each repository's kept data for a catalogue service (`service_volumes`, also **Settings → System → Service data**), and resetting one so its next session starts the service empty; refused while a session holds it |
 | `tracon policy keygen\|init\|sign\|push\|show` | the policy bundle |
 | `tracon name set\|rm\|show` | a record's name (a session, review, report, approval, manifest, transfer or check), shown by every node in the mesh; `show` says what an id, prefix or name refers to |
 | `tracon metrics [--channel] [--days]`, `provenance <sha>` | what happened |

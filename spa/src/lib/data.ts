@@ -20,3 +20,31 @@ export function countLabel(count: number, unit: string): string {
   if (count === 0) return `no ${plural}`
   return `${count.toLocaleString('en-US')} ${count === 1 ? unit : plural}`
 }
+
+/** What the operator is told of one service volume, and whether it can be
+ *  reset from here: only at the node itself, and not while a session holds it. */
+export function serviceVolumeLine(
+  volume: { service: string; bytes: number; used_ms: number; live: boolean; mounted: boolean },
+  now: number,
+): string {
+  const parts = [`${volume.service} · ${formatBytes(volume.bytes)}`]
+  if (volume.live) parts.push('held by a running session')
+  else parts.push(`last used ${ago(now - volume.used_ms)}`)
+  if (!volume.mounted) parts.push('its entry no longer names this service')
+  return parts.join(' · ')
+}
+
+export function resetRefusal(volume: { live: boolean }, local: boolean): string | null {
+  if (!local) return 'Service data is reset on the node itself.'
+  if (volume.live) return 'A running session holds it; reset it once that session ends.'
+  return null
+}
+
+function ago(ms: number): string {
+  const minutes = Math.floor(Math.max(0, ms) / 60_000)
+  if (minutes < 1) return 'just now'
+  if (minutes < 60) return `${minutes} min ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 48) return `${hours} h ago`
+  return `${Math.floor(hours / 24)} days ago`
+}

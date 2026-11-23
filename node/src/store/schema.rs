@@ -1874,6 +1874,20 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE shown_work ADD COLUMN proposal INTEGER NOT NULL DEFAULT 0;
     "#,
+    // 89: each repository's persistent volume for a catalogue service
+    // (`crate::service_volume`): the volume's name, the repository it was
+    // made for and the service whose data it holds, when it was made and
+    // when a session last mounted it. Per node: never replicated.
+    r#"
+    CREATE TABLE service_volume (
+        volume     TEXT PRIMARY KEY,
+        repo_path  TEXT NOT NULL,
+        service    TEXT NOT NULL,
+        created_ms INTEGER NOT NULL,
+        used_ms    INTEGER NOT NULL
+    );
+    CREATE UNIQUE INDEX service_volume_repo ON service_volume(repo_path, service);
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

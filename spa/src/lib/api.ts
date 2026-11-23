@@ -22,6 +22,7 @@ import type {
   StorageItem,
   StorageScheduled,
   DataInventory,
+  ServiceVolume,
   McpServerStatus,
   PluginBuild,
   PluginInstance,
@@ -525,6 +526,11 @@ export const api = {
   /** Runtime storage whose owner is over; removed only with `apply`. Loopback only. */
   /** What the serving node holds, kind by kind, and where each is deleted. */
   data: () => call<DataInventory>('GET', '/api/maintenance/data'),
+  /** Each repository's persistent volume for a catalogue service. */
+  serviceVolumes: () => call<{ volumes: ServiceVolume[] }>('GET', '/api/maintenance/service-volumes'),
+  /** Remove a repository's data for one service; its next session starts it empty. Loopback only. */
+  resetServiceVolume: (volume: string) =>
+    call<{ reset: string; repo: string; service: string }>('POST', '/api/maintenance/service-volumes/reset', { volume }),
   plugins: () => call<{ plugins: PluginSummary[] }>('GET', '/api/plugins'),
   /** The last lines a plugin's instance on `channel` wrote. */
   pluginLogs: (name: string, channel: string, lines = 200) =>

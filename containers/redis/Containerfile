@@ -1,0 +1,6 @@
+# The Redis the `redis` service bundle is assembled from. Nothing builds or
+# publishes this as an image: a session's sandbox runs the bundle under its
+# supervisor. The FROM line is the pin, read by scripts/database-bundle.sh
+# (what goes in the bundle, and the version it is named for), and moved by
+# Dependabot.
+FROM docker.io/library/redis:7.4.8-bookworm@sha256:3e0669e42d4fe421c9dea0ba5fbc04d336b80b4f32a6c7d25bee3a1d089288a1

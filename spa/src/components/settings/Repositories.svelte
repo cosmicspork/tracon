@@ -286,7 +286,7 @@
         <summary>
           <code>{form.path || 'new repository'}</code>
           <small>
-            {form.source === 'dockerfile' ? `builds ${form.dockerfile || '…'}` : form.source === 'build' ? 'build steps on the base' : form.source === 'image' ? 'pinned image' : 'harness image'}{form.sessionEgress ? ' · registries open to sessions' : ''}
+            {form.source === 'dockerfile' ? `builds ${form.dockerfile || '…'}` : form.source === 'build' ? 'build steps on the base' : form.source === 'image' ? 'pinned image' : 'harness image'}{form.sessionEgress ? ' · registries open to sessions' : ''}{words(form.serviceVolumes).length ? ` · keeps ${words(form.serviceVolumes).join(', ')} data` : ''}
           </small>
         </summary>
         <div class="grid">
@@ -359,6 +359,12 @@
             <span>Time limit (seconds)</span>
             <input type="number" min="1" bind:value={form.timeout} placeholder="node-wide" />
             <small>For preparation, and for each check.</small>
+          </label>
+
+          <label class="wide">
+            <span>Service data kept</span>
+            <input bind:value={form.serviceVolumes} spellcheck="false" placeholder="postgres redis" />
+            <small>Catalogue services whose data this repository keeps between sessions, each in a volume of its own. Reset it under System › Service data. <Help label="About service data">A service not named here starts empty in every session. A kept volume survives sessions, and only you reset it; it goes with the repository's data once no entry names the repository.</Help></small>
           </label>
 
           <div class="wide sessions">
