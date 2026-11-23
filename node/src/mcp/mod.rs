@@ -11,6 +11,7 @@ pub mod approvals;
 pub mod aside;
 pub mod audit;
 pub mod branch;
+pub mod check_run;
 pub mod checking;
 pub mod docs;
 pub mod egress;
@@ -579,7 +580,8 @@ impl Tools {
     /// A verdict is a review session's account of someone else's change, and
     /// closing the item is the operator's call: the item stays open through
     /// CI and review until they close it.
-    pub const NOT_EXECUTE: &'static [&'static str] = &[review::VERDICT, work::WORK_CLOSE];
+    pub const NOT_EXECUTE: &'static [&'static str] =
+        &[review::VERDICT, work::WORK_CLOSE, check_run::CHECK_RUN];
 
     /// The tools a review session gets: what it needs to read, what it needs
     /// to exercise the candidate and show what it saw, and its verdict.
@@ -680,6 +682,11 @@ impl Tools {
         // publish can still ask for review and be told why it stopped there.
         if self.session.get().is_some() {
             out.extend(review::definitions());
+            // A harness the operator runs tests through the node only where
+            // the operator lets the node run containers for it.
+            if self.cfg.external.run_containers {
+                out.extend(check_run::definitions());
+            }
             // Memory and documents need no credential either: the corpus is
             // the node's own, and reading it is what every session starts by
             // doing. This means every session gets an MCP server.
@@ -2577,6 +2584,13 @@ impl Tools {
                     .get()
                     .ok_or("review tools are not available on this node")?;
                 review::call(&access.store, &access.manager, ctx, name, args).await
+            }
+            check_run::CHECK_RUN => {
+                let access = self
+                    .session
+                    .get()
+                    .ok_or("check_run is not available on this node")?;
+                check_run::call(&access.store, &access.manager, ctx, args).await
             }
             memory::RECALL | memory::RETAIN => {
                 let access = self

@@ -114,6 +114,7 @@ pub async fn run_forked(
     force_rerun: bool,
     cancel: &dyn Cancel,
     forks: &Forks,
+    asked: Option<&[String]>,
 ) -> Forked {
     let ran = forked(
         backend,
@@ -126,6 +127,7 @@ pub async fn run_forked(
         force_rerun,
         cancel,
         forks,
+        asked,
     )
     .await;
     match ran {
@@ -146,10 +148,17 @@ async fn forked(
     force_rerun: bool,
     cancel: &dyn Cancel,
     forks: &Forks,
+    asked: Option<&[String]>,
 ) -> Result<Forked, String> {
     let kind = forks.kind.as_str();
     let image = environment.image.clone();
-    let commands = environment.checks.clone();
+    // What a harness asked to run (`checks::run_required_for`) is evidence
+    // of nothing: it neither reuses nor leaves a run to reuse.
+    let evidence = asked.is_none();
+    let commands = match asked {
+        Some(asked) => asked.to_vec(),
+        None => environment.checks.clone(),
+    };
     if commands.is_empty() {
         return Ok(Forked::Unplaced("there are no checks to run".into()));
     }
@@ -216,7 +225,7 @@ async fn forked(
             &image_key,
             &inputs_json,
         );
-        let rerun_of = match force_rerun {
+        let rerun_of = match force_rerun && evidence {
             true => store
                 .latest_check_for_identity(
                     &candidate.id,
@@ -228,7 +237,7 @@ async fn forked(
                 .map(|run| run.id),
             false => None,
         };
-        let prior = match force_rerun {
+        let prior = match force_rerun || !evidence {
             true => None,
             false => store
                 .latest_reusable_check(&candidate.id, &key)
@@ -239,7 +248,7 @@ async fn forked(
             command: command.clone(),
             definition_json,
             definition_hash,
-            reuse_key: Some(key),
+            reuse_key: evidence.then_some(key),
             rerun_of,
         };
         match prior {
@@ -356,7 +365,7 @@ async fn forked(
         store
             .insert_check_run(&CheckRunRow {
                 id: id.clone(),
-                candidate_id: Some(candidate.id.clone()),
+                candidate_id: evidence.then(|| candidate.id.clone()),
                 session_id: session_id.map(str::to_string),
                 command: Some(check.command.clone()),
                 definition_json: check.definition_json.clone(),
@@ -743,6 +752,7 @@ pub async fn run_on_digitalocean(
     cancel: &dyn Cancel,
     runtime: &crate::provider::digitalocean::runtime::DoRuntime,
     requirements: Requirements,
+    asked: Option<&[String]>,
 ) -> Forked {
     use crate::provider::digitalocean::runtime::{CHECK_TEMPLATE_POLL, CHECK_TEMPLATE_WITHIN};
     let environment = match crate::repo_image::environment(backend, cfg, store, repo).await {
@@ -778,6 +788,7 @@ pub async fn run_on_digitalocean(
         force_rerun,
         cancel,
         &forks,
+        asked,
     )
     .await
 }

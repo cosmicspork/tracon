@@ -565,9 +565,13 @@ generated_details = false           # a description an approval sends opens with
 [external]                          # a harness you run yourself, using this node's tools; off unless enabled
 enabled = false
 repo_roots = ["~/src"]              # a worktree put up for review must belong to a repository under one of these
-run_checks = false                  # true: run the repository's checks on the node's copy of each submission,
-                                    # in its image, as evidence for the reviewer; never gates the submission.
-                                    # Also makes `auto` the external review trigger where a channel sets none
+run_containers = false              # true: the node runs containers for an external harness, in the repository's
+                                    # image on its own copy of the commit. Both: the required checks behind each
+                                    # submission, as evidence for the reviewer (a failed one shows on the card and
+                                    # never refuses the submission), and the check_run tool, which runs the checks
+                                    # or one command and hands back their output, attached to nothing; check_run needs
+                                    # a [[repo]] entry. Also makes `auto` the external review trigger
+                                    # where a channel sets none. Was run_checks, still read (with a warning) in 0.60
 
 [docs]
 # export_dir = "~/notes"            # Markdown only: <slug>.md, archived ones under archive/;

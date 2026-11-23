@@ -202,6 +202,30 @@ impl Checking {
         entry
     }
 
+    /// A place in the line for checks the node runs for no session (a
+    /// harness the operator runs: its review's checks, and `check_run`),
+    /// queued and placed as a session's are but never kept here, since no
+    /// `review_status` waits on them: their caller holds the result.
+    pub fn line_entry(
+        &self,
+        handle: &str,
+        candidate_id: &str,
+        commands: Vec<String>,
+    ) -> Arc<Entry> {
+        Arc::new(Entry {
+            handle: handle.to_string(),
+            session_id: String::new(),
+            key: key("", candidate_id, &commands),
+            candidate_id: candidate_id.to_string(),
+            commands,
+            started_ms: crate::store::now_ms(),
+            settled: tokio::sync::watch::Sender::new(None),
+            queued: tokio::sync::watch::Sender::new(None),
+            short: Default::default(),
+            elsewhere: Mutex::default(),
+        })
+    }
+
     /// The entry under `handle`, if the node has one.
     pub fn get(&self, handle: &str) -> Option<Arc<Entry>> {
         self.entries.lock().unwrap().get(handle).cloned()

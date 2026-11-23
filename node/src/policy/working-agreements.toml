@@ -22,7 +22,7 @@
 # refuses a different bundle under the version it already runs, and offers
 # the shipped one only when its version is higher.
 
-version = 26
+version = 27
 
 # --- 1. The harness and Git's internals stay the node's ---------------------
 # The harness's own configuration is the node's to write, not the session's.
@@ -139,6 +139,17 @@ matches = [
     "jira-review__issue",
     "jira-review__transitions",
 ]
+
+# Running a repository's checks on the node for a harness the operator runs
+# is offered only where the operator turned on `[external] run_containers`,
+# and runs in the repository's own image with no network, on a copy of a
+# commit, attached to nothing: the switch was the asking.
+[[rule]]
+id = "node-checks"
+verdict = "allow"
+reason = "Running checks or one command on a copy of a commit, in the repository's image with no network, changes nothing outside that copy, and the operator turned it on."
+kinds = ["tool"]
+matches = ["check_run"]
 
 # Writing to the forge or the tracker — a comment, an edited field, a new
 # issue, a pipeline run — is named nowhere here, so every one of them is asked. A comment is

@@ -352,7 +352,7 @@ pub const KEYS: &[KeySpec] = &[
     restart("external.enabled"),
     restart("external.idle_timeout_secs"),
     restart("external.repo_roots").path(PathKind::Root),
-    restart("external.run_checks"),
+    restart("external.run_containers"),
     // [docs]
     live("docs.export_dir").path(PathKind::WriteDir),
     live("docs.export_channel"),

@@ -700,11 +700,11 @@ go on). Set it beside the review model in **Settings → Channels**, or:
 
 ```sh
 tracon channel bind work phases.review.trigger.session=auto      # the default
-tracon channel bind work phases.review.trigger.external=manual   # the default, unless [external] run_checks
+tracon channel bind work phases.review.trigger.external=manual   # the default, unless [external] run_containers
 tracon channel bind work phases.review.trigger=manual            # both at once
 ```
 
-With `[external] run_checks` on, an external submission's default is `auto`
+With `[external] run_containers` on, an external submission's default is `auto`
 instead: the node runs the repository's checks on it, and the reviewer starts once
 they are done, with them to go on. A trigger the channel sets still wins.
 

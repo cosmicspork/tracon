@@ -1883,7 +1883,7 @@ type Kept = tokio::task::JoinHandle<Result<Option<Vec<crate::store::CandidateFil
 
 /// What follows a submission or a resubmission once its review is recorded:
 /// the candidate's files kept, when they are not yet; the node's checks run on
-/// them, for a harness the operator runs with `[external] run_checks` on; and
+/// them, for a harness the operator runs with `[external] run_containers` on; and
 /// a reviewer started once both are done. What became of the reviewer.
 #[allow(clippy::too_many_arguments)]
 async fn keep_and_review(
@@ -1900,7 +1900,7 @@ async fn keep_and_review(
 ) -> Value {
     // The same commit submitted again while its checks run gets those
     // checks, not a second run of them (`ExternalChecks::begin`).
-    let check = (external && manager.cfg().external.run_checks)
+    let check = (external && manager.cfg().external.run_containers)
         .then(|| manager.external_checks().begin(store, review_id, candidate))
         .flatten();
     let checking = check.is_some();
@@ -1928,7 +1928,7 @@ async fn keep_and_review(
 }
 
 /// For a review from a harness the operator runs, with `[external]
-/// run_checks` on: the repository's required checks, run on the node's own
+/// run_containers` on: the repository's required checks, run on the node's own
 /// copy of the candidate once `retained` has kept its files, as evidence for
 /// the reviewer, who starts once they are done. They run behind the
 /// submission and gate nothing; their results land on the candidate as an
@@ -2092,6 +2092,21 @@ impl ExternalChecks {
         })
     }
 
+    /// Begin a run `check_run` asked for: counted among those a restart
+    /// would interrupt, and never one a submission attaches to.
+    pub fn begin_asked(self: &Arc<Self>) -> ExternalCheck {
+        let key = (String::new(), uuid::Uuid::now_v7().to_string());
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key.clone());
+        ExternalCheck {
+            checks: self.clone(),
+            key,
+            settled: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
     /// Whether a run of a review's candidate is under way.
     pub fn running(&self, review_id: &str, candidate_id: &str) -> bool {
         self.0
@@ -2169,50 +2184,23 @@ async fn check_kept_candidate(
         review_id: review_id.to_string(),
         head_sha: candidate.head_sha.clone(),
     };
-    // Placed as a session's checks are, with no session to record it on:
-    // on DigitalOcean first only where it is preferred, and there after
-    // the node's own runtime had no room for them, where it may.
-    let elsewhere = |short: Option<String>| {
-        let (repo, root) = (repo.clone(), snapshot.root.clone());
-        let wants = &wants;
-        let channel = review.channel.clone();
-        async move {
-            let crate::session::placing::ChecksPlaced::DigitalOcean {
-                runtime,
-                requirements,
-            } = manager
-                .place_checks(None, &channel, repo.as_deref(), short.as_deref())
-                .await
-            else {
-                return None;
-            };
-            match review::forked::run_on_digitalocean(
-                manager.backend().as_ref(),
-                manager.cfg(),
-                store,
-                candidate,
-                None,
-                repo.as_deref(),
-                &root,
-                false,
-                wants,
-                &runtime,
-                requirements,
-            )
-            .await
-            {
-                review::forked::Forked::Ran(report) => Some(*report),
-                review::forked::Forked::Unplaced(why) => {
-                    tracing::warn!(review_id, %why, "an external candidate's checks run on this node instead of DigitalOcean");
-                    None
-                }
-            }
-        }
-    };
-    let report = match elsewhere(None).await {
-        Some(report) => report,
-        None => {
-            let report = review::checks::run_required_for(
+    // Placed and queued as a session's checks are, with no session to
+    // record it on (`run_placed`).
+    let commands =
+        crate::environment::environment_for(manager.cfg(), store, repo.as_deref()).checks;
+    let entry = manager
+        .checking()
+        .line_entry(review_id, &candidate.id, commands);
+    let (root, repo) = (&snapshot.root, repo.as_deref());
+    let wants = &wants;
+    let report = run_placed(
+        manager,
+        &review.channel,
+        repo,
+        &entry,
+        wants,
+        || {
+            review::checks::run_required_for(
                 manager.backend().as_ref(),
                 manager.cfg(),
                 store,
@@ -2220,21 +2208,35 @@ async fn check_kept_candidate(
                 // The node's own run, for no session: whoever first captured
                 // this commit did not ask for it.
                 None,
-                repo.as_deref(),
-                &snapshot.root,
+                repo,
+                root,
                 false,
-                &wants,
+                wants,
+                None,
             )
-            .await;
-            let short = match &report {
-                Ok(ran) if ran.cancelled.is_none() => ran.no_room.clone(),
-                _ => None,
-            };
-            match short {
-                Some(short) => elsewhere(Some(short)).await.unwrap_or(report),
-                None => report,
-            }
-        }
+        },
+        |runtime, requirements| async move {
+            review::forked::run_on_digitalocean(
+                manager.backend().as_ref(),
+                manager.cfg(),
+                store,
+                candidate,
+                None,
+                repo,
+                root,
+                false,
+                wants,
+                &runtime,
+                requirements,
+                None,
+            )
+            .await
+        },
+    )
+    .await;
+    let Some(report) = report else {
+        tokio::task::spawn_blocking(move || drop(snapshot));
+        return Ok(None);
     };
     tokio::task::spawn_blocking(move || drop(snapshot));
     let mut report = report?;
@@ -2276,6 +2278,92 @@ async fn check_kept_candidate(
     serde_json::to_string(&report.results)
         .map(Some)
         .map_err(|error| error.to_string())
+}
+
+/// Checks the node runs for no session, for a harness the operator runs:
+/// its review's required checks, or what `check_run` asked for. Placed and
+/// queued as a session's are (`submit`): on DigitalOcean first where
+/// placement prefers it; otherwise on the node's own runtime, in its line
+/// (`mcp::checking`) behind whatever waits for room there; and after the
+/// node's runtime stopped short of room, back in the line, or on
+/// DigitalOcean where placement allows it then. Checks that stopped short
+/// [`checking::MAX_SHORT`](crate::mcp::checking::MAX_SHORT) times are not
+/// tried again: that run's report, which says so, stands. `None` when
+/// `cancel` withdrew them while they waited their turn.
+pub(crate) async fn run_placed<Here, HereRan, There, ThereRan>(
+    manager: &Manager,
+    channel: &str,
+    repo: Option<&std::path::Path>,
+    entry: &Arc<crate::mcp::checking::Entry>,
+    cancel: &dyn review::checks::Cancel,
+    here: Here,
+    there: There,
+) -> Option<Result<review::checks::CheckReport, String>>
+where
+    Here: Fn() -> HereRan,
+    HereRan: std::future::Future<Output = Result<review::checks::CheckReport, String>>,
+    There: Fn(
+        Arc<crate::provider::digitalocean::runtime::DoRuntime>,
+        crate::provider::Requirements,
+    ) -> ThereRan,
+    ThereRan: std::future::Future<Output = review::forked::Forked>,
+{
+    let checking = manager.checking().clone();
+    let mut slot = checking.start(entry);
+    // Why the node's own runtime is short of room for them: others wait for
+    // room before them, or their last run here stopped short.
+    let mut short = slot.is_none().then(|| WAITING_FOR_ROOM.to_string());
+    // Set once DigitalOcean has not run them: the rest are the node's own.
+    let mut stay_here = false;
+    loop {
+        if !stay_here {
+            if let crate::session::placing::ChecksPlaced::DigitalOcean {
+                runtime,
+                requirements,
+            } = manager
+                .place_checks(None, channel, repo, short.as_deref())
+                .await
+            {
+                // Their place here, or in the line, is given up while they
+                // run there.
+                drop(slot.take());
+                checking.leave(entry);
+                entry.run_on(Some(crate::provider::ProviderKind::DigitalOcean));
+                let forked = there(runtime, requirements).await;
+                entry.run_on(None);
+                match forked {
+                    review::forked::Forked::Ran(report) => return Some(*report),
+                    review::forked::Forked::Unplaced(why) => {
+                        tracing::warn!(handle = %entry.handle, %why, "checks placed on DigitalOcean run on this node instead");
+                        stay_here = true;
+                        slot = checking.start(entry);
+                    }
+                }
+            }
+        }
+        let running = match slot.take() {
+            Some(slot) => slot,
+            None => match checking.turn(entry, || cancel.cancelled()).await {
+                Ok(slot) => slot,
+                Err(_) => return None,
+            },
+        };
+        let report = here().await;
+        drop(running);
+        let why = match &report {
+            Ok(ran) if ran.cancelled.is_none() => ran.no_room.clone(),
+            _ => None,
+        };
+        let Some(why) = why else {
+            return Some(report);
+        };
+        let now = checking.stopped_short(entry, why.clone());
+        if now.held.is_some() {
+            checking.leave(entry);
+            return Some(report);
+        }
+        short = Some(why);
+    }
 }
 
 /// What a review's checks record names preparation by, when it failed and
@@ -3355,6 +3443,7 @@ async fn run_checks_on_digitalocean(
         },
         runtime,
         requirements,
+        None,
     )
     .await;
     match forked {
@@ -4381,7 +4470,7 @@ impl StartedBy {
 /// `phases.review.trigger` says nothing for it. The one place that default
 /// is decided: an external harness's submission carries no checks or shown
 /// work, so a reviewer on its own would have only the diff to go on, unless
-/// the node runs the repository's checks on it (`[external] run_checks`),
+/// the node runs the repository's checks on it (`[external] run_containers`),
 /// which the reviewer then waits for and reads.
 pub fn default_trigger(source: Source, external_checks: bool) -> Trigger {
     match source {
@@ -4404,12 +4493,12 @@ pub struct ReviewerBinding {
 }
 
 impl ReviewerBinding {
-    /// A channel's binding on this node, whose `[external] run_checks` sets
+    /// A channel's binding on this node, whose `[external] run_containers` sets
     /// the default for external submissions.
     pub fn for_channel(manager: &Manager, channel: &str) -> Self {
         Self::of(
             &manager.bindings(channel),
-            manager.cfg().external.run_checks,
+            manager.cfg().external.run_containers,
         )
     }
 

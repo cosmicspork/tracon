@@ -273,6 +273,7 @@ pub async fn run_required(
         snapshot,
         force_rerun,
         cancel,
+        None,
     )
     .await
 }
@@ -283,6 +284,12 @@ pub async fn run_required(
 /// captured that commit first; checks the node runs for a harness the
 /// operator runs belong to no session (`None`), and its review names the
 /// repository (`environment::review_repo`).
+///
+/// `asked` is what a harness the operator runs asked to have run instead
+/// (`check_run`): those commands in place of the required ones, in the same
+/// image, on the same prepared tree, with the same read-only cache and no
+/// network, but kept as evidence of nothing. Their records name no
+/// candidate, they reuse no earlier run, and no later run reuses them.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_required_for(
     backend: &dyn Backend,
@@ -294,12 +301,17 @@ pub async fn run_required_for(
     snapshot: &Path,
     force_rerun: bool,
     cancel: &dyn Cancel,
+    asked: Option<&[String]>,
 ) -> Result<CheckReport, String> {
     // The one place a check run may build: the image for the default branch's
     // Dockerfile as it is now, so a check never runs in an image a merged
     // change has since replaced.
     let environment = crate::repo_image::environment(backend, cfg, store, repo).await?;
-    let commands = environment.checks.clone();
+    let commands = match asked {
+        Some(asked) => asked.to_vec(),
+        None => environment.checks.clone(),
+    };
+    let evidence = asked.is_none();
     let raw_image = environment.image.clone();
     let runner = backend.runner(Vec::new());
     // The identity actually confirmed against the runtime for this backend and
@@ -337,8 +349,9 @@ pub async fn run_required_for(
         let definition_hash = hash(&definition_json);
         let reuse_key = pinned_image
             .as_ref()
+            .filter(|_| evidence)
             .map(|image| reuse_key(&candidate.head_sha, &definition_hash, image, &inputs_json));
-        let rerun_of = if force_rerun {
+        let rerun_of = if force_rerun && evidence {
             store
                 .latest_check_for_identity(
                     &candidate.id,
@@ -351,7 +364,7 @@ pub async fn run_required_for(
         } else {
             None
         };
-        let prior = if force_rerun {
+        let prior = if force_rerun || !evidence {
             None
         } else if let Some(key) = reuse_key.as_deref() {
             store
@@ -386,7 +399,7 @@ pub async fn run_required_for(
 
         let run = CheckRunRow {
             id: run_id.clone(),
-            candidate_id: Some(candidate.id.clone()),
+            candidate_id: evidence.then(|| candidate.id.clone()),
             session_id: session_id.map(str::to_string),
             command: Some(command.clone()),
             definition_json,

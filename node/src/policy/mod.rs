@@ -876,11 +876,25 @@ mod tests {
         assert_eq!(
             (policy().version, sha.as_str()),
             (
-                26,
-                "f7988ea1f56e46ebac8f5e321952edb7a73b1b6cbdcd0674f4ebe6a75c9167e7"
+                27,
+                "0b095b6630c3d370c1abba17209c7f15131ef7c1c46641ea63b1585b80f20ba6"
             ),
             "working-agreements.toml changed: raise its version and pin the new hash"
         );
+    }
+
+    /// `check_run` is offered only where the operator turned on `[external]
+    /// run_containers`, so the switch is the asking; a command that names
+    /// publishing is still refused, as anywhere.
+    #[test]
+    fn a_check_run_is_allowed_but_not_a_way_to_publish() {
+        let p = policy();
+        let args = serde_json::json!({ "worktree": "/src/app", "command": "cargo test" });
+        let d = p.decide(&tool("check_run", &args, "check_run"));
+        assert_eq!(d.verdict, Verdict::Allow, "{:?}", d.rule_id);
+        let args = serde_json::json!({ "worktree": "/src/app", "command": "git push origin main" });
+        let d = p.decide(&tool("check_run", &args, "check_run git push origin main"));
+        assert_eq!(d.verdict, Verdict::Deny, "{:?}", d.rule_id);
     }
 
     #[test]

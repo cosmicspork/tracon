@@ -316,7 +316,7 @@ pub async fn list_channels(State(s): State<AppState>) -> ApiResult<Json<serde_js
     let mut out = Vec::new();
     let rows = s.store().channel_list()?;
     // What an external submission's trigger defaults to on this node.
-    let external_checks = s.cfg.external.run_checks;
+    let external_checks = s.cfg.external.run_containers;
     if rows.is_empty() {
         for name in DEFAULT_CHANNELS.iter().copied() {
             let ceiling = crate::metrics::ceiling(s.store(), &json!({}), name);
