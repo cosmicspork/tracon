@@ -455,6 +455,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/reviews/{id}", get(api::get_review))
         .route("/api/reviews/{id}/file", get(api::review_file))
+        .route("/api/reviews/{id}/context", get(api::review_context))
         .route("/api/reviews/{id}/verdict", post(api::decide_review))
         .route("/api/reviews/{id}/outgoing", post(api::review_outgoing))
         .route(

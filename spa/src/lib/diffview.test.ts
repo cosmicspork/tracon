@@ -3,7 +3,21 @@ import { Chunk } from '@codemirror/merge'
 import { Text } from '@codemirror/state'
 
 import { splitDiff } from './diff'
-import { MODE_KEY, defaultMode, fileSides, storedMode, storeMode, SPLIT_MIN_WIDTH } from './diffview'
+import {
+  MODE_KEY,
+  WRAP_KEY,
+  contextMismatch,
+  defaultMode,
+  expand,
+  fileSides,
+  noLines,
+  parseHunks,
+  storedMode,
+  storedWrap,
+  storeMode,
+  storeWrap,
+  SPLIT_MIN_WIDTH,
+} from './diffview'
 import { overrideFor } from './mergeChanges'
 
 const DIFF = `diff --git a/x.rs b/x.rs
@@ -76,7 +90,7 @@ test("the merge view marks exactly the diff's changed rows, never a context row"
 test('what the header says is kept when no hunk shows it', () => {
   expect(sides[1].notes).toEqual(['new file'])
   expect(sides[2].notes).toEqual(['deleted'])
-  expect(sides[3]).toMatchObject({ hunks: false, notes: ['binary file changed'], a: '', b: '' })
+  expect(sides[3]).toMatchObject({ hunks: false, notes: ['binary'], a: '', b: '' })
 })
 
 test('documents other than the diff’s are diffed afresh', () => {
@@ -110,4 +124,92 @@ test('the chosen mode is remembered, and storage that refuses only forgets it', 
   }
   expect(storedMode(refusing)).toBeNull()
   expect(() => storeMode('split', refusing)).not.toThrow()
+})
+
+// --- context around the hunks ---------------------------------------------
+
+const base40 = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`)
+const head40 = base40.map((l, i) => (i === 4 ? 'line five' : l))
+// Line 5 changed, three lines of context either side: the diff leaves out
+// line 1 above and lines 9 to 40 below.
+const ONE = `diff --git a/f b/f
+index 1111111..2222222 100644
+--- a/f
++++ b/f
+@@ -2,7 +2,7 @@ fn top()
+ line 2
+ line 3
+ line 4
+-line 5
++line five
+ line 6
+ line 7
+ line 8
+`
+const one = splitDiff(ONE)[0]
+const pinned = { base: base40.join('\n') + '\n', head: head40.join('\n') + '\n' }
+
+test('the gaps a diff leaves out are counted from its hunk headers, the last once the file is known', () => {
+  expect(expand(one, null, new Set()).gaps).toEqual([{ gap: 0, hidden: 1 }])
+  expect(expand(one, null, new Set()).tail).toEqual({ gap: 1, hidden: null })
+  expect(expand(one, pinned, new Set()).tail).toEqual({ gap: 1, hidden: 32 })
+  // Without the files, opening a gap shows nothing new.
+  expect(expand(one, null, new Set([0, 1])).file.lines).toEqual(one.lines)
+})
+
+test('an opened gap is written into the diff as context, numbered on both sides', () => {
+  const all = expand(one, pinned, new Set([0, 1]))
+  expect(all.gaps).toEqual([{ gap: 0, hidden: 0 }])
+  expect(all.tail).toBeNull()
+  const s = fileSides(all.file)
+  expect(s.a.split('\n')[0]).toBe('@@ -1,40 +1,40 @@ fn top()')
+  expect(s.aLines.filter((n) => n !== null)).toEqual(Array.from({ length: 40 }, (_, i) => i + 1))
+  expect(s.bLines.filter((n) => n !== null)).toEqual(Array.from({ length: 40 }, (_, i) => i + 1))
+  expect(s.b.split('\n')[5]).toBe('line five')
+  // The marked change is still only the changed line.
+  expect(s.blocks).toEqual([{ a: 5, aN: 1, b: 5, bN: 1 }])
+})
+
+test('the "before" column of a unified view numbers context rows only', () => {
+  const s = fileSides(one)
+  expect(s.bOld).toEqual([null, 2, 3, 4, null, 6, 7, 8, null])
+  expect(s.bLines).toEqual([null, 2, 3, 4, 5, 6, 7, 8, null])
+})
+
+test('files that do not match the diff are refused as context', () => {
+  const { hunks } = parseHunks(one)
+  expect(contextMismatch(hunks, base40, head40)).toBeNull()
+  expect(contextMismatch(hunks, null, head40)).toBeNull()
+  expect(contextMismatch(hunks, base40, base40)).toBe('the changed file differs from the diff at line 5')
+  expect(contextMismatch(hunks, head40, null)).toBe('the base file differs from the diff at line 5')
+})
+
+test('a new file has nothing after its one hunk to show', () => {
+  const added = splitDiff(DIFF)[1]
+  expect(expand(added, null, new Set()).tail).toBeNull()
+})
+
+test('a binary file, a rename and a mode change each say what happened', () => {
+  expect(noLines(sides[3])).toBe('Binary file: its contents are not shown as text.')
+  expect(noLines({ notes: ['renamed from a.rs'] })).toBe('Renamed from a.rs; the contents did not change.')
+  expect(noLines({ notes: ['mode now 100755'] })).toBe('Only the file mode changed.')
+})
+
+test('wrapping is off until the viewer turns it on, and survives storage that refuses', () => {
+  const kept = new Map<string, string>()
+  const storage = { getItem: (k: string) => kept.get(k) ?? null, setItem: (k: string, v: string) => void kept.set(k, v) }
+  expect(storedWrap(storage)).toBe(false)
+  storeWrap(true, storage)
+  expect(kept.get(WRAP_KEY)).toBe('on')
+  expect(storedWrap(storage)).toBe(true)
+  const refusing = {
+    getItem: () => {
+      throw new Error('SecurityError')
+    },
+    setItem: () => {
+      throw new Error('SecurityError')
+    },
+  }
+  expect(storedWrap(refusing)).toBe(false)
+  storeWrap(true, refusing)
 })

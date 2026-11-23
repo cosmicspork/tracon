@@ -3615,6 +3615,96 @@ pub async fn review_file(
     Ok(Json(json!({ "path": q.path, "text": text })))
 }
 
+#[derive(Deserialize)]
+pub struct ContextQuery {
+    pub path: String,
+    /// An earlier revision of the same review: its commit is the base side,
+    /// for the diff since the last verdict. Absent, the base is the one the
+    /// revision's own diff was taken against.
+    pub from: Option<String>,
+}
+
+/// One reviewed file whole on both sides of the latest revision, for showing
+/// the lines around a hunk. Both sides are pinned: the base by the blob the
+/// revision's diff names (or an earlier revision's commit), the candidate by
+/// the revision's commit, falling back to the tree the evidence store kept.
+/// Never the worktree's files as they stand now. A side that cannot be read
+/// says why, so the screen can label the context missing rather than guess.
+pub async fn review_context(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<ContextQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let r = s.store().get_review(&id)?.ok_or(ApiError(
+        StatusCode::NOT_FOUND,
+        "no review with that id".into(),
+    ))?;
+    if r.kind == crate::store::reports::KIND {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "standalone narrative reports have no reviewed files",
+        ));
+    }
+    if r.node_id != s.node_id {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "the reviewed files are kept on the node that owns this review".into(),
+        ));
+    }
+    // A review from before revisions were recorded pinned the same two
+    // things on its own row.
+    let (revision_id, diff, head_sha, candidate) = match s.store().latest_review_revision(&id)? {
+        Some(revision) => (
+            Some(revision.id),
+            revision.diff,
+            revision.head_sha,
+            revision.candidate_id,
+        ),
+        None => (
+            None,
+            r.diff.clone(),
+            r.head_sha.clone(),
+            crate::store::candidate_id(&r.head_sha, &r.channel),
+        ),
+    };
+    let from = match q.from.as_deref() {
+        Some(from) => {
+            let earlier = s
+                .store()
+                .review_revision(from)?
+                .filter(|earlier| earlier.review_id == id)
+                .ok_or(ApiError(
+                    StatusCode::NOT_FOUND,
+                    "no revision of this review with that id".into(),
+                ))?;
+            Some(earlier)
+        }
+        None => None,
+    };
+    let worktree = worktree_of(&s, &r);
+    let base = crate::review::context::base_side(
+        worktree.as_deref(),
+        &diff,
+        &q.path,
+        from.as_ref().map(|f| f.head_sha.as_str()),
+    )
+    .await;
+    let store = s.store().clone();
+    let path = q.path.clone();
+    let head =
+        crate::review::context::head_side(worktree.as_deref(), &head_sha, &q.path, move || {
+            store.candidate_file(&candidate, &path).ok().flatten()
+        })
+        .await;
+    Ok(Json(json!({
+        "path": q.path,
+        "revision_id": revision_id,
+        "from_revision_id": from.map(|f| f.id),
+        "base": base,
+        "head": head,
+    })))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn record_evidence_decision(
     store: &Store,

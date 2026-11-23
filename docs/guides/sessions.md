@@ -552,6 +552,15 @@ snapshot was made from.
 The review's diff reads each file under its own header, side by side or unified:
 side by side, the two sides aligned row for row, when the screen is wide enough,
 unified when it is not, and the layout you pick is remembered on that device.
+Each side carries the file's own line numbers (unified, a column for before and one for
+after), the code is highlighted by its language, the words that changed inside a line are
+marked apart from the rest of it, and long lines wrap when you turn **Wrap lines** on.
+Every hunk header says how many unchanged lines the diff leaves out above it, and
+**Show** fills them in. Those lines are read from what the revision pinned (the base
+blob its diff names and the file at its commit, or the evidence store's copy of that
+commit), never from the worktree as it stands, and they are checked against the diff
+first; when they cannot be read or do not match, the gap says so instead. A rename, a
+binary file and a change of mode are each labelled as what they are.
 You approve, reject with a reason, or — on a desktop — edit the diff and send it back as
 a request for changes. A request for changes is how a review comes back: the agent
 resubmits with the same `review_id`. A rejection is final: `submit_review` refuses a

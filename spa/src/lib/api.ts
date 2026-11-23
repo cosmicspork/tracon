@@ -624,6 +624,20 @@ export const api = {
       'GET',
       `/api/reviews/${id}/file?path=${encodeURIComponent(path)}`,
     ),
+  /**
+   * One reviewed file whole on both sides, as the latest revision pinned it
+   * (or, with `from`, as an earlier revision's commit had it), for showing
+   * the lines a hunk leaves out. A side that cannot be read is null, with why.
+   */
+  reviewContext: (id: string, path: string, from?: string) =>
+    call<{
+      path: string
+      base: { text: string | null; why: string | null }
+      head: { text: string | null; why: string | null }
+    }>(
+      'GET',
+      `/api/reviews/${id}/context?path=${encodeURIComponent(path)}${from ? `&from=${encodeURIComponent(from)}` : ''}`,
+    ),
   decideReview: (
     id: string,
     verdict: {

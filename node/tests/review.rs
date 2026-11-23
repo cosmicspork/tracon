@@ -966,6 +966,59 @@ async fn a_branch_that_moved_after_submit_cannot_be_approved() {
     );
 }
 
+/// Context around a hunk comes from what the revision pinned, never from the
+/// worktree as it stands: the agent kept working after submitting, committed
+/// and left an edit uncommitted, and the context still reads as submitted.
+#[tokio::test]
+async fn context_is_read_from_the_pinned_base_and_candidate_not_the_worktree() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let id = f.submit().await;
+    sh(
+        std::path::Path::new(&f.worktree),
+        "echo later >> a.txt && git add -A && git commit -qm later && echo dirty >> a.txt",
+    );
+    // The page reads the review first, which takes the node's snapshot of
+    // the workspace as it now stands.
+    let (status, _) = f.call("GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = f
+        .call(
+            "GET",
+            &format!("/api/reviews/{id}/context?path=a.txt"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["base"]["text"], "base\n", "{body}");
+    assert_eq!(body["head"]["text"], "base\nchange\n");
+
+    // A file the change does not have says why rather than inventing one.
+    let (status, body) = f
+        .call(
+            "GET",
+            &format!("/api/reviews/{id}/context?path=nope.txt"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["base"]["text"].is_null());
+    assert!(body["base"]["why"].as_str().is_some());
+    assert!(body["head"]["text"].is_null());
+    assert!(body["head"]["why"].as_str().is_some());
+
+    // An earlier revision must be one of this review's.
+    let (status, _) = f
+        .call(
+            "GET",
+            &format!("/api/reviews/{id}/context?path=a.txt&from=elsewhere"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
 #[tokio::test]
 async fn without_a_brokered_credential_approval_publishes_nothing() {
     state::isolate();
