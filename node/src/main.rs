@@ -66,6 +66,10 @@ enum Command {
     /// session's own harness state.
     #[command(subcommand)]
     Session(SessionCommand),
+    /// Everything a node holds, as one versioned file (data contract v1):
+    /// export it from the running node, and read one with nothing running.
+    #[command(subcommand)]
+    Data(DataCommand),
     /// Memories on the running node's corpus (talks to `tracon serve`).
     #[command(subcommand)]
     Memory(MemoryCommand),
@@ -399,6 +403,35 @@ enum DocCommand {
     /// Vectors are derived data: never backed up, never replicated, and always
     /// reconstructible from the documents and memories this node holds.
     Reindex,
+}
+
+#[derive(Subcommand)]
+enum DataCommand {
+    /// Write everything the running node holds to a file, as data contract
+    /// v1: one JSON record per line, signed by the node. Credentials and
+    /// private keys are left out; transcripts are not, and can carry
+    /// anything that passed through a session.
+    Export {
+        /// Where to write it. Left out: `tracon-export-<ms>.jsonl` here.
+        #[arg(short, long)]
+        out: Option<std::path::PathBuf>,
+    },
+    /// Read an export without a node, a store, or a harness: a count of each
+    /// kind and whether the signature holds, `--jsonl` for the records, or
+    /// `--documents DIR` to write its documents out as document export does.
+    /// Reading grants nothing and imports nothing.
+    Show {
+        export: std::path::PathBuf,
+        /// Print the records, one JSON object per line.
+        #[arg(long)]
+        jsonl: bool,
+        /// Only records of this kind (with `--jsonl`).
+        #[arg(long)]
+        kind: Option<String>,
+        /// Write the export's Markdown documents to `<DIR>/<channel>/<slug>.md`.
+        #[arg(long)]
+        documents: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -950,6 +983,7 @@ async fn main() -> Result<()> {
         Command::Doc(cmd) => doc_command(cmd).await,
         Command::Skill(cmd) => skill_command(cmd).await,
         Command::Session(cmd) => session_command(cmd).await,
+        Command::Data(cmd) => data_command(cmd).await,
         Command::Memory(cmd) => memory_command(cmd).await,
         Command::Work(cmd) => work_command(cmd).await,
         Command::Name(cmd) => name_command(cmd).await,
@@ -2688,6 +2722,141 @@ async fn node_send(
         .into());
     }
     Ok(v)
+}
+
+/// `export` asks the running node, which owns the store; `show` reads a file
+/// and talks to nothing, so an export stays readable with nothing running.
+async fn data_command(cmd: DataCommand) -> Result<()> {
+    match cmd {
+        DataCommand::Export { out } => {
+            let path = out.unwrap_or_else(|| {
+                format!("tracon-export-{}.jsonl", tracon::store::now_ms()).into()
+            });
+            let url = format!("{}/api/maintenance/export", node_url()?);
+            let mut req = reqwest::Client::new().get(&url);
+            if let Ok(token) = std::env::var("TRACON_TOKEN") {
+                if !token.is_empty() {
+                    req = req.bearer_auth(token);
+                }
+            }
+            let mut res = req.send().await.map_err(|e| {
+                anyhow::anyhow!("{url}: {e} (is `tracon serve` running? set TRACON_URL)")
+            })?;
+            if !res.status().is_success() {
+                let status = res.status();
+                let text = res.text().await.unwrap_or_default();
+                let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+                anyhow::bail!(
+                    "{status}: {}",
+                    v["error"]["message"].as_str().unwrap_or(&text)
+                );
+            }
+            // Written beside its name and renamed into it, so a file at the
+            // name is always a whole export.
+            let partial = path.with_extension("jsonl.partial");
+            let mut file = {
+                use std::os::unix::fs::OpenOptionsExt;
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&partial)?
+            };
+            let written: Result<()> = async {
+                use std::io::Write;
+                while let Some(chunk) = res.chunk().await? {
+                    file.write_all(&chunk)?;
+                }
+                file.sync_all()?;
+                Ok(())
+            }
+            .await;
+            if let Err(error) = written {
+                let _ = std::fs::remove_file(&partial);
+                return Err(error);
+            }
+            std::fs::rename(&partial, &path)?;
+            let reading = tracon::contract::read(
+                std::io::BufReader::new(std::fs::File::open(&path)?),
+                |_| {},
+            )?;
+            println!("Wrote {} ({} record(s)).", path.display(), reading.records);
+            if let Err(error) = &reading.verified {
+                println!("It does not verify: {error}");
+            }
+            println!("\n{}", tracon::contract::WARNING);
+            Ok(())
+        }
+        DataCommand::Show {
+            export,
+            jsonl,
+            kind,
+            documents,
+        } => {
+            let file = std::fs::File::open(&export)
+                .map_err(|e| anyhow::anyhow!("reading {}: {e}", export.display()))?;
+            let mut docs = Vec::new();
+            let reading = tracon::contract::read(std::io::BufReader::new(file), |record| {
+                let k = record["kind"].as_str().unwrap_or_default();
+                if documents.is_some() && k == "document" && record["table"] == "document" {
+                    docs.push(record.clone());
+                }
+                if jsonl && kind.as_deref().is_none_or(|want| want == k) {
+                    println!("{record}");
+                }
+            })?;
+            if let Some(dir) = &documents {
+                let (written, skipped) = tracon::contract::write_documents(dir, &docs)?;
+                eprintln!(
+                    "Wrote {written} document(s) to {}{}.",
+                    dir.display(),
+                    if skipped > 0 {
+                        format!(", skipped {skipped} (HTML, or not a safe file name)")
+                    } else {
+                        String::new()
+                    }
+                );
+            }
+            if jsonl {
+                if let Err(error) = &reading.verified {
+                    eprintln!("signature   DOES NOT VERIFY: {error}");
+                }
+                return Ok(());
+            }
+            let header = &reading.header;
+            println!("contract    {}", header["contract"].as_str().unwrap_or(""));
+            println!("node        {}", header["node"].as_str().unwrap_or(""));
+            println!(
+                "tracon      {}",
+                header["tracon_version"].as_str().unwrap_or("")
+            );
+            println!(
+                "created     {}",
+                header["created_ms"].as_i64().unwrap_or_default()
+            );
+            println!(
+                "signature   {}",
+                match &reading.verified {
+                    Ok(()) => "verified: the file is whole and that node wrote it. \
+                               It grants nothing."
+                        .to_string(),
+                    Err(error) => format!("DOES NOT VERIFY: {error}"),
+                }
+            );
+            for (kind, n) in &reading.counts {
+                println!("{kind:<12}{n}");
+            }
+            if reading.packages > 0 {
+                println!(
+                    "packages    {} session package(s), {} verify",
+                    reading.packages, reading.packages_verified
+                );
+            }
+            println!("\n{}", tracon::contract::WARNING);
+            println!("`--jsonl` prints every record; `--kind` picks one kind.");
+            Ok(())
+        }
+    }
 }
 
 /// Two different things live here, and the difference is the point.

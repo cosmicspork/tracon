@@ -461,6 +461,21 @@ line names its own `kind`, so `grep` and `jq` are sufficient tools. A package
 that does not verify still renders — it says so on the manifest line rather
 than refusing to open, because an archive that will not open is not an archive.
 
+The whole node exports the same way, as [data contract v1](reference/data-contract.md):
+sessions, events, work items, decisions, drafts, documents, memories, workspace
+state, evidence and provenance, one signed JSONL file with credentials and keys
+left out (transcripts are kept, and can carry anything a session saw):
+
+```sh
+tracon data export -o node.jsonl              # from the running node (or Settings → Data)
+tracon data show node.jsonl                   # counts per kind, and whether it verifies
+tracon data show node.jsonl --jsonl           # every record
+tracon data show node.jsonl --documents docs/ # the documents, as document export writes them
+```
+
+Version 1 is export only. A verified export says the file is whole and which node
+wrote it; it grants nothing, and reading one changes nothing anywhere.
+
 ## Rebuilding the vectors
 
 The vector index is derived data. It is node-local, it never replicates, and it

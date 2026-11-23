@@ -30,8 +30,14 @@
   note={`What ${store.node?.name ?? 'the serving node'} holds. Nothing is removed until you delete it.`}
 >
   {#snippet actions()}
+    <a class="btn" href="/api/maintenance/export" download>Export everything</a>
     <button class="btn" onclick={() => void load()} disabled={busy}>{busy ? 'Counting…' : 'Count again'}</button>
   {/snippet}
+  <p class="how">
+    Export writes every record kind to one signed JSONL file (data contract v1) that
+    <code>tracon data show</code> reads with nothing running. Credentials and keys are left
+    out; transcripts are not, and can still carry anything that passed through a session.
+  </p>
   {#if error}
     <p class="crit">{error}</p>
   {:else if !data}
