@@ -35,6 +35,12 @@ pub struct Mount {
     pub sub_path: String,
     pub target: String,
     pub read_only: bool,
+    /// Read-only beneath a writable layer of the run's own, which goes with
+    /// it: the run may write anywhere under `target`, and nothing it writes
+    /// reaches `volume` (Podman's `:O`). Set only with `read_only`, so a
+    /// runtime that sends the volume in rather than mounting it treats it as
+    /// it treats any read-only tree: sent at the start, never taken back.
+    pub overlay: bool,
 }
 
 impl Mount {
@@ -44,6 +50,17 @@ impl Mount {
             sub_path: String::new(),
             target: target.into(),
             read_only,
+            overlay: false,
+        }
+    }
+
+    /// `volume` at `target`, read-only beneath a writable layer the run
+    /// writes to and nothing keeps (its `overlay` set): a check's cache,
+    /// which holds the default branch's build output its build starts from.
+    pub fn overlay(volume: impl Into<String>, target: impl Into<String>) -> Self {
+        Self {
+            overlay: true,
+            ..Self::volume(volume, target, true)
         }
     }
 
@@ -56,6 +73,7 @@ impl Mount {
             sub_path: String::new(),
             target: target.into(),
             read_only: false,
+            overlay: false,
         }
     }
 
@@ -74,6 +92,7 @@ impl Mount {
             sub_path: sub_path.into(),
             target: target.into(),
             read_only,
+            overlay: false,
         }
     }
 }

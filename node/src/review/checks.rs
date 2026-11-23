@@ -25,8 +25,8 @@ use crate::{
     boundary::Backend,
     config::Config,
     environment::{
-        cache_env, check_env, environment_for, origin_repo, scoped_egress, PrepareSecrets,
-        Refusals, RepoEnvironment,
+        cache_env, check_env, environment_for, origin_repo, prepared_check_env, scoped_egress,
+        PrepareSecrets, Refusals, RepoEnvironment,
     },
     runner::{Mount, RunKind, RunLabels, Runner, RunnerCommand, RunnerError},
     store::{now_ms, CandidateRow, CheckRunRow, Store},
@@ -462,8 +462,12 @@ pub async fn run_required_for(
                     // The check reads what preparation fetched and can add
                     // nothing to it: candidate code runs here, and a cache it
                     // could write is one its own next check would be built on.
-                    env = check_env();
-                    mounts.push(Mount::volume(ready.cache.clone(), "/cache", true));
+                    // From the snapshot it also starts from the default
+                    // branch's build output there, read-only beneath a layer
+                    // of its own that goes with it.
+                    let (check_env, cache) = check_cache(&environment, &ready.cache);
+                    env = check_env;
+                    mounts.push(cache);
                     backend
                         .clone_volume(&ready.work, &scratch_volume)
                         .await
@@ -945,6 +949,28 @@ pub(crate) async fn until_stopped<T>(
         let _ = runner.kill(name).await;
     }
     Err(stopped)
+}
+
+/// What a prepared check of `environment` runs with, and how it gets the
+/// run's `cache`. From the repository's snapshot, whose warm-up built the
+/// default branch, the cache holds that build's output
+/// (`sandbox_images::build_output`): the check is pointed at it
+/// (`prepared_check_env`) and gets the cache read-only beneath a writable
+/// layer of its own (`Mount::overlay`; where the runtime sends the cache
+/// over the snapshot's own `/cache` instead, the sandbox's own copy of it),
+/// so its build starts from that output and changes nothing any other run
+/// reads. The cache is only ever the snapshot's and this run's preparation's,
+/// never a session's (`environment::session_cache_volume`). Without a
+/// snapshot there is no output to start from, and the cache is mounted
+/// read-only, as it always was.
+pub(crate) fn check_cache(
+    environment: &RepoEnvironment,
+    cache: &str,
+) -> (Vec<(String, String)>, Mount) {
+    match environment.image_source == crate::sandbox_images::SNAPSHOT_SOURCE {
+        true => (prepared_check_env(), Mount::overlay(cache, "/cache")),
+        false => (check_env(), Mount::volume(cache, "/cache", true)),
+    }
 }
 
 /// A candidate as preparation left it: the tree every check of the run is
@@ -1521,10 +1547,11 @@ pub(crate) fn check_inputs(cfg: &Config, environment: &RepoEnvironment) -> serde
     if !environment.prepare.is_empty() {
         inputs["prepare"] = json!(environment.prepare);
         inputs["egress"] = json!(environment.egress);
-        // A prepared check runs with `check_env()`, so what it says is only
-        // true of that environment: evidence recorded under a different one
-        // (a uv check that failed before `UV_NO_CACHE`) is not reused.
-        inputs["env"] = json!(check_env());
+        // A prepared check runs with `check_env()` (from a snapshot, with its
+        // build output: `check_cache`), so what it says is only true of that
+        // environment: evidence recorded under a different one (a uv check
+        // that failed before `UV_NO_CACHE`) is not reused.
+        inputs["env"] = json!(check_cache(environment, "").0);
     }
     inputs
 }
@@ -2561,6 +2588,11 @@ mod tests {
             assert_eq!(var(check, "HTTPS_PROXY"), None);
             assert_eq!(secret(check, "HTTPS_PROXY"), None);
             assert_eq!(var(check, "CARGO_NET_OFFLINE").as_deref(), Some("true"));
+            // Not from a snapshot: no build output to start from, and the
+            // cache is the run's, read-only, with nothing pointed at it to
+            // build in.
+            assert!(!check.mounts[1].overlay);
+            assert_eq!(var(check, "CARGO_TARGET_DIR"), None);
             // uv cannot open a read-only cache, so a check's is its own.
             assert_eq!(var(check, "UV_NO_CACHE").as_deref(), Some("1"));
             assert_eq!(var(prepare, "UV_NO_CACHE"), None);
@@ -2658,6 +2690,51 @@ mod tests {
             assert_eq!(cache.volume, ready.cache);
             assert!(!cache.read_only);
         }
+    }
+
+    /// A check from the repository's snapshot starts from the default
+    /// branch's build output in its cache: pointed at it, with the cache the
+    /// run's own (never a session's) read-only beneath a writable layer that
+    /// goes with the check. Evidence is keyed on that environment.
+    #[test]
+    fn a_check_from_the_snapshot_builds_on_its_output_over_a_layer_of_its_own() {
+        let mut environment = RepoEnvironment {
+            image: format!(
+                "{}-app-0123456789ab@sha256:{}",
+                crate::sandbox_images::snapshot_repo(),
+                "a".repeat(64)
+            ),
+            image_source: crate::sandbox_images::SNAPSHOT_SOURCE,
+            checks: vec!["just check".into()],
+            timeout_secs: 60,
+            prepare: vec!["cargo fetch --locked".into()],
+            egress: vec!["crates".into()],
+            session_egress: Vec::new(),
+            cache_volume: "tracon-cache-base-app".into(),
+            repo: None,
+        };
+        let run_cache = crate::config::resource_name("prep-cache-run1");
+        let (env, mount) = check_cache(&environment, &run_cache);
+        assert_eq!(mount, Mount::overlay(run_cache.clone(), "/cache"));
+        assert!(mount.read_only && mount.overlay);
+        assert_eq!(volume_kind(&mount.volume), "run cache");
+        assert!(
+            !mount.volume.contains("cache-r-"),
+            "never a session's cache"
+        );
+        for pair in crate::environment::build_env() {
+            assert!(env.contains(&pair), "{pair:?}");
+        }
+        assert!(env.contains(&("CARGO_NET_OFFLINE".into(), "true".into())));
+        let cfg = Config::pod_hosted();
+        assert_eq!(check_inputs(&cfg, &environment)["env"], json!(env));
+
+        // The repository's image without a snapshot has no output to give.
+        environment.image = TOOLCHAIN.into();
+        environment.image_source = crate::environment::REPOSITORY_BUILD;
+        let (env, mount) = check_cache(&environment, &run_cache);
+        assert_eq!(mount, Mount::volume(run_cache, "/cache", true));
+        assert_eq!(env, check_env());
     }
 
     /// A preparation that fails stops the execution there. The check is never
