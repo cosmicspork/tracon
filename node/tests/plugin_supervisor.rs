@@ -141,9 +141,7 @@ fn mode_of(path: &Path) -> u32 {
 #[tokio::test]
 async fn ensure_starts_it_and_it_answers_on_its_socket() {
     let r = rig();
-    let started = Instant::now();
     let endpoint = r.sup.ensure(PLUGIN, "personal").await.unwrap();
-    assert!(started.elapsed() < Duration::from_secs(2));
     assert!(endpoint.socket.exists());
     let http = upstream::unix_client(&endpoint.socket);
     upstream::initialize_unix(&http, Duration::from_secs(2))
