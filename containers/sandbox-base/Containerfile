@@ -21,7 +21,7 @@ FROM docker.io/library/ubuntu:24.04@sha256:9c7f200c07e3d4a03e7249d2c16bf66a51120
 LABEL org.opencontainers.image.source="https://github.com/cosmicspork/tracon" \
       org.opencontainers.image.description="Stock base image for tracon sandboxes: Ubuntu 24.04 with git, a C toolchain, Node, Python with uv, and PHP with Composer"
 
-ARG UBUNTU_SNAPSHOT=20261025T000000Z
+ARG UBUNTU_SNAPSHOT=20261123T000000Z
 ARG PHP_VERSION=8.5
 ARG NODE_VERSION=24.22.2
 ARG NODE_LINUX_ARM64_SHA256=eb187837a2230d4047161ac0be008584e16b46f726e9c9490ee35dc6b17d9ba8
