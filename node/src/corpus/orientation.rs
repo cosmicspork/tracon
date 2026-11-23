@@ -347,7 +347,7 @@ fn push_working_with(out: &mut String, policy: &Policy, facts: &Facts) {
 const TOOL_GROUPS: &[(&str, &[&str])] = {
     use crate::mcp::{
         approvals, branch, docs, egress, fetch, memory, operator, review, services, setup, show,
-        work,
+        stash, work,
     };
     &[
         (
@@ -407,6 +407,8 @@ const TOOL_GROUPS: &[(&str, &[&str])] = {
                 setup::DRAFT,
                 setup::TRY,
                 setup::PROPOSE,
+                stash::GET,
+                stash::PUT,
             ],
         ),
         ("GitHub", crate::mcp::github::TOOLS),
@@ -648,7 +650,7 @@ fn push_work(out: &mut String, facts: &Facts, missing: &mut Vec<Missing>) {
             ));
         }
         "execute" => {
-            out.push_str(
+            out.push_str(&format!(
                 "This is an **execute session**: do the work in your worktree, commit it, and \
                  call `submit_review`. You hold no forge token; the node snapshots the worktree \
                  and a human approves before anything is published. The title and body are \
@@ -657,14 +659,15 @@ fn push_work(out: &mut String, facts: &Facts, missing: &mut Vec<Missing>) {
                  changed, what you verified, what you did not, and what you want checked. It \
                  is shown on the review and never published, and the operator does not read \
                  your final chat message, so the summary goes there. A screenshot, a page or \
-                 files for the operator go to `show_work`. Work you find but should not do now \
+                 files for the operator go to `show_work`.{} Work you find but should not do now \
                  goes to `work_discover`, against this item. Submitting is not closing, and \
                  closing is not yours: the item stays open through CI and review until its \
                  change merges, which closes it (an item set to need acceptance waits for the \
                  operator to accept it), or until the operator closes it. Once the change is published and this session sits idle, \
                  the node suspends it, and it is carried on when a CI failure or a review \
                  comment needs an answer.\n\n",
-            );
+                stash_hint(facts.tools)
+            ));
             if let Some(ready) = ready_tool(facts) {
                 out.push_str(&format!(
                     "Once your review's change is open on the forge, it can be merged there \
@@ -745,8 +748,20 @@ fn exercising(tools: &[String], services: &[String]) -> String {
     };
     format!(
         "Where no check settles what the change does, or the operator asks, exercise it: \
-         {run}and show what you saw with `show_work`.\n\n"
+         {run}and show what you saw with `show_work`.{}\n\n",
+        stash_hint(tools)
     )
+}
+
+/// Where the stash is offered: what it is first for, said once.
+fn stash_hint(tools: &[String]) -> &'static str {
+    if !tools.iter().any(|t| t == crate::mcp::stash::GET) {
+        return "";
+    }
+    " Before rebuilding bytes that are slow to make, such as \"before\" screenshots of the \
+     default branch, try `stash_get`; once built, keep them with `stash_put`, keyed on what \
+     they are built from (`origin/main:<dir>` for the default branch), so a later session \
+     restores them while those inputs are unchanged."
 }
 
 /// A review session: requirements, diff and the evidence the node holds on
@@ -2014,6 +2029,7 @@ mod tests {
         all.extend(fetch::definitions());
         all.extend(show::definitions());
         all.extend(branch::definitions());
+        all.extend(stash::definitions());
         all.extend(setup::definitions());
         all.extend(work::definitions());
         all.extend(approvals::definitions());

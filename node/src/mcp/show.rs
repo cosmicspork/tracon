@@ -433,7 +433,7 @@ struct Collected {
 }
 
 /// A path as the agent wrote it, relative to the repository root.
-fn clean(path: &str) -> Result<String, ()> {
+pub(super) fn clean(path: &str) -> Result<String, ()> {
     let trimmed = path.trim();
     let trimmed = trimmed.strip_prefix("./").unwrap_or(trimmed);
     let trimmed = trimmed.trim_end_matches('/');
@@ -449,9 +449,14 @@ fn is_git(segment: &str) -> bool {
 /// still not here; saying only that it is "not in the workspace" sent an agent
 /// looking for a file it could see.
 fn missing(root: &Path, relative: &str) -> String {
+    missing_for(SHOW, root, relative)
+}
+
+/// [`missing`], for another tool that reads the same snapshot.
+pub(super) fn missing_for(tool: &str, root: &Path, relative: &str) -> String {
     if ignored(root, relative) {
         format!(
-            "{relative} is ignored by git, and show_work reads only the files git would see \
+            "{relative} is ignored by git, and {tool} reads only the files git would see \
              (tracked, or untracked and not ignored): an ignored file never leaves your \
              workspace. Write what you show to a path no ignore rule matches, and keep it out \
              of your commits"
