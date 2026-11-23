@@ -570,6 +570,55 @@ async fn an_oauth_credential_becomes_a_bearer_with_the_beta_flag_merged() {
     );
 }
 
+/// Claude Code's WebSearch is a server-side tool: the harness names it in
+/// its Messages request and the provider runs the search, so it reaches
+/// nothing but the provider. The gateway forwards it as asked, on a key and
+/// on a subscription alike, and the provider's search results come back as
+/// they were sent, while the harness's client-side fetch stays at the
+/// boundary.
+#[tokio::test]
+async fn claude_codes_server_side_web_search_goes_through_the_gateway() {
+    state::isolate();
+    const OAUTH: &str = r#"
+        [credentials.stubcred]
+        kind = "oauth"
+        provider = "stub"
+        channels = ["work"]
+        [credentials.stubcred.env]
+        ACCESS_TOKEN = "at-1"
+        REFRESH_TOKEN = "rt-1"
+    "#;
+    let search = json!({
+        "type": "web_search_20250305",
+        "name": "web_search",
+        "max_uses": 5,
+    });
+    let answered = r#"{"type":"message","content":[{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{"query":"tracon"}},{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":[{"type":"web_search_result","url":"https://example.com/","title":"Example"}]}],"usage":{"input_tokens":3,"output_tokens":2,"server_tool_use":{"web_search_requests":1}}}"#;
+    for broker in [STORE, OAUTH] {
+        let h = harness(broker, LOOPBACK).await;
+        *h.seen.answer.lock().unwrap() = Some((200, Vec::new(), answered));
+        let token = h.manager.register_tool_token_for_test("s6", "work").await;
+        let (status, _, body) = call(
+            &h.app,
+            "POST",
+            "/model/stub/v1/messages?beta=true",
+            &token,
+            json!({
+                "model": "claude-x",
+                "messages": [{ "role": "user", "content": "search for tracon" }],
+                "tools": [search],
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let back: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(back["content"][1]["type"], "web_search_tool_result");
+        let seen = h.seen.requests.lock().unwrap();
+        let sent: Value = serde_json::from_str(&seen[0].3).unwrap();
+        assert_eq!(sent["tools"], json!([search]), "{sent}");
+    }
+}
+
 /// An Anthropic subscription is Claude Code's alone. A tracon-agent session
 /// that reaches for it is refused before anything is forwarded, and the refusal is
 /// on its log; a Claude Code session on the same credential goes through.

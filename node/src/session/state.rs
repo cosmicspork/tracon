@@ -157,6 +157,12 @@ pub mod event_kind {
     /// (`host`). Once per host: the agent saw a 403 from a package manager,
     /// and this is where the operator sees what it wanted.
     pub const EGRESS_REFUSED: &str = "egress_refused";
+    /// A `web_fetch` the node made for the session, as evidence of what the
+    /// agent read: the `url` asked, the `final_url` after redirects, the
+    /// `status`, the body's `sha256` and `bytes`, the `redirects`, who
+    /// allowed it (`decided_by`: `policy`, `grant` or `operator`, with the
+    /// `rule` or `approval_id`), or the `error` that stopped it.
+    pub const WEB_FETCHED: &str = "web_fetched";
     /// What the session was told at start, so the transcript shows it.
     pub const ORIENTATION: &str = "orientation";
     /// Where the session runs, when placement decided it (`decision`:

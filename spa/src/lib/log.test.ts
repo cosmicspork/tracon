@@ -338,6 +338,12 @@ test('each 0.29.0 kind reads as a sentence, not its name', () => {
     ['pty_opened', { phase: 'spawn', command: 'bash', args: ['-l'], cwd: '/w' }, 'terminal opened · bash -l · in /w · what is typed in it is not recorded'],
     ['pty_closed', { phase: 'detached', duration_ms: 65_000 }, 'terminal detached · after 1m'],
     ['abandoned', { reason: 'item closed', summary: 'superseded by #12' }, 'abandoned · superseded by #12'],
+    [
+      'web_fetched',
+      { url: 'https://a.test/x', final_url: 'https://a.test/y', status: 200, sha256: '0123456789abcdef', decided_by: 'operator' },
+      'fetched https://a.test/x · → https://a.test/y · 200 · sha256 01234567 · the operator allowed it',
+    ],
+    ['web_fetched', { url: 'https://a.test/x', error: 'more than 5 redirects' }, 'fetch failed · https://a.test/x · more than 5 redirects'],
     ['placement', { decision: 'place', provider: 'digitalocean' }, "runs on DigitalOcean · this node's own runtime is full or DigitalOcean is preferred"],
     ['placement', { decision: 'place', provider: 'digitalocean', approval_id: 'a1' }, 'runs on DigitalOcean · the operator allowed it'],
     ['placement', { decision: 'place', provider: 'podman' }, 'runs on this node (podman)'],

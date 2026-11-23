@@ -498,6 +498,24 @@ refusal, and the orientation it starts with says all of this before its first co
 It works wherever grants are issued: on every runtime, through each sandbox's tunnel to
 the node's egress proxy.
 
+Web pages are not egress. A session's `curl`, `wget` and the harness's own fetch tool
+(Claude Code's WebFetch) are refused at the boundary like any other host, and the
+refusal's body and the orientation tell the agent to call **`web_fetch`** instead: the
+node fetches the page and hands back its status and body. It is deny by default. A
+URL the channel's fetch allow list covers is fetched at once; any other raises a card
+with three answers: **Fetch once** fetches that URL now and nothing more, **Save to
+channel** adds the card's pattern (the URL's origin, `https://docs.rs/*`, unless the
+agent proposed a narrower or wider one, and you may edit it before saving) to the
+channel's allow list and then fetches, and **Deny** tells the agent to do without it.
+Saving is an admin answer, confirmed with a passkey away from the node. A fetch reads
+at most 10 MB of body and follows at most five redirects, each one decided against the
+same list before it is followed: a redirect to a URL the list does not cover stops and
+names the URL, for the agent to ask about on its own. The node never dials an address
+its egress proxy refuses, and every fetch, failed ones included, is on the session's
+log as evidence: the URL, the final URL, the status and the body's SHA-256. Claude
+Code's WebSearch is different: the provider runs the search, so the request only
+reaches the provider through the model gateway, which forwards it as asked.
+
 A repository's warm-up asks too. A registry often sends its downloads to another
 host (Nova's go to a Cloudflare R2 bucket), and the warm-up is the first thing to find
 out. Its refusal raises a card naming the repository and the host that offers only

@@ -792,6 +792,39 @@ one-word command or a chain only exactly as written, a brokered tool by name. Bo
 are recorded in the session's log with the rule that let the call through, and
 neither reaches past a signed deny.
 
+### Fetching pages
+
+`web_fetch` is decided URL by URL under the kind `fetch`, with deny by default: a URL
+is fetched unasked only when an allow rule naming `kinds = ["fetch"]` covers it (an
+allow rule that names no kind never allows a fetch), or a pattern saved to the
+channel's fetch allow list does. A pattern with a scheme is a glob over the whole URL;
+one without is a glob over the host, on any scheme, port and path:
+
+```toml
+[[rule]]
+id = "documentation"
+verdict = "allow"
+reason = "Reference documentation the agents read."
+kinds = ["fetch"]
+matches = ["https://docs.rs/*", "*.python.org"]
+
+[[rule]]
+id = "no-paste-sites"
+verdict = "deny"
+reason = "Nothing is fetched from paste sites."
+kinds = ["fetch"]
+matches = ["*.pastebin.com"]
+```
+
+A deny matches its patterns as globs and, as every deny does, as substrings. The
+channel's own list is authority grants of the action `fetch`, whose target is a
+pattern: **Save to channel** on a fetch card adds one, and **Settings → Permissions &
+policies** lists, adds and revokes them like any grant. A grant denying a pattern
+refuses it on that channel even where the bundle allows it; a signed deny wins over
+every grant, and a saved allow fetches only while the signed bundle is intact. A
+pattern that names no host of its own (`*`, `https://*`, `*.com`) is refused as a
+grant: opening the whole web is a signed rule. Anything else is asked.
+
 ## Granting authority
 
 Merging, publishing, deploying, and calling a plugin tool its manifest marks

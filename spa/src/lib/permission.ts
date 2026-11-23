@@ -121,7 +121,8 @@ export function editedArguments(
  * The answers to this card that are an admin action on the node holding it,
  * which that node confirms only with its own passkey (`admin_answer` on the
  * node): allowing a repository setup proposal, a Dockerfile trial or a
- * plugin's install card, and saving an egress host to the repository. A peer
+ * plugin's install card, saving an egress host to the repository, and saving
+ * a fetch pattern to the channel's allow list. A peer
  * showing the card cannot confirm them, so it leaves them to that node.
  */
 export function stepUpOptions(p: Pick<Permission, 'raw_input'>): string[] {
@@ -132,6 +133,7 @@ export function stepUpOptions(p: Pick<Permission, 'raw_input'>): string[] {
     if (input.tool === 'repo_setup_propose' || input.tool === 'repo_setup_try' || input.tool === 'plugin_install')
       return ['allow_once']
     if (input.tool === 'request_egress' || input.tool === 'prepare_egress') return ['allow_repo']
+    if (input.tool === 'web_fetch') return ['allow_channel']
     return []
   } catch {
     return []

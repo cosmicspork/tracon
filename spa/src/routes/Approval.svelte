@@ -321,7 +321,9 @@
     }
   }
 
-  async function answer(optionId: 'allow_once' | 'allow_session' | 'allow_repo' | 'reject_once' | 'request_changes') {
+  async function answer(
+    optionId: 'allow_once' | 'allow_session' | 'allow_repo' | 'allow_channel' | 'reject_once' | 'request_changes',
+  ) {
     if (!details || !open) return
     busy = true
     error = null
@@ -333,7 +335,7 @@
       await api.answer(
         id,
         optionId,
-        optionId === 'allow_once' ? changedArguments(original, edited) : undefined,
+        optionId === 'allow_once' || optionId === 'allow_channel' ? changedArguments(original, edited) : undefined,
         {
           ...(optionId === 'reject_once' ? { reason: text } : optionId === 'request_changes' ? { notes: text } : {}),
           argumentsHash: details.arguments_hash,
@@ -341,7 +343,7 @@
         },
       )
       await store.refetch()
-      if (optionId === 'allow_once') {
+      if (optionId === 'allow_once' || optionId === 'allow_channel') {
         // Accepted is not run: the page stays until the call has.
         await load()
         await follow()
@@ -778,7 +780,13 @@
     <div class="decide">
       {#if can.has('allow_once')}
         <button class="btn p" disabled={allow.disabled} title={allow.why ?? undefined} onclick={() => answer('allow_once')}>
-          {can.has('allow_repo') ? 'Allow once' : changes.length ? 'Allow with edits' : 'Allow'}
+          {can.has('allow_channel')
+            ? 'Fetch once'
+            : can.has('allow_repo')
+              ? 'Allow once'
+              : changes.length
+                ? 'Allow with edits'
+                : 'Allow'}
         </button>
       {/if}
       <!-- A host a session asked to reach: how long it stays open. -->
@@ -787,6 +795,10 @@
       {/if}
       {#if can.has('allow_repo')}
         <button class="btn" disabled={busy} onclick={() => answer('allow_repo')}>Save to the repository's egress</button>
+      {/if}
+      <!-- A URL a session asked to fetch: its pattern saved to the channel's allow list, then fetched. -->
+      {#if can.has('allow_channel')}
+        <button class="btn" disabled={busy} title="Adds the pattern to this channel's fetch allow list, then fetches" onclick={() => answer('allow_channel')}>Save to channel</button>
       {/if}
       <input
         bind:value={said}

@@ -1661,6 +1661,8 @@ export interface AuthorityGrant {
     | 'ticket_transition'
     /** An interactive terminal in one session's workspace. Bound to that session. */
     | 'terminal'
+    /** A pattern on the channel's fetch allow list (`web_fetch`): its target is a URL or host glob. */
+    | 'fetch'
   verdict: 'allow' | 'ask' | 'deny'
   target: string
   channel: string

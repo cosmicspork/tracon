@@ -58,7 +58,10 @@
     busy = true
     error = null
     try {
-      const edited = optionId === 'allow_once' && !egress ? editedArguments(permission, drafts) : undefined
+      // Saving a fetch card's pattern runs the fetch as allowing it once
+      // does, with the pattern as edited here.
+      const runs = optionId === 'allow_once' || optionId === 'allow_channel'
+      const edited = runs && !egress ? editedArguments(permission, drafts) : undefined
       // A peer's approval has no page here to ask for changes on, so the
       // notes are written on the card.
       const said = optionId === 'request_changes' ? { notes: notes.trim() } : {}
@@ -75,7 +78,8 @@
     // A harness's own "always" is never offered: it would widen the harness's
     // standing rules, which are the node's. The node's session grant is
     // offered instead, and its name says exactly how wide it is.
-    if (egress) return name
+    // A fetch card's answers say what each does: once, saved, denied.
+    if (egress || options.some((o) => o.kind === 'allow_channel')) return name
     return { allow_once: 'Allow', reject_once: 'Deny' }[kind] ?? name
   }
 </script>
@@ -141,6 +145,11 @@
       {#each options.filter((o) => o.kind === 'allow_repo') as o (o.option_id)}
         <button class="lnk" disabled={busy} title={warmUp ? "Adds it to the repository's egress and warms the cache again" : "Also adds it to the repository's egress for later sessions"} onclick={() => answer(o.option_id)}
           >{label(o.kind, o.name)}</button
+        >
+      {/each}
+      {#each options.filter((o) => o.kind === 'allow_channel') as o (o.option_id)}
+        <button class="lnk" disabled={busy} title="Adds the pattern to this channel's fetch allow list, then fetches; a signed denial still wins" onclick={() => answer(o.option_id)}
+          >{o.name}</button
         >
       {/each}
       {#each options.filter((o) => o.kind === 'allow_session') as o (o.option_id)}

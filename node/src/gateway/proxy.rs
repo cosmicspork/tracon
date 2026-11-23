@@ -855,6 +855,25 @@ fn answer(status: StatusCode, said: &str) -> Response<Forwarded> {
     response
 }
 
+/// What a session's refused request is told after the refusal itself, in the
+/// body only: the page it was after is read with the node's `web_fetch`, not
+/// by retrying another client. The status line keeps the refusal alone.
+pub const SESSION_REFUSAL_HINT: &str = "To read a web page, call the node's web_fetch tool \
+     instead: the harness's own fetch tool, curl and wget are refused here. A host a package \
+     manager needs is asked for with request_egress.";
+
+/// A 403 for a grant's client: `said` as the status line's reason and the
+/// body, and for a session [`SESSION_REFUSAL_HINT`] after it in the body.
+fn refused_to(grant: &Grant, said: &str) -> Response<Forwarded> {
+    let mut response = answer(StatusCode::FORBIDDEN, said);
+    if grant.session_id.is_some() {
+        *response.body_mut() = Full::from(format!("{said}\n\n{SESSION_REFUSAL_HINT}\n"))
+            .map_err(|never| match never {})
+            .boxed();
+    }
+    response
+}
+
 /// The token a request presents: the password of its `Proxy-Authorization:
 /// Basic` credentials. The user name is the client's label and proves nothing.
 fn presented_token(req: &Request<Incoming>) -> Option<String> {
@@ -913,10 +932,7 @@ async fn handle_granted(
         _ => None,
     };
     let Some((host, port)) = target else {
-        return Ok(answer(
-            StatusCode::FORBIDDEN,
-            "only CONNECT to port 443 is proxied",
-        ));
+        return Ok(refused_to(&grant, "only CONNECT to port 443 is proxied"));
     };
     let host = host
         .trim_matches(|c| c == '[' || c == ']')
@@ -930,8 +946,8 @@ async fn handle_granted(
     if !grant.allows(&host) {
         tracing::info!(client = %grant.client, %host, "granted proxy refused");
         let said = granted.grants.refused(&grant, &host);
-        return Ok(answer(
-            StatusCode::FORBIDDEN,
+        return Ok(refused_to(
+            &grant,
             said.as_deref().unwrap_or(&grant.refusal),
         ));
     }

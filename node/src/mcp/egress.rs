@@ -310,12 +310,14 @@ pub fn refusal(host: &str, asked: &Asked) -> String {
     match asked {
         Asked::Pending(row, _) => format!(
             "{host} is not open to this session; the operator has been asked (approval {}). \
-             Retry once it is answered: request_egress waits for the answer",
+             Retry once it is answered: request_egress waits for the answer. To read a web \
+             page, call web_fetch instead",
             row.id
         ),
-        Asked::Declined(_) => {
-            format!("{host} is not open to this session; the operator declined it. Do without it")
-        }
+        Asked::Declined(_) => format!(
+            "{host} is not open to this session; the operator declined it. Do without it, or \
+             read a web page with web_fetch"
+        ),
     }
 }
 
@@ -465,6 +467,7 @@ mod tests {
         };
         let said = refusal("pypi.org", &Asked::Pending(row, true));
         assert!(said.contains("approval a1"), "{said}");
+        assert!(said.contains("web_fetch"), "{said}");
         assert!(hyper::ext::ReasonPhrase::try_from(said.as_bytes()).is_ok());
     }
 }

@@ -59,6 +59,19 @@ pub const EGRESS_CARD_OPTIONS: &str = r#"[{"option_id":"allow_once","name":"Allo
 /// anyone answers, so there is nothing to open once or for a session.
 pub const PREPARE_EGRESS_CARD_OPTIONS: &str = r#"[{"option_id":"allow_repo","name":"Save to the repository's egress","kind":"allow_repo"},{"option_id":"reject_once","name":"Reject","kind":"reject_once"}]"#;
 
+/// The approval a `web_fetch` puts to the operator for a URL the channel's
+/// fetch allow list does not cover (`mcp::fetch`). Allowing it fetches that
+/// URL once; saving it to the channel adds its pattern to the allow list
+/// first.
+pub const FETCH_TOOL: &str = "web_fetch";
+
+/// Add the card's pattern to the channel's fetch allow list, then fetch.
+pub const OPTION_ALLOW_CHANNEL: &str = "allow_channel";
+
+/// What a fetch card offers: this URL now, the pattern for the channel from
+/// now on, or no.
+pub const FETCH_CARD_OPTIONS: &str = r#"[{"option_id":"allow_once","name":"Fetch once","kind":"allow_once"},{"option_id":"allow_channel","name":"Save to channel","kind":"allow_channel"},{"option_id":"reject_once","name":"Deny","kind":"reject_once"}]"#;
+
 /// The approval a session puts to the operator when this node's own
 /// boundary cannot take it and DigitalOcean could. Allowing it runs the
 /// session there; nothing else is run.
@@ -88,6 +101,7 @@ pub fn card_options(tool: &str) -> &'static str {
         PREPARE_EGRESS_TOOL => PREPARE_EGRESS_CARD_OPTIONS,
         PLACE_TOOL => PLACE_CARD_OPTIONS,
         PLUGIN_INSTALL_TOOL => PLUGIN_CARD_OPTIONS,
+        FETCH_TOOL => FETCH_CARD_OPTIONS,
         _ => CARD_OPTIONS,
     }
 }
@@ -653,9 +667,8 @@ impl Store {
                     session_state: r.get("intent_session_state")?,
                 };
                 let options = match approval.tool.as_str() {
-                    EGRESS_TOOL | PREPARE_EGRESS_TOOL | PLACE_TOOL | PLUGIN_INSTALL_TOOL => {
-                        card_options(&approval.tool)
-                    }
+                    EGRESS_TOOL | PREPARE_EGRESS_TOOL | PLACE_TOOL | PLUGIN_INSTALL_TOOL
+                    | FETCH_TOOL => card_options(&approval.tool),
                     _ => options,
                 };
                 Ok(approval.as_card(options, intent))
