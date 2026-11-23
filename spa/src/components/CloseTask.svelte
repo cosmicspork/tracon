@@ -1,10 +1,10 @@
 <script lang="ts">
-  // Closing the task a review's change belongs to. The operator's call alone:
-  // no session closes the item it holds, so the task stays open through CI
-  // and review. Once the followed request is merged, closing is what is left
-  // to do, and it is offered prominently.
+  // Closing the task a review's change belongs to. No session closes the item
+  // it holds, so the task stays open through CI and review; its change's merge
+  // closes it. A task set to need acceptance is accepted here instead, bound
+  // to the candidate shown, and prominently once that change has merged.
   import { api } from '../lib/api'
-  import { closeOffer } from '../lib/continuation'
+  import { acceptOffer, closeOffer } from '../lib/continuation'
   import type { Continuation } from '../lib/types'
 
   let { itemId }: { itemId: string } = $props()
@@ -26,6 +26,21 @@
   })
 
   const offer = $derived(view ? closeOffer(view) : null)
+  const accepting = $derived(view ? acceptOffer(view) : null)
+
+  async function accept() {
+    if (busy || !accepting) return
+    busy = true
+    error = null
+    try {
+      await api.acceptTask(itemId, accepting.candidate)
+      await load()
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e)
+    } finally {
+      busy = false
+    }
+  }
 
   async function close() {
     if (busy) return
@@ -42,7 +57,14 @@
   }
 </script>
 
-{#if offer}
+{#if accepting}
+  <div class="close" class:prominent={accepting.prominent}>
+    <span class="t">{accepting.text}</span><span class="sep">·</span>
+    <button class={accepting.prominent ? 'btn p' : 'btn'} disabled={busy} onclick={accept}>Accept</button>
+    {#if offer}<button class="lnk" disabled={busy} onclick={close}>Close task</button>{/if}
+    {#if error}<span class="err">refused · {error}</span>{/if}
+  </div>
+{:else if offer}
   <div class="close" class:prominent={offer.prominent}>
     {#if offer.text}<span class="t">{offer.text}</span><span class="sep">·</span>{/if}
     <button class={offer.prominent ? 'btn p' : 'lnk'} disabled={busy} onclick={close}>Close task</button>

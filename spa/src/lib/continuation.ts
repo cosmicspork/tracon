@@ -119,3 +119,19 @@ export function closeOffer(c: Continuation): { prominent: boolean; text: string 
   const merged = c.follow?.state === 'merged'
   return { prominent: merged, text: merged && c.follow ? `${c.follow.label} merged` : null }
 }
+
+/** What the interface says about accepting the task's published change, or
+ *  null when there is nothing to accept: a task that ends at merge, nothing
+ *  published yet, or the current candidate accepted already. The candidate
+ *  is the one the operator is shown, and the acceptance is bound to it. Once
+ *  that change has merged, accepting is what is left, and it is prominent. */
+export function acceptOffer(c: Continuation): { candidate: string; prominent: boolean; text: string } | null {
+  const candidate = c.actions.accept
+  if (!candidate) return null
+  const merged = c.next.kind === 'accept'
+  return {
+    candidate,
+    prominent: merged,
+    text: merged && c.follow ? `${c.follow.label} merged · accept it to close the task` : 'Accepting closes the task once its change merges',
+  }
+}

@@ -16,6 +16,7 @@
     priorityLabel,
     projectLabel,
     projectName,
+    landingLine,
     taskName,
     workLabel,
     workState,
@@ -91,6 +92,10 @@
   /** Close the task: the item closes, and any session holding it ends. */
   function close() {
     return act(() => api.closeTask(id))
+  }
+  /** Whether the task ends at its change's merge or waits for the operator's acceptance. */
+  function setAcceptance(acceptance: 'merge' | 'operator') {
+    return act(() => api.putWork(id, { acceptance }))
   }
   function reopen() {
     return act(() => api.putWork(id, { state: 'open' }))
@@ -182,6 +187,22 @@
       {/if}
       {#if cycle}<span class="why">{' · part of a dependency cycle'}</span>{/if}
     </dd>
+    <dt>Ends</dt>
+    <dd class="m">
+      {item.acceptance === 'operator' ? 'once you accept its merged change' : 'when its change merges'}
+      {#if item.state === 'open'}
+        <button class="lnk" disabled={busy} onclick={() => setAcceptance(item!.acceptance === 'operator' ? 'merge' : 'operator')}
+          >{item.acceptance === 'operator' ? 'End at merge' : 'Require my acceptance'}</button
+        >
+      {/if}
+    </dd>
+    {#if item.change_url}
+      <dt>Change</dt>
+      <dd class="m">
+        <a href={item.change_url} target="_blank" rel="noopener">{item.change_url}</a>
+        {` · ${landingLine(item) ?? item.change_state ?? 'published'}`}
+      </dd>
+    {/if}
     {#if item.discovered_from}
       <dt>Discovered from</dt>
       <dd class="m"><Name kind="task" id={item.discovered_from} href="/tasks/{item.discovered_from}" />{parent ? ` ${parent}` : ''}{#if item.discovered_by_session}{' · by '}<Name kind="session" id={item.discovered_by_session} href="/sessions/{item.discovered_by_session}" />{/if}{#if item.discovered_by_lane}{` · by lane ${item.discovered_by_lane}`}{/if}</dd>

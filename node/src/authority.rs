@@ -809,6 +809,7 @@ pub async fn publish_review(
                 &published_target(&target, &url)?,
             )
             .map_err(|e| PublishError::External(e.to_string()))?;
+        record_on_item(ctx, review, &url, &candidate_id);
         ctx.manager.publish_queue().await;
         return Ok(Published { url, outputs });
     }
@@ -905,6 +906,7 @@ pub async fn publish_review(
                     "publish completed externally, but the review claim was lost; reconcile it before retrying".into(),
                 ));
             }
+            record_on_item(ctx, review, &published, &candidate_id);
             ctx.manager.publish_queue().await;
             // The session is answerable for the change now; it says so where
             // the operator looks for it, not only on the review.
@@ -929,7 +931,8 @@ pub async fn publish_review(
                 );
             }
             // Publishing is not finishing: the item stays open through CI
-            // and review until the operator closes it, and the session goes
+            // and review until its change merges (and, for an item that asks
+            // for it, until the operator accepts it), and the session goes
             // on, suspended once it sits idle, so a CI failure or a comment
             // has somewhere to go.
             Ok(Published {
@@ -1150,8 +1153,39 @@ pub async fn reconcile_publication(
             "the review claim was lost while reconciling; reload it".into(),
         ));
     }
+    record_on_item(ctx, review, &url, &row.candidate_id);
     ctx.manager.publish_queue().await;
     Ok(url)
+}
+
+/// Mark the work item the submitting session holds as published: its work
+/// is on the forge as `url`, carrying `candidate`, and the item stays open
+/// until that change merges. Publication has already landed, so a failure
+/// here is logged rather than reported as a failed publish.
+fn record_on_item(
+    ctx: &PublishContext<'_>,
+    review: &crate::store::ReviewRow,
+    url: &str,
+    candidate: &str,
+) {
+    let Some(item_id) = review
+        .session_id
+        .as_deref()
+        .and_then(|id| ctx.store.get_session(id).ok().flatten())
+        .and_then(|s| s.work_item_id)
+    else {
+        return;
+    };
+    if let Err(error) = crate::corpus::work::record_published(
+        ctx.store,
+        ctx.manager.bus(),
+        ctx.node_id,
+        &item_id,
+        url,
+        candidate,
+    ) {
+        tracing::warn!(item = %item_id, %error, "the item was not marked published");
+    }
 }
 
 /// Whether two web addresses name the same page, as an operator copies one

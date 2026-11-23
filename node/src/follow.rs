@@ -11,8 +11,12 @@
 //! comments"); a session still attached reads the request itself with
 //! `pr_status` or `mr_status`.
 //!
-//! A request is followed until it is merged or closed. Following only reads:
-//! it never merges, approves, retries or comments. Polling only — webhooks
+//! What the request does is carried onto the session's work item too: open,
+//! merged, or closed without merging. Its merge closes the item, unless the
+//! item waits for the operator to accept the candidate that merged.
+//!
+//! A request is followed until it is merged or closed. Following only reads
+//! the forge: it never merges, approves, retries or comments. Polling only — webhooks
 //! would need the node reachable from the forge — and only for reviews a
 //! session submitted, since the events hang on that session.
 //!
@@ -333,6 +337,7 @@ pub async fn tick(tools: &Tools) -> Vec<Followed> {
             at_ms: now_ms(),
             mono_ms: 0,
         });
+        settle_item(manager, &session_id, &publication, &now).await;
         if !said.is_empty() {
             notify(store, manager.cfg(), &review, &said).await;
             followed.push(Followed {
@@ -343,6 +348,51 @@ pub async fn tick(tools: &Tools) -> Vec<Followed> {
         }
     }
     followed
+}
+
+/// Carry what the forge shows onto the work item the submitting session
+/// holds: its change is open, merged or closed without merging. A merge
+/// closes the item, unless it waits for the operator to accept the candidate
+/// that merged; a look at an earlier publication of the same work, whose
+/// candidate the item no longer carries, changes nothing.
+async fn settle_item(
+    manager: &crate::session::Manager,
+    session_id: &str,
+    publication: &PublicationRow,
+    now: &Snapshot,
+) {
+    let store = manager.store();
+    let Some(item_id) = store
+        .get_session(session_id)
+        .ok()
+        .flatten()
+        .and_then(|s| s.work_item_id)
+    else {
+        return;
+    };
+    let state = match now.state.as_str() {
+        "merged" => tracon_sync::work::CHANGE_MERGED,
+        "closed" => tracon_sync::work::CHANGE_CLOSED,
+        _ => tracon_sync::work::CHANGE_PUBLISHED,
+    };
+    let item = match crate::corpus::work::record_change_state(
+        store,
+        manager.bus(),
+        manager.node_id(),
+        &item_id,
+        &publication.candidate_id,
+        state,
+    ) {
+        Ok(Some(item)) => item,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(item = %item_id, %error, "the item's change state was not recorded");
+            return;
+        }
+    };
+    if let Err(error) = crate::continuation::land(manager, item, "its change merged").await {
+        tracing::warn!(item = %item_id, %error, "the merged item was not closed");
+    }
 }
 
 /// Push what changed to the phones subscribed here, unless the review's

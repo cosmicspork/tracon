@@ -1,7 +1,21 @@
 import { expect, test } from 'bun:test'
 
 import type { Project, WorkView } from './types'
-import { inProject, isTopPriority, matches, taskName, pickableProjects, priorityLabel, projectLabel, projectName, projectTabs } from './work'
+import {
+  inProject,
+  isTopPriority,
+  landing,
+  landingLine,
+  matches,
+  taskName,
+  pickableProjects,
+  priorityLabel,
+  projectLabel,
+  projectName,
+  projectTabs,
+  workLabel,
+  workState,
+} from './work'
 
 const levels = [
   { name: 'Urgent', value: 4 },
@@ -108,4 +122,34 @@ test('pickers offer repositories and projects with work, and tell same-named one
   expect(projectLabel(projects[0], projects)).toBe('hounddogreading')
   expect(projectLabel(projects[1], projects)).toBe('imported workspace #1')
   expect(projectLabel(projects[3], projects)).toBe('imported workspace #3')
+})
+
+test('published work reads as waiting on its merge, and on acceptance of the candidate that merged', () => {
+  const plain = view({ session_id: 's1' })
+  expect(workState(plain)).toBe('insession')
+  expect(landing(plain)).toBe(null)
+
+  const published = view({ session_id: 's1', change_url: 'https://forge/pr/7', change_candidate: 'c1', change_state: 'published' })
+  expect(workState(published)).toBe('published')
+  expect(workLabel(published)).toBe('Published')
+  expect(landingLine(published)).toBe('published · awaiting merge')
+
+  const gated = { ...published, acceptance: 'operator' as const }
+  expect(landingLine(gated)).toBe('published · awaiting merge, then your acceptance')
+  expect(landingLine({ ...gated, accepted_candidate: 'c1' })).toBe('published · accepted, awaiting merge')
+
+  const merged = { ...gated, change_state: 'merged' as const }
+  expect(landing(merged)).toBe('acceptance')
+  expect(workLabel(merged)).toBe('Merged')
+  expect(landingLine(merged)).toBe('merged · awaiting your acceptance')
+  // Accepted for that candidate, it is done; a new candidate inherits no verdict.
+  expect(landing({ ...merged, accepted_candidate: 'c1' })).toBe(null)
+  expect(landing({ ...merged, accepted_candidate: 'c0' })).toBe('acceptance')
+
+  // Closed on the forge without merging, it is back to its session.
+  const dropped = { ...published, change_state: 'closed' as const }
+  expect(landing(dropped)).toBe('abandoned')
+  expect(workState(dropped)).toBe('insession')
+  // A closed item is closed, whatever its change says.
+  expect(workState(view({ ...merged, state: 'closed', readiness: { state: 'closed' } }))).toBe('closed')
 })

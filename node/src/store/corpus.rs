@@ -194,6 +194,11 @@ pub fn work_from_row(r: &Row) -> rusqlite::Result<WorkItem> {
         discovered_by_lane: r.get("discovered_by_lane")?,
         phase_plan_slug: r.get("phase_plan_slug")?,
         closed_by_session: r.get("closed_by_session")?,
+        acceptance: r.get("acceptance")?,
+        change_url: r.get("change_url")?,
+        change_candidate: r.get("change_candidate")?,
+        change_state: r.get("change_state")?,
+        accepted_candidate: r.get("accepted_candidate")?,
         created_ms: r.get("created_ms")?,
         updated_ms: r.get("updated_ms")?,
     })
@@ -208,6 +213,9 @@ pub fn work_change_row(w: &WorkItem) -> Value {
         "discovered_by_lane": w.discovered_by_lane,
         "phase_plan_slug": w.phase_plan_slug,
         "closed_by_session": w.closed_by_session,
+        "acceptance": w.acceptance,
+        "change_url": w.change_url, "change_candidate": w.change_candidate,
+        "change_state": w.change_state, "accepted_candidate": w.accepted_candidate,
         "created_ms": w.created_ms, "updated_ms": w.updated_ms,
     })
 }

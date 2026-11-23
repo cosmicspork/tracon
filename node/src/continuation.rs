@@ -117,7 +117,8 @@ pub struct ShownSummary {
 
 /// The request the work's change was published as, from the snapshots
 /// `follow` recorded on its sessions. While it is open the next action is
-/// what it needs; once it is merged, closing the task is.
+/// what it needs. Its merge closes the task, unless the task waits for the
+/// operator's acceptance; then accepting it is what is left.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Followed {
     pub url: String,
@@ -136,7 +137,7 @@ pub struct Followed {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NextAction {
     /// `done`, `start`, `watch`, `answer`, `resume`, `unblock`, `execute`,
-    /// `continue`, `change_approach`, `merge` or `close`.
+    /// `continue`, `change_approach`, `merge`, `accept` or `close`.
     pub kind: &'static str,
     pub text: String,
     /// The attempt the action is about, when it is about one.
@@ -152,6 +153,10 @@ pub struct Actions {
     pub abandon: bool,
     /// The task is open and the operator may close it (`close_task`).
     pub close: bool,
+    /// The candidate an acceptance would judge (`accept_task`): offered for a
+    /// task set to need acceptance, once its change is published, until that
+    /// candidate is accepted. A new candidate offers acceptance again.
+    pub accept: Option<String>,
 }
 
 /// What the next action is derived from: the subject's own state and the
@@ -170,6 +175,8 @@ pub struct Situation<'a> {
     pub abandoned: bool,
     /// The request the work was published as, when one is followed.
     pub follow: Option<Followed>,
+    /// The task waits for the operator to accept its published change.
+    pub awaiting_acceptance: bool,
 }
 
 /// The latest attempt, as far as the next action reads it.
@@ -214,8 +221,12 @@ fn written_plan(store: &Store, item: &WorkItem) -> Result<Option<String>> {
 
 /// What a followed request needs next. "Continue" carries the attempt on;
 /// starting it is the operator's call, never the request's.
-fn follow_next(f: &Followed, latest: Latest<'_>) -> NextAction {
+fn follow_next(f: &Followed, latest: Latest<'_>, awaiting_acceptance: bool) -> NextAction {
     let (kind, text) = match f.state.as_str() {
+        "merged" if awaiting_acceptance => (
+            "accept",
+            format!("{} merged · accept it to close the task", f.label),
+        ),
         "merged" => ("close", format!("{} merged · close the task", f.label)),
         "closed" => (
             "continue",
@@ -312,7 +323,7 @@ pub fn next_action(s: &Situation<'_>) -> NextAction {
         // whose request is no longer open: the request says what is next.
         if let Some(f) = &s.follow {
             if state == SessionState::Suspended || f.state != "open" {
-                return follow_next(f, latest);
+                return follow_next(f, latest, s.awaiting_acceptance);
             }
         }
         if state == SessionState::Paused {
@@ -360,7 +371,7 @@ pub fn next_action(s: &Situation<'_>) -> NextAction {
         .as_ref()
         .filter(|f| latest.phase != "plan" && (!failed || f.state != "open"))
     {
-        return follow_next(f, latest);
+        return follow_next(f, latest, s.awaiting_acceptance);
     }
     let reason = latest.end_reason.unwrap_or_default();
     let is = |r: EndReason| reason == r.as_str();
@@ -541,7 +552,13 @@ pub fn view(store: &Store, subject: &Subject) -> Result<Option<Continuation>> {
         None => false,
     };
     let follow = followed(store, &ids, latest.map_or(0, |l| l.created_ms))?;
+    let accept = item.as_ref().and_then(|i| {
+        (i.state != tracon_sync::work::CLOSED && i.needs_acceptance() && !i.accepted())
+            .then(|| i.change_candidate.clone())
+            .flatten()
+    });
     let next = next_action(&Situation {
+        awaiting_acceptance: accept.is_some(),
         follow: follow.clone(),
         item_closed,
         item_blockers,
@@ -613,6 +630,7 @@ pub fn view(store: &Store, subject: &Subject) -> Result<Option<Continuation>> {
         continue_from: continuable.map(|l| l.id.clone()),
         abandon: !item_closed && !abandoned && (item.is_some() || !attempts.is_empty()),
         close: item.is_some() && !item_closed,
+        accept,
     };
 
     Ok(Some(Continuation {
@@ -824,6 +842,16 @@ mod tests {
         let running = row("running", None, "execute", None);
         assert_eq!(with(pr("open"), running).kind, "watch");
         assert_eq!(with(pr("merged"), running).kind, "close");
+        // A merged change on an item that waits for acceptance asks for it.
+        let n = next(Situation {
+            is_item: true,
+            latest: Some(suspended),
+            follow: Some(pr("merged")),
+            awaiting_acceptance: true,
+            ..Default::default()
+        });
+        assert_eq!(n.kind, "accept");
+        assert_eq!(n.text, "PR #149 merged · accept it to close the task");
         // An item the operator closed is done, whatever the request says.
         let n = next(Situation {
             is_item: true,
@@ -1194,6 +1222,56 @@ pub async fn close_task(
         manager.item_closed(&h.id, "closed by the operator").await;
     }
     Ok(item)
+}
+
+/// Accept the task's published change, as the candidate the operator judged
+/// (`None`: the one it carries now). A candidate the task no longer carries
+/// is refused. Once the accepted candidate has merged the task closes, as a
+/// merge closes a task that needs no acceptance; accepted before the merge,
+/// it closes when following sees the merge.
+pub async fn accept_task(
+    manager: &crate::session::Manager,
+    item_id: &str,
+    candidate: Option<&str>,
+) -> std::result::Result<WorkItem, crate::session::SessionError> {
+    use crate::corpus::work::WorkError;
+    use crate::session::SessionError;
+    let store = manager.store();
+    let item =
+        crate::corpus::work::accept(store, manager.bus(), manager.node_id(), item_id, candidate)
+            .map_err(|e| match e {
+                WorkError::Missing(_) => SessionError::NotFound,
+                other => SessionError::Rejected(other.to_string()),
+            })?;
+    Ok(land(manager, item.clone(), "accepted by the operator")
+        .await?
+        .unwrap_or(item))
+}
+
+/// Close an item whose work has landed: its change merged, and was accepted
+/// when the item asks for that. The session holding it ends as it does when
+/// the operator closes the task. Returns the closed item, or `None` when the
+/// item is not done yet (or is closed already).
+pub async fn land(
+    manager: &crate::session::Manager,
+    item: WorkItem,
+    summary: &str,
+) -> Result<Option<WorkItem>> {
+    if item.state == tracon_sync::work::CLOSED || !item.landed() {
+        return Ok(None);
+    }
+    let store = manager.store();
+    let holder = store.session_holding(&item.id)?;
+    let closed =
+        match crate::corpus::work::close(store, manager.bus(), manager.node_id(), &item.id, None) {
+            Ok(closed) => closed,
+            Err(crate::corpus::work::WorkError::Store(e)) => return Err(e),
+            Err(_) => return Ok(None),
+        };
+    if let Some(h) = holder {
+        manager.item_closed(&h.id, summary).await;
+    }
+    Ok(Some(closed))
 }
 
 /// Abandon the work: close the item (ending the attempt that holds it), or,
