@@ -361,7 +361,20 @@ async fn origin_fetches_through_the_gateway_and_refuses_a_push() {
     assert_eq!(recorded[0]["repository"], format!("{}/r", r.owner));
     assert_eq!(recorded[0]["protocol"], "v2");
     assert_eq!(recorded[0]["fetched"][0]["sha"], two.as_str());
-    assert_eq!(recorded[0]["fetched"][0]["refs"][0], "refs/heads/main");
+    // Named by every ref the forge listed at that commit: `main`, and `HEAD`
+    // where the client asked for it (newer Git's ls-refs does).
+    let refs: Vec<&str> = recorded[0]["fetched"][0]["refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|name| name.as_str())
+        .collect();
+    assert!(refs.contains(&"refs/heads/main"), "{recorded:?}");
+    assert!(
+        refs.iter()
+            .all(|name| ["HEAD", "refs/heads/main"].contains(name)),
+        "{recorded:?}"
+    );
 
     // Protocol v0 too, and a pull that rebases local work onto the new main.
     std::fs::write(ws.join("mine"), "mine").unwrap();
