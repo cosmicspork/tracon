@@ -386,7 +386,11 @@ struct Slot {
 }
 
 pub enum Fill {
-    Filled,
+    /// Filled; the node that opened the slot, which the filler pins its first
+    /// key handoff to.
+    Filled {
+        inviter: [u8; 32],
+    },
     Unknown,
     AlreadyFilled,
 }
@@ -441,7 +445,7 @@ impl EnrollSlots {
             Some(s) if s.filled.is_some() => Fill::AlreadyFilled,
             Some(s) => {
                 s.filled = Some(body);
-                Fill::Filled
+                Fill::Filled { inviter: s.inviter }
             }
         }
     }
@@ -782,7 +786,7 @@ mod tests {
         assert!(matches!(e.take("CODE", &a, 1), Take::NotYet));
         assert!(matches!(e.take("CODE", &b, 1), Take::NotYours));
         assert!(matches!(e.fill("NOPE", "x".into(), 1), Fill::Unknown));
-        assert!(matches!(e.fill("CODE", "x".into(), 1), Fill::Filled));
+        assert!(matches!(e.fill("CODE", "x".into(), 1), Fill::Filled { inviter } if inviter == a));
         assert!(matches!(e.fill("CODE", "y".into(), 1), Fill::AlreadyFilled));
         assert!(matches!(e.take("CODE", &a, 1), Take::Ready(s) if s == "x"));
         assert!(matches!(e.take("CODE", &a, 1), Take::Unknown));

@@ -28,8 +28,11 @@ That installs, enrolls (you confirm the fingerprints match — from the phone if
 is where you are), sets up the boundary, and installs the service. Paste it into a
 cloud console's user-data and a fresh VM comes up enrolled.
 
-**Compare both fingerprints before admission.** Enrollment hands the new member
-the selected channel keys and signed policy, not the private signing key. Logging
+**Compare both fingerprints before admission.** Each side prints its own and the
+other's: the inviter shows the new node's, and `tracon enroll` shows the inviting
+node's, which is the only node it takes keys from while enrolling. Enrollment hands
+the new member the selected channel keys and signed policy, not the private signing
+key. Logging
 a browser into an existing node does not enroll another machine or grant it keys.
 
 **A reachable node can be configured remotely, if it lets you.** On the node to be

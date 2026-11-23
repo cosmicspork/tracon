@@ -400,6 +400,168 @@ async fn a_long_mesh_backlog_does_not_delay_the_handoff() {
     );
 }
 
+/// What `accept` said, kept for the test to read.
+#[derive(Default)]
+struct Lines(std::sync::Mutex<Vec<String>>);
+impl enroll::Progress for Lines {
+    fn say(&self, line: &str) {
+        self.0.lock().unwrap().push(line.to_string());
+    }
+}
+
+/// A node that is enrolling has no record of who is in which channel, so the
+/// one node it can take keys from is the inviter whose fingerprint the
+/// operator compared. Another member answering on the hub first — with keys
+/// it made itself — must not get its epochs into the new node's keyrings.
+#[tokio::test]
+async fn while_enrolling_keys_are_taken_from_the_inviter_alone() {
+    state::isolate();
+    let a = Identity::from_seed(&[1u8; 32]);
+    let b = Identity::from_seed(&[2u8; 32]);
+    let c = Identity::from_seed(&[3u8; 32]);
+    let hub = support::mesh::start_hub_managed(
+        &[
+            (&a, &[MESH_CHANNEL, "personal"][..]),
+            (&c, &[MESH_CHANNEL, "personal"][..]),
+        ],
+        0,
+    )
+    .await;
+    let a_store = store_holding(&a, &[MESH_CHANNEL, "personal"]);
+    let inv = enroll::open_invite(&a, &hub.url, &["personal".into()], Some(60))
+        .await
+        .unwrap();
+
+    let b_store = Arc::new(Store::open_in_memory().unwrap());
+    let (hub2, code2, store2) = (hub.url.clone(), inv.code.clone(), b_store.clone());
+    let accept = tokio::spawn(async move {
+        let b = Identity::from_seed(&[2u8; 32]);
+        let lines = Lines::default();
+        let got = enroll::accept(
+            store2,
+            &b,
+            &hub2,
+            &code2,
+            "laptop",
+            "x86_64",
+            Duration::from_secs(30),
+            &lines,
+        )
+        .await;
+        (got, lines.0.into_inner().unwrap())
+    });
+    let req = tokio::time::timeout(support::mesh::WAIT, async {
+        loop {
+            if let Some(r) = enroll::poll_invite(&a, &hub.url, &inv.code).await.unwrap() {
+                break r;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("B's enrollment request reached the hub");
+
+    // B is on the hub's books; C, a member, hands it keys of its own making
+    // before the inviter's arrive.
+    hub.members
+        .put(&Member {
+            node_id: b.node_id(),
+            x25519_pub: b.x25519_hex(),
+            binding_sig: sign_binding(&b),
+            name: "laptop".into(),
+            channels: vec![MESH_CHANNEL.into(), "personal".into()],
+            admitted_ms: 0,
+            admitted_by: a.node_id(),
+            role: Default::default(),
+        })
+        .unwrap();
+    let c_store = store_holding(&c, &[MESH_CHANNEL, "personal"]);
+    let forged = enroll::handoff_payload(
+        &c_store,
+        &c,
+        &b.x25519_public(),
+        &[MESH_CHANNEL.into(), "personal".into()],
+    )
+    .unwrap();
+    enroll::post_direct(&c, &hub.url, &b.node_id(), &b.x25519_public(), &forged)
+        .await
+        .unwrap();
+
+    enroll::admit(
+        &a_store,
+        &a,
+        &hub.url,
+        &req.node_id,
+        &req.x25519_pub,
+        &req.binding_sig,
+        &req.name,
+        &inv.channels,
+        &[],
+    )
+    .await
+    .unwrap();
+    let (got, lines) = accept.await.unwrap();
+    let got = got.unwrap();
+    assert!(got.contains(&MESH_CHANNEL.to_string()) && got.contains(&"personal".to_string()));
+
+    // The operator was shown the inviter's fingerprint, and told C's
+    // handoff was set aside.
+    let a_fp = proto::enroll::fingerprint(&a.verifying_key().to_bytes());
+    assert!(lines.iter().any(|l| l.contains(&a_fp)), "{lines:?}");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("ignored a handoff") && l.contains(&c.node_id()[..16])),
+        "{lines:?}"
+    );
+    // B holds A's epochs and none of C's.
+    for ch in [MESH_CHANNEL, "personal"] {
+        let mine = Keyring::from_bytes(&b_store.channel_get(ch).unwrap().unwrap().keyring).unwrap();
+        let a_ring =
+            Keyring::from_bytes(&a_store.channel_get(ch).unwrap().unwrap().keyring).unwrap();
+        let ids: Vec<String> = mine.entries().iter().map(|e| e.id_hex()).collect();
+        assert_eq!(ids, vec![a_ring.newest().id_hex()], "{ch}");
+    }
+    // Only the inviter's handoff was applied.
+    assert_eq!(
+        lines.iter().filter(|l| l.contains("keys received")).count(),
+        1,
+        "{lines:?}"
+    );
+}
+
+/// A hub that does not say who opened the invitation leaves the new node no
+/// inviter to pin, and enrolling stops there rather than taking keys from
+/// whoever answers.
+#[tokio::test]
+async fn a_hub_that_names_no_inviter_is_refused() {
+    state::isolate();
+    let app = axum::Router::new().route(
+        "/v0/enroll/{code}",
+        axum::routing::post(|| async { axum::http::StatusCode::NO_CONTENT }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let b = Identity::from_seed(&[2u8; 32]);
+    let err = enroll::accept(
+        Arc::new(Store::open_in_memory().unwrap()),
+        &b,
+        &format!("http://{addr}"),
+        "7KQ4M2XA",
+        "laptop",
+        "x86_64",
+        Duration::from_secs(5),
+        &Quiet,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(&err, enroll::EnrollError::Local(m) if m.contains("which node opened")),
+        "{err}"
+    );
+}
+
 // --------------------------------------------------------------- key binding
 
 /// A hub serving one fixed enrollment slot, however that slot was written.
