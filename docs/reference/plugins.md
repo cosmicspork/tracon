@@ -220,7 +220,16 @@ verify when it lands.
 - On approval the new build becomes active, the old one is kept as `previous`, and the
   running processes stop; the next use starts the new build.
 - `tracon plugin rollback <name>` swaps active and previous with no card, since both
-  were approved.
+  were approved. Rolling back is an admin action.
+- Settings › Plugins has the same two on each plugin's row. **Check for update** calls
+  `POST /api/plugins/{name}/update` with the channel picked in the card's header (the
+  node's `[session] default_channel` when none is), then says "up to date" or links to
+  the update card it raised. **Roll back to `<previous>`**, shown only when the plugin
+  has a previous build, asks for an in-page confirmation naming both versions and calls
+  `POST /api/plugins/{name}/rollback`; from off the node's machine a passkey confirms
+  it. Both are disabled while a request is in flight and while an update card for that
+  plugin waits. A plugin installed from a local archive shows the node's refusal (add
+  the new archive again). Installing and removing stay with `tracon plugin`.
 - A plugin installed from one source (a repository, or local archives) is not replaced
   from another: `plugin <name> is installed from <source>; tracon plugin rm <name>
   before adding it from <other>`.

@@ -853,7 +853,7 @@
 {/if}
 
 {#if activeSection === 'plugins'}
-  <Plugins />
+  <Plugins channels={externalChannels} />
 {/if}
 
 {#if activeSection === 'channels'}

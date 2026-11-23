@@ -623,7 +623,9 @@ const MCP_SERVERS = {
   ],
 }
 
-// Settings › Plugins: one plugin with instances in three states, one with none.
+// Settings › Plugins: one plugin with instances in three states and a
+// previous build to roll back to, one with none, and one installed from a
+// local archive (which only adding a new archive updates).
 const INSTANCE = {
   plugin: 'sql-review',
   version: '0.3.1',
@@ -637,6 +639,8 @@ const PLUGINS = {
       repo: 'example-org/sql-review',
       state: 'installed',
       active: { version: '0.3.1', tools: ['query', 'explain'] },
+      previous: { version: '0.3.0', digest: '9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b' },
+      pending: null,
       instances: [
         { ...INSTANCE, channel: 'personal', state: 'ready', pid: 48102, started_ms: Date.UTC(2026, 10, 18, 9, 12), uptime_secs: 1260, restarts: 0, last_error: null },
         { ...INSTANCE, channel: 'orbit', state: 'unhealthy', pid: null, started_ms: null, uptime_secs: null, restarts: 7, last_error: 'exited with code 1' },
@@ -648,10 +652,24 @@ const PLUGINS = {
       repo: 'example-org/tickets-plugin',
       state: 'installed',
       active: { version: '1.2.0', tools: ['search'] },
+      previous: null,
+      pending: null,
+      instances: [],
+    },
+    {
+      name: 'notes-index',
+      repo: 'local:notes-index-0.1.0-x86_64-unknown-linux-musl.tar.gz',
+      state: 'installed',
+      active: { version: '0.1.0', tools: ['lookup'] },
+      previous: null,
+      pending: null,
       instances: [],
     },
   ],
 }
+const withPlugin = (name, over) => ({
+  plugins: PLUGINS.plugins.map((p) => (p.name === name ? { ...p, ...over } : p)),
+})
 
 // Everything Settings reads, in its populated form.
 const BASE = {
@@ -910,6 +928,43 @@ export default [
     act: async (page) => {
       await page.getByRole('button', { name: 'Logs', exact: true }).nth(1).click()
       await scrollTo(page, 'unhealthy: not started again')
+    },
+  }),
+  S('plugins-update-current', '/settings#plugins', 'Plugins: checked for an update, up to date', {
+    since: '#1077',
+    note: 'The node answered that the active build is the latest release already.',
+    over: { 'POST /api/plugins/tickets/update': { up_to_date: true, version: '1.2.0', digest: 'e1f2' } },
+    act: async (page) => {
+      await page.locator('li[data-plugin="tickets"]').getByRole('button', { name: 'Check for update' }).click()
+      await page.getByText('Up to date: 1.2.0').waitFor()
+    },
+  }),
+  S('plugins-update-card', '/settings#plugins', 'Plugins: an update card waiting', {
+    since: '#1077',
+    note: 'sql-review has an update card for 0.4.0 waiting: the row links to it and both buttons are disabled until it is answered.',
+    over: {
+      '/api/plugins': withPlugin('sql-review', {
+        pending: { version: '0.4.0', digest: 'c0ffee', approval_id: 'ap-plugin-update', approval_state: 'pending' },
+      }),
+    },
+  }),
+  S('plugins-update-local', '/settings#plugins', 'Plugins: a local archive refused an update', {
+    since: '#1077',
+    note: 'A plugin installed from a local archive: the node\'s 422 is shown and there is no retry button.',
+    over: {
+      'POST /api/plugins/notes-index/update': fail(422, 'notes-index was installed from a local archive; add the new archive again to update it'),
+    },
+    act: async (page) => {
+      await page.locator('li[data-plugin="notes-index"]').getByRole('button', { name: 'Check for update' }).click()
+      await scrollTo(page, 'add the new archive again')
+    },
+  }),
+  S('plugins-rollback-confirm', '/settings#plugins', 'Plugins: confirming a rollback', {
+    since: '#1077',
+    note: 'The in-page confirmation names both versions; no card is raised since both builds were approved.',
+    act: async (page) => {
+      await page.getByRole('button', { name: 'Roll back to 0.3.0' }).click()
+      await page.getByRole('group', { name: 'Confirm the rollback' }).waitFor()
     },
   }),
   S('plugins-empty', '/settings#plugins', 'Plugins: none installed', {
