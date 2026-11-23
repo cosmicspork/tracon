@@ -4,4 +4,4 @@
 # (what goes in the bundle, and the version it is named for), and moved by
 # Dependabot. A Debian image, so its libraries are held to the stock base's
 # glibc by the script.
-FROM docker.io/library/postgres:17.10-bookworm@sha256:9b18b78397054fce88a9552e9d5a3ad5bb7fd258c5b3cc1c5028e46373d6ea8f
+FROM docker.io/library/postgres:17.12-bookworm@sha256:837bed18782820fe967067cb5328b02b0d9992c1be9a37ee0c9c492cfc03af3b
