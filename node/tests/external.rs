@@ -1193,6 +1193,8 @@ async fn an_edit_that_does_not_fit_the_tool_is_refused_and_still_waits() {
 async fn an_edit_may_not_change_what_the_call_acts_on() {
     state::isolate();
     let h = harness_with(enabled()).await;
+    // Offered only on a channel that binds GitHub; nothing is sent to it.
+    github_at(&h, "127.0.0.1:1".parse().unwrap());
     let id = ask(
         &h,
         "github_issue_comment",
@@ -1219,6 +1221,8 @@ async fn an_edit_may_not_change_what_the_call_acts_on() {
 async fn opening_an_approval_claims_it_and_leaving_releases_it() {
     state::isolate();
     let h = harness_with(enabled()).await;
+    // Offered only on a channel that binds GitHub; nothing is sent to it.
+    github_at(&h, "127.0.0.1:1".parse().unwrap());
     let id = ask(
         &h,
         "github_issue_comment",
@@ -2380,16 +2384,25 @@ async fn the_nodes_old_jira_tool_names_are_unknown_tools() {
     for old in OLD_JIRA_TOOLS {
         assert!(!names.iter().any(|n| n == old), "{old} in {names:?}");
     }
-    // Like any name the node has no tool for, it is not refused by name: no
-    // rule names it, so it is asked, and fails once allowed.
+    // Like any name the channel is not offered, it is refused at once: no
+    // card is raised and nothing runs.
     for name in ["issue_search", "no_such_tool"] {
-        let id = ask(&h, name, json!({ "jql": "project = WRK" })).await;
-        let (status, _) = answer(&h, &id, json!({ "option_id": "allow_once" })).await;
-        assert_eq!(status, StatusCode::OK);
-        let out = settled(&h, &id).await;
-        assert_eq!(out["state"], "failed", "{out}");
-        assert_eq!(out["reason"], format!("no tool named {name}"), "{out}");
+        let (_, v) = mcp(
+            &h.operator,
+            "work",
+            tool_call(name, json!({ "jql": "project = WRK" })),
+        )
+        .await;
+        let (err, out) = outcome(&v);
+        assert!(err, "{out}");
+        assert_eq!(
+            out,
+            json!(format!(
+                "no tool named {name} on channel work; nothing was asked or run"
+            ))
+        );
     }
+    assert!(h.store.open_permission_views().unwrap().is_empty());
 }
 
 /// A Jira approval from before the plugin still opens: its wiki markup is
@@ -3297,4 +3310,53 @@ async fn an_external_harness_calls_a_plugins_tool_as_itself() {
         .unwrap();
     assert_no_sessions(&h);
     h.manager.plugins().shutdown().await;
+}
+
+/// A name the channel is not offered is refused at once, before any rule is
+/// read: no card, nothing run, no approval kept. A forge tool on a channel
+/// without its credential says which credential. A tool the channel is
+/// offered and the policy does not name is still asked.
+#[tokio::test]
+async fn a_tool_the_channel_is_not_offered_is_refused_before_anything_is_asked() {
+    state::isolate();
+    let h = harness_with(enabled()).await;
+    let names = list(&h.operator, "work").await;
+    for name in ["no_such_tool", "absent__query"] {
+        assert!(!names.iter().any(|n| n == name), "{name} in {names:?}");
+        let (_, v) = mcp(&h.operator, "work", tool_call(name, json!({}))).await;
+        let (err, out) = outcome(&v);
+        assert!(err, "{out}");
+        assert_eq!(
+            out,
+            json!(format!(
+                "no tool named {name} on channel work; nothing was asked or run"
+            )),
+        );
+    }
+    let (_, v) = mcp(
+        &h.operator,
+        "personal",
+        tool_call("pr_status", json!({ "repo": "o/n", "number": 1 })),
+    )
+    .await;
+    let (err, out) = outcome(&v);
+    assert!(err, "{out}");
+    let out = out.to_string();
+    assert!(
+        out.contains("pr_status is not offered on channel personal")
+            && out.contains("credential gh is not bound")
+            && out.contains("nothing was asked or run"),
+        "{out}"
+    );
+    assert!(h.store.open_permission_views().unwrap().is_empty());
+
+    // A tool it is offered still goes to the policy, and is asked.
+    let id = ask(
+        &h,
+        "doc_write",
+        json!({ "slug": "plan-y", "body": "hello" }),
+    )
+    .await;
+    let queue = h.store.open_permission_views().unwrap();
+    assert!(queue.iter().any(|p| p.id == id), "{queue:?}");
 }

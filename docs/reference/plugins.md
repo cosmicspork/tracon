@@ -387,7 +387,13 @@ sessions none.
 ### How a call is decided
 
 The node decides each call before the plugin sees it, exactly as for an
-`[[mcp_server]]` tool:
+`[[mcp_server]]` tool. First, a name the caller is not offered on its channel is refused
+before policy is read, with nothing asked or run: a plugin that is not installed, or a
+tool its manifest does not declare, is refused as `no tool named <name> on channel
+<channel>; nothing was asked or run`, and a plugin installed but not offered on the
+channel says so (`plugin <name> is not offered on channel <channel>: it needs a
+credential matching …`). This holds for an agent's call and a plugin's `tools/call`
+alike. Then:
 
 1. The signed policy bundle, under the `tool` kind and the namespaced name
    (`sql-review__query`). A signed denial wins over everything.
@@ -1046,6 +1052,10 @@ Calls another plugin's tool as your plugin.
 - The call is logged on the channel's external log under `plugin:<your name>`.
 - It is never held for the operator. A call that would be asked is refused with `data.decision = "asked"`. If you need the operator's say, raise a card yourself.
 - Calling your own tools through the node is refused.
+- A tool of a plugin that is not installed, or one its manifest does not declare, is
+  refused before policy with `-32602` and `no tool named <name> on channel <channel>;
+  nothing was asked or run`. One whose plugin is installed but not offered on your
+  channel is refused with `-32003`, naming the credential it needs.
 
 **Returns** the tool's MCP result, `{ content, structuredContent? }`.
 

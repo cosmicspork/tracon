@@ -293,8 +293,12 @@ pub enum OperatorCallError {
     /// The channel is unknown or archived.
     Request(String),
     /// No plugin of that name is installed with that tool, or none is
-    /// active.
-    NotInstalled { plugin: String },
+    /// active. A call to one of its tools carries its refusal, which names
+    /// the tool and the channel ([`no_tool`]).
+    NotInstalled {
+        plugin: String,
+        call: Option<String>,
+    },
     /// The plugin is installed but not offered on the channel.
     NotOffered(String),
     /// The plugin cannot be started, does not list the tool, or the
@@ -313,7 +317,11 @@ impl std::fmt::Display for OperatorCallError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Unavailable => f.write_str("plugins are not available on this node"),
-            Self::NotInstalled { plugin } => {
+            Self::NotInstalled {
+                call: Some(refusal),
+                ..
+            } => f.write_str(refusal),
+            Self::NotInstalled { plugin, call: None } => {
                 write!(f, "plugin {plugin} is not installed on this node")
             }
             Self::Request(m)
@@ -1186,8 +1194,11 @@ impl Tools {
             let plugin = name
                 .split_once(upstream::SEPARATOR)
                 .map_or(name, |(prefix, _)| prefix);
+            // Refused before policy is read, as an agent's call to a name it
+            // is not offered is ([`Self::unoffered`]).
             return Err(OperatorCallError::NotInstalled {
                 plugin: plugin.to_string(),
+                call: Some(no_tool(name, &ctx.channel)),
             });
         };
         self.plugin_offered(ctx, &pt.plugin, &pt.manifest)
@@ -1488,6 +1499,7 @@ impl Tools {
                 gate,
                 OperatorCallError::NotInstalled {
                     plugin: plugin.to_string(),
+                    call: None,
                 },
             );
         };
@@ -2243,6 +2255,11 @@ impl Tools {
         }
         if self.is_consequential(name) && self.consequential_scope(name, args).is_none() {
             return Err(consequential_refusal(name, args));
+        }
+        // A name this caller is not offered is refused before policy is
+        // read: there is nothing for the operator to allow.
+        if let Some(refusal) = self.unoffered(ctx, name, audience) {
+            return Err(refusal);
         }
         self.upstream_ready(ctx, name).await?;
         self.plugin_ready(ctx, name, args).await?;
@@ -3059,6 +3076,47 @@ impl Tools {
             }
         }
         all
+    }
+
+    /// Why a call to `name` is refused before it is decided because this
+    /// caller is not offered it: it is in none of the definitions
+    /// `tools/list` gives the caller ([`Self::list_for`]). Another server's
+    /// tool, and a tool of a plugin that is installed, are left to
+    /// [`Self::upstream_ready`] and [`Self::plugin_ready`], which start or
+    /// list them again before saying why one is not offered. One of the
+    /// node's forge tools on a channel without its credential says which
+    /// credential. `None` for a name the caller is offered.
+    fn unoffered(&self, ctx: &CallContext, name: &str, audience: Audience) -> Option<String> {
+        let offered = self.list_for(&ctx.channel, &ctx.node_id, audience);
+        if offered.iter().any(|t| t["name"] == name) || self.upstream_tool(name).is_some() {
+            return None;
+        }
+        if let (Some(access), Some((prefix, _))) =
+            (self.session.get(), name.split_once(upstream::SEPARATOR))
+        {
+            let installed = access
+                .store
+                .plugin_get(prefix)
+                .ok()
+                .flatten()
+                .is_some_and(|r| r.state != crate::store::plugins::REMOVED);
+            if installed {
+                return None;
+            }
+        }
+        let credential = match forge_of_tool(name) {
+            Some(crate::forge::Forge::Github) => Some(github::CREDENTIAL),
+            Some(crate::forge::Forge::Gitlab) => Some(gitlab::CREDENTIAL),
+            None => None,
+        };
+        Some(match credential {
+            Some(credential) => format!(
+                "{name} is not offered on channel {}: credential {credential} is not bound to \
+                 it; nothing was asked or run",
+                ctx.channel
+            ),
+            None => no_tool(name, &ctx.channel),
+        })
     }
 
     /// The repository the calling session works on, as its launch resolved
@@ -4723,6 +4781,12 @@ fn refusal(decision: Decision) -> String {
     )
 }
 
+/// Why a call to a tool the caller is not offered on `channel`, and that is
+/// no tool of an installed plugin or another server, is refused.
+fn no_tool(name: &str, channel: &str) -> String {
+    format!("no tool named {name} on channel {channel}; nothing was asked or run")
+}
+
 /// `name` plus its arguments on one line, bounded, for the policy haystack
 /// and the queue card. Secrets never appear here: arguments are the
 /// harness's own words. A profile is spelled out as `profile=<name>` ahead of
@@ -5576,7 +5640,9 @@ mod tests {
     }
 
     /// A profile is spelled out in the policy haystack, so a deny rule can
-    /// name one: `sql-review`'s tools take one per database account.
+    /// name one: `sql-review`'s tools take one per database account. The
+    /// call here is to a tool the channel is offered, since a name it is not
+    /// offered is refused before any rule is read.
     #[tokio::test]
     async fn a_deny_rule_can_name_a_profile() {
         let mut t = tools(STORE);
@@ -5598,7 +5664,7 @@ mod tests {
             .handle(
                 &ctx("work"),
                 &json!({"jsonrpc":"2.0","id":7,"method":"tools/call",
-                        "params":{"name":"sql-review__query","arguments":{"sql":"SELECT 1","profile":"prd"}}}),
+                        "params":{"name":"pr_status","arguments":{"repo":"o/n","number":1,"profile":"prd"}}}),
             )
             .await
             .unwrap();
@@ -5753,5 +5819,28 @@ mod tests {
         assert_eq!(res["result"]["isError"], true);
         let text = res["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("approval"), "{text}");
+    }
+
+    /// A name the channel is not offered never reaches the policy: with an
+    /// empty one, which asks about everything, it is refused by name instead.
+    #[tokio::test]
+    async fn a_name_the_channel_is_not_offered_is_refused_before_policy() {
+        let mut t = tools(STORE);
+        t.policy = Default::default();
+        for name in ["no_such_tool", "absent__query"] {
+            let res = t
+                .handle(
+                    &CallContext::external(None, "work", "n1"),
+                    &json!({"jsonrpc":"2.0","id":8,"method":"tools/call",
+                            "params":{"name":name,"arguments":{}}}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res["result"]["isError"], true);
+            assert_eq!(
+                res["result"]["content"][0]["text"],
+                format!("no tool named {name} on channel work; nothing was asked or run")
+            );
+        }
     }
 }
