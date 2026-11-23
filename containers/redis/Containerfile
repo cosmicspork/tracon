@@ -3,4 +3,4 @@
 # supervisor. The FROM line is the pin, read by scripts/database-bundle.sh
 # (what goes in the bundle, and the version it is named for), and moved by
 # Dependabot.
-FROM docker.io/library/redis:7.4.8-bookworm@sha256:3e0669e42d4fe421c9dea0ba5fbc04d336b80b4f32a6c7d25bee3a1d089288a1
+FROM docker.io/library/redis:7.4.12-bookworm@sha256:2e3eb11462c4e3759e6972678dd051d150ff54b1e60714b3c33b701260172a90
