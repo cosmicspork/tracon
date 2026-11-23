@@ -61,7 +61,7 @@ const MAX_RESPONSE: usize = 8 << 20;
 const MAX_PAGES: usize = 20;
 
 /// One tool a server lists, under the name a session calls it by.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RemoteTool {
     pub name: String,
     pub remote: String,

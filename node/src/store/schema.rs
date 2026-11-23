@@ -1946,6 +1946,14 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX review_thread_comment_thread ON review_thread_comment(thread_id, created_ms);
     "#,
+    // 92: what the active plugin build's `tools/list` named at its last
+    // start that agreed with its manifest, as JSON (`store::plugins::Listed`),
+    // so a later listing offers its tools without starting it. NULL until a
+    // start of that build is ready; set NULL whenever another build becomes
+    // active or the plugin is removed.
+    r#"
+    ALTER TABLE plugin ADD COLUMN listed TEXT;
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

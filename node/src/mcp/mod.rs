@@ -762,8 +762,9 @@ impl Tools {
     }
 
     /// The tools of every active plugin offered to a channel that may use
-    /// `available`, as their builds last listed them. A plugin not started
-    /// yet, or refused at its start, offers nothing.
+    /// `available`, as their builds last listed them, whether or not they
+    /// run now. A build never started yet, or refused at its start, offers
+    /// nothing.
     fn plugin_definitions(&self, available: &[&str]) -> Vec<Value> {
         let Some(access) = self.session.get() else {
             return Vec::new();
@@ -852,22 +853,29 @@ impl Tools {
             .collect()
     }
 
-    /// Start each plugin offered to `channel` that is not running, so a
-    /// `tools/list` offers what it lists. A plugin that cannot start within
-    /// the wait offers what it last listed, if that is its active build's.
+    /// Start each plugin offered to `channel` whose active build's tools the
+    /// node does not know yet, so a `tools/list` offers what it lists. One
+    /// whose build listed them before, here or before the node restarted,
+    /// is offered from that and not started: a listing alone never starts
+    /// it again. A plugin that cannot start within the wait offers nothing.
     pub async fn refresh_plugins(&self, channel: &str, node_id: &str) {
         let Some(access) = self.session.get() else {
             return;
         };
+        let plugins = access.manager.plugins();
         let names: Vec<String> = {
             let broker = self.broker.read().unwrap();
             let available = broker.available_to(channel, node_id);
             self.active_plugins(&available)
                 .into_iter()
+                .filter(|(name, build)| {
+                    !plugins
+                        .listed(name)
+                        .is_some_and(|l| l.digest == build.digest)
+                })
                 .map(|(name, _)| name)
                 .collect()
         };
-        let plugins = access.manager.plugins();
         let starts = names.iter().map(|name| async move {
             match tokio::time::timeout(PLUGIN_LIST_TIMEOUT, plugins.ensure(name, channel)).await {
                 Ok(Ok(_)) => {}
