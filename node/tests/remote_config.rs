@@ -1342,12 +1342,6 @@ impl tracon::adapter::HarnessAdapter for Listing {
     fn protocol(&self) -> tracon::adapter::ProtocolSupport {
         self.inner.protocol()
     }
-    async fn version(
-        &self,
-        r: &dyn tracon::runner::Runner,
-    ) -> Result<tracon::adapter::HarnessVersion, tracon::adapter::AdapterError> {
-        self.inner.version(r).await
-    }
     async fn probe_models(
         &self,
         _r: &dyn tracon::runner::Runner,
