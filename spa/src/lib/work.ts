@@ -1,15 +1,50 @@
 import { generatedName } from './names'
 import type { Blocker, PriorityLevel, Project, WorkItem, WorkView } from './types'
 
-/** The row's state word, as the ledger shows it. */
-export function workState(v: WorkView): 'ready' | 'blocked' | 'insession' | 'closed' {
+/**
+ * What an open item with a published change waits on before it closes:
+ * `merge` (published, not merged), `acceptance` (merged, and the item waits
+ * for the operator to accept the candidate that merged), `abandoned` (closed
+ * on the forge without merging), or null. Mirrors the node's `landing`.
+ */
+export function landing(item: WorkItem): 'merge' | 'acceptance' | 'abandoned' | null {
+  if (item.state === 'closed' || !item.change_url) return null
+  const accepted = !!item.accepted_candidate && item.accepted_candidate === item.change_candidate
+  if (item.change_state === 'merged') return item.acceptance === 'operator' && !accepted ? 'acceptance' : null
+  if (item.change_state === 'closed') return 'abandoned'
+  return 'merge'
+}
+
+/** The row's state word, as the ledger shows it. Published work waiting on
+ *  its merge or its acceptance reads as such, whoever holds it. */
+export function workState(v: WorkView): 'ready' | 'blocked' | 'insession' | 'published' | 'closed' {
   if (v.readiness.state === 'closed') return 'closed'
+  const l = landing(v)
+  if (l === 'merge' || l === 'acceptance') return 'published'
   if (v.readiness.state === 'blocked') return 'blocked'
   return v.session_id ? 'insession' : 'ready'
 }
 
 export function workLabel(v: WorkView): string {
-  return { ready: 'Ready', blocked: 'Blocked', insession: 'In session', closed: 'Closed' }[workState(v)]
+  if (workState(v) === 'published') return landing(v) === 'acceptance' ? 'Merged' : 'Published'
+  return { ready: 'Ready', blocked: 'Blocked', insession: 'In session', published: 'Published', closed: 'Closed' }[workState(v)]
+}
+
+/** What a published item waits on, in a few words, or null. */
+export function landingLine(item: WorkItem): string | null {
+  switch (landing(item)) {
+    case 'merge':
+      if (item.acceptance !== 'operator') return 'published · awaiting merge'
+      return item.accepted_candidate && item.accepted_candidate === item.change_candidate
+        ? 'published · accepted, awaiting merge'
+        : 'published · awaiting merge, then your acceptance'
+    case 'acceptance':
+      return 'merged · awaiting your acceptance'
+    case 'abandoned':
+      return 'change closed without merging'
+    default:
+      return null
+  }
 }
 
 /** "waits on task-quiet-otter-07 Metrics rollups" — blockers by name and, when known, title. */

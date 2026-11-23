@@ -189,3 +189,240 @@ async fn a_published_request_is_followed_until_it_closes() {
         "a closed request is not read again"
     );
 }
+
+async fn mcp(app: &axum::Router, sid: &str, token: &str, name: &str, args: Value) -> Value {
+    use tower::ServiceExt;
+    let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}});
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri(format!("/mcp/{sid}"))
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::from(body.to_string()))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    let text = v["result"]["content"][0]["text"].as_str().unwrap_or("");
+    serde_json::from_str(text).unwrap_or(json!({ "raw": text }))
+}
+
+const URL: &str = "https://github.test/owner/name/pull/7";
+
+/// A forge serving PR 7 open, a session `s1` holding a new item, and its
+/// review published as `p1`, carrying candidate `c1`, as approval leaves it.
+async fn published_item(
+    acceptance: &str,
+) -> (
+    support::harness::Harness,
+    Shared,
+    tracon_sync::work::WorkItem,
+) {
+    let h = harness().await;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    drop(listener);
+    let forge = Shared::default();
+    set(&forge, false, "open", false, 0, "success");
+    stub(&addr, forge.clone()).await;
+    h.tools.broker.write().unwrap().put(
+        "gh",
+        Credential {
+            env: BTreeMap::from([
+                ("GH_TOKEN".to_string(), "t".to_string()),
+                ("GITHUB_API".to_string(), format!("http://{addr}")),
+            ]),
+            channels: vec!["personal".to_string()],
+            ..Credential::default()
+        },
+    );
+    let node = h.manager.node_id().to_string();
+    let item = tracon::corpus::work::create(
+        &h.store,
+        &h.bus,
+        &node,
+        tracon::corpus::work::NewWork {
+            channel: "personal".into(),
+            project_id: None,
+            title: "Ship the thing".into(),
+            body: String::new(),
+            deps: vec![],
+            priority: 0,
+            discovered_from: None,
+            discovered_by_session: None,
+            discovered_by_lane: None,
+        },
+    )
+    .unwrap();
+    let item = tracon::corpus::work::update(
+        &h.store,
+        &h.bus,
+        &node,
+        &item.id,
+        tracon::corpus::work::Patch {
+            acceptance: Some(acceptance.into()),
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    let mut session = session_row("s1", &node, "personal");
+    session.work_item_id = Some(item.id.clone());
+    h.store.insert_session(&session).unwrap();
+    h.store.insert_review(&review(&node)).unwrap();
+    open_publication(&h, "p1", "c1");
+    (h, forge, item)
+}
+
+/// A publication of review `r1` that opened PR 7, and the item marked
+/// published with its candidate, as approving it does.
+fn open_publication(h: &support::harness::Harness, id: &str, candidate: &str) {
+    let node = h.manager.node_id().to_string();
+    h.store
+        .publication_begin(&PublicationBegin {
+            id,
+            review_id: "r1",
+            revision_id: None,
+            candidate_id: candidate,
+            channel: "personal",
+            node_id: &node,
+            provider: "github",
+            project: "owner/name",
+            base: "main",
+            branch: "feat",
+            head_sha: "abc",
+            instance: "i",
+        })
+        .unwrap();
+    h.store.publication_opened(id, URL).unwrap();
+    let item = h
+        .store
+        .get_session("s1")
+        .unwrap()
+        .unwrap()
+        .work_item_id
+        .unwrap();
+    tracon::corpus::work::record_published(&h.store, &h.bus, &node, &item, URL, candidate).unwrap();
+}
+
+/// A plain coding task ends at merge: published, it reads as waiting on the
+/// merge (to the work views and to agents); merged, it closes and the
+/// session holding it is told, with no step left for the operator.
+#[tokio::test]
+async fn a_merge_closes_the_task_it_published() {
+    let (h, forge, item) = published_item("merge").await;
+    let token = h
+        .manager
+        .register_tool_token_for_test("s1", "personal")
+        .await;
+
+    assert!(tracon::follow::tick(&h.tools).await.is_empty());
+    let open = h.store.work_get(&item.id).unwrap().unwrap();
+    assert_eq!(open.state, "open", "publishing does not close it");
+    assert_eq!(open.change_state.as_deref(), Some("published"));
+    assert_eq!(open.change_url.as_deref(), Some(URL));
+    assert_eq!(open.landing(), Some(tracon_sync::work::Landing::Merge));
+
+    // The agent reads the published-but-unmerged state.
+    let shown = mcp(&h.harness, "s1", &token, "work_show", json!({})).await;
+    assert_eq!(shown["acceptance"], "merge", "{shown}");
+    assert_eq!(shown["change"]["url"], URL, "{shown}");
+    assert_eq!(shown["change"]["state"], "published", "{shown}");
+    assert_eq!(shown["change"]["awaiting"], "merge", "{shown}");
+    let listed = mcp(
+        &h.harness,
+        "s1",
+        &token,
+        "work_list",
+        json!({ "state": "published" }),
+    )
+    .await;
+    assert_eq!(listed["items"][0]["id"], item.id, "{listed}");
+    assert_eq!(
+        listed["items"][0]["change"]["awaiting"], "merge",
+        "{listed}"
+    );
+    // And so does the operator's ledger.
+    let (_, v) = support::http::call(&h.operator, "GET", "/api/work?channel=personal", None).await;
+    assert_eq!(v["items"][0]["change_state"], "published", "{v}");
+
+    set(&forge, false, "closed", true, 0, "success");
+    tracon::follow::tick(&h.tools).await;
+    let closed = h.store.work_get(&item.id).unwrap().unwrap();
+    assert_eq!(closed.state, "closed", "the merge closed it");
+    assert_eq!(closed.change_state.as_deref(), Some("merged"));
+    assert_eq!(closed.closed_by_session, None);
+    let said: Vec<String> = h
+        .store
+        .events_after("s1", 0, 500)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.kind)
+        .collect();
+    assert!(said.iter().any(|k| k == "work_closed"), "{said:?}");
+}
+
+/// An item set to need acceptance stays open after its merge until the
+/// operator accepts it, and the acceptance is bound to the candidate it
+/// judged: a new candidate inherits no earlier verdict.
+#[tokio::test]
+async fn a_task_that_needs_acceptance_waits_for_it_on_the_candidate_that_merged() {
+    let (h, forge, item) = published_item("operator").await;
+    let operator = |method: &'static str, uri: String, body: Option<Value>| {
+        let app = h.operator.clone();
+        async move { support::http::call(&app, method, &uri, body).await }
+    };
+    assert!(tracon::follow::tick(&h.tools).await.is_empty());
+
+    // Accepted before it merged: the verdict is on `c1`.
+    let (status, v) = operator(
+        "POST",
+        format!("/api/work/{}/accept", item.id),
+        Some(json!({ "candidate": "c1" })),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{v}");
+    assert_eq!(v["state"], "open", "accepted, but not merged yet");
+    assert_eq!(v["accepted_candidate"], "c1");
+
+    // A new revision is published as `c2`: the verdict on `c1` is none on it.
+    open_publication(&h, "p2", "c2");
+    let now = h.store.work_get(&item.id).unwrap().unwrap();
+    assert!(!now.accepted(), "a new candidate inherits no verdict");
+    let (status, v) = operator(
+        "POST",
+        format!("/api/work/{}/accept", item.id),
+        Some(json!({ "candidate": "c1" })),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::CONFLICT, "{v}");
+
+    // It merges: the look at the earlier publication says nothing of `c2`,
+    // and the one at `c2` leaves the item open, waiting on the operator.
+    set(&forge, false, "closed", true, 0, "success");
+    tracon::follow::tick(&h.tools).await;
+    let merged = h.store.work_get(&item.id).unwrap().unwrap();
+    assert_eq!(merged.state, "open", "it waits for acceptance");
+    assert_eq!(merged.change_state.as_deref(), Some("merged"));
+    assert_eq!(
+        merged.landing(),
+        Some(tracon_sync::work::Landing::Acceptance)
+    );
+    let (_, view) = operator("GET", format!("/api/work/{}/continuation", item.id), None).await;
+    assert_eq!(view["actions"]["accept"], "c2", "{view}");
+    assert_eq!(view["next"]["kind"], "accept", "{view}");
+
+    let (status, v) = operator(
+        "POST",
+        format!("/api/work/{}/accept", item.id),
+        Some(json!({ "candidate": "c2" })),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{v}");
+    assert_eq!(v["state"], "closed", "{v}");
+    let (_, view) = operator("GET", format!("/api/work/{}/continuation", item.id), None).await;
+    assert_eq!(view["actions"]["accept"], Value::Null, "{view}");
+    assert_eq!(view["next"]["kind"], "done", "{view}");
+}

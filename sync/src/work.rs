@@ -13,6 +13,21 @@ use sha2::{Digest, Sha256};
 pub const OPEN: &str = "open";
 pub const CLOSED: &str = "closed";
 
+/// How an item with a published change ends: when the change merges
+/// (`merge`, every item's default), or only once the operator has accepted
+/// the candidate that merged (`operator`).
+pub const ACCEPT_ON_MERGE: &str = "merge";
+pub const ACCEPT_BY_OPERATOR: &str = "operator";
+
+/// Where an item's published change stands on its forge.
+pub const CHANGE_PUBLISHED: &str = "published";
+pub const CHANGE_MERGED: &str = "merged";
+pub const CHANGE_CLOSED: &str = "closed";
+
+fn accept_on_merge() -> String {
+    ACCEPT_ON_MERGE.into()
+}
+
 /// A ledger row as both sides read it. `deps` are the ids this item waits on.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WorkItem {
@@ -33,8 +48,100 @@ pub struct WorkItem {
     pub discovered_by_lane: Option<String>,
     pub phase_plan_slug: Option<String>,
     pub closed_by_session: Option<String>,
+    /// `merge` (the default) or `operator`: whether the item closes when its
+    /// change merges, or waits for the operator to accept it.
+    #[serde(default = "accept_on_merge")]
+    pub acceptance: String,
+    /// The change the item's work was last published as, when it was.
+    #[serde(default)]
+    pub change_url: Option<String>,
+    /// The candidate that change carries: what a merge and an acceptance are
+    /// of. A new publication replaces it, and with it any earlier verdict.
+    #[serde(default)]
+    pub change_candidate: Option<String>,
+    /// `published`, `merged` or `closed` (without merging), as the node that
+    /// follows the change last saw it.
+    #[serde(default)]
+    pub change_state: Option<String>,
+    /// The candidate the operator accepted. It counts only while it is
+    /// still `change_candidate`.
+    #[serde(default)]
+    pub accepted_candidate: Option<String>,
     pub created_ms: i64,
     pub updated_ms: i64,
+}
+
+impl Default for WorkItem {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            channel: String::new(),
+            project_id: None,
+            title: String::new(),
+            body: String::new(),
+            state: OPEN.into(),
+            priority: 0,
+            deps: Vec::new(),
+            discovered_from: None,
+            discovered_by_session: None,
+            discovered_by_lane: None,
+            phase_plan_slug: None,
+            closed_by_session: None,
+            acceptance: accept_on_merge(),
+            change_url: None,
+            change_candidate: None,
+            change_state: None,
+            accepted_candidate: None,
+            created_ms: 0,
+            updated_ms: 0,
+        }
+    }
+}
+
+/// What an open item with a published change waits on before it closes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Landing {
+    /// Published, not merged yet.
+    Merge,
+    /// Merged, and the operator has not accepted the candidate that merged.
+    Acceptance,
+    /// Closed on the forge without merging.
+    Abandoned,
+}
+
+impl WorkItem {
+    /// Whether the item waits for the operator's acceptance once merged.
+    pub fn needs_acceptance(&self) -> bool {
+        self.acceptance == ACCEPT_BY_OPERATOR
+    }
+
+    /// Whether the operator accepted the candidate the item's change carries
+    /// now: an acceptance of an earlier candidate is no verdict on this one.
+    pub fn accepted(&self) -> bool {
+        self.accepted_candidate.is_some() && self.accepted_candidate == self.change_candidate
+    }
+
+    /// Whether the item's work is done: its change merged, and accepted
+    /// when the item asks for that.
+    pub fn landed(&self) -> bool {
+        self.change_state.as_deref() == Some(CHANGE_MERGED)
+            && (!self.needs_acceptance() || self.accepted())
+    }
+
+    /// What an open item with a published change waits on, or `None` for a
+    /// closed item or one with nothing published.
+    pub fn landing(&self) -> Option<Landing> {
+        if self.state == CLOSED || self.change_url.is_none() {
+            return None;
+        }
+        match self.change_state.as_deref() {
+            Some(CHANGE_MERGED) if !self.landed() => Some(Landing::Acceptance),
+            Some(CHANGE_MERGED) => None,
+            Some(CHANGE_CLOSED) => Some(Landing::Abandoned),
+            _ => Some(Landing::Merge),
+        }
+    }
 }
 
 /// `sha256("tracon/work-item" ‖ 0x1f ‖ channel ‖ 0x1f ‖ project ‖ 0x1f ‖ site ‖
@@ -221,7 +328,40 @@ mod tests {
             closed_by_session: None,
             created_ms,
             updated_ms: created_ms,
+            ..WorkItem::default()
         }
+    }
+
+    #[test]
+    fn an_item_lands_on_merge_unless_it_waits_for_acceptance_of_that_candidate() {
+        let mut w = item("a", &[], 0, 1);
+        assert_eq!(w.landing(), None, "nothing published");
+        w.change_url = Some("https://forge/pr/1".into());
+        w.change_candidate = Some("c1".into());
+        w.change_state = Some(CHANGE_PUBLISHED.into());
+        assert_eq!(w.landing(), Some(Landing::Merge));
+        assert!(!w.landed());
+        w.change_state = Some(CHANGE_MERGED.into());
+        assert!(w.landed(), "a plain item ends at merge");
+        assert_eq!(w.landing(), None);
+
+        w.acceptance = ACCEPT_BY_OPERATOR.into();
+        assert!(!w.landed());
+        assert_eq!(w.landing(), Some(Landing::Acceptance));
+        w.accepted_candidate = Some("c1".into());
+        assert!(w.landed());
+        // A new candidate inherits no verdict.
+        w.change_candidate = Some("c2".into());
+        w.change_state = Some(CHANGE_PUBLISHED.into());
+        assert!(!w.accepted());
+        assert_eq!(w.landing(), Some(Landing::Merge));
+        w.change_state = Some(CHANGE_MERGED.into());
+        assert_eq!(w.landing(), Some(Landing::Acceptance));
+
+        w.change_state = Some(CHANGE_CLOSED.into());
+        assert_eq!(w.landing(), Some(Landing::Abandoned));
+        w.state = CLOSED.into();
+        assert_eq!(w.landing(), None);
     }
 
     #[test]

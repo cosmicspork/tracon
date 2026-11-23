@@ -495,6 +495,8 @@ export const api = {
     call<{ abandoned: boolean }>('POST', '/api/continuation/abandon', body),
   /** Close the task: the item closes and any session holding it ends. The operator's call alone. */
   closeTask: (id: string) => call<WorkItem>('POST', `/api/work/${id}/close`),
+  /** Accept the task's published change as the candidate judged; refused once a newer one replaced it. */
+  acceptTask: (id: string, candidate: string) => call<WorkItem>('POST', `/api/work/${id}/accept`, { candidate }),
   /** One prompt: the work item and the session that starts on it. */
   compose: (c: {
     channel: string
@@ -1075,7 +1077,15 @@ export const api = {
   /** Only the fields given change; `project_id: null` takes the item out of its project. */
   putWork: (
     id: string,
-    patch: { title?: string; body?: string; deps?: string[]; priority?: number; state?: 'open' | 'closed'; project_id?: string | null },
+    patch: {
+      title?: string
+      body?: string
+      deps?: string[]
+      priority?: number
+      state?: 'open' | 'closed'
+      project_id?: string | null
+      acceptance?: 'merge' | 'operator'
+    },
   ) =>
     call<WorkItem>('PUT', `/api/work/${id}`, patch),
   deleteWork: (id: string) => call<void>('DELETE', `/api/work/${id}`),

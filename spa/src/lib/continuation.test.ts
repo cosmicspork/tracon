@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { generatedName } from './names'
-import { attemptState, carries, closeOffer, verbs, workLinks } from './continuation'
+import { acceptOffer, attemptState, carries, closeOffer, verbs, workLinks } from './continuation'
 import type { Continuation, ContinuationAttempt } from './types'
 
 const attempt = (over: Partial<ContinuationAttempt>): ContinuationAttempt => ({
@@ -134,4 +134,23 @@ test('closing the task is offered while it is open, prominently once its request
   })
   expect(closeOffer({ ...base, follow: null })).toEqual({ prominent: false, text: null })
   expect(closeOffer({ ...base, actions: { ...base.actions, close: false } })).toBe(null)
+})
+
+test('accepting is offered for the candidate shown, prominently once its change merged', () => {
+  const base = {
+    next: { kind: 'merge', text: 'PR #149 is open · merge it', session_id: 's' },
+    actions: { continue_from: 's', abandon: true, close: true, accept: 'c1' },
+    follow: { url: 'u', label: 'PR #149', state: 'open', failed: [], new_comments: 0, changes_requested: false },
+  } as unknown as Continuation
+  expect(acceptOffer(base)).toEqual({ candidate: 'c1', prominent: false, text: 'Accepting closes the task once its change merges' })
+  expect(
+    acceptOffer({
+      ...base,
+      next: { kind: 'accept', text: 'PR #149 merged · accept it to close the task', session_id: 's' },
+      follow: { ...base.follow!, state: 'merged' },
+    }),
+  ).toEqual({ candidate: 'c1', prominent: true, text: 'PR #149 merged · accept it to close the task' })
+  // A task that ends at merge, or one already accepted, has nothing to accept; nor does an older node.
+  expect(acceptOffer({ ...base, actions: { ...base.actions, accept: null } })).toBe(null)
+  expect(acceptOffer({ ...base, actions: { continue_from: 's', abandon: true, close: true } })).toBe(null)
 })

@@ -9,12 +9,12 @@
   // The three verbs: continue (carry on from the last attempt's workspace),
   // change approach (the same, with the operator's new direction handed to the
   // next attempt), abandon (close the item, or put a plain lineage away). Once
-  // the followed request is merged, closing the task is the next action, and
-  // it is offered here first.
+  // the followed request is merged, the task closes on its own; a task set to
+  // need acceptance offers Accept instead, here first.
   import { api } from '../lib/api'
   import Name from './Name.svelte'
   import { autogrow } from '../lib/autogrow'
-  import { closeOffer, verbs, workLinks } from '../lib/continuation'
+  import { acceptOffer, closeOffer, verbs, workLinks } from '../lib/continuation'
   import { router } from '../lib/router.svelte'
   import type { Continuation } from '../lib/types'
 
@@ -60,6 +60,9 @@
 
   const can = $derived(view ? verbs(view) : { continue: false, changeApproach: false, abandon: false })
   const closing = $derived(view?.kind === 'item' && view.next.kind === 'close' ? closeOffer(view) : null)
+  // A task set to need acceptance offers it for the candidate shown, and
+  // first of all once that change has merged.
+  const accepting = $derived(view?.kind === 'item' ? acceptOffer(view) : null)
 
   async function act(run: () => Promise<void>) {
     if (busy) return
@@ -89,6 +92,16 @@
     const id = view.id
     return act(async () => {
       await api.closeTask(id)
+      await load()
+      onchange?.()
+    })
+  }
+  function accept() {
+    if (!view || !accepting) return
+    const id = view.id
+    const candidate = accepting.candidate
+    return act(async () => {
+      await api.acceptTask(id, candidate)
       await load()
       onchange?.()
     })
@@ -128,7 +141,7 @@
       </nav>
     {/if}
 
-    {#if actions || closing}
+    {#if actions || closing || accepting?.prominent}
       <div class="next {view.next.kind}">
         <span class="h5">Next</span>
         <span class="t">{view.next.text}</span>
@@ -142,13 +155,16 @@
       <div class="row"><span class="h5">In the way</span><span>{view.blockers.join(' · ')}</span></div>
     {/if}
 
-    {#if closing || (actions && (can.continue || can.changeApproach || can.abandon))}
+    {#if closing || accepting || (actions && (can.continue || can.changeApproach || can.abandon))}
       <div class="verbs">
+        {#if accepting}
+          <button class="btn" class:p={accepting.prominent} disabled={busy} onclick={accept} title={accepting.text}>Accept</button>
+        {/if}
         {#if closing}
           <button class="btn p" disabled={busy} onclick={closeTask}>Close task</button>
         {/if}
         {#if actions && can.continue}
-          <button class="btn" class:p={!closing} disabled={busy} onclick={() => carryOn(false)}>Continue</button>
+          <button class="btn" class:p={!closing && !accepting?.prominent} disabled={busy} onclick={() => carryOn(false)}>Continue</button>
         {/if}
         {#if actions && can.changeApproach}
           <button class="btn" class:p={!can.continue} disabled={busy} onclick={() => (mode = mode === 'approach' ? '' : 'approach')}

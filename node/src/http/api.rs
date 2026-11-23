@@ -2575,6 +2575,27 @@ pub async fn close_task(
     Ok(Json(json!(item)))
 }
 
+#[derive(Deserialize, Default)]
+pub struct AcceptBody {
+    /// The candidate the operator judged. One the task no longer carries is
+    /// refused: a verdict on it is none on what is published now.
+    #[serde(default)]
+    candidate: Option<String>,
+}
+
+/// Accept the task's published change, as the candidate the operator
+/// judged. A task set to need acceptance closes once that candidate has
+/// merged; accepted before the merge, it closes when the merge lands.
+pub async fn accept_task(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    body: Option<Json<AcceptBody>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    let item = crate::continuation::accept_task(&s.manager, &id, body.candidate.as_deref()).await?;
+    Ok(Json(json!(item)))
+}
+
 #[derive(Deserialize)]
 pub struct AbandonBody {
     #[serde(default)]
@@ -6095,7 +6116,8 @@ pub struct WorkQuery {
     pub channel: Option<String>,
     /// A project's id, or `none` for items that belong to no project.
     pub project_id: Option<String>,
-    /// `ready`, `blocked`, `in_session`, `open` (all but closed), or
+    /// `ready`, `blocked`, `in_session`, `published` (open, its change
+    /// waiting on a merge or an acceptance), `open` (all but closed), or
     /// `closed`; default all.
     pub state: Option<String>,
     /// Words every item must contain (`corpus::work::matches`).
@@ -6280,7 +6302,8 @@ pub async fn delete_work(
 pub(super) fn work_err(e: crate::corpus::work::WorkError) -> ApiError {
     use crate::corpus::work::WorkError::*;
     match e {
-        Title => ApiError(StatusCode::BAD_REQUEST, e.to_string()),
+        Title | Acceptance(_) => ApiError(StatusCode::BAD_REQUEST, e.to_string()),
+        Refused(_) => ApiError(StatusCode::CONFLICT, e.to_string()),
         Missing(_) => ApiError(StatusCode::NOT_FOUND, e.to_string()),
         Store(e) => ApiError::from(e),
     }

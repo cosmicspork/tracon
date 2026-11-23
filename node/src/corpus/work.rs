@@ -3,7 +3,10 @@
 //! to the mesh the same way a document is.
 
 use serde_json::Value;
-use tracon_sync::work::{item_id, Readiness, WorkItem, CLOSED, OPEN};
+use tracon_sync::work::{
+    item_id, Landing, Readiness, WorkItem, ACCEPT_BY_OPERATOR, ACCEPT_ON_MERGE, CHANGE_CLOSED,
+    CHANGE_MERGED, CHANGE_PUBLISHED, CLOSED, OPEN,
+};
 use tracon_sync::ChangeOp;
 
 use crate::store::{now_ms, work_change_row, Store, StoreError, WorkView};
@@ -26,6 +29,10 @@ pub struct NewWork {
 pub enum WorkError {
     #[error("title is required")]
     Title,
+    #[error("acceptance {0:?} is not merge or operator")]
+    Acceptance(String),
+    #[error("{0}")]
+    Refused(String),
     #[error("no work item {0}")]
     Missing(String),
     #[error("{0}")]
@@ -66,6 +73,7 @@ pub fn create(store: &Store, bus: &Bus, site: &str, w: NewWork) -> Result<WorkIt
         closed_by_session: None,
         created_ms: now,
         updated_ms: now,
+        ..Default::default()
     };
     put(store, bus, site, &item)?;
     Ok(item)
@@ -84,6 +92,9 @@ pub struct Patch {
     /// The id stays what it was minted as; it is a name, not an address.
     #[serde(default, deserialize_with = "present")]
     pub project_id: Option<Option<String>>,
+    /// `merge` or `operator`: whether the item closes when its change
+    /// merges, or waits for the operator to accept it.
+    pub acceptance: Option<String>,
 }
 
 /// A field that was sent, `null` included, as `Some`; one left out stays
@@ -129,6 +140,13 @@ pub fn update(
     if let Some(project) = patch.project_id {
         item.project_id = project.filter(|p| !p.trim().is_empty());
     }
+    if let Some(acceptance) = patch.acceptance {
+        let acceptance = acceptance.trim();
+        if acceptance != ACCEPT_ON_MERGE && acceptance != ACCEPT_BY_OPERATOR {
+            return Err(WorkError::Acceptance(acceptance.to_string()));
+        }
+        item.acceptance = acceptance.to_string();
+    }
     match patch.state.as_deref() {
         Some(CLOSED) if item.state != CLOSED => {
             item.state = CLOSED.into();
@@ -173,6 +191,7 @@ fn name_matches(name: &str, word: &str) -> bool {
 
 /// The ledger in ready order, narrowed: `project` is a project id or `none`
 /// for items with no project; `state` is `ready`, `blocked`, `in_session`,
+/// `published` (open, its change waiting on a merge or an acceptance),
 /// `open` (everything not closed), `closed`, or anything else for all;
 /// `query` keeps the items that `matches` it.
 pub fn select(
@@ -191,6 +210,9 @@ pub fn select(
             Some("ready") => v.readiness == Readiness::Ready && v.session_id.is_none(),
             Some("blocked") => matches!(v.readiness, Readiness::Blocked { .. }),
             Some("in_session") => v.readiness != Readiness::Closed && v.session_id.is_some(),
+            Some("published") => {
+                matches!(v.item.landing(), Some(Landing::Merge | Landing::Acceptance))
+            }
             Some("open") => v.readiness != Readiness::Closed,
             Some("closed") => v.readiness == Readiness::Closed,
             _ => true,
@@ -292,6 +314,102 @@ pub fn close(
     )
 }
 
+/// Record that the item's work was published as `url`, carrying `candidate`.
+/// Publishing is not finishing: the item stays open until the change merges
+/// (and, when it asks for that, the operator accepts it). A different
+/// candidate replaces the one an earlier verdict judged, so that verdict no
+/// longer counts; the same candidate published again keeps it.
+pub fn record_published(
+    store: &Store,
+    bus: &Bus,
+    site: &str,
+    id: &str,
+    url: &str,
+    candidate: &str,
+) -> Result<WorkItem, WorkError> {
+    let mut item = store
+        .work_get(id)?
+        .ok_or_else(|| WorkError::Missing(id.into()))?;
+    let same = item.change_url.as_deref() == Some(url)
+        && item.change_candidate.as_deref() == Some(candidate)
+        && item.change_state.as_deref() == Some(CHANGE_PUBLISHED);
+    if same || item.state == CLOSED {
+        return Ok(item);
+    }
+    item.change_url = Some(url.to_string());
+    item.change_candidate = Some(candidate.to_string());
+    item.change_state = Some(CHANGE_PUBLISHED.into());
+    item.updated_ms = now_ms();
+    put(store, bus, site, &item)?;
+    Ok(item)
+}
+
+/// Record where the item's change stands on its forge (`published`, i.e.
+/// open, `merged`, or `closed` without merging), as following the change of
+/// `candidate` saw it. A look at a change of another candidate (an earlier
+/// publication of the same work, still followed) says nothing about this
+/// one, and `None` is returned; so is an unchanged state.
+pub fn record_change_state(
+    store: &Store,
+    bus: &Bus,
+    site: &str,
+    id: &str,
+    candidate: &str,
+    state: &str,
+) -> Result<Option<WorkItem>, WorkError> {
+    let Some(mut item) = store.work_get(id)? else {
+        return Ok(None);
+    };
+    if item.change_candidate.as_deref() != Some(candidate)
+        || item.change_state.as_deref() == Some(state)
+    {
+        return Ok(None);
+    }
+    if ![CHANGE_PUBLISHED, CHANGE_MERGED, CHANGE_CLOSED].contains(&state) {
+        return Ok(None);
+    }
+    item.change_state = Some(state.to_string());
+    item.updated_ms = now_ms();
+    put(store, bus, site, &item)?;
+    Ok(Some(item))
+}
+
+/// The operator's acceptance of the item's change, bound to the candidate
+/// they judged. `candidate` is the one they were shown; one the item no
+/// longer carries is refused, since a verdict on it is none on what is
+/// published now. With no `candidate`, the current one is accepted.
+pub fn accept(
+    store: &Store,
+    bus: &Bus,
+    site: &str,
+    id: &str,
+    candidate: Option<&str>,
+) -> Result<WorkItem, WorkError> {
+    let mut item = store
+        .work_get(id)?
+        .ok_or_else(|| WorkError::Missing(id.into()))?;
+    if item.state == CLOSED {
+        return Err(WorkError::Refused("the task is already closed".into()));
+    }
+    let Some(current) = item.change_candidate.clone() else {
+        return Err(WorkError::Refused(
+            "nothing of this task is published yet, so there is no change to accept".into(),
+        ));
+    };
+    if let Some(judged) = candidate.filter(|c| *c != current) {
+        return Err(WorkError::Refused(format!(
+            "the change was resubmitted since {judged} was judged; it now carries {current}, \
+             which has no verdict yet"
+        )));
+    }
+    if item.accepted_candidate.as_deref() != Some(current.as_str()) {
+        item.accepted_candidate = Some(current);
+        item.updated_ms = now_ms();
+        put(store, bus, site, &item)?;
+    }
+    Ok(item)
+}
+
 /// The document a plan session writes for an item: `plan-<id prefix>`.
 pub fn plan_slug(item_id: &str) -> String {
     format!("plan-{}", &item_id[..12.min(item_id.len())])
@@ -369,6 +487,7 @@ mod search_tests {
             closed_by_session: None,
             created_ms: 0,
             updated_ms: 0,
+            ..Default::default()
         };
         let name = crate::names::task(&id);
         let words: Vec<&str> = name.split('-').collect();

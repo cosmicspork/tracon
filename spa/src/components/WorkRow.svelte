@@ -5,7 +5,7 @@
   import { store } from '../lib/store.svelte'
   import type { PriorityLevel, WorkView } from '../lib/types'
   import { nameOf } from '../lib/names'
-  import { blockersLine, isTopPriority, priorityLabel, taskName, workLabel, workState } from '../lib/work'
+  import { blockersLine, isTopPriority, landingLine, priorityLabel, taskName, workLabel, workState } from '../lib/work'
 
   let {
     item,
@@ -28,12 +28,22 @@
     if (state === 'blocked' && item.readiness.state === 'blocked') bits.push(blockersLine(item.readiness.by, titles))
     if (state === 'ready') bits.push(item.phase_plan_slug ? 'plan written' : 'no plan yet')
     if (state === 'insession' && holder) bits.push(`${holder.phase} on ${nodeLabel(store.nodes, holder.node_id)}`)
+    const landed = landingLine(item)
+    if (landed) bits.push(landed)
     if (state === 'closed' && item.closed_by_session) bits.push(`closed by ${nameOf('session', item.closed_by_session)}`)
     if (item.discovered_from) bits.push(`discovered from ${taskName(item.discovered_from)}`)
     return bits.join(' · ')
   })
   const act = $derived(
-    state === 'ready' ? (item.phase_plan_slug ? 'Plan · Execute' : 'Plan') : state === 'insession' ? 'Session' : 'Open',
+    state === 'ready'
+      ? item.phase_plan_slug
+        ? 'Plan · Execute'
+        : 'Plan'
+      : state === 'insession'
+        ? 'Session'
+        : state === 'published' && item.change_state === 'merged'
+          ? 'Accept'
+          : 'Open',
   )
 </script>
 
@@ -93,6 +103,12 @@
   }
   .row.insession .t em {
     color: var(--wait);
+  }
+  .row.published .bar {
+    background: var(--acc);
+  }
+  .row.published .t em {
+    color: var(--acc);
   }
   .row.closed .bar {
     background: var(--ok);

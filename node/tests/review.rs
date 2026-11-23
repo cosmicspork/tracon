@@ -3816,7 +3816,8 @@ async fn the_page_shows_the_trigger_a_revision_was_submitted_under() {
 }
 
 /// Publishing is not finishing: the item stays open through CI and review,
-/// so a CI failure or a comment has a session to come back to, until the
+/// so a CI failure or a comment has a session to come back to, marked
+/// published with the candidate it carries, until its change merges or the
 /// operator closes the task.
 #[tokio::test]
 async fn publishing_leaves_the_item_open_until_the_operator_closes_the_task() {
@@ -3858,6 +3859,18 @@ async fn publishing_leaves_the_item_open_until_the_operator_closes_the_task() {
     let open = f.store.work_get(&item.id).unwrap().unwrap();
     assert_eq!(open.state, "open");
     assert!(!f.event_kinds("s1").contains(&"work_closed".to_string()));
+    // It reads as published, not merged, bound to the reviewed candidate.
+    let reviewed = f.store.get_review(&id).unwrap().unwrap();
+    assert_eq!(open.change_state.as_deref(), Some("published"));
+    assert_eq!(open.change_url, reviewed.publish_result);
+    assert_eq!(
+        open.change_candidate,
+        Some(tracon::store::candidate_id(
+            &reviewed.head_sha,
+            &reviewed.channel
+        ))
+    );
+    assert_eq!(open.landing(), Some(tracon_sync::work::Landing::Merge));
     // The session says where its work went, not only the review.
     assert!(f.event_kinds("s1").contains(&"published".to_string()));
     let published = f.store.session_publications("s1").unwrap();
