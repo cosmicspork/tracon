@@ -94,8 +94,11 @@ describe('verdict availability', () => {
   })
 
   test('a verdict that sends a reason says it needs one', () => {
-    expect(unavailable('revise', ready)).toBe('say what should change')
+    expect(unavailable('revise', ready)).toBe('say what should change, or open a thread')
     expect(unavailable('reject', { ...ready, reason: '   ' })).toBe('say why you are rejecting it')
+    // Unresolved threads say what to change on their own; a rejection still needs its reason.
+    expect(unavailable('revise', { ...ready, openThreads: 2 })).toBeNull()
+    expect(unavailable('reject', { ...ready, openThreads: 2 })).toBe('say why you are rejecting it')
     expect(unavailable('revise', { ...ready, reason: 'rename it' })).toBeNull()
     // A stale review can still be sent back: that is how it gets resubmitted.
     expect(unavailable('revise', { ...ready, reason: 'x', stale: ['a'] })).toBeNull()

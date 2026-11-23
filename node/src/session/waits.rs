@@ -470,7 +470,7 @@ fn collect(
         let decided = if report {
             review::decided_report_view(&row)
         } else {
-            review::decided_review_view(&row)
+            review::decided_review_view(store, &row)
         };
         // A revision whose checks are running is the checks' wait.
         if decided.is_some() && running.contains(&row.id) {

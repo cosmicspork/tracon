@@ -21,7 +21,7 @@ const harness = `
     import ReviewDiff from ${JSON.stringify(`${here}ReviewDiff.svelte`)}
     import { ViewedFiles } from ${JSON.stringify(`${here}../lib/viewedFiles.svelte.ts`)}
     import { splitDiff } from ${JSON.stringify(`${here}../lib/diff.ts`)}
-    const { diff, collapsed, contexts, revision } = window.reviewDiff
+    const { diff, collapsed, contexts, revision, threads } = window.reviewDiff
     // The reader's viewed marks, as the review screen keeps them, when asked for.
     const viewed = revision ? new ViewedFiles('rv', revision, splitDiff(diff)) : undefined
     // What the node's /context would answer, by path: both sides, or why not.
@@ -33,9 +33,13 @@ const harness = `
           return c
         }
       : undefined
+    window.picked = []
+    // With threads, a pick is recorded and README.md's new line 2 carries one.
+    const onpick = threads ? (line) => window.picked.push(line) : undefined
+    const marks = threads ? (line) => (line.path === 'README.md' && line.new === 2 ? 1 : 0) : undefined
   </script>
   <textarea id="reason"></textarea>
-  <ReviewDiff {diff} {collapsed} {context} {viewed} />
+  <ReviewDiff {diff} {collapsed} {context} {viewed} {onpick} {marks} />
 `
 const entry = `
   import { mount } from 'svelte'
@@ -142,10 +146,18 @@ const CONTEXTS = {
   'src/moved.rs': { base: null, head: gapsHead.map((l) => `${l} // later`).join('\n') },
 }
 
-type Opts = { width?: number; collapsed?: boolean; init?: string; diff?: string; contexts?: object; revision?: string }
+type Opts = {
+  width?: number
+  collapsed?: boolean
+  init?: string
+  diff?: string
+  contexts?: object
+  revision?: string
+  threads?: boolean
+}
 
 async function open(
-  { width = 1280, collapsed = false, init = '', diff = DIFF, contexts, revision }: Opts = {},
+  { width = 1280, collapsed = false, init = '', diff = DIFF, contexts, revision, threads = false }: Opts = {},
   page?: Page,
 ): Promise<Page> {
   page ??= await browser!.newPage({ viewport: { width, height: 800 } })
@@ -156,7 +168,7 @@ async function open(
   const html =
     `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>${css}</style>` +
     `<body style="margin:0;padding:0 16px"><div id="app"></div>` +
-    `<script>${init};window.reviewDiff = ${JSON.stringify({ diff, collapsed, contexts, revision })}</script><script type="module">${js}</script></body>`
+    `<script>${init};window.reviewDiff = ${JSON.stringify({ diff, collapsed, contexts, revision, threads })}</script><script type="module">${js}</script></body>`
   await page.route('http://tracon.test/**', (route) => route.fulfill({ contentType: 'text/html', body: html }))
   await page.goto('http://tracon.test/')
   await page.waitForSelector('.review-diff', { timeout: 5000 }).catch((e) => {
@@ -666,5 +678,119 @@ test.skipIf(!browser)('stepping reaches changes in files not drawn yet', async (
   })
   expect(Number(at!.slice(5, 7))).toBeGreaterThanOrEqual(8)
   expect(await page.locator(`details[data-path="${at}"] .cm-editor`).count()).toBeGreaterThan(0)
+  await page.close()
+})
+
+/** Click the thread button of a row reading `text` in a file, and return what was picked. */
+async function pick(page: Page, path: string, text: string, editor = 0) {
+  return page.evaluate(
+    ([path, text, editor]) => {
+      const ed = document.querySelectorAll(`details[data-path="${path}"] .cm-editor`)[editor as number]
+      const rows = [...ed.querySelectorAll('.cm-line, .cm-deletedLine')] as HTMLElement[]
+      const row = rows.find((l) => l.textContent === text)
+      if (!row) throw new Error(`no row ${text}`)
+      const mid = row.getBoundingClientRect().top + row.getBoundingClientRect().height / 2
+      const button = [...ed.querySelectorAll('.cm-threadPick')].find((b) => {
+        const r = b.getBoundingClientRect()
+        return r.top <= mid && r.bottom >= mid
+      }) as HTMLButtonElement | undefined
+      if (!button) throw new Error(`no button beside ${text}`)
+      button.click()
+      const w = window as unknown as { picked: { path: string; kind: string; old: number | null; new: number | null }[] }
+      const l = w.picked.at(-1)!
+      return { path: l.path, kind: l.kind, old: l.old, new: l.new, label: button.textContent }
+    },
+    [path, text, editor] as const,
+  )
+}
+
+test.skipIf(!browser)('side by side, a line picked on either side is the line the node numbers, and marked lines read so', async () => {
+  const page = await open({ threads: true, init: "localStorage.setItem('tracon-diff-mode','split')" })
+  await ready(page, 'README.md')
+  expect(await pick(page, 'README.md', 'A gateway.', 0)).toEqual({ path: 'README.md', kind: 'del', old: 2, new: null, label: '2' })
+  expect(await pick(page, 'README.md', 'A gateway for brokered calls.', 1)).toEqual({
+    path: 'README.md',
+    kind: 'add',
+    old: null,
+    new: 2,
+    label: '2',
+  })
+  // Context picked on the before side is still the same line, on both sides.
+  expect(await pick(page, 'README.md', 'More below.', 0)).toMatchObject({ kind: 'ctx', old: 3, new: 3 })
+  // Only the after side's line 2 carries a thread; the before side's line 2 is another line.
+  const marked = await page.evaluate(() =>
+    [...document.querySelectorAll('details[data-path="README.md"] .cm-threadMarked')].map((b) => (b as HTMLElement).dataset.new),
+  )
+  expect(marked).toEqual(['2'])
+  await page.close()
+})
+
+test.skipIf(!browser)('unified, removed lines shown above their replacement can be picked too', async () => {
+  const page = await open({ threads: true, init: "localStorage.setItem('tracon-diff-mode','unified')" })
+  await ready(page, 'README.md')
+  expect(await pick(page, 'README.md', 'A gateway.')).toEqual({ path: 'README.md', kind: 'del', old: 2, new: null, label: '2' })
+  expect(await pick(page, 'README.md', 'A gateway for brokered calls.')).toMatchObject({ kind: 'add', new: 2 })
+  expect(await pick(page, 'README.md', 'More below.')).toMatchObject({ kind: 'ctx', old: 3, new: 3, label: '3' })
+  // Further down a long file, after removals and additions, the numbers still hold.
+  await ready(page, 'src/lib.rs')
+  expect(await pick(page, 'src/lib.rs', '    let value_6 = compute(6);')).toMatchObject({ kind: 'del', old: 7, new: null })
+  expect(await pick(page, 'src/lib.rs', '    let value_7 = compute(7);')).toMatchObject({ kind: 'ctx', old: 8, new: 9 })
+  await page.close()
+})
+
+test.skipIf(!browser)('the line numbers are the thread buttons, and an opened gap is numbered but takes no thread', async () => {
+  const page = await open({ diff: GAPS, contexts: CONTEXTS, threads: true, init: "localStorage.setItem('tracon-diff-mode','split')" })
+  await ready(page, 'src/gaps.rs')
+  // One column of numbers per side, and each number of a line is its button.
+  const columns = () =>
+    page.evaluate(() =>
+      [...document.querySelectorAll('details[data-path="src/gaps.rs"] .cm-editor')].map((ed) => ({
+        gutters: ed.querySelectorAll('.cm-gutter:not(.cm-changeGutter)').length,
+        outside: [...ed.querySelectorAll('.cm-threadPick')].filter((b) => !b.closest('.cm-lineNo')).length,
+      })),
+    )
+  expect(await columns()).toEqual([
+    { gutters: 1, outside: 0 },
+    { gutters: 1, outside: 0 },
+  ])
+  expect(await pick(page, 'src/gaps.rs', 'let v_5 = 5 + 1;', 1)).toMatchObject({ kind: 'add', new: 5, label: '5' })
+
+  await page.locator('details[data-path="src/gaps.rs"] .cm-merge-b .cm-gapShow[data-gap="1"]').click()
+  await page.waitForFunction(() =>
+    [...document.querySelectorAll('details[data-path="src/gaps.rs"] .cm-merge-b .cm-line')].some((l) => l.textContent === 'let v_15 = 15;'),
+  )
+  await ready(page, 'src/gaps.rs')
+  // The diff's own lines still pick as the node numbers them, through the opened gap.
+  expect(await pick(page, 'src/gaps.rs', 'let v_8 = 8;', 1)).toMatchObject({ kind: 'ctx', old: 8, new: 8, label: '8' })
+  expect(await pick(page, 'src/gaps.rs', 'let v_30 = 30 + 1;', 1)).toMatchObject({ kind: 'add', new: 30, label: '30' })
+  // A line the gap opened reads its number, but the node would anchor nothing there.
+  const gapRow = await page.evaluate(() => {
+    const ed = document.querySelector('details[data-path="src/gaps.rs"] .cm-merge-b')!
+    const line = [...ed.querySelectorAll('.cm-line')].find((l) => l.textContent === 'let v_15 = 15;')!
+    const mid = line.getBoundingClientRect().top + line.getBoundingClientRect().height / 2
+    const g = [...ed.querySelectorAll('.cm-lineNo .cm-gutterElement')].find((e) => {
+      const r = e.getBoundingClientRect()
+      return r.top <= mid && r.bottom >= mid
+    })!
+    return { text: g.textContent, button: g.querySelector('button') !== null }
+  })
+  expect(gapRow).toEqual({ text: '15', button: false })
+
+  // Unified, the before and after columns are the pickers too.
+  await page.getByRole('radio', { name: 'Unified' }).click()
+  await ready(page, 'src/gaps.rs')
+  expect(await pick(page, 'src/gaps.rs', 'let v_30 = 30;')).toMatchObject({ kind: 'del', old: 30, label: '30' })
+  expect(
+    await page.evaluate(() =>
+      [...document.querySelectorAll('details[data-path="src/gaps.rs"] .cm-threadPick')].every((b) => b.closest('.cm-lineNo')),
+    ),
+  ).toBe(true)
+  await page.close()
+})
+
+test.skipIf(!browser)('without onpick there is no thread gutter', async () => {
+  const page = await open({ init: "localStorage.setItem('tracon-diff-mode','split')" })
+  await ready(page, 'README.md')
+  expect(await page.locator('.cm-threadPick').count()).toBe(0)
   await page.close()
 })

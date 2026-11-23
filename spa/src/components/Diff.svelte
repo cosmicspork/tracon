@@ -1,10 +1,28 @@
 <script lang="ts">
   import { classifyLines, splitDiff } from '../lib/diff'
+  import { numberLines, type Numbered } from '../lib/reviewThreads'
 
-  let { diff, perFile = false }: { diff: string; perFile?: boolean } = $props()
+  let {
+    diff,
+    perFile = false,
+    onpick,
+    marks,
+  }: {
+    diff: string
+    perFile?: boolean
+    /**
+     * Given, each numbered line gets a gutter button that calls it: how a
+     * review thread is started on a line. ReviewDiff passes it here while
+     * the merge view is loading or could not load; the merge view calls it
+     * with the same `Numbered` line.
+     */
+    onpick?: (line: Numbered) => void
+    /** How many threads a line carries, to mark it. */
+    marks?: (line: Numbered) => number
+  } = $props()
 
   const files = $derived(splitDiff(diff))
-  const whole = $derived(classifyLines(diff.split('\n')))
+  const whole = $derived(numberLines(classifyLines(diff.split('\n'))))
   /** The line each file starts on, by index, so a file list can scroll to it. */
   const starts = $derived.by(() => {
     const at = new Map<number, string>()
@@ -27,8 +45,8 @@
           <span class="stat">+{f.added} −{f.removed}</span>
         </summary>
         <div class="diff">
-          {#each classifyLines(f.lines) as line, i (i)}
-            <div class={line.kind}>{line.text || ' '}</div>
+          {#each numberLines(classifyLines(f.lines)) as line, i (i)}
+            <div class={line.kind}>{@render gutter(line)}{line.text || ' '}</div>
           {/each}
         </div>
       </details>
@@ -37,10 +55,28 @@
 {:else}
   <div class="diff whole">
     {#each whole as line, i (i)}
-      <div class={line.kind} data-path={starts.get(i)}>{line.text || ' '}</div>
+      <div class={line.kind} data-path={starts.get(i)}>{@render gutter(line)}{line.text || ' '}</div>
     {/each}
   </div>
 {/if}
+
+{#snippet gutter(line: Numbered)}
+  {#if onpick}
+    {@const n = line.new ?? line.old}
+    {@const marked = marks?.(line) ?? 0}
+    {#if n !== null}
+      <button
+        type="button"
+        class="gutter"
+        class:marked={marked > 0}
+        title={marked > 0 ? `${marked} thread${marked === 1 ? '' : 's'} here · add another` : 'Comment on this line'}
+        onclick={() => onpick(line)}>{n}</button
+      >
+    {:else}
+      <span class="gutter"></span>
+    {/if}
+  {/if}
+{/snippet}
 
 <style>
   .diff {
@@ -57,6 +93,26 @@
   .diff div {
     padding: 0 12px;
     white-space: pre;
+  }
+  .gutter {
+    display: inline-block;
+    width: 4ch;
+    margin-right: 8px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--dim);
+    font: inherit;
+    text-align: right;
+    cursor: pointer;
+  }
+  span.gutter {
+    cursor: default;
+  }
+  .gutter.marked {
+    color: var(--ink);
+    font-weight: 600;
+    text-decoration: underline;
   }
   .meta,
   .hunk {

@@ -113,6 +113,8 @@ pub const KINDS: &[(&str, &[&str])] = &[
             "review_revision",
             "review_revision_trigger",
             "review_session_revision",
+            "review_thread",
+            "review_thread_comment",
             "publication",
             "shown_work",
             "qa_deployment",

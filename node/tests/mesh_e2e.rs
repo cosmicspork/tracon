@@ -2811,3 +2811,130 @@ async fn a_peers_provider_sign_in_needs_an_admin_peer_and_a_confirmation() {
         "{v}"
     );
 }
+
+/// A peer's review threads are held by the node that owns the review: A's
+/// operator opens, replies to and resolves one through B, which anchors it on
+/// its own copy of the revision, and A reads B's threads back with the rest
+/// of the review's detail. B changes threads only on reviews it owns.
+#[tokio::test]
+async fn a_peers_review_threads_are_kept_by_the_node_that_holds_it() {
+    state::isolate();
+    let (a, b) = pair().await;
+    let (ai, bi) = (a.id.node_id(), b.id.node_id());
+    let id = uuid::Uuid::now_v7().to_string();
+    let review = tracon::store::ReviewRow {
+        state: "new".into(),
+        diff: "diff --git a/x.rs b/x.rs\n--- a/x.rs\n+++ b/x.rs\n@@ -0,0 +1,2 @@\n+one\n+two\n"
+            .into(),
+        ..held_review(&id, &bi)
+    };
+    let candidate = tracon::store::candidate_id(&review.head_sha, "personal");
+    b.store
+        .insert_candidate(&tracon::store::CandidateRow {
+            id: candidate.clone(),
+            head_sha: review.head_sha.clone(),
+            tree_sha: None,
+            channel: "personal".into(),
+            owner_session_id: None,
+            source_kind: "git".into(),
+            captured_ms: 1,
+            capture_json: "{}".into(),
+        })
+        .unwrap();
+    let revision = uuid::Uuid::now_v7().to_string();
+    b.store
+        .insert_review_with_revision(
+            &review,
+            &tracon::store::ReviewRevisionRow {
+                id: revision.clone(),
+                review_id: id.clone(),
+                candidate_id: candidate,
+                title: review.title.clone(),
+                body: review.body.clone(),
+                diff: review.diff.clone(),
+                files: review.files.clone(),
+                head_sha: review.head_sha.clone(),
+                context_json: "[]".into(),
+                requirements_work_item_id: None,
+                requirements_title: None,
+                requirements_body: None,
+                requirements_hash: None,
+                created_ms: 1,
+                intent_json: None,
+            },
+        )
+        .unwrap();
+    a.store.insert_review(&review).unwrap();
+
+    let (st, v) = call(
+        &a.app,
+        "POST",
+        &format!("/api/reviews/{id}/threads"),
+        Some(json!({ "kind": "line", "path": "x.rs", "start_line": 2, "body": "why two?" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let thread = v["threads"][0]["id"].as_str().unwrap().to_string();
+    assert_eq!(v["threads"][0]["revision_id"], revision.as_str(), "{v}");
+    assert_eq!(v["threads"][0]["lines"], "two");
+    assert_eq!(b.store.review_threads(&id).unwrap().len(), 1);
+    assert!(
+        a.store.review_threads(&id).unwrap().is_empty(),
+        "held by B alone"
+    );
+
+    let (st, v) = call(
+        &a.app,
+        "POST",
+        &format!("/api/reviews/{id}/threads/{thread}/replies"),
+        Some(json!({ "body": "and not three" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = call(
+        &a.app,
+        "POST",
+        &format!("/api/reviews/{id}/threads/{thread}/resolve"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["threads"][0]["state"], "resolved");
+
+    let (st, v) = call(&a.app, "GET", &format!("/api/reviews/{id}"), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["owner_detail"]["state"], "fetched", "{v}");
+    assert_eq!(v["threads"][0]["state"], "resolved", "{v}");
+    assert_eq!(v["threads"][0]["comments"].as_array().unwrap().len(), 2);
+
+    // B changes nothing on a review it does not own.
+    let other = uuid::Uuid::now_v7().to_string();
+    a.store.insert_review(&held_review(&other, &ai)).unwrap();
+    b.store.insert_review(&held_review(&other, &ai)).unwrap();
+    let refused = a
+        .client
+        .command(
+            &bi,
+            Command::ReviewThread {
+                review_id: other,
+                change: json!({ "op": "create", "kind": "general", "body": "x" }),
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+    assert!(
+        matches!(refused, Err(CommandError::Refused(_))),
+        "{refused:?}"
+    );
+
+    // Unreachable, nothing is changed here in its place.
+    a.store.set_reachable(&bi, false).unwrap();
+    let (st, _) = call(
+        &a.app,
+        "POST",
+        &format!("/api/reviews/{id}/threads/{thread}/reopen"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::GATEWAY_TIMEOUT);
+}

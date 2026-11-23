@@ -34,6 +34,10 @@
   // `context`, shown on request: the file is read whole, once, from what the
   // revision pinned, checked against the diff, and the gap written back into
   // the file's diff as context. When it cannot be read, each gap says why.
+  //
+  // Given `onpick`, a line's number starts a review thread on it, and `marks`
+  // marks the lines that carry threads; only lines of the diff itself, not
+  // those a gap opened, which the node would not anchor a thread to.
   import { tick, untrack } from 'svelte'
 
   import Diff from './Diff.svelte'
@@ -57,12 +61,15 @@
     type Expanded,
     type FileSides,
   } from '../lib/diffview'
+  import { inDiff, type Numbered } from '../lib/reviewThreads'
 
   let {
     diff,
     collapsed = false,
     context,
     viewed,
+    onpick,
+    marks,
   }: {
     diff: string
     collapsed?: boolean
@@ -70,6 +77,16 @@
     viewed?: ViewedFiles
     /** Read one file whole on both sides, as the revision pinned it; absent, gaps are only counted. */
     context?: (path: string) => Promise<Context>
+    /**
+     * Given, each line number of a file, in either mode, is a button that
+     * calls it with the line as the node numbers it: how a review thread is
+     * started on a line. Only for a diff of the revision itself, whose line
+     * numbers are that revision's. Lines a gap opened are not in that diff,
+     * so they keep a plain number.
+     */
+    onpick?: (line: Numbered) => void
+    /** How many threads a line carries, to mark it. */
+    marks?: (line: Numbered) => number
   } = $props()
 
   type MergeDiffInstance = {
@@ -95,6 +112,8 @@
     view: Expanded
     unavailable: string | null
     heavy: ReturnType<typeof heavy>
+    /** Which lines a thread can start on: those the diff itself shows, not those an opened gap adds. */
+    pickable?: (line: Numbered) => boolean
   }
   const memo = new Map<string, { file: DiffFile; ctx: unknown; open: ReadonlySet<number>; shown: Shown }>()
   function show(file: DiffFile): Shown {
@@ -110,6 +129,7 @@
       view,
       unavailable: ctx && 'why' in ctx ? ctx.why : null,
       heavy: hit?.file === file ? hit.shown.heavy : heavy(file),
+      pickable: open.size > 0 ? inDiff(fileSides(file)) : undefined,
     }
     memo.set(file.path, { file, ctx, open, shown })
     return shown
@@ -544,7 +564,7 @@
   {#if filter.trim() && shownCount === 0}
     <div class="empty">No file path contains “{filter.trim()}”.</div>
   {/if}
-  {#each files as { file, sides, view, unavailable, heavy: h } (file.path)}
+  {#each files as { file, sides, view, unavailable, heavy: h, pickable } (file.path)}
     {@const seen = viewed?.state(file.path) ?? 'unviewed'}
     {@const held = h !== null && !loaded.has(file.path)}
     <details
@@ -598,6 +618,9 @@
               tail={view.tail}
               {unavailable}
               onexpand={context ? (gap: number) => openGap(file, gap) : undefined}
+              {onpick}
+              {marks}
+              {pickable}
               bind:this={
                 () => views.get(file.path),
                 (v) => {
@@ -607,7 +630,7 @@
               }
             />
           {:else}
-            <Diff diff={file.lines.join('\n')} />
+            <Diff diff={file.lines.join('\n')} {onpick} {marks} />
           {/if}
         </div>
       {/if}

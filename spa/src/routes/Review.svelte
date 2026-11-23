@@ -3,6 +3,8 @@
   import Name from '../components/Name.svelte'
   import Diff from '../components/Diff.svelte'
   import ReviewDiff from '../components/ReviewDiff.svelte'
+  import ReviewThreads from '../components/ReviewThreads.svelte'
+  import { anchorAt, threadsOn, unresolvedCount, type Anchor, type Numbered, type ReviewThread } from '../lib/reviewThreads'
   import { splitDiff } from '../lib/diff'
   import { ViewedFiles } from '../lib/viewedFiles.svelte'
   import CommitMessage from '../components/CommitMessage.svelte'
@@ -99,6 +101,10 @@
   /** What became of the latest revision's reviewer, as the node last said. */
   let reviewerView = $state<ReviewerView | null>(null)
   let requirements = $state<PinnedRequirements | null>(null)
+  /** The operator's review threads, as the node holding the review reads them. */
+  let threads = $state<ReviewThread[]>([])
+  /** Where the next thread goes: the composer's, or a line picked in the diff. */
+  let threadAnchor = $state<Anchor>({ kind: 'general' })
   /** What changed since your last verdict, and which diff is showing. */
   let sinceReviewed = $state<SinceReviewed | null>(null)
   let diffView = $state<'since' | 'full'>('full')
@@ -217,6 +223,8 @@
         reviewerStarting = d.review_session_starting ?? false
         reviewerView = d.reviewer ?? null
         requirements = d.requirements
+        threads = d.threads ?? []
+        threadAnchor = { kind: 'general' }
         sinceReviewed = d.since_reviewed ?? null
         // A resubmission opens on what answered your feedback; the full diff
         // is one tap away.
@@ -521,6 +529,7 @@
     stale,
     reason,
     readiness,
+    openThreads: unresolvedCount(threads),
     opener: opening
       ? {
           required: true,
@@ -567,6 +576,35 @@
       ? new ViewedFiles(review.id, revision?.id ?? review.head_sha, diffFiles)
       : undefined,
   )
+  /** Why threads cannot be opened or changed here, or null when they can. */
+  const threadsBlocked = $derived(
+    closed
+      ? 'Decided: its threads stay as they were.'
+      : remoteOwner && ownerDetail?.state !== 'fetched'
+        ? `Its threads are held by ${nodeLabel(store.nodes, remoteOwner)}, which could not be read; reload once it can.`
+        : null,
+  )
+  /** The number of the revision on screen, as a thread written on it says. */
+  const revisionNumber = $derived(threads.find((t) => t.revision_id === revision?.id)?.revision ?? null)
+  /**
+   * A line number picked in the full diff starts a thread there, or extends
+   * the one being written into a range. The since-last-verdict diff is
+   * numbered against the last verdict, not this revision, so it offers none.
+   */
+  function pickLine(line: Numbered) {
+    threadAnchor = anchorAt(line, threadAnchor) ?? threadAnchor
+    document.querySelector('[aria-label="new thread"]')?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }
+  /**
+   * How many threads a line of the full diff carries, to mark it. Derived
+   * from the threads and the revision, so a new thread or another revision
+   * hands the diff a new function and its marks follow.
+   */
+  const threadMarks = $derived.by(() => {
+    const all = threads
+    const rev = revision?.id
+    return (line: Numbered) => threadsOn(all, line, rev).length
+  })
   const files = $derived.by(() => {
     try {
       return JSON.parse(review?.files ?? '[]') as { path: string; blob: string }[]
@@ -792,6 +830,7 @@
       reviewerReason = d.review_session_reason ?? null
       reviewerStarting = d.review_session_starting ?? false
       reviewerView = d.reviewer ?? null
+      threads = d.threads ?? threads
       return true
     } catch {
       /* the error already shown is the one that matters */
@@ -1527,8 +1566,29 @@
         {viewed}
       />
     {:else}
-      <ReviewDiff bind:this={reviewDiff} diff={review.diff} collapsed={surface.phone} context={pinnedContext()} {viewed} />
+      <ReviewDiff
+        bind:this={reviewDiff}
+        diff={review.diff}
+        collapsed={surface.phone}
+        context={pinnedContext()}
+        {viewed}
+        onpick={threadsBlocked ? undefined : pickLine}
+        marks={threadMarks}
+      />
     {/if}
+  {/if}
+
+  {#if review}
+    <ReviewThreads
+      reviewId={id}
+      revisionId={revision?.id}
+      {revisionNumber}
+      paths={diffFiles.map((f) => f.path)}
+      {threads}
+      bind:anchor={threadAnchor}
+      blocked={threadsBlocked}
+      onthreads={(next) => (threads = next)}
+    />
   {/if}
 
   {#if closed}

@@ -43,6 +43,21 @@
     '&.cm-merge-a .cm-changedLineGutter, .cm-deletedLineGutter': { backgroundColor: 'var(--crit)' },
     '.cm-insertedLine, .cm-deletedLine, .cm-deletedLine del': { textDecoration: 'none' },
     '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': { backgroundColor: 'var(--s3)' },
+    // A line number that starts a review thread reads as the number it is.
+    '.cm-threadPick': {
+      display: 'block',
+      width: '100%',
+      padding: '0',
+      border: 'none',
+      background: 'none',
+      color: 'inherit',
+      font: 'inherit',
+      textAlign: 'right',
+      cursor: 'pointer',
+    },
+    '.cm-threadPick:hover:not(:disabled)': { color: 'var(--ink)', textDecoration: 'underline' },
+    '.cm-threadPick:disabled': { cursor: 'default' },
+    '.cm-threadPick.cm-threadMarked': { color: 'var(--ink)', fontWeight: '600', textDecoration: 'underline' },
   })
 </script>
 
@@ -59,15 +74,24 @@
   // unified, a before column and an after column), the file's syntax, and on
   // each hunk header how many unchanged lines the diff leaves out there, with
   // a way to show them when the page can read them.
+  //
+  // Given `onpick` or `marks`, those line numbers are also the review
+  // threads' (`lib/threadGutter.ts`): each number of a line the diff shows is
+  // a button that starts a thread on that line, as the node numbers it, and
+  // reads marked when threads are on it. Unified, each removed line shown
+  // above its replacement has its own. A new `onpick` or `marks` re-marks the
+  // numbers in place, without rebuilding the editors or moving the view.
   import { untrack } from 'svelte'
   import { Compartment, EditorState, RangeSetBuilder, type Extension } from '@codemirror/state'
-  import { Decoration, EditorView, GutterMarker, WidgetType, gutter, type BlockInfo } from '@codemirror/view'
-  import { MergeView, getChunks, getOriginalDoc, unifiedMergeView } from '@codemirror/merge'
+  import { Decoration, EditorView, WidgetType } from '@codemirror/view'
+  import { MergeView, getChunks, unifiedMergeView } from '@codemirror/merge'
   import type { LanguageSupport } from '@codemirror/language'
 
   import type { DiffMode, FileSides, Gap } from '../lib/diffview'
   import { overrideFor } from '../lib/mergeChanges'
   import { languageFor, syntax } from '../lib/syntax'
+  import { sideRows, type Numbered } from '../lib/reviewThreads'
+  import { sideNumbers, unifiedNumbers, type Rows, type Threads } from '../lib/threadGutter'
 
   let {
     sides,
@@ -77,6 +101,9 @@
     tail = null,
     onexpand,
     unavailable = null,
+    onpick,
+    marks,
+    pickable,
   }: {
     sides: FileSides
     mode: DiffMode
@@ -90,6 +117,17 @@
     onexpand?: (gap: number) => void
     /** Why the left-out lines cannot be shown, said on each gap instead of a button. */
     unavailable?: string | null
+    /**
+     * Given, each line number is a button that calls it with that line,
+     * numbered as the node numbers it: how a review thread is started on a
+     * line. Unified, the removed lines shown above their replacement get one
+     * each too.
+     */
+    onpick?: (line: Numbered) => void
+    /** How many threads a line carries, to mark it. A new function re-marks the rows. */
+    marks?: (line: Numbered) => number
+    /** Which lines a thread can start on (not those an opened gap shows); absent, every line. */
+    pickable?: (line: Numbered) => boolean
   } = $props()
 
   let host = $state<HTMLDivElement>()
@@ -100,6 +138,16 @@
   /** Every editor showing now, for what reconfigures them in place. */
   let editors: EditorView[] = []
   const wrapping = new Compartment()
+  /** Each editor's line numbers, remade in place when what they pick or mark changes. */
+  const numbering = new Compartment()
+  /** How each editor showing now makes its line numbers, for remaking them. */
+  let numbered: { view: EditorView; make: (t: Threads) => Extension }[] = []
+  /** What the numbers showing now were made to pick and mark. */
+  let made: Threads = {}
+
+  const rows = $derived(sideRows(sides))
+  /** Each row as its line, read only when a number picks or marks one. */
+  const rowsFor = (t: Threads): Rows => (t.pick || t.marks ? rows : null)
 
   // The file's language, fetched before the editors are made: unified, the
   // deleted lines are drawn once, with whatever language the editor had then.
@@ -122,13 +170,18 @@
     const lang = language
     const diffConfig = { override: overrideFor(sides) }
     const wrapped = untrack(() => wrap)
-    const marks = { gaps, tail, onexpand, unavailable }
+    const hunks = { gaps, tail, onexpand, unavailable }
+    const s = sides
+    const t = untrack(threads)
+    made = t
     if (mode === 'split') {
+      const makeA = (t: Threads) => sideNumbers('a', s, rowsFor(t), t)
+      const makeB = (t: Threads) => sideNumbers('b', s, rowsFor(t), t)
       const merge = new MergeView({
-        a: { doc: sides.a, extensions: [extensions(lang, wrapped), headerRows(sides.aLines), numbers('a', sides.aLines)] },
+        a: { doc: s.a, extensions: [extensions(lang, wrapped), headerRows(s.aLines), numbering.of(untrack(() => makeA(t)))] },
         b: {
-          doc: sides.b,
-          extensions: [extensions(lang, wrapped), headerRows(sides.bLines, marks), numbers('b', sides.bLines)],
+          doc: s.b,
+          extensions: [extensions(lang, wrapped), headerRows(s.bLines, hunks), numbering.of(untrack(() => makeB(t)))],
         },
         parent: host,
         gutter: true,
@@ -137,6 +190,10 @@
       })
       after = merge.b
       editors = [merge.a, merge.b]
+      numbered = [
+        { view: merge.a, make: makeA },
+        { view: merge.b, make: makeB },
+      ]
       changes = () => merge.chunks
       const unfollow = followSideways(merge.a, merge.b)
       return () => {
@@ -144,26 +201,46 @@
         merge.destroy()
         after = undefined
         editors = []
+        numbered = []
       }
     }
+    const make = (t: Threads) => unifiedNumbers(s, rowsFor(t), t)
     const view = new EditorView({
       doc: sides.b,
       extensions: [
         unifiedMergeView({ original: sides.a, mergeControls: false, highlightChanges: true, gutter: true, diffConfig }),
         extensions(lang, wrapped),
-        headerRows(sides.bLines, marks),
-        unifiedNumbers(sides),
+        headerRows(s.bLines, hunks),
+        numbering.of(untrack(() => make(t))),
       ],
       parent: host,
     })
     after = view
     editors = [view]
+    numbered = [{ view, make }]
     changes = () => getChunks(view.state)?.chunks ?? []
     return () => {
       view.destroy()
       after = undefined
       editors = []
+      numbered = []
     }
+  })
+
+  /** What the line numbers are to pick and mark, as the props say now. */
+  function threads(): Threads {
+    return { pick: onpick, marks, pickable }
+  }
+
+  // A thread opened, a revision changed, threads blocked: the numbers are
+  // remade in place, and the editors and the reader's row stay.
+  $effect(() => {
+    const t = threads()
+    untrack(() => {
+      if (t.pick === made.pick && t.marks === made.marks && t.pickable === made.pickable) return
+      made = t
+      for (const { view, make } of numbered) view.dispatch({ effects: numbering.reconfigure(make(t)) })
+    })
   })
 
   // Wrapping changes in place: the editors stay, and so does the reader's row.
@@ -181,83 +258,6 @@
       lang ? [lang, syntax] : [],
       theme,
     ]
-  }
-
-  // --- line numbers -----------------------------------------------------------
-
-  class Num extends GutterMarker {
-    text: string
-    constructor(text: string) {
-      super()
-      this.text = text
-    }
-    eq(other: GutterMarker) {
-      return other instanceof Num && other.text === this.text
-    }
-    toDOM() {
-      return document.createTextNode(this.text)
-    }
-  }
-
-  /** Several numbers stacked, one per row of a unified view's deleted lines. */
-  class Nums extends GutterMarker {
-    texts: string[]
-    constructor(texts: string[]) {
-      super()
-      this.texts = texts
-    }
-    eq(other: GutterMarker) {
-      return other instanceof Nums && other.texts.join() === this.texts.join()
-    }
-    toDOM() {
-      const box = document.createElement('div')
-      box.className = 'cm-deletedNumbers'
-      for (const t of this.texts) box.appendChild(document.createElement('div')).textContent = t
-      return box
-    }
-  }
-
-  const widest = (lines: (number | null)[]) => new Num(String(Math.max(9, ...lines.map((n) => n ?? 0))))
-  const rowOf = (view: EditorView, line: BlockInfo) => view.state.doc.lineAt(line.from).number - 1
-
-  /** A column of the file's own line numbers, from what each row of the document is in the file. */
-  function numberColumn(cls: string, lines: (number | null)[], widget?: GutterConfigWidget): Extension {
-    return gutter({
-      class: `cm-lineNo ${cls}`,
-      lineMarker: (view, line) => {
-        const n = lines[rowOf(view, line)]
-        return n == null ? null : new Num(String(n))
-      },
-      initialSpacer: () => widest(lines),
-      // An absent marker for widgets must be left out, not passed as undefined:
-      // the merge view's spacers are widgets too.
-      ...(widget ? { widgetMarker: widget } : {}),
-    })
-  }
-  type GutterConfigWidget = (view: EditorView, widget: WidgetType, block: BlockInfo) => GutterMarker | null
-
-  /** Side by side: each side numbers its own lines. */
-  function numbers(side: 'a' | 'b', lines: (number | null)[]): Extension {
-    return numberColumn(side === 'a' ? 'cm-lineNo-before' : 'cm-lineNo-after', lines)
-  }
-
-  /**
-   * Unified: a column of the lines before the change and one of the lines
-   * after it. A context row has both; an added row only the after; the rows
-   * of a deleted chunk, drawn as one widget, only the before.
-   */
-  function unifiedNumbers(s: FileSides): Extension {
-    const deleted: GutterConfigWidget = (view, _widget, block) => {
-      const chunk = getChunks(view.state)?.chunks.find((c) => c.fromB === block.from && c.fromA < c.toA)
-      if (!chunk) return null
-      const orig = getOriginalDoc(view.state)
-      const first = orig.lineAt(chunk.fromA).number
-      const last = orig.lineAt(Math.max(chunk.fromA, chunk.endA)).number
-      const texts: string[] = []
-      for (let n = first; n <= last; n++) texts.push(String(s.aLines[n - 1] ?? ''))
-      return new Nums(texts)
-    }
-    return [numberColumn('cm-lineNo-before', s.bOld, deleted), numberColumn('cm-lineNo-after', s.bLines)]
   }
 
   // --- hunk headers and the lines they leave out ---------------------------
