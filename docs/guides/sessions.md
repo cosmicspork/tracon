@@ -419,6 +419,24 @@ node then builds and pins
 its own image. An undecided offer is replaced by a newer one from the same node for the
 same repository, is withdrawn if that node leaves the channel, and lapses after 14 days.
 
+**Take a co-member's build instead of building.** The recipe is shared and the image is
+not: each node pins its own. A Podman node with DigitalOcean's container registry
+(`[digitalocean] registry` under `registry.digitalocean.com` and a `credential`) also
+pushes each repository image it builds there, as
+`<registry>/<prefix>-repo-images:<recipe>-<arch>`, and sends the other members of its
+channels the digest, signed with its node key, with the repository's forge identity, the
+recipe's hash and the platform. A Podman node about to build the same recipe for the
+same platform (a recipe it accepted, on the same pinned base) pulls that digest instead,
+with its own DigitalOcean token, and pins it as its own build: nothing builds, and the
+build's log names whose image it took. It takes one only when the statement verifies
+under its signer's key, the signer still shares the channel it came on, and the registry
+serves exactly the digest signed, the pull included. A node with no DigitalOcean token or
+no read access to the registry, or one whose image fails any of that, builds the recipe
+itself, and that build's log opens with why. `tracon repo build` always builds here. A
+node that builds its own pins its own digest, and pushes and signs it in turn; only
+what a node built is pushed, never what it took. Kubernetes nodes build into their
+builder's registry and neither push nor take these.
+
 A session reaches no registry unless you say so. `session_egress = true` on the
 repository's entry opens its `egress` list to that repository's sessions, through proxy
 credentials that are the session's own, so "add this dependency and run the tests" is an

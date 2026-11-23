@@ -180,6 +180,13 @@ pub enum Payload {
     Questions {
         waiting: Vec<Value>,
     },
+    /// The repository images the sender built and pushed to a registry, each
+    /// an [`crate::image::ImageStatement`] it signed, for the channel's other
+    /// members to pull instead of building. An older receiver cannot read
+    /// this kind and drops it.
+    RepoImages {
+        images: Vec<crate::image::ImageStatement>,
+    },
     /// A bounded, aggregate view for an opt-in hub replica. It deliberately
     /// contains no transcript, file path, prompt, credential, or work payload.
     /// The envelope sender is repeated in `node_id` so a replica can reject a

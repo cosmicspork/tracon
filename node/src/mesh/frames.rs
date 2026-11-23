@@ -231,6 +231,10 @@ pub fn snapshots(store: &Store, self_id: &str) -> Vec<(String, Payload)> {
             },
         ));
     }
+    // The repository images this node pushed, said again for a peer that
+    // came late or forgot them.
+    let images = crate::repo_image_share::own(store, self_id);
+    out.extend(crate::repo_image_share::payloads(store, self_id, &images));
     out
 }
 
