@@ -118,12 +118,13 @@ export function editedArguments(
 }
 
 /**
- * The answers to this card that are an admin action on the node holding it,
- * which that node confirms only with its own passkey (`admin_answer` on the
- * node): allowing a repository setup proposal, a Dockerfile trial or a
- * plugin's install card, saving an egress host to the repository, and saving
- * a fetch pattern to the channel's allow list. A peer
- * showing the card cannot confirm them, so it leaves them to that node.
+ * The answers to this card that are an admin action on the node holding it
+ * (`admin_answer` on the node): allowing a repository setup proposal, a
+ * Dockerfile trial or a plugin's install card, saving an egress host to the
+ * repository, and saving a fetch pattern to the channel's allow list. That
+ * node confirms them with its own passkey; a peer showing the card confirms
+ * them with the peer's, and the holder takes that only from a node its
+ * `[mesh] admin_peers` names.
  */
 export function stepUpOptions(p: Pick<Permission, 'raw_input'>): string[] {
   if (!p.raw_input) return []
@@ -142,12 +143,20 @@ export function stepUpOptions(p: Pick<Permission, 'raw_input'>): string[] {
 
 /**
  * The answers this node leaves to the node holding the card: its step-up
- * answers, unless the card is this node's own. A card whose owner is not
- * known to be this node is treated as a peer's, so an answer it would refuse
- * is never offered. The Home lane and the card both ask this, so a card is
- * never counted as yours while it offers no Allow, or offers one its owner
- * then refuses.
+ * answers, while that node is not one this node knows (the node list has not
+ * loaded, or the owner has left), since nothing here could confirm them for
+ * it. A known peer's are offered: allowing one asks for this node's passkey,
+ * and the peer refuses it, saying why, unless its `[mesh] admin_peers` names
+ * this node. The Home lane and the card both ask this, so the two never
+ * disagree.
  */
 export function withheldOptions(nodes: NodeInfo[], p: Pick<Permission, 'node_id' | 'raw_input'>): string[] {
-  return nodeById(nodes, p.node_id)?.is_self ? [] : stepUpOptions(p)
+  return nodeById(nodes, p.node_id) ? [] : stepUpOptions(p)
+}
+
+/** Whether allowing this card is an admin action on a known peer, confirmed
+    here with this node's passkey for that peer. */
+export function peerAdminCard(nodes: NodeInfo[], p: Pick<Permission, 'node_id' | 'raw_input'>): boolean {
+  const owner = nodeById(nodes, p.node_id)
+  return !!owner && !owner.is_self && stepUpOptions(p).length > 0
 }

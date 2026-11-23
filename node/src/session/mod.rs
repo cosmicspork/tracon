@@ -753,10 +753,15 @@ pub struct OperatorAnswer {
     /// signed-in browser, with the token, or through a peer. Not sent on to
     /// the owner of a peer's card, which names the peer itself.
     pub by: Option<String>,
+    /// For a peer's card whose answer is an admin action there: what this
+    /// node's operator confirmed for exactly this answer
+    /// ([`crate::mesh::admin::admit_answer`]). Sent on with the answer.
+    pub statement: Option<proto::admin::AdminStatement>,
 }
 
 impl OperatorAnswer {
-    fn into_frame(self, id: &str) -> proto::frame::Command {
+    /// The answer to card `id` as it is sent to the card's owner.
+    pub(crate) fn into_frame(self, id: &str) -> proto::frame::Command {
         proto::frame::Command::Answer {
             permission_id: id.to_string(),
             option_id: self.option_id,
@@ -765,6 +770,7 @@ impl OperatorAnswer {
             notes: self.notes,
             arguments_hash: self.arguments_hash,
             preview_hash: self.preview_hash,
+            statement: self.statement.map(Box::new),
         }
     }
 }

@@ -1,7 +1,8 @@
 //! Administering a node from a peer.
 //!
 //! A node takes admin commands (reading and editing its `node.toml`, signing
-//! its providers in and out, starting a reviewer on its models) only from
+//! its providers in and out, starting a reviewer on its models, allowing one
+//! of its admin cards) only from
 //! the peers its own `[mesh]
 //! admin_peers` names. Membership of a channel, or of the mesh, is not
 //! enough: it says which node asked, not that this node's operator lets that
@@ -109,6 +110,62 @@ pub fn admit(
     if !is_admin_command(command) {
         return Ok(None);
     }
+    admin_member(store, cfg, self_id, sender)?;
+    if matches!(command, Command::ConfigRead) {
+        return Ok(None);
+    }
+    if let Command::ConfigPatch { not_after_ms, .. } = command {
+        if now > not_after_ms.saturating_add(DEADLINE_SKEW_MS) {
+            return Err("this edit expired before it arrived; it was not run".into());
+        }
+    }
+    if let Command::ProviderCode {
+        name,
+        statement: None,
+        ..
+    } = command
+    {
+        if login_confirmed(name) {
+            return Ok(None);
+        }
+    }
+    let Some(statement) = statement_of(command) else {
+        return Err(NO_STATEMENT.into());
+    };
+    check(store, self_id, sender, command, statement, now).map(Some)
+}
+
+const NO_STATEMENT: &str = "an admin command from a peer must carry the statement its operator \
+     confirmed with a passkey there; the sender sent none (it may run an older build)";
+
+/// Whether `sender` may give the answer `command` here, which this node
+/// counts as an admin action (`http::api::admin_answer`): named in its
+/// `[mesh] admin_peers`, and carrying a statement its operator confirmed
+/// for exactly this answer (card, option and any edited arguments) on this
+/// node, which is then spent. Channel membership is the caller's check, as
+/// for any answer.
+pub fn admit_answer(
+    store: &Store,
+    cfg: &Config,
+    self_id: &str,
+    sender: &str,
+    command: &Command,
+    now: i64,
+) -> Result<Admitted, String> {
+    admin_member(store, cfg, self_id, sender)?;
+    let Command::Answer {
+        statement: Some(statement),
+        ..
+    } = command
+    else {
+        return Err(NO_STATEMENT.into());
+    };
+    check(store, self_id, sender, command, statement, now)
+}
+
+/// Whether this node's `[mesh] admin_peers` names `sender`, and the sender is
+/// still a member of the mesh by this node's own record.
+fn admin_member(store: &Store, cfg: &Config, self_id: &str, sender: &str) -> Result<(), String> {
     let live = cfg.live();
     if !live.mesh.is_admin_peer(sender) {
         return Err(format!(
@@ -130,32 +187,7 @@ pub fn admit(
             short(sender)
         ));
     }
-    if matches!(command, Command::ConfigRead) {
-        return Ok(None);
-    }
-    if let Command::ConfigPatch { not_after_ms, .. } = command {
-        if now > not_after_ms.saturating_add(DEADLINE_SKEW_MS) {
-            return Err("this edit expired before it arrived; it was not run".into());
-        }
-    }
-    if let Command::ProviderCode {
-        name,
-        statement: None,
-        ..
-    } = command
-    {
-        if login_confirmed(name) {
-            return Ok(None);
-        }
-    }
-    let Some(statement) = statement_of(command) else {
-        return Err(
-            "an admin command from a peer must carry the statement its operator confirmed with \
-             a passkey there; the sender sent none (it may run an older build)"
-                .into(),
-        );
-    };
-    check(store, self_id, sender, command, statement, now).map(Some)
+    Ok(())
 }
 
 fn check(

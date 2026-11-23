@@ -212,6 +212,7 @@ impl Rig {
                     arguments_hash: None,
                     preview_hash: None,
                     by: None,
+                    statement: None,
                 },
             )
             .await

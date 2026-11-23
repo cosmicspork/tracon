@@ -5,7 +5,7 @@
   import { clock } from '../lib/clock.svelte'
   import { formatAge, formatExpiry } from '../lib/format'
   import { chipLabel, nodeById, nodeLabel, unreachableReason } from '../lib/nodes'
-  import { argumentsHash, cardRequest, editableFields, editedArguments, isApproval, isEgress, isWarmUpEgress, withheldOptions } from '../lib/permission'
+  import { argumentsHash, cardRequest, editableFields, editedArguments, isApproval, isEgress, isWarmUpEgress, peerAdminCard, withheldOptions } from '../lib/permission'
   import { permissionOptions, type Permission } from '../lib/types'
   import { store } from '../lib/store.svelte'
 
@@ -19,11 +19,13 @@
   let composing = $state(false)
 
   const owner = $derived(nodeById(store.nodes, permission.node_id))
-  // A card another node holds is decided there: an answer here is relayed,
-  // and one that node confirms only with its own passkey is left to it. The
+  // A card another node holds is decided there: an answer here is relayed.
+  // Allowing one that is an admin action there is confirmed here, with this
+  // node's passkey for that node, unless the owner is not known here. The
   // Home lane asks the same question, so the two never disagree.
   const peer = $derived(!owner?.is_self)
   const withheld = $derived(withheldOptions(store.nodes, permission))
+  const adminOnPeer = $derived(peerAdminCard(store.nodes, permission))
   const options = $derived(permissionOptions(permission).filter((o) => !withheld.includes(o.option_id)))
   // Allowing it is the owner's to confirm; turning it down is still yours.
   const allowElsewhere = $derived(withheld.includes('allow_once'))
@@ -162,6 +164,14 @@
           >{label(o.kind, o.name)}</button
         >
       {/each}
+      {#if adminOnPeer}
+        <span
+          class="why"
+          data-testid="admin-on-peer"
+          title={`Allowing it asks for your passkey. ${nodeLabel(store.nodes, permission.node_id)} takes it only if its [mesh] admin_peers lists this node.`}
+          >admin action on {nodeLabel(store.nodes, permission.node_id)}</span
+        >
+      {/if}
       {#if allowElsewhere}
         <span class="why" data-testid="decide-on-owner" title="Confirmed with that node's passkey"
           >allow on {nodeLabel(store.nodes, permission.node_id)}</span

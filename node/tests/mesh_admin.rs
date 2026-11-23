@@ -103,6 +103,10 @@ fn node(
         Default::default(),
         Arc::new(tracon::runner::local::LocalBackend),
     );
+    let _ = tools.session.set(tracon::mcp::SessionAccess {
+        store: store.clone(),
+        manager: manager.clone(),
+    });
     let client = MeshClient::new(
         identity(seed),
         hub,
@@ -951,4 +955,192 @@ async fn a_peer_forging_a_step_up_is_relayed_as_its_refusal() {
             r.body
         );
     }
+}
+
+/// An approval B holds, pending on `personal`, and A's mirror of its card as
+/// B lists it.
+fn b_card(a: &Node, b: &Node, id: &str, tool: &str, arguments: Value) {
+    let now = tracon::store::now_ms();
+    let approval = tracon::store::approvals::ApprovalRow {
+        id: id.into(),
+        channel: "personal".into(),
+        session_id: None,
+        node_id: b.id.node_id(),
+        lane: None,
+        tool: tool.into(),
+        arguments: arguments.to_string(),
+        request_key: format!("key-{id}"),
+        title: tool.into(),
+        state: "pending".into(),
+        answer_option_id: None,
+        edited_arguments: None,
+        result: None,
+        reason: None,
+        operator_note: None,
+        claimed_ms: None,
+        created_ms: now,
+        decided_ms: None,
+        finished_ms: None,
+        expires_ms: now + 600_000,
+    };
+    b.store.insert_approval(&approval).unwrap();
+    let card = approval.as_card(
+        tracon::store::approvals::card_options(tool),
+        Default::default(),
+    );
+    assert!(a
+        .store
+        .upsert_permission_mirror(&card.request, "personal")
+        .unwrap());
+}
+
+fn b_state(b: &Node, id: &str) -> String {
+    b.store.get_approval(id).unwrap().unwrap().state
+}
+
+/// B names A: A's operator allows B's admin card from A's interface. Off
+/// A's machine, A's passkey confirms it with a prompt naming B and what the
+/// answer does there (and which arguments an edit changes); at A's machine
+/// it needs none and is still signed. B decides it, naming A's operator.
+#[tokio::test]
+async fn an_admin_peer_allows_a_nodes_admin_card_with_its_passkey() {
+    let _lock = state::config_lock().await;
+    state::isolate_dirs();
+    let (a, b) = pair(&[identity(1).node_id()]).await;
+    let (ai, bi) = (a.id.node_id(), b.id.node_id());
+    wait_for("B to see A in personal", || {
+        b.store
+            .nodes_in_channel("personal")
+            .is_ok_and(|m| m.contains(&ai))
+    })
+    .await;
+    let args = json!({ "checks": ["just check"], "repo": "/work/x" });
+    b_card(&a, &b, "setup", "repo_setup_propose", args.clone());
+
+    let (cookie, mut key) = pair_phone(&a).await;
+    let uri = "/api/permissions/setup/answer";
+    let body = json!({ "option_id": "allow_once" });
+    let refused = remote(&a, &cookie, "POST", uri, Some(&body), None).await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+    assert_eq!(refused.kind(), "step_up_required", "{}", refused.body);
+    let prompt = format!("On beta ({}\u{2026}): ", &bi[..8]);
+    assert_eq!(
+        refused.body["step_up"]["summary"],
+        format!("{prompt}Allow repository setup for /work/x")
+    );
+    // An edit is named first.
+    let edited = json!({ "option_id": "allow_once", "arguments": { "checks": ["curl evil"], "repo": "/work/x" } });
+    let r = remote(&a, &cookie, "POST", uri, Some(&edited), None).await;
+    assert_eq!(
+        r.body["step_up"]["summary"],
+        format!("{prompt}Edited checks: Allow repository setup for /work/x")
+    );
+    assert_eq!(
+        b_state(&b, "setup"),
+        "pending",
+        "nothing ran before the passkey"
+    );
+    // A peer's fetch card names the channel it was listed on.
+    b_card(
+        &a,
+        &b,
+        "fetch",
+        "web_fetch",
+        json!({ "pattern": "docs.rs/*" }),
+    );
+    let r = remote(
+        &a,
+        &cookie,
+        "POST",
+        "/api/permissions/fetch/answer",
+        Some(&json!({ "option_id": "allow_channel" })),
+        None,
+    )
+    .await;
+    assert_eq!(
+        r.body["step_up"]["summary"],
+        format!("{prompt}Save docs.rs/* to personal's fetch allow list"),
+        "{}",
+        r.body
+    );
+
+    let step_up = &refused.body["step_up"];
+    let credential = key.get(&step_up["options"]);
+    let finished = remote(
+        &a,
+        &cookie,
+        "POST",
+        "/api/passkeys/assert/finish",
+        Some(&json!({ "challenge_id": step_up["challenge_id"], "credential": credential })),
+        None,
+    )
+    .await;
+    assert_eq!(finished.status, StatusCode::OK, "{}", finished.body);
+    let proof = finished.body["proof"].as_str().unwrap().to_string();
+    // The proof confirms this answer and no other.
+    let r = remote(&a, &cookie, "POST", uri, Some(&edited), Some(&proof)).await;
+    assert_eq!(r.kind(), "step_up_required", "{}", r.body);
+    let r = remote(&a, &cookie, "POST", uri, Some(&body), Some(&proof)).await;
+    assert_ne!(r.kind(), "step_up_required", "{}", r.body);
+    assert!(
+        !r.body.to_string().contains("admin_peers") && !r.body.to_string().contains("statement"),
+        "{}",
+        r.body
+    );
+    assert_ne!(b_state(&b, "setup"), "pending", "{}", r.body);
+
+    // At A's machine: no prompt, still signed, and B takes it.
+    b_card(
+        &a,
+        &b,
+        "trial",
+        "repo_setup_try",
+        json!({ "repo": "/work/x" }),
+    );
+    let r = local(
+        &a,
+        "POST",
+        "/api/permissions/trial/answer",
+        Some(&json!({ "option_id": "allow_once" })),
+    )
+    .await;
+    assert!(
+        !r.body.to_string().contains("admin_peers") && !r.body.to_string().contains("statement"),
+        "{}",
+        r.body
+    );
+    assert_ne!(b_state(&b, "trial"), "pending", "{}", r.body);
+}
+
+/// B does not name A: A's operator confirms the answer, and B refuses it
+/// for that, saying so.
+#[tokio::test]
+async fn a_node_not_naming_the_peer_refuses_its_admin_answer() {
+    let _lock = state::config_lock().await;
+    state::isolate_dirs();
+    let (a, b) = pair(&[]).await;
+    let ai = a.id.node_id();
+    wait_for("B to see A in personal", || {
+        b.store
+            .nodes_in_channel("personal")
+            .is_ok_and(|m| m.contains(&ai))
+    })
+    .await;
+    b_card(
+        &a,
+        &b,
+        "setup",
+        "repo_setup_propose",
+        json!({ "repo": "/work/x" }),
+    );
+    let r = local(
+        &a,
+        "POST",
+        "/api/permissions/setup/answer",
+        Some(&json!({ "option_id": "allow_once" })),
+    )
+    .await;
+    assert!(!r.status.is_success(), "{}", r.body);
+    assert!(r.body.to_string().contains("admin_peers"), "{}", r.body);
+    assert_eq!(b_state(&b, "setup"), "pending");
 }

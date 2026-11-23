@@ -336,6 +336,7 @@ async fn an_asked_call_is_held_as_an_approval_with_its_exact_arguments() {
                 arguments_hash: None,
                 preview_hash: None,
                 by: None,
+                statement: None,
             },
         )
         .await

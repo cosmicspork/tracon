@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { cardRequest, editableFields, editedArguments, isEgress, isWarmUpEgress, stepUpOptions, withheldOptions } from './permission'
+import { cardRequest, editableFields, editedArguments, isEgress, isWarmUpEgress, peerAdminCard, stepUpOptions, withheldOptions } from './permission'
 
 const card = (args: unknown, kind: string | null = 'tool') => ({
   kind,
@@ -80,8 +80,12 @@ test('a card is only this node’s own when its owner is known to be this node',
     { id: 'peer', is_self: false },
   ] as Parameters<typeof withheldOptions>[0]
   expect(withheldOptions(nodes, setup('self'))).toEqual([])
-  expect(withheldOptions(nodes, setup('peer'))).toEqual(['allow_once'])
+  // A known peer's is allowed here, with this node's passkey for that peer.
+  expect(withheldOptions(nodes, setup('peer'))).toEqual([])
+  expect(peerAdminCard(nodes, setup('peer'))).toBe(true)
+  expect(peerAdminCard(nodes, setup('self'))).toBe(false)
   // Before the node list has loaded, or for an owner it does not name.
   expect(withheldOptions([], setup('self'))).toEqual(['allow_once'])
   expect(withheldOptions(nodes, setup('gone'))).toEqual(['allow_once'])
+  expect(peerAdminCard(nodes, setup('gone'))).toBe(false)
 })
