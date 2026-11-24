@@ -1174,25 +1174,30 @@ pub struct External {
     /// Where a worktree submitted for review may come from: its repository
     /// must live under one of these. A leading `~/` is the operator's home.
     pub repo_roots: Vec<PathBuf>,
-    /// Run containers for a harness the operator runs, in the repository's
-    /// image, on the node's own copy of its commit: the one switch for both.
-    ///
-    /// * The repository's required checks behind each external
-    ///   `submit_review`, as evidence for its reviewer. They run behind the
-    ///   submission and never gate it: a failed one shows on the review card,
-    ///   and the submission stands. On, it also makes `auto` the reviewer
-    ///   trigger for external submissions on a channel that sets none
-    ///   (`phases.review.trigger.external`): the reviewer has the checks to
-    ///   go on, and starts once they are done.
-    /// * The `check_run` tool, which runs the configured checks or one
-    ///   command the same way and gives the harness their output, attached to
-    ///   nothing: how a harness outside the boundary tests without a
-    ///   container runtime of its own.
+    /// Offer the `check_run` tool to a harness the operator runs: it runs
+    /// the repository's configured checks, or one command, in the
+    /// repository's image on the node's own copy of the worktree's commit,
+    /// and gives the harness their output, attached to nothing. How a
+    /// harness outside the boundary tests without a container runtime of its
+    /// own. Changes nothing about what happens to its submissions.
     ///
     /// Off by default, because it runs code the node did not watch being
-    /// written. Was `run_checks`, which is still read, with a warning, for
-    /// one release ([`External::lift_renamed`]).
-    pub run_containers: bool,
+    /// written.
+    pub check_run: bool,
+    /// Run the repository's required checks behind each external
+    /// `submit_review`, as evidence for its reviewer. They run behind the
+    /// submission and never gate it: a failed one shows on the review card,
+    /// and the submission stands. On, it also makes `auto` the reviewer
+    /// trigger for external submissions on a channel that sets none
+    /// (`phases.review.trigger.external`): the reviewer has the checks to go
+    /// on, and starts once they are done.
+    ///
+    /// Off, a reviewer started on an external submission (by the operator,
+    /// or by an `auto` trigger the channel set) runs the required checks
+    /// itself before it starts, and waits for them.
+    ///
+    /// Off by default, for the same reason as `check_run`.
+    pub check_submissions: bool,
 }
 
 impl Default for External {
@@ -1201,42 +1206,90 @@ impl Default for External {
             enabled: false,
             idle_timeout_secs: 3600,
             repo_roots: vec![PathBuf::from("~/src")],
-            run_containers: false,
+            check_run: false,
+            check_submissions: false,
         }
     }
 }
 
 impl External {
+    /// The one switch 0.60 had for both `check_run` and
+    /// `check_submissions`, read for one release as setting both.
+    pub const DEPRECATED_RUN_CONTAINERS: &'static str = "run_containers";
     /// What `run_containers` was called until 0.60.
     pub const RENAMED_RUN_CHECKS: &'static str = "run_checks";
+    /// The keys that replaced `run_containers`.
+    const SPLIT: [&'static str; 2] = ["check_run", "check_submissions"];
 
-    /// Read `[external] run_checks`, the name `run_containers` had, from
-    /// `text`: as the setting where the file does not also name the new key,
-    /// ignored where it does. What to warn about, if the file names the old
-    /// key at all.
-    fn lift_renamed(&mut self, text: &str) -> Option<String> {
-        let value = toml::from_str::<toml::Value>(text).ok()?;
-        let external = value.get("external")?;
-        let old = external.get(Self::RENAMED_RUN_CHECKS)?;
-        if external.get("run_containers").is_some() {
-            return Some(
-                "[external] run_checks is ignored: run_containers, which replaced it, is set too; \
-                 the run_checks line can go"
-                    .into(),
-            );
-        }
-        let Some(old) = old.as_bool() else {
-            return Some(
-                "[external] run_checks is ignored: it is not true or false. It was renamed \
-                 run_containers"
-                    .into(),
-            );
+    /// Read `[external] run_containers`, and `run_checks` before it, from
+    /// `text`: as setting both `check_run` and `check_submissions`, except
+    /// for a key the file also names, which is read as written. What to warn
+    /// about, one line each, if the file names an old key at all.
+    fn lift_renamed(&mut self, text: &str) -> Vec<String> {
+        let Ok(value) = toml::from_str::<toml::Value>(text) else {
+            return Vec::new();
         };
-        self.run_containers = old;
-        Some(format!(
-            "[external] run_checks was renamed run_containers, and is read as \
-             run_containers = {old} for this release only; rename the line"
-        ))
+        let Some(external) = value.get("external") else {
+            return Vec::new();
+        };
+        let mut said = Vec::new();
+        let current = external.get(Self::DEPRECATED_RUN_CONTAINERS);
+        let renamed = external.get(Self::RENAMED_RUN_CHECKS);
+        let (name, old) = match (current, renamed) {
+            (Some(current), Some(_)) => {
+                said.push(
+                    "[external] run_checks is ignored: run_containers, which replaced it, is \
+                     set too; the run_checks line can go"
+                        .into(),
+                );
+                (Self::DEPRECATED_RUN_CONTAINERS, current)
+            }
+            (Some(current), None) => (Self::DEPRECATED_RUN_CONTAINERS, current),
+            (None, Some(renamed)) => (Self::RENAMED_RUN_CHECKS, renamed),
+            (None, None) => return said,
+        };
+        let Some(old) = old.as_bool() else {
+            said.push(format!(
+                "[external] {name} is ignored: it is not true or false. It is now two \
+                 switches, check_run and check_submissions"
+            ));
+            return said;
+        };
+        let set: Vec<&str> = Self::SPLIT
+            .into_iter()
+            .filter(|key| external.get(*key).is_some())
+            .collect();
+        for key in Self::SPLIT {
+            if set.contains(&key) {
+                continue;
+            }
+            match key {
+                "check_run" => self.check_run = old,
+                _ => self.check_submissions = old,
+            }
+        }
+        said.push(match set.as_slice() {
+            [] => format!(
+                "[external] {name} is deprecated: it is now two switches, and is read as \
+                 check_run = {old} and check_submissions = {old} for this release only; \
+                 replace the line with the ones you want"
+            ),
+            [one] => {
+                let other = Self::SPLIT
+                    .into_iter()
+                    .find(|key| key != one)
+                    .unwrap_or_default();
+                format!(
+                    "[external] {name} is deprecated, and ignored for {one}, which is set too; \
+                     it is read as {other} = {old} for this release only; replace the line"
+                )
+            }
+            _ => format!(
+                "[external] {name} is ignored: check_run and check_submissions, which replaced \
+                 it, are both set; the {name} line can go"
+            ),
+        });
+        said
     }
 }
 
@@ -4051,7 +4104,7 @@ impl Config {
             config.providers.entry(name).or_insert(provider);
         }
         config.review.lift_retired_defaults();
-        if let Some(warning) = config.external.lift_renamed(text) {
+        for warning in config.external.lift_renamed(text) {
             tracing::warn!("{}: {warning}", path.display());
         }
         config.retired = RetiredNames::from_text(text);
@@ -4816,47 +4869,85 @@ mod tests {
         assert!(!retired_selinux_key(bundled));
     }
 
-    /// `[external] run_checks` was renamed `run_containers`: the old key is
-    /// still read for one release, with a warning, and the new one wins
-    /// where a file names both.
+    /// `[external] check_run` and `check_submissions` are two switches, both
+    /// off by default, and each sets only itself.
     #[test]
-    fn external_run_checks_is_read_as_run_containers_for_one_release() {
-        let load = |text: &str| Config::from_toml(text, Path::new("node.toml")).unwrap();
-        assert!(!load("").external.run_containers);
-        assert!(
-            load("[external]\nrun_containers = true\n")
+    fn external_check_run_and_check_submissions_are_independent() {
+        let load = |text: &str| {
+            Config::from_toml(text, Path::new("node.toml"))
+                .unwrap()
                 .external
-                .run_containers
-        );
-        assert!(
-            load("[external]\nrun_checks = true\n")
+        };
+        let none = load("");
+        assert!(!none.check_run && !none.check_submissions);
+        let run = load("[external]\ncheck_run = true\n");
+        assert!(run.check_run && !run.check_submissions);
+        let submissions = load("[external]\ncheck_submissions = true\n");
+        assert!(!submissions.check_run && submissions.check_submissions);
+        let both = load("[external]\ncheck_run = true\ncheck_submissions = true\n");
+        assert!(both.check_run && both.check_submissions);
+        assert!(External::default()
+            .lift_renamed("[external]\ncheck_run = true\n")
+            .is_empty());
+    }
+
+    /// `[external] run_containers`, and `run_checks` before it, are read for
+    /// one release as setting both switches, with a warning; a new key the
+    /// file also names is read as written, and the alias ignored for it.
+    #[test]
+    fn external_run_containers_is_read_as_both_switches_for_one_release() {
+        let load = |text: &str| {
+            Config::from_toml(text, Path::new("node.toml"))
+                .unwrap()
                 .external
-                .run_containers
+        };
+        let alias = load("[external]\nrun_containers = true\n");
+        assert!(alias.check_run && alias.check_submissions);
+        let renamed = load("[external]\nrun_checks = true\n");
+        assert!(renamed.check_run && renamed.check_submissions);
+        let overridden = load("[external]\nrun_containers = true\ncheck_submissions = false\n");
+        assert!(overridden.check_run && !overridden.check_submissions);
+        let both = load(
+            "[external]\nrun_containers = true\ncheck_run = false\ncheck_submissions = false\n",
         );
-        assert!(
-            !load("[external]\nrun_checks = true\nrun_containers = false\n")
-                .external
-                .run_containers
-        );
+        assert!(!both.check_run && !both.check_submissions);
+        assert!(!load("[external]\nrun_checks = true\nrun_containers = false\n").check_run);
 
         let mut external = External::default();
-        let said = external
-            .lift_renamed("[external]\nrun_checks = true\n")
-            .unwrap();
-        assert!(said.contains("renamed run_containers"), "{said}");
-        assert!(external.run_containers);
-        let said = External::default()
-            .lift_renamed("[external]\nrun_checks = true\nrun_containers = true\n")
-            .unwrap();
-        assert!(said.contains("is ignored"), "{said}");
-        assert_eq!(
-            External::default().lift_renamed("[external]\nrun_containers = true\n"),
-            None
+        let said = external.lift_renamed("[external]\nrun_containers = true\n");
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("deprecated"), "{said:?}");
+        assert!(
+            said[0].contains("check_run = true and check_submissions = true"),
+            "{said:?}"
         );
+        let said = External::default()
+            .lift_renamed("[external]\nrun_containers = true\ncheck_submissions = false\n");
+        assert!(
+            said[0].contains("ignored for check_submissions"),
+            "{said:?}"
+        );
+        assert!(said[0].contains("check_run = true"), "{said:?}");
+        let said = External::default().lift_renamed(
+            "[external]\nrun_containers = true\ncheck_run = true\ncheck_submissions = true\n",
+        );
+        assert!(said[0].contains("is ignored"), "{said:?}");
+        let said = External::default()
+            .lift_renamed("[external]\nrun_checks = true\nrun_containers = true\n");
+        assert!(said[0].contains("run_checks is ignored"), "{said:?}");
+        let said = External::default().lift_renamed("[external]\nrun_containers = \"yes\"\n");
+        assert!(said[0].contains("not true or false"), "{said:?}");
+
         // The new spelling is the one the node writes.
-        let written = toml::to_string(&load("[external]\nrun_checks = true\n")).unwrap();
-        assert!(written.contains("run_containers = true"), "{written}");
-        assert!(!written.contains("run_checks"), "{written}");
+        let cfg = Config::from_toml(
+            "[external]\nrun_containers = true\n",
+            Path::new("node.toml"),
+        )
+        .unwrap();
+        let written = toml::to_string(&cfg).unwrap();
+        assert!(written.contains("check_run = true"), "{written}");
+        assert!(written.contains("check_submissions = true"), "{written}");
+        assert!(!written.contains("run_containers"), "{written}");
     }
 
     /// The OpenCode harness's own tables still load, and are named rather

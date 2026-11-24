@@ -42,13 +42,20 @@ node's documents and memory, the ledger, and review. `submit_review` takes the
 path of your worktree; its repository must live under `[external] repo_roots`
 (`~/src` unless you say otherwise), so a linked worktree in a scratch directory
 is fine. The node captures the diff from it, skips the container checks (you
-ran them where your toolchain is) unless `[external] run_containers` asks it to run them
+ran them where your toolchain is) unless `[external] check_submissions` asks it to run them
 behind the submission for the reviewer (the card says they are running until they
 land, a failed one shows there without refusing the submission, and a reviewer, whether the trigger starts it or you do, waits for them), and on approval pushes that branch and opens
 the change — or updates the one named by `change` — with the brokered
 credential, exactly as for a session it started.
 
-The same switch gives the agent **`check_run`**, so it tests through the node
+With `check_submissions` off, a submission runs nothing, but a reviewer still
+gets the checks: one started on it (by you, or by an `auto` trigger the channel
+sets) first runs the repository's required checks on the review's candidate, as
+a submission would have, and starts once they are done. The card says they are
+running meanwhile. A repository with no `[[repo]]` entry has none to run: the
+reviewer starts on the diff alone, and the card says why no checks ran.
+
+`[external] check_run` gives the agent **`check_run`**, so it tests through the node
 instead of a container runtime of its own (the Dev Container CLI, and the Podman
 machine it keeps running on macOS). `check_run(worktree, checks?, command?)`
 snapshots the worktree's HEAD commit as `submit_review` does (uncommitted
@@ -61,7 +68,10 @@ outcome, exit status and end of each one's output go back to the agent and are
 attached to nothing: no review, no candidate, nothing a later submission reuses.
 A repository with no `[[repo]]` entry is refused; draft one with
 `repo_setup_draft` from a session on it, or add it to `node.toml`. Without
-`run_containers` the tool is not offered.
+`check_run` the tool is not offered. It changes nothing about submissions:
+`check_run` alone leaves them unchecked and the external review trigger at
+`manual`. `run_containers`, the one switch 0.60 had for both, is still read for
+one release as setting both, with a warning at startup.
 `work_close` takes the item's id, and refuses one a running session holds.
 `work_list` and `work_show` read the channel's ledger (`worktree` narrows it to
 that repository's project), and `work_update` and `work_delete` change or remove

@@ -935,15 +935,15 @@ mod tests {
         assert_eq!(
             (policy().version, sha.as_str()),
             (
-                27,
-                "0b095b6630c3d370c1abba17209c7f15131ef7c1c46641ea63b1585b80f20ba6"
+                28,
+                "945d60fd6e395cfa9213afb1c690b3f77ef7d4ec27b24e4eed425e49e309f328"
             ),
             "working-agreements.toml changed: raise its version and pin the new hash"
         );
     }
 
     /// `check_run` is offered only where the operator turned on `[external]
-    /// run_containers`, so the switch is the asking; a command that names
+    /// check_run`, so the switch is the asking; a command that names
     /// publishing is still refused, as anywhere.
     #[test]
     fn a_check_run_is_allowed_but_not_a_way_to_publish() {
