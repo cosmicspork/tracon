@@ -548,6 +548,22 @@ const REPO_ENV = {
   ],
 }
 
+/** An offer another node made this one (`/api/repos/offers`). */
+const offer = (id, state, repo, received, decided, path, note) => ({
+  id,
+  sender_node: PEER,
+  sender_name: 'bazzite',
+  channel: 'personal',
+  repo,
+  recipe: {},
+  note,
+  received_ms: received,
+  expires_ms: received + 7 * 86400000,
+  state,
+  decided_ms: decided,
+  decided_path: path,
+})
+
 // The repository screen reads its entries from node.toml (`/api/config`
 // `document.repo`) and their builds from `/api/repos/environments`: both
 // say the same table.
@@ -1070,6 +1086,24 @@ export default [
     act: async (page) => {
       for (const d of await page.locator('details.entry').all()) await d.evaluate((el) => (el.open = true))
       await page.locator('.builds details').first().evaluate((el) => (el.open = true))
+    },
+  }),
+  S('repositories-offers', '/settings#channels', 'Repositories: one offer waiting, decided ones on their entries', {
+    since: '#1163',
+    note: 'The inbox lists only the pending offer. orbit was offered and accepted twice: its entry says the latest inline with the sender\'s note, the earlier one under history (opened here). Each repository appears once.',
+    over: {
+      '/api/repos/offers': {
+        offers: [
+          offer('o-new', 'pending', 'github.com/op/site', -600000, null, null, 'Composer and npm, as on the build box.'),
+          offer('o-2', 'accepted', 'github.com/op/orbit', -3600000, -120000, 'github.com/op/orbit', 'Adds cargo-nextest to the prepare steps.'),
+          offer('o-1', 'superseded', 'github.com/op/orbit', -604800000, -120000, 'github.com/op/orbit', null),
+          offer('o-0', 'declined', 'github.com/op/orbit', -1209600000, -1209000000, null, null),
+        ],
+      },
+    },
+    act: async (page) => {
+      for (const d of await page.locator('details.entry').all()) await d.evaluate((el) => (el.open = true))
+      await page.getByText('history').first().click()
     },
   }),
   S('repositories-empty', '/settings#channels', 'Repositories: no entries', {

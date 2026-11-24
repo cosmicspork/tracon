@@ -1,6 +1,6 @@
-import { expect, test } from 'bun:test'
+import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
-import { OFFERS_LINK, forgeIdentity, inboxOrder, offerResultLine, offerTargets, reviewIsStale, shown } from './recipes'
+import { OFFERS_LINK, decidedLine, decidedOnto, forgeIdentity, inboxOrder, offerResultLine, offerTargets, reviewIsStale, shown, waitingOffers } from './recipes'
 import type { ChannelInfo, NodeInfo, RecipeOffer, RecipeOfferView } from './types'
 
 const channel = (name: string, nodes: string[], archived: number | null = null) =>
@@ -63,4 +63,43 @@ test('an accept waits for a review of exactly what it would write', () => {
 test("the push for a staged offer opens the same place as Home's card", () => {
   const rust = readFileSync(new URL('../../../node/src/http/recipes.rs', import.meta.url), 'utf8')
   expect(rust).toContain(`"${OFFERS_LINK}".into()`)
+})
+
+describe('decided offers', () => {
+  const at = (id: string, state: RecipeOffer['state'], decided: number | null, path: string | null): RecipeOffer => ({
+    id,
+    sender_node: 'n1',
+    sender_name: 'bazzite',
+    channel: 'personal',
+    repo: 'github.com/o/a',
+    recipe: {} as RecipeOffer['recipe'],
+    note: null,
+    received_ms: decided ?? 0,
+    expires_ms: 0,
+    state,
+    decided_ms: decided,
+    decided_path: path,
+  })
+  const offers = [
+    at('p', 'pending', null, null),
+    at('old', 'superseded', 10, 'github.com/o/a'),
+    at('new', 'accepted', 20, 'github.com/o/a'),
+    at('other', 'accepted', 30, 'github.com/o/b'),
+    at('no', 'declined', 40, null),
+  ]
+
+  test('the inbox lists only what waits on a decision', () => {
+    expect(waitingOffers(offers).map((o) => o.id)).toEqual(['p'])
+    expect(waitingOffers([at('a', 'accepting', 1, null)]).map((o) => o.id)).toEqual(['a'])
+  })
+
+  test('an entry shows the latest offer accepted onto it, the rest as history', () => {
+    const { latest, earlier } = decidedOnto(offers, 'github.com/o/a')
+    expect(latest?.id).toBe('new')
+    expect(earlier.map((o) => o.id)).toEqual(['old'])
+    expect(decidedOnto(offers, 'github.com/o/c')).toEqual({ latest: null, earlier: [] })
+    expect(decidedOnto(offers, '')).toEqual({ latest: null, earlier: [] })
+    expect(decidedLine(latest!)).toBe('recipe from bazzite on personal · accepted')
+    expect(decidedLine(earlier[0])).toBe('recipe from bazzite on personal · accepted, since replaced')
+  })
 })
