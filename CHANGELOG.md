@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.61.0](https://github.com/cosmicspork/tracon/compare/v0.60.0...v0.61.0) (2026-11-24)
+
+
+### Features
+
+* **node:** split [external] run_containers into check_run and check_submissions ([#1161](https://github.com/cosmicspork/tracon/issues/1161)) ([35135f5](https://github.com/cosmicspork/tracon/commit/35135f53668edba1516d12a04ba77a3c1e646e9e))
+* **node:** trim, cap and take turns with the warm-up's build output ([#1166](https://github.com/cosmicspork/tracon/issues/1166)) ([b23cbf3](https://github.com/cosmicspork/tracon/commit/b23cbf373b3ce966d4b9383bd30a96681c062057))
+* **spa,node:** a review history screen at /reviews ([#1162](https://github.com/cosmicspork/tracon/issues/1162)) ([0a2511d](https://github.com/cosmicspork/tracon/commit/0a2511d9ac9566a76326174a1e9fe296e3e00650))
+* **spa,node:** full-page plugin pages, per-channel open buttons and customizable navigation ([#1154](https://github.com/cosmicspork/tracon/issues/1154)) ([3757b1d](https://github.com/cosmicspork/tracon/commit/3757b1db5fe6914e6e965a9a1883530f4b867cac))
+* **ui:** @tracon/ui, shared tokens, base styles and a theme bridge plugins build in ([#1153](https://github.com/cosmicspork/tracon/issues/1153)) ([6f44a65](https://github.com/cosmicspork/tracon/commit/6f44a65750c03965b148c483d41a133440ce9636))
+* **ui:** ship the interface's Svelte components in @tracon/ui ([#1167](https://github.com/cosmicspork/tracon/issues/1167)) ([b55d493](https://github.com/cosmicspork/tracon/commit/b55d493482c1a84f30bbe91933f8131bbbcd4627))
+
+
+### Bug Fixes
+
+* **node:** key a snapshot's Cargo.lock on its third-party packages ([#1164](https://github.com/cosmicspork/tracon/issues/1164)) ([b6faa0f](https://github.com/cosmicspork/tracon/commit/b6faa0f567a788a30b87390fcf68d555f2e8b0f3))
+* **spa,node:** list only waiting recipe offers, and each decided one on its entry ([#1165](https://github.com/cosmicspork/tracon/issues/1165)) ([0d86410](https://github.com/cosmicspork/tracon/commit/0d8641094a09136fc129421730a65c965b1abe49))
+* **spa:** say a decided review's threads are read-only ([#1160](https://github.com/cosmicspork/tracon/issues/1160)) ([3470dcc](https://github.com/cosmicspork/tracon/commit/3470dcc86dff23a569e0ac1214a4d2e1ee0e0efe))
+
 ## [0.60.0](https://github.com/cosmicspork/tracon/compare/v0.59.0...v0.60.0) (2026-11-23)
 
 
