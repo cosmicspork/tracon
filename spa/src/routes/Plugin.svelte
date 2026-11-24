@@ -26,6 +26,10 @@
   /** The frame's address with this page's theme, fixed when it opens: a
       later change is posted to it (lib/plugin-theme.ts), not a reload. */
   let src = $state('')
+  /** Whether the frame has loaded. Until it has, it stays hidden over this
+      page's background: WKWebView paints a framed page white until its first
+      styled paint, which on a cold load is long enough to flash. */
+  let loaded = $state(false)
 
   // What the node says of its plugins now, not what it said when the
   // navigation first read them.
@@ -46,6 +50,7 @@
     const on = channel
     opened = null
     error = null
+    loaded = false
     if (!on) return
     api
       .pluginUi(plugin, on)
@@ -87,6 +92,8 @@
       bind:this={frame}
       title={opened.title}
       {src}
+      class:loaded
+      onload={() => (loaded = true)}
       sandbox="allow-scripts allow-same-origin allow-forms allow-downloads allow-modals"
     ></iframe>
   {:else}
@@ -109,6 +116,10 @@
     border: 0;
     border-radius: 0;
     background: var(--bg);
+    visibility: hidden;
+  }
+  iframe.loaded {
+    visibility: visible;
   }
   .state {
     display: grid;
