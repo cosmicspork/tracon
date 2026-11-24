@@ -44,7 +44,8 @@
 //                                       // say (the login gate replaces any of them)
 //   }
 //
-// A response wrapped as { status, body } is sent with that status; anything
+// A response wrapped as { status, body } is sent with that status (and
+// { status, body, type } with that content type, for an image); anything
 // else is a 200 with the value as JSON. Small *_ms numbers are offsets from
 // now, as in api.json.
 
@@ -136,12 +137,16 @@ function lookup(api, method, path) {
 
 async function respond(route, value, req) {
   if (typeof value === 'function') value = await value(req)
-  const wrapped = value !== null && typeof value === 'object' && !Array.isArray(value) && 'status' in value && 'body' in value && Object.keys(value).length === 2
+  const keys = value !== null && typeof value === 'object' && !Array.isArray(value) ? Object.keys(value) : []
+  const wrapped =
+    keys.includes('status') &&
+    keys.includes('body') &&
+    (keys.length === 2 || (keys.length === 3 && typeof value.type === 'string'))
   const status = wrapped ? value.status : 200
   const body = wrapped ? value.body : value
   await route.fulfill({
     status,
-    contentType: typeof body === 'string' ? 'text/plain' : 'application/json',
+    contentType: wrapped && value.type ? value.type : typeof body === 'string' ? 'text/plain' : 'application/json',
     body: typeof body === 'string' ? body : JSON.stringify(stamp(body ?? null)),
   })
 }

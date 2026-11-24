@@ -1,26 +1,26 @@
 <script lang="ts">
-  // The phone's fifth tab: the rail entries its bottom bar has no room for.
+  // The phone's last tab: every visible navigation entry its bottom bar has
+  // no room for, in the operator's order (lib/nav.ts), then Settings.
+  import NavIcon from '../components/NavIcon.svelte'
+  import { BUILT_IN_INFO, drawNav, phoneNav } from '../lib/nav'
+  import { navigation } from '../lib/navigation.svelte'
   import { store } from '../lib/store.svelte'
+
+  const rest = $derived(phoneNav(drawNav(navigation.list, navigation.plugins)).more)
 </script>
 
 <div class="h4">More <b>{store.node?.name ?? 'this node'}</b></div>
 
 <nav class="more" aria-label="More destinations">
-  <a href="/memories">
-    <svg viewBox="0 0 24 24"><path d="M12 3c-4 2-7 5-7 9a7 7 0 0 0 14 0c0-4-3-7-7-9z" /><path d="M12 8v8M9 12h6" /></svg>
-    <span><b>Memories</b><small>What sessions learned, kept for the next one</small></span>
-  </a>
-  <a href="/plugins">
-    <svg viewBox="0 0 24 24"><path d="M9 4v4M15 4v4" /><path d="M6 8h12v4a6 6 0 0 1-12 0z" /><path d="M12 18v3" /></svg>
-    <span><b>Plugins</b><small>Pages installed plugins bring, each framed on its own origin</small></span>
-  </a>
-  <a href="/usage">
-    <svg viewBox="0 0 24 24"><path d="M5 19V11M10 19V5M15 19v-6M20 19V8" /></svg>
-    <span><b>Usage</b><small>Sessions, tokens and cost by channel</small></span>
-  </a>
+  {#each rest as e (e.key)}
+    <a href={e.href}>
+      <NavIcon entry={e} size={20} />
+      <span><b>{e.label}</b><small>{e.hint}</small></span>
+    </a>
+  {/each}
   <a href="/settings">
-    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" /></svg>
-    <span><b>Settings</b><small>Connections, channels, devices, mesh and this node</small></span>
+    <NavIcon entry={{ builtin: 'settings', icon: null }} size={20} />
+    <span><b>Settings</b><small>{BUILT_IN_INFO.settings.hint}</small></span>
   </a>
 </nav>
 
@@ -44,10 +44,13 @@
   .more a:hover {
     background: var(--s2);
   }
-  .more svg {
+  .more :global(svg),
+  .more :global(img) {
     width: 20px;
     height: 20px;
     flex-shrink: 0;
+  }
+  .more :global(svg) {
     stroke: var(--ink2);
     fill: none;
     stroke-width: 1.7;

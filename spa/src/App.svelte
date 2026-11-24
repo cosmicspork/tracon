@@ -34,6 +34,9 @@
   import { router } from './lib/router.svelte'
   import { nameLookup, screenFor } from './lib/routes'
   import NameLookup from './components/NameLookup.svelte'
+  import NavIcon from './components/NavIcon.svelte'
+  import { activeKey, drawNav, phoneNav } from './lib/nav'
+  import { navigation } from './lib/navigation.svelte'
   import { store } from './lib/store.svelte'
   import { surface } from './lib/surface.svelte'
   import { staleInterface, versionLabel } from './lib/version'
@@ -106,28 +109,17 @@
   const screen = $derived(screenFor(router.path))
   /** A record address that carries a name: resolved before the screen opens. */
   const lookup = $derived(nameLookup(router.path, router.search, router.hash))
-  /** Which rail entry the screen belongs to. Enrolling a node is part of Mesh. */
-  const nav = $derived(
-    screen.name === 'settings' || screen.name === 'enroll'
-      ? 'settings'
-      : router.path.startsWith('/docs')
-        ? 'docs'
-        : router.path.startsWith('/memories')
-          ? 'memories'
-          : router.path.startsWith('/plugins')
-            ? 'plugins'
-          : router.path.startsWith('/tasks')
-            ? 'tasks'
-            : router.path.startsWith('/sessions')
-              ? 'sessions'
-              : router.path === '/usage'
-                ? 'usage'
-                : router.path === '/more'
-                  ? 'more'
-                  : 'home'
-  )
+  // The navigation is the operator's list for this node (lib/nav.ts), the
+  // same on the rail, the phone bar and More.
+  $effect(() => navigation.use(store.node?.id))
+  const drawn = $derived(drawNav(navigation.list, navigation.plugins))
+  const phone = $derived(phoneNav(drawn))
+  /** Which entry the screen belongs to. Enrolling a node is part of Settings. */
+  const nav = $derived(activeKey(router.path, drawn))
   /** The phone's More tab stands for every entry its bar has no room for. */
-  const more = $derived(['memories', 'plugins', 'usage', 'settings', 'more'].includes(nav))
+  const more = $derived(!phone.bar.some((e) => e.key === nav))
+  /** A plugin's page has the whole of main: no padding, no gap. */
+  const fullPage = $derived(screen.name === 'plugin')
   const cannotRun = $derived(servingBanner(store.nodes))
   const hubDown = $derived(store.mesh?.hub.state === 'unreachable')
   const staleVersion = $derived(
@@ -173,35 +165,13 @@
         <span class="lbl">tracon</span>
       </div>
     {/if}
-    <a href="/" class:on={nav === 'home'}>
-      <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10" /></svg>
-      <span class="lbl">Home</span>
-      {#if waiting > 0}<span class="n">{waiting}</span>{/if}
-    </a>
-    <a href="/tasks" class:on={nav === 'tasks'}>
-      <svg viewBox="0 0 24 24"><path d="M5 7h3M5 12h3M5 17h3" /><path d="M11 7h8M11 12h8M11 17h5" /></svg>
-      <span class="lbl">Tasks</span>
-    </a>
-    <a href="/sessions" class:on={nav === 'sessions'}>
-      <svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2" /><path d="M8 10l3 2-3 2M13 14h3" /></svg>
-      <span class="lbl">Sessions</span>
-    </a>
-    <a href="/docs" class:on={nav === 'docs'}>
-      <svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6z" /><path d="M9 11h7M9 15h7M9 7h3" /></svg>
-      <span class="lbl">Documents</span>
-    </a>
-    <a href="/memories" class:on={nav === 'memories'}>
-      <svg viewBox="0 0 24 24"><path d="M12 3c-4 2-7 5-7 9a7 7 0 0 0 14 0c0-4-3-7-7-9z" /><path d="M12 8v8M9 12h6" /></svg>
-      <span class="lbl">Memories</span>
-    </a>
-    <a href="/plugins" class:on={nav === 'plugins'}>
-      <svg viewBox="0 0 24 24"><path d="M9 4v4M15 4v4" /><path d="M6 8h12v4a6 6 0 0 1-12 0z" /><path d="M12 18v3" /></svg>
-      <span class="lbl">Plugins</span>
-    </a>
-    <a href="/usage" class:on={nav === 'usage'}>
-      <svg viewBox="0 0 24 24"><path d="M5 19V11M10 19V5M15 19v-6M20 19V8" /></svg>
-      <span class="lbl">Usage</span>
-    </a>
+    {#each drawn as e (e.key)}
+      <a href={e.href} class:on={nav === e.key} title={collapsed ? e.label : undefined} aria-label={collapsed ? e.label : undefined}>
+        <NavIcon entry={e} />
+        <span class="lbl">{e.label}</span>
+        {#if e.key === 'home' && waiting > 0}<span class="n">{waiting}</span>{/if}
+      </a>
+    {/each}
     <span class="sp"></span>
     <a href="/settings" class:on={nav === 'settings'}>
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" /></svg>
@@ -225,7 +195,7 @@
     </button>
   </nav>
 
-  <main>
+  <main class:full={fullPage}>
     {#if store.connectionLost}
       <div class="banner crit">Connection lost <b>· reconnecting. Saved work remains on the node; keep this page open to preserve unsent text.</b></div>
     {/if}
@@ -299,23 +269,13 @@
 
   <!-- Bottom tabs keep every primary destination within thumb reach. -->
   <nav class="tabs">
-    <a href="/" class:on={nav === 'home'}>
-      <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10" /></svg>
-      <span>Home</span>
-      {#if waiting > 0}<i class="dot"></i>{/if}
-    </a>
-    <a href="/tasks" class:on={nav === 'tasks'}>
-      <svg viewBox="0 0 24 24"><path d="M5 7h3M5 12h3M5 17h3" /><path d="M11 7h8M11 12h8M11 17h5" /></svg>
-      <span>Tasks</span>
-    </a>
-    <a href="/sessions" class:on={nav === 'sessions'}>
-      <svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2" /><path d="M8 10l3 2-3 2M13 14h3" /></svg>
-      <span>Sessions</span>
-    </a>
-    <a href="/docs" class:on={nav === 'docs'}>
-      <svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6z" /><path d="M9 11h7M9 15h7M9 7h3" /></svg>
-      <span>Documents</span>
-    </a>
+    {#each phone.bar as e (e.key)}
+      <a href={e.href} class:on={nav === e.key}>
+        <NavIcon entry={e} size={19} />
+        <span>{e.label}</span>
+        {#if e.key === 'home' && waiting > 0}<i class="dot"></i>{/if}
+      </a>
+    {/each}
     <a href="/more" class:on={more}>
       <svg viewBox="0 0 24 24"><circle cx="6" cy="12" r="1.3" /><circle cx="12" cy="12" r="1.3" /><circle cx="18" cy="12" r="1.3" /></svg>
       <span>More</span>
@@ -336,7 +296,7 @@
   .rail { background: var(--s1); display: flex; flex-direction: column; padding: 12px 0; gap: 2px; overflow: hidden; position: sticky; top: 0; height: 100vh; }
   button.brand { background: none; border: 0; cursor: pointer; color: inherit; width: 100%; }
   .brand { display: flex; align-items: center; gap: 10px; padding: 4px 16px 14px; font: 600 15px var(--sans); letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap; }
-  .rail svg { width: 17px; height: 17px; flex-shrink: 0; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  .rail :global(svg), .rail :global(img) { width: 17px; height: 17px; flex-shrink: 0; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
   .rail a, .rail button { display: flex; align-items: center; gap: 10px; padding: 8px 16px; color: var(--ink2); text-decoration: none; font: 500 14px var(--sans); white-space: nowrap; position: relative; background: none; border: 0; cursor: pointer; text-align: left; }
   .rail a.on { color: var(--ink); box-shadow: inset 2px 0 0 var(--acc); background: var(--s2); }
   .lbl { flex: 1; }
@@ -359,6 +319,7 @@
   .narrow .n { position: absolute; top: 2px; right: 8px; font-size: 10px; }
   .narrow .collapse svg { transform: rotate(180deg); }
   main { padding: 18px 22px 22px; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  main.full { padding: 0; gap: 0; }
   /* Bottom tabs are the phone's navigation; the rail is the desktop's. */
   .tabs { display: none; }
 
@@ -366,9 +327,12 @@
     .shell, .shell.narrow { grid-template-columns: minmax(0, 1fr); }
     .rail { display: none; }
     main { padding: 14px 12px calc(72px + env(safe-area-inset-bottom)); }
+    /* The frame sits above the tab bar, which stays. */
+    main.full { padding: 0; }
     .tabs {
       display: grid;
-      grid-template-columns: repeat(5, minmax(0, 1fr));
+      grid-auto-flow: column;
+      grid-auto-columns: minmax(0, 1fr);
       position: fixed;
       inset: auto 0 0 0;
       background: var(--s1);
@@ -389,7 +353,7 @@
       position: relative;
     }
     .tabs a.on { color: var(--ink); box-shadow: inset 0 2px 0 var(--acc); }
-    .tabs svg {
+    .tabs :global(svg), .tabs :global(img) {
       width: 19px; height: 19px; stroke: currentColor; fill: none;
       stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round;
     }
