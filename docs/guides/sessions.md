@@ -126,7 +126,7 @@ snapshot is the workspace as Git sees it: what its ignore rules exclude (a
 `target/`, a `node_modules/`) stays in the volume and is never exported.
 Nothing is removed on its own except a check run's copy once the check is over,
 unless `[gc]` sets a schedule (below).
-`tracon gc` (or **Settings → Maintenance → Runtime storage**) lists the volumes
+`tracon gc` (or **Settings → System → Runtime storage**) lists the volumes
 and state directories whose owner is over (an archived or vanished session, a
 workspace no open session uses and older than a day, a finished check run, a
 copy's `tracon-transfer-…` container a day old) and removes them with `--apply`,
@@ -242,7 +242,7 @@ sandbox's trees back first, so a save holds everything before it. Each save is a
 The saves are kept in the session's scratch volume under `saved/<index>-<before>/`, the
 package its harness state is backed up in, which no sandbox mounts: they are there
 again when the session is reopened or its harness restarted, and they go only when its
-runtime storage is reclaimed (**Settings → Data**, `tracon gc`), with its harness state. Read one back from
+runtime storage is reclaimed (**Settings → System**, `tracon gc`), with its harness state. Read one back from
 the session: open its `context_saved` line in the log to read the conversation, or
 **Export** it as one JSON document holding every file
 (`GET /api/sessions/{id}/saved`, `…/saved/{index}`, `…/saved/{index}/export`;
@@ -817,7 +817,7 @@ into a run, so checks and preparations never read it and nothing an agent stashe
 reaches a check. It holds bytes, not knowledge: what an agent learned belongs in a
 memory. Each repository of each channel keeps up to 1 GB on the node that ran the
 session (under `stash/` in the state directory); a put past that evicts the least
-recently used entries, a hit counting as a use. **Settings → Data** shows what it
+recently used entries, a hit counting as a use. **Settings → System** shows what it
 takes as *Artefact stash*. Neither tool is asked: they reach nothing beyond this
 node.
 
@@ -1045,8 +1045,8 @@ follows its draft with `issue_report_status`, which waits up to 45 seconds and
 returns the published issue's number, URL and title, or that you discarded it
 and why. None of the three pauses the session.
 
-**Devices & notifications** manages this browser's subscription and device tests.
-Shared channel notification rules live under **Channels** and have an explicit
+**Access & devices** manages this browser's subscription and device tests.
+Shared channel notification rules live under **Channels & repositories** and have an explicit
 mesh scope. Push-service acceptance is not phone display or human acknowledgement.
 No registered devices means no device delivery can be demonstrated.
 

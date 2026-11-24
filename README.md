@@ -31,9 +31,9 @@ never need its credentials, but do not gain its isolation.
 
 Your work should outlive the tool. Workspaces outlive sessions, a session can move
 to another node with its branch history, documents can be exported, and candidate
-packages carry their files and evidence outside the node. A complete portable
-archive does not exist yet; a versioned export is planned
-([#1092](https://github.com/cosmicspork/tracon/issues/1092)).
+packages carry their files and evidence outside the node. The whole node exports
+as one signed JSONL file ([data contract v1](docs/reference/data-contract.md)) that
+reads with nothing running; importing it back is a later contract.
 
 This project is built with coding agents. The name comes from terminal radar
 approach control: it issues clearances, but never flies the aircraft.
@@ -44,7 +44,9 @@ approach control: it issues clearances, but never flies the aircraft.
 harnesses, enforces policy, brokers credentials, and serves the interface above.
 A single node works without a hub. Optionally, nodes dial out to a small hub that
 relays end-to-end-encrypted frames so one interface can reach work on other nodes.
-Laptops, servers, and Kubernetes pods run the same binary.
+Laptops, servers, and Kubernetes pods run the same binary. Plugins extend a node
+with tools and pages of their own, such as reviewed SQL and Jira access
+([plugins guide](docs/guides/plugins.md)).
 
 **What it is not.** Not a coding agent — the node drives Claude Code over stream-json
 and `tracon-agent` over ACP, and contains no model loop; the one tracon ships runs in its
@@ -145,12 +147,12 @@ harness images it built. A `node.toml` that still turns one of the `[runtime.pod
 `[boundary]` keys only the gateway and harness images read are ignored, with a line in
 the log.
 
-Open `http://127.0.0.1:7420`. **Settings** groups configuration into Connections,
-Channels, Devices & notifications, Mesh, Permissions & policies, and Maintenance.
-**Nodes** compares connectivity, isolation, runtime, models, and compatibility;
-its management links open the relevant Settings section.
-Channel-scoped skills and instructions live under **Channels**; their launch
-manifests remain owned by the serving node.
+Open `http://127.0.0.1:7420`. **Settings** groups configuration into General,
+Connections, Plugins, Channels & repositories, Access & devices, Permissions &
+policies, Mesh, Configuration, and System. **Mesh** also compares the nodes'
+connectivity, isolation, runtime, models, and compatibility.
+Channel-scoped skills and instructions live under **Channels & repositories**; their
+launch manifests remain owned by the serving node.
 
 Home offers two paths: prepare this node, or use a ready peer on a shared channel.
 A local isolation failure or missing local provider does not block that peer.

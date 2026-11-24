@@ -11,7 +11,7 @@ tracon data show node.jsonl --jsonl --kind memory
 tracon data show node.jsonl --documents ./docs   # the documents, as document export writes them
 ```
 
-**Settings → Data → Export everything** downloads the same file. The route is
+**Settings → System → Export everything** downloads the same file. The route is
 `GET /api/maintenance/export`, open to the operator at the node and to an
 explicitly authenticated administrator elsewhere, because the file carries every
 transcript.

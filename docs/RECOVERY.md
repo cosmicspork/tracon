@@ -48,7 +48,7 @@ if it may be needed. With `[gc]` set in `node.toml`, the node runs the same swee
 on its own timer, and with `archive_ended_after_secs` it first archives this node's
 ended sessions untouched that long (never one whose review is open or whose
 publication is not settled): export a session's workspace before then, or leave
-`[gc]` unset. `tracon gc` and **Settings → Maintenance → Runtime storage** say when
+`[gc]` unset. `tracon gc` and **Settings → System → Runtime storage** say when
 the last automatic sweep ran, what it did, and when the next one is due. Session
 rows, their logs and evidence are never removed by it.
 
@@ -467,7 +467,7 @@ state, evidence and provenance, one signed JSONL file with credentials and keys
 left out (transcripts are kept, and can carry anything a session saw):
 
 ```sh
-tracon data export -o node.jsonl              # from the running node (or Settings → Data)
+tracon data export -o node.jsonl              # from the running node (or Settings → System)
 tracon data show node.jsonl                   # counts per kind, and whether it verifies
 tracon data show node.jsonl --jsonl           # every record
 tracon data show node.jsonl --documents docs/ # the documents, as document export writes them
