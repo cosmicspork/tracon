@@ -54,3 +54,7 @@ change and is listed in Tracon's changelog under `@tracon/ui`. Adding one is not
 bun install && bun test && bun run check
 just ui-pack   # from the repository root: target/tracon-ui-<version>.tgz
 ```
+
+## License
+
+MIT (this directory only; see LICENSE here). The rest of Tracon is AGPL-3.0-only.

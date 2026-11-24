@@ -2,7 +2,7 @@
   "name": "@tracon/ui",
   "version": "0.60.0",
   "description": "Tracon's design tokens, base styles and theme bridge, for the interface and plugin pages.",
-  "license": "AGPL-3.0-only",
+  "license": "MIT",
   "type": "module",
   "sideEffects": [
     "*.css"
@@ -25,7 +25,8 @@
     "tokens.css",
     "base.css",
     "index.css",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
