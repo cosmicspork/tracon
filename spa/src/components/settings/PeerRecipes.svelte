@@ -5,17 +5,20 @@
   // this node, and each is confirmed here with a prompt naming the peer.
   // Editing the entries themselves is A peer's repositories / node.toml.
   import Card from './Card.svelte'
+  import DecidedOffer from './DecidedOffer.svelte'
   import RecipeOffers from './RecipeOffers.svelte'
   import { api } from '../../lib/api'
   import { nodeDisplayName } from '../../lib/names'
   import { peerFailure } from '../../lib/peer-admin'
   import { forgeIdentity, offerResultLine, offerTargets, type OfferTarget } from '../../lib/recipes'
   import { store } from '../../lib/store.svelte'
-  import type { RecipeOfferResult } from '../../lib/types'
+  import type { RecipeOffer, RecipeOfferResult } from '../../lib/types'
 
   const peers = $derived(store.nodes.filter((node) => !node.is_self))
   let selected = $state('')
   let paths = $state<string[] | null>(null)
+  /** The chosen peer's offers, read by its inbox: each entry shows the one decided onto it. */
+  let offers = $state<RecipeOffer[]>([])
   let targets = $state<OfferTarget[]>([])
   let failure = $state('')
   let busy = $state('')
@@ -32,6 +35,7 @@
     selected = id
     paths = null
     targets = []
+    offers = []
     failure = ''
     offering = null
     if (!id) return
@@ -107,7 +111,7 @@
     {#if busy === 'load'}
       <small>Reading…</small>
     {:else if paths}
-      {#key selected}<RecipeOffers node={selected} />{/key}
+      {#key selected}<RecipeOffers node={selected} bind:offers />{/key}
       {#if paths.length === 0}
         <small>No [[repo]] entries on that node.</small>
       {/if}
@@ -121,6 +125,7 @@
               </button>
             {/if}
           </span>
+          <DecidedOffer {offers} {path} />
           {#if offering === path}
             <div class="offer">
               <small>Sends its Dockerfile, preparation, checks and registries. Not its image, credentials or path.</small>

@@ -19,6 +19,11 @@ export interface RepoForm {
   ownChecks: boolean
   /** One command per line. */
   checks: string
+  /** Off: the default warm-up build (the checks, for a Cargo or Go project).
+   *  On: `warm`, which may be empty to build nothing. */
+  ownWarm: boolean
+  /** One command per line. */
+  warm: string
   timeout: string
   /** One command per line. */
   prepare: string
@@ -58,6 +63,8 @@ export function blankForm(): RepoForm {
     build: '',
     ownChecks: false,
     checks: '',
+    ownWarm: false,
+    warm: '',
     timeout: '',
     prepare: '',
     egress: '',
@@ -69,7 +76,7 @@ export function blankForm(): RepoForm {
 }
 
 export function toForm(entry: RepoEntry): RepoForm {
-  const { path, image, dockerfile, context, build, checks, timeout_secs, prepare, egress, session_egress, service_volumes, ...kept } = entry
+  const { path, image, dockerfile, context, build, checks, warm, timeout_secs, prepare, egress, session_egress, service_volumes, ...kept } = entry
   return {
     path,
     source: build?.length ? 'build' : dockerfile ? 'dockerfile' : image ? 'image' : 'harness',
@@ -79,6 +86,8 @@ export function toForm(entry: RepoEntry): RepoForm {
     build: (build ?? []).join('\n'),
     ownChecks: checks !== undefined && checks !== null,
     checks: (checks ?? []).join('\n'),
+    ownWarm: warm !== undefined && warm !== null,
+    warm: (warm ?? []).join('\n'),
     timeout: timeout_secs ? String(timeout_secs) : '',
     prepare: prepare.join('\n'),
     egress: egress.join(' '),
@@ -105,6 +114,7 @@ export function toEntry(form: RepoForm): RepoEntry {
   }
   if (form.source === 'build' && lines(form.build).length) entry.build = lines(form.build)
   if (form.ownChecks) entry.checks = lines(form.checks)
+  if (form.ownWarm) entry.warm = lines(form.warm)
   const timeout = Number(form.timeout)
   if (form.timeout.trim() && Number.isFinite(timeout) && timeout > 0) entry.timeout_secs = Math.floor(timeout)
   if (form.sessionEgress) entry.session_egress = true
@@ -195,7 +205,7 @@ export function writtenRepos(document: Record<string, unknown>): RepoEntry[] {
 }
 
 /// What the form says, one field at a time.
-const FORM_FIELDS = ['path', 'source', 'image', 'dockerfile', 'context', 'build', 'ownChecks', 'checks', 'timeout', 'prepare', 'egress', 'sessionEgress', 'kept'] as const
+const FORM_FIELDS = ['path', 'source', 'image', 'dockerfile', 'context', 'build', 'ownChecks', 'checks', 'ownWarm', 'warm', 'timeout', 'prepare', 'egress', 'sessionEgress', 'kept'] as const
 
 /// The forms, carried onto the table as the node has it now (`now`), when
 /// they were edited against `seeded`. Only what the operator changed in a
@@ -249,4 +259,4 @@ export function replayRepos(
 }
 
 /// The fields of entry `index` as a refusal may name them.
-export const REPO_FIELDS = ['path', 'image', 'dockerfile', 'context', 'build', 'checks', 'timeout_secs', 'prepare', 'egress', 'session_egress', 'service_volumes']
+export const REPO_FIELDS = ['path', 'image', 'dockerfile', 'context', 'build', 'checks', 'warm', 'timeout_secs', 'prepare', 'egress', 'session_egress', 'service_volumes']

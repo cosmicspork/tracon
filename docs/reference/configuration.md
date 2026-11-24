@@ -168,6 +168,11 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
                                     # dropped waits for its sandbox to redial (see "When a
                                     # sandbox's connection drops"); 0 ends the run with the
                                     # connection, as before resuming existed
+# warm_concurrency = 1              # how many repositories' warm-ups run at once; the rest wait.
+                                    # Each builds at the lowest CPU priority
+# max_build_output_bytes = 10737418240  # the most build output a snapshot keeps, after the trim
+                                    # (10 GiB); over it the snapshot keeps only what `prepare`
+                                    # fetched. 0 keeps none
 # [runtime.kubernetes]              # namespace (for sandbox pods; empty, the node pod's own),
                                     # state_mount (where the node's own claim is mounted),
                                     # gateway_host (the name a sandbox resolves to its loopback).
@@ -257,11 +262,17 @@ kind = "podman"                     # Linux; or "kubernetes", for a pod-hosted n
                                     # They reach only `egress`, over HTTPS. Rebuilt when the base,
                                     # a step or the egress changes (see "Repository recipes on the
                                     # stock base")
-# checks = ["just check"]           # in place of [supervision] checks. With `prepare`, the warm-up
-                                    # also runs them on the default branch to build it, keeping the
-                                    # output under /cache (CARGO_TARGET_DIR=/cache/target,
-                                    # GOCACHE=/cache/go-build) in the snapshot; each check starts from
-                                    # it, read-only beneath a writable layer of its own
+# checks = ["just check"]           # in place of [supervision] checks
+# warm = ["cargo test --locked --no-run"]  # with `prepare`, what the warm-up builds the default
+                                    # branch with, offline, keeping the output under /cache
+                                    # (CARGO_TARGET_DIR=/cache/target, GOCACHE=/cache/go-build) in
+                                    # the snapshot; each check starts from it, read-only beneath a
+                                    # writable layer of its own. Left out, the checks, for a
+                                    # repository with a Cargo.toml or go.mod at its root, and nothing
+                                    # otherwise; [] builds nothing. Compiling without running
+                                    # (`--no-run`) is enough: test and binary executables, the
+                                    # incremental cache and what the build added to /work are
+                                    # removed before the snapshot is made
 # timeout_secs = 1800               # in place of [supervision] timeout_secs; covers preparation, and
                                     # each command of the warm-up's build
 # prepare = ["bun install --frozen-lockfile"]  # run once before a run's checks, on a copy each check

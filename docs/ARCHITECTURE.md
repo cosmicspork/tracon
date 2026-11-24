@@ -1358,10 +1358,17 @@ cache at `/cache`, it starts empty and is sent over that `/cache`, never onto st
 that would hide it, so preparation starts warm and only what it added comes back
 (`Exclusions::Unchanged`, by change time) to be sent over the same image to each check.
 The warm-up also **builds** the default branch: after `prepare`, in the same sandbox,
-it runs the repository's checks as a check runs them (offline, no grant, nothing lent;
-their outcome only logged) with build output under `/cache` (`environment::build_env`:
-`CARGO_TARGET_DIR=/cache/target`, `GOCACHE=/cache/go-build`), so the snapshot carries
-that output (`sandbox_images::build_output`). The snapshot is keyed on those commands
+it runs the entry's `warm` commands, or with none its checks when the default branch is
+a Cargo or Go project (`sandbox_images::warm_commands`), as a check runs them (offline,
+no grant, nothing lent, under `nice`; their outcome only logged) with build output under
+`/cache` (`environment::build_env`: `CARGO_TARGET_DIR=/cache/target`,
+`GOCACHE=/cache/go-build`), so the snapshot carries that output
+(`sandbox_images::build_output`). Only that output is kept: what the build added to
+`/work` is removed against a listing taken before it, Cargo's incremental cache and
+linked test, binary and example executables are trimmed in both of Cargo's target
+layouts (`sandbox_images::trim_script`), and output still over `[sandbox]
+max_build_output_bytes` is dropped. Warm-ups take turns across repositories
+(`[sandbox] warm_concurrency`, one by default). The snapshot is keyed on those commands
 too, so the output is rebuilt with it and removed with it, never refreshed on its own.
 A check from the snapshot is pointed at the same directories (`prepared_check_env`) and
 gets its cache read-only beneath a writable layer of its own

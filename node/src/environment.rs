@@ -81,6 +81,10 @@ pub struct RepoEnvironment {
     /// Dockerfile nothing has built yet.
     pub image_source: &'static str,
     pub checks: Vec<String>,
+    /// The entry's `warm`, as it wrote it: what the warm-up builds the
+    /// default branch with. `None` leaves it to
+    /// `sandbox_images::warm_commands` (the checks, for a compiled project).
+    pub warm: Option<Vec<String>>,
     pub timeout_secs: u64,
     /// Commands run before a run's checks, and on a session's workspace
     /// before its harness starts, with `egress` reachable and the cache
@@ -169,13 +173,16 @@ pub fn environment_with(
         },
         _ => (harness_image(cfg), "harness image"),
     };
-    RepoEnvironment {
-        checks: checks
-            .iter()
+    let commands = |list: &[String]| -> Vec<String> {
+        list.iter()
             .map(|command| command.trim())
             .filter(|command| !command.is_empty())
             .map(str::to_string)
-            .collect(),
+            .collect()
+    };
+    RepoEnvironment {
+        checks: commands(checks),
+        warm: entry.and_then(|entry| entry.warm.as_deref()).map(commands),
         timeout_secs: entry
             .and_then(|entry| entry.timeout_secs)
             .unwrap_or(live.supervision.timeout_secs)

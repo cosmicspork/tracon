@@ -1,6 +1,7 @@
 <script lang="ts">
   import Help from '../Help.svelte'
   import Card from './Card.svelte'
+  import DecidedOffer from './DecidedOffer.svelte'
   import RecipeOffers from './RecipeOffers.svelte'
   import { api } from '../../lib/api'
   import { autogrow } from '../../lib/autogrow'
@@ -21,9 +22,11 @@
     type RepoForm,
   } from '../../lib/repos'
   import { saveOps } from '../../lib/config-form'
-  import type { RecipeOfferResult, RepoEntry, RepoEnvironments, RepoImageBuild } from '../../lib/types'
+  import type { RecipeOffer, RecipeOfferResult, RepoEntry, RepoEnvironments, RepoImageBuild } from '../../lib/types'
 
   let loaded = $state<RepoEnvironments | null>(null)
+  /** Every offer the inbox read: each entry shows the one decided onto it. */
+  let offers = $state<RecipeOffer[]>([])
   let forms = $state<RepoForm[]>([])
   // The table the forms were seeded from, and its file's version: a save
   // edits entries where they were in it and names this version, never a
@@ -270,7 +273,7 @@
     </div>
   {/if}
 
-  <RecipeOffers onaccepted={() => void load(true)} />
+  <RecipeOffers bind:offers onaccepted={() => void load(true)} />
 
   {#if loaded}
     {#if forms.length === 0}
@@ -288,7 +291,9 @@
           <small>
             {form.source === 'dockerfile' ? `builds ${form.dockerfile || '…'}` : form.source === 'build' ? 'build steps on the base' : form.source === 'image' ? 'pinned image' : 'harness image'}{form.sessionEgress ? ' · registries open to sessions' : ''}{words(form.serviceVolumes).length ? ` · keeps ${words(form.serviceVolumes).join(', ')} data` : ''}
           </small>
+          <DecidedOffer {offers} path={form.path} part="latest" />
         </summary>
+        <DecidedOffer {offers} path={form.path} part="history" />
         <div class="grid">
           <label class="wide">
             <span>Repository</span>
@@ -341,6 +346,17 @@
               <small>One per line. Empty: no required checks.</small>
             {:else}
               <small>The node-wide checks run.</small>
+            {/if}
+          </div>
+
+          <div class="wide sessions">
+            <span class="heading">Warm-up build</span>
+            <label class="opt-check"><input type="checkbox" bind:checked={form.ownWarm} /> Choose what the warm-up builds</label>
+            {#if form.ownWarm}
+              <textarea class="grow" bind:value={form.warm} use:autogrow={form.warm} rows="2" spellcheck="false" placeholder="cargo test --locked --no-run" aria-label="Warm-up build commands, one per line"></textarea>
+              <small>One per line, run offline after preparation on the default branch; only Cargo's and Go's output is kept. Empty: build nothing.</small>
+            {:else}
+              <small>The checks, for a Cargo or Go project; nothing otherwise.</small>
             {/if}
           </div>
 
