@@ -1914,7 +1914,7 @@ type Kept = tokio::task::JoinHandle<Result<Option<Vec<crate::store::CandidateFil
 
 /// What follows a submission or a resubmission once its review is recorded:
 /// the candidate's files kept, when they are not yet; the node's checks run on
-/// them, for a harness the operator runs with `[external] run_containers` on; and
+/// them, for a harness the operator runs with `[external] check_submissions` on; and
 /// a reviewer started once both are done. What became of the reviewer.
 #[allow(clippy::too_many_arguments)]
 async fn keep_and_review(
@@ -1931,7 +1931,7 @@ async fn keep_and_review(
 ) -> Value {
     // The same commit submitted again while its checks run gets those
     // checks, not a second run of them (`ExternalChecks::begin`).
-    let check = (external && manager.cfg().external.run_containers)
+    let check = (external && manager.cfg().external.check_submissions)
         .then(|| manager.external_checks().begin(store, review_id, candidate))
         .flatten();
     let checking = check.is_some();
@@ -1959,7 +1959,8 @@ async fn keep_and_review(
 }
 
 /// For a review from a harness the operator runs, with `[external]
-/// run_containers` on: the repository's required checks, run on the node's own
+/// check_submissions` on, or a reviewer about to start on one that ran none
+/// (`check_before_reviewer`): the repository's required checks, run on the node's own
 /// copy of the candidate once `retained` has kept its files, as evidence for
 /// the reviewer, who starts once they are done. They run behind the
 /// submission and gate nothing; their results land on the candidate as an
@@ -2423,6 +2424,23 @@ fn unrun_checks(why: &str) -> String {
         exit: None,
         outcome: COULD_NOT_RUN.into(),
         tail: format!("the node could not run this candidate's checks: {why}"),
+        failures: String::new(),
+        ms: 0,
+        reused_from: None,
+        missing_tool: None,
+    };
+    serde_json::to_string(&[entry]).unwrap_or_default()
+}
+
+/// The one-entry checks record that says why no check ran on a candidate
+/// the node had none to run for: `could_not_run`, with `why` as it is.
+fn no_checks(why: &str) -> String {
+    let entry = review::checks::CheckResult {
+        command: "required checks".into(),
+        ok: false,
+        exit: None,
+        outcome: COULD_NOT_RUN.into(),
+        tail: why.to_string(),
         failures: String::new(),
         ms: 0,
         reused_from: None,
@@ -3750,12 +3768,55 @@ pub async fn spawn_claimed_review_session(
     unkept: Option<String>,
     started_by: StartedBy,
 ) -> Value {
+    // An external submission that ran no checks has them run now, and the
+    // reviewer starts once they are done, still under this claim.
+    let Some((head_sha, checked)) = unkept
+        .is_none()
+        .then(|| check_before_reviewer(store, manager, start.review_id()))
+        .flatten()
+    else {
+        return start_claimed(store, manager, start, None, unkept, started_by).await;
+    };
+    if let Err(error) = store.set_review_session_reason(start.review_id(), WAITING_FOR_CHECKS) {
+        tracing::warn!(%error, review_id = start.review_id(), "could not record why no reviewer started");
+    }
+    manager.publish_queue().await;
+    tokio::spawn({
+        let store = store.clone();
+        let manager = manager.clone();
+        async move {
+            let why = self::unkept(checked.await);
+            // Decided meanwhile, it wants no reviewer.
+            if !store
+                .review_undecided_at(start.review_id(), &head_sha)
+                .unwrap_or(false)
+            {
+                return;
+            }
+            // For the commit the checks ran on: a resubmission meanwhile
+            // has its own trigger, and its own reviewer.
+            start_claimed(&store, &manager, start, Some(&head_sha), why, started_by).await;
+        }
+    });
+    json!({ "state": "starting", "reason": WAITING_FOR_CHECKS })
+}
+
+/// [`spawn_claimed_review_session`]'s start, for the commit `at` when it is
+/// for one, else the one the claim names, if any.
+async fn start_claimed(
+    store: &Arc<Store>,
+    manager: &Manager,
+    start: ReviewStart,
+    at: Option<&str>,
+    unkept: Option<String>,
+    started_by: StartedBy,
+) -> Value {
     let review_id = start.review_id();
     match start_review_session(
         store,
         manager,
         review_id,
-        start.head(),
+        at.or(start.head()),
         unkept.as_deref(),
         started_by,
     )
@@ -3773,6 +3834,88 @@ pub async fn spawn_claimed_review_session(
             json!({ "state": state, "reason": reason })
         }
     }
+}
+
+/// Before a reviewer starts on a review from a harness the operator runs
+/// whose latest commit has no checks record (`[external] check_submissions`
+/// was off when it was submitted): the repository's required checks, run
+/// on the kept candidate as a submission's are (`check_external_candidate`),
+/// and the commit they run on. The reviewer waits on them and reads them as
+/// it would a submission's, and the card says they are running meanwhile. A
+/// run of them already under way is waited on, not doubled. `None` when
+/// there is nothing to run first: a review from a session, one checked
+/// already, one no reviewer could start on anyway, or one whose repository
+/// has no `[[repo]]` entry, on which the card is told why none ran and the
+/// reviewer reads the diff alone.
+fn check_before_reviewer(
+    store: &Arc<Store>,
+    manager: &Manager,
+    review_id: &str,
+) -> Option<(String, Kept)> {
+    let review = store.get_review(review_id).ok().flatten()?;
+    if Source::of(&review) != Source::External || review.checks_json.is_some() {
+        return None;
+    }
+    review_model(manager, &review.channel)?;
+    let revision = store.latest_review_revision(review_id).ok().flatten()?;
+    if revision.head_sha != review.head_sha
+        || !store
+            .review_undecided_at(review_id, &revision.head_sha)
+            .unwrap_or(false)
+    {
+        return None;
+    }
+    let candidate = store.candidate(&revision.candidate_id).ok().flatten()?;
+    let materialized = serde_json::from_str::<Value>(&candidate.capture_json)
+        .ok()
+        .and_then(|capture| capture["materialized"].as_bool())
+        .unwrap_or(false);
+    if !materialized {
+        return None;
+    }
+    let repo = crate::environment::review_repo(store, &review)
+        .ok()
+        .flatten();
+    let repos = manager.cfg().repos();
+    let entry = repo
+        .as_deref()
+        .is_some_and(|repo| repos.iter().any(|entry| entry.matches(repo)));
+    if !entry {
+        let why = match &repo {
+            Some(repo) => format!(
+                "{} has no [[repo]] entry on this node, so it has no required checks to run; \
+                 the reviewer reads the diff alone",
+                repo.display()
+            ),
+            None => "the review names no repository, so there are no required checks to run; \
+                     the reviewer reads the diff alone"
+                .to_string(),
+        };
+        if let Err(error) = store.set_checks_at(review_id, &candidate.head_sha, &no_checks(&why)) {
+            tracing::warn!(%error, review_id, "could not record why no check ran");
+        }
+        return None;
+    }
+    let checked = match manager
+        .external_checks()
+        .begin(store, review_id, &candidate)
+    {
+        Some(check) => check_external_candidate(store, manager, review_id, &candidate, None, check),
+        // A run under way, from a submission of this commit: its results
+        // are the reviewer's too.
+        None => {
+            let manager = manager.clone();
+            let review_id = review_id.to_string();
+            let candidate_id = candidate.id.clone();
+            tokio::spawn(async move {
+                while manager.external_checks().running(&review_id, &candidate_id) {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+                Ok(None)
+            })
+        }
+    };
+    Some((candidate.head_sha, checked))
 }
 
 /// What a start says when another is already under way for the review. Its
@@ -4501,7 +4644,7 @@ impl StartedBy {
 /// `phases.review.trigger` says nothing for it. The one place that default
 /// is decided: an external harness's submission carries no checks or shown
 /// work, so a reviewer on its own would have only the diff to go on, unless
-/// the node runs the repository's checks on it (`[external] run_containers`),
+/// the node runs the repository's checks on it (`[external] check_submissions`),
 /// which the reviewer then waits for and reads.
 pub fn default_trigger(source: Source, external_checks: bool) -> Trigger {
     match source {
@@ -4524,12 +4667,12 @@ pub struct ReviewerBinding {
 }
 
 impl ReviewerBinding {
-    /// A channel's binding on this node, whose `[external] run_containers` sets
-    /// the default for external submissions.
+    /// A channel's binding on this node, whose `[external] check_submissions`
+    /// sets the default for external submissions (`check_run` does not).
     pub fn for_channel(manager: &Manager, channel: &str) -> Self {
         Self::of(
             &manager.bindings(channel),
-            manager.cfg().external.run_containers,
+            manager.cfg().external.check_submissions,
         )
     }
 

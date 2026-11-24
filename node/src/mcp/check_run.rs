@@ -3,9 +3,8 @@
 //! An agent outside the boundary has no container runtime of the node's to
 //! run its repository's checks in, and reaching for one of its own (the Dev
 //! Container CLI, a Podman machine kept running on macOS) is a second,
-//! unbrokered way to run containers. So with `[external] run_containers` on,
-//! the same switch that runs a repository's required checks behind an
-//! external `submit_review`, the node runs them for it on request: the
+//! unbrokered way to run containers. So with `[external] check_run` on, the
+//! node runs them for it on request: the
 //! worktree's commit is snapshot as `submit_review` snapshots it, prepared
 //! as a review's candidate is, and each check (or the one command asked for)
 //! run in the repository's image on a fresh copy of the prepared tree, with
@@ -95,10 +94,10 @@ pub async fn call(
             super::review::SUBMIT
         ));
     }
-    if !manager.cfg().external.run_containers {
+    if !manager.cfg().external.check_run {
         return Err(format!(
             "{CHECK_RUN} is off on this node; the operator turns it on with [external] \
-             run_containers"
+             check_run"
         ));
     }
     if let Some(why) = manager.restart().refusal() {

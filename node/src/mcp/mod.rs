@@ -703,8 +703,8 @@ impl Tools {
         if self.session.get().is_some() {
             out.extend(review::definitions());
             // A harness the operator runs tests through the node only where
-            // the operator lets the node run containers for it.
-            if self.cfg.external.run_containers {
+            // the operator offers it that (`[external] check_run`).
+            if self.cfg.external.check_run {
                 out.extend(check_run::definitions());
             }
             // Memory and documents need no credential either: the corpus is

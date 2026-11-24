@@ -69,7 +69,7 @@ export type ReviewSource = 'session' | 'external'
 /**
  * Whether each source's submissions start a reviewer on their own. The node
  * says, defaults included, and its default for an external harness's
- * follows `[external] run_containers`: auto when the node checks those
+ * follows `[external] check_submissions`: auto when the node checks those
  * submissions, manual when not. From a node that predates saying, the
  * bindings are read with the defaults it would have used: a session's
  * submission starts one, an external harness's waits for you.

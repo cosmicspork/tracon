@@ -613,13 +613,16 @@ generated_details = false           # a description an approval sends opens with
 [external]                          # a harness you run yourself, using this node's tools; off unless enabled
 enabled = false
 repo_roots = ["~/src"]              # a worktree put up for review must belong to a repository under one of these
-run_containers = false              # true: the node runs containers for an external harness, in the repository's
-                                    # image on its own copy of the commit. Both: the required checks behind each
-                                    # submission, as evidence for the reviewer (a failed one shows on the card and
-                                    # never refuses the submission), and the check_run tool, which runs the checks
-                                    # or one command and hands back their output, attached to nothing; check_run needs
-                                    # a [[repo]] entry. Also makes `auto` the external review trigger
-                                    # where a channel sets none. Was run_checks, still read (with a warning) in 0.60
+check_run = false                   # true: offer the check_run tool, which runs the repository's checks or one
+                                    # command in its image on the node's own copy of the commit and hands back
+                                    # their output, attached to nothing; needs a [[repo]] entry. Nothing else
+check_submissions = false           # true: run the required checks behind each submission, as evidence for the
+                                    # reviewer (a failed one shows on the card and never refuses the submission),
+                                    # and make `auto` the external review trigger where a channel sets none.
+                                    # Off, a reviewer started on an external submission runs them first and waits
+                                    # for them (none with no [[repo]] entry: the card says why, and it reads the diff)
+                                    # run_containers (0.60) is still read, with a warning, as setting both; a new key
+                                    # set beside it wins for that key. run_checks before it likewise
 
 [docs]
 # export_dir = "~/notes"            # Markdown only: <slug>.md, archived ones under archive/;

@@ -3340,7 +3340,23 @@
       "editable_by_peer": true,
       "exec_path": false,
       "fs_path": false,
-      "key": "external.run_containers",
+      "key": "external.check_run",
+      "path": null,
+      "secret": false,
+      "shape": {
+        "kind": "bool",
+        "optional": false
+      }
+    },
+    {
+      "admin": true,
+      "apply": "restart",
+      "editable": true,
+      "editable_at_node": true,
+      "editable_by_peer": true,
+      "exec_path": false,
+      "fs_path": false,
+      "key": "external.check_submissions",
       "path": null,
       "secret": false,
       "shape": {
