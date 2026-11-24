@@ -2462,6 +2462,10 @@ export interface PluginSummary {
     /** Whether its manifest has `[ui]`, and the title its navigation entry takes. */
     ui?: boolean
     ui_title?: string | null
+    /** The archive's digest: the icon's cache key. */
+    digest?: string
+    /** Whether the page has an icon the node serves at `/api/plugins/{name}/icon`. */
+    icon?: boolean
   } | null
   /** The build before the active one, which a rollback makes active again. */
   previous?: PluginBuild | null

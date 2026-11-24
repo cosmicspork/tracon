@@ -7,6 +7,7 @@
   import { generatedName, nodeDisplayName } from '../lib/names'
   import { isTauri } from '@tauri-apps/api/core'
   import LaunchManifest from '../components/LaunchManifest.svelte'
+  import Navigation from '../components/settings/Navigation.svelte'
   import QrScanner from '../components/QrScanner.svelte'
   import { api } from '../lib/api'
   import { admin } from '../lib/admin'
@@ -719,6 +720,8 @@
       {/each}
     </div>
   </Card>
+
+  <Navigation />
 
   {#if desktopPrefs}
     <Card title="Desktop app" note="How the app behaves on this machine. Stored beside node.toml.">

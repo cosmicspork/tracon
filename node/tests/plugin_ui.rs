@@ -717,3 +717,94 @@ async fn a_page_on_a_channel_the_entry_does_not_list_is_refused_and_starts_nothi
     assert!(n.h.manager.plugins().status().is_empty());
     n.shutdown().await;
 }
+
+/// `GET /api/plugins/{name}/icon` on the operator router: status, headers, body.
+async fn icon_of(n: &Node, name: &str, headers: &[(&str, &str)]) -> Answer {
+    let mut b = Request::builder()
+        .uri(format!("/api/plugins/{name}/icon"))
+        .header("host", "127.0.0.1:7420");
+    for (k, v) in headers {
+        b = b.header(*k, *v);
+    }
+    let res =
+        n.h.operator
+            .clone()
+            .oneshot(b.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+    let status = res.status();
+    let headers = res.headers().clone();
+    let body = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .unwrap()
+        .to_vec();
+    Answer {
+        status,
+        headers,
+        body,
+    }
+}
+
+const FAVICON: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\"><circle r=\"4\"/></svg>";
+
+#[tokio::test]
+async fn a_pages_favicon_is_served_sandboxed_from_the_interfaces_origin() {
+    let n = node("pinwheel", true, "pages", vec![]).await;
+    let ui = install::build_dir(&n.state, "pinwheel", "1.0.0", support::plugin::DIGEST).join("ui");
+
+    // No <link rel="icon">: no icon, and the list says so.
+    let (_, list) = call(&n.h.operator, "GET", "/api/plugins", None).await;
+    let row = |list: &Value| {
+        list["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "pinwheel")
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(row(&list)["active"]["icon"], false);
+    assert_eq!(icon_of(&n, "pinwheel", &[]).await.status, 404);
+
+    std::fs::write(
+        ui.join("index.html"),
+        format!("<!doctype html><link rel=\"icon\" href=\"./fav.svg\">{INDEX}"),
+    )
+    .unwrap();
+    std::fs::write(ui.join("fav.svg"), FAVICON).unwrap();
+    let (_, list) = call(&n.h.operator, "GET", "/api/plugins", None).await;
+    assert_eq!(row(&list)["active"]["icon"], true);
+
+    let a = icon_of(&n, "pinwheel", &[]).await;
+    assert_eq!(a.status, 200);
+    assert_eq!(String::from_utf8_lossy(&a.body), FAVICON);
+    assert_eq!(a.headers["content-type"], "image/svg+xml");
+    assert_eq!(a.headers["x-content-type-options"], "nosniff");
+    let csp: Vec<_> = a
+        .headers
+        .get_all("content-security-policy")
+        .iter()
+        .map(|v| v.to_str().unwrap().to_string())
+        .collect();
+    assert!(csp.iter().any(|v| v == "sandbox"), "{csp:?}");
+    let etag = a.headers["etag"].to_str().unwrap().to_string();
+    assert_eq!(etag, format!("\"{}\"", support::plugin::DIGEST));
+
+    // The same build again: not modified.
+    let again = icon_of(&n, "pinwheel", &[("if-none-match", &etag)]).await;
+    assert_eq!(again.status, 304);
+    assert!(again.body.is_empty());
+
+    // Too big, or a link out of ui/: no icon.
+    std::fs::write(ui.join("fav.svg"), " ".repeat(256 * 1024 + 1)).unwrap();
+    assert_eq!(icon_of(&n, "pinwheel", &[]).await.status, 404);
+    std::fs::write(
+        ui.join("index.html"),
+        "<link rel=\"icon\" href=\"../tracon-plugin.toml\">",
+    )
+    .unwrap();
+    assert_eq!(icon_of(&n, "pinwheel", &[]).await.status, 404);
+
+    // A plugin that is not installed has none.
+    assert_eq!(icon_of(&n, "nobody", &[]).await.status, 404);
+}

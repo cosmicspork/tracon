@@ -13,6 +13,7 @@
 
 pub mod context;
 pub mod host;
+pub mod icon;
 pub mod install;
 pub mod lending;
 pub mod manifest;

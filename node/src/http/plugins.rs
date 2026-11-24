@@ -66,6 +66,7 @@ fn row_view(s: &AppState, row: &PluginRow) -> Value {
         view["formats"] = json!(b.manifest.formats);
         view["ui"] = json!(b.manifest.ui.is_some());
         view["ui_title"] = json!(b.manifest.ui.as_ref().map(|u| &u.title));
+        view["icon"] = json!(build_icon(&row.name, b).is_some());
         view
     });
     let instances: Vec<_> = s
@@ -400,6 +401,72 @@ pub async fn logs(
     Ok(Json(json!({
         "lines": s.manager.plugins().logs(&name, &query.channel, lines),
     })))
+}
+
+/// The icon of `name`'s build `build`, when its page has one the node will
+/// serve (`plugin::icon`).
+fn build_icon(
+    name: &str,
+    build: &Build,
+) -> Option<(std::path::PathBuf, crate::plugin::icon::Icon)> {
+    let ui = build.manifest.ui.as_ref()?;
+    let root = install::build_dir(&Config::state_dir(), name, &build.version, &build.digest);
+    let icon = crate::plugin::icon::locate(&root, ui)?;
+    Some((root, icon))
+}
+
+/// `GET /api/plugins/{name}/icon`: the active build's page icon, from the
+/// interface's own origin so the navigation can show it with `<img>`.
+/// Sandboxed and never sniffed, since an SVG is a document; its ETag is the
+/// build's digest, so a new build is fetched and an unchanged one is not.
+pub async fn icon(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::http::header;
+    use axum::response::IntoResponse as _;
+    let active = s
+        .store()
+        .plugin_get(&name)
+        .ok()
+        .flatten()
+        .filter(|r| r.state != crate::store::plugins::REMOVED)
+        .and_then(|r| r.active);
+    let Some(build) = active else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some((root, icon)) = build_icon(&name, &build) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let etag = format!("\"{}\"", build.digest);
+    let common = |b: axum::http::response::Builder| {
+        b.header(header::CONTENT_TYPE, icon.media)
+            .header(header::CONTENT_SECURITY_POLICY, "sandbox")
+            .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+            .header(header::ETAG, etag.as_str())
+            .header(header::CACHE_CONTROL, "private, no-cache")
+    };
+    if headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|t| t.trim() == etag))
+    {
+        return common(axum::http::Response::builder())
+            .status(StatusCode::NOT_MODIFIED)
+            .body(axum::body::Body::empty())
+            .unwrap_or_else(|_| StatusCode::NOT_FOUND.into_response());
+    }
+    let Ok(bytes) = tokio::fs::read(root.join(&icon.path)).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if bytes.len() as u64 > crate::plugin::icon::MAX_ICON_BYTES {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    common(axum::http::Response::builder())
+        .status(StatusCode::OK)
+        .body(axum::body::Body::from(bytes))
+        .unwrap_or_else(|_| StatusCode::NOT_FOUND.into_response())
 }
 
 #[derive(Deserialize)]

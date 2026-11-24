@@ -116,6 +116,11 @@ pub enum Hint {
 pub struct Ui {
     pub entry: String,
     pub title: String,
+    /// The page's icon in the interface's navigation, a path under `ui/`
+    /// (SVG, PNG or ICO). Unset, the entry's `<link rel="icon">` is used
+    /// (`crate::plugin::icon`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 impl Credential {
@@ -456,6 +461,20 @@ impl Manifest {
             }
             if ui.title.trim().is_empty() {
                 return bad("ui.title", "is empty".into());
+            }
+            if let Some(icon) = &ui.icon {
+                if !under(icon, "ui") {
+                    return bad(
+                        "ui.icon",
+                        format!("{icon:?} must be a plain path under ui/"),
+                    );
+                }
+                if super::icon::media_of(icon).is_none() {
+                    return bad(
+                        "ui.icon",
+                        format!("{icon:?} must be an .svg, .png or .ico file"),
+                    );
+                }
             }
         }
         for entry in &self.egress {
@@ -901,6 +920,21 @@ title = "SQL"
                 "ui.entry:",
             ),
             ("title = \"SQL\"", "title = \" \"", "ui.title:"),
+            (
+                "title = \"SQL\"",
+                "title = \"SQL\"\nicon = \"bin/x.svg\"",
+                "ui.icon:",
+            ),
+            (
+                "title = \"SQL\"",
+                "title = \"SQL\"\nicon = \"ui/../bin/x.svg\"",
+                "ui.icon:",
+            ),
+            (
+                "title = \"SQL\"",
+                "title = \"SQL\"\nicon = \"ui/mark.gif\"",
+                "ui.icon: \"ui/mark.gif\" must be an .svg",
+            ),
             ("db.internal:1521", "db.internal:70000", "egress:"),
             ("db.internal:1521", "db internal", "egress:"),
             (
