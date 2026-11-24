@@ -78,7 +78,8 @@ same machine the app needs none of this. Behind an ingress, list its addresses i
 than the ingress's.
 
 Add the page to the Home Screen — iOS only delivers push to an
-installed web app — then open **Nodes** and switch on **Push to this device**. The
+installed web app — then open **Settings → Access & devices** and switch on **Push
+from <node> to this device**. The
 node pushes straight to the phone's push service, sealed to the phone's own key.
 
 Push needs a contact. Every push is signed with a VAPID subject, and Apple refuses

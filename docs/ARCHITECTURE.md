@@ -2706,7 +2706,7 @@ by hand, or on a schedule the operator sets; only runtime storage, never session
 logs or evidence. `[gc]` runs `tracon gc --apply` on a timer (off unless `every_secs`
 is set), first archiving this node's own ended sessions untouched for
 `archive_ended_after_secs`, save one whose review is open or whose publication is not
-settled, as approving or publishing reads its workspace again. Settings → Data shows what the node holds per kind (rows counted from the
+settled, as approving or publishing reads its workspace again. Settings → System shows what the node holds per kind (rows counted from the
 store, directories measured on disk; plugins by their builds, each one's data by
 channel, and its logs), where each kind that has a real delete is
 deleted, and what that delete does beyond the node; the Nodes screen carries the
