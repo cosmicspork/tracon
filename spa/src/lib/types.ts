@@ -2222,6 +2222,9 @@ export interface RepoEntry {
   build?: string[]
   /** Absent: the node-wide checks. Empty: explicitly none. */
   checks?: string[]
+  /** What the warm-up builds the default branch with. Absent: the checks,
+   *  for a Cargo or Go project. Empty: nothing. */
+  warm?: string[]
   timeout_secs?: number
   prepare: string[]
   egress: string[]

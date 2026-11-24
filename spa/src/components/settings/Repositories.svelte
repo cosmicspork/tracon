@@ -349,6 +349,17 @@
             {/if}
           </div>
 
+          <div class="wide sessions">
+            <span class="heading">Warm-up build</span>
+            <label class="opt-check"><input type="checkbox" bind:checked={form.ownWarm} /> Choose what the warm-up builds</label>
+            {#if form.ownWarm}
+              <textarea class="grow" bind:value={form.warm} use:autogrow={form.warm} rows="2" spellcheck="false" placeholder="cargo test --locked --no-run" aria-label="Warm-up build commands, one per line"></textarea>
+              <small>One per line, run offline after preparation on the default branch; only Cargo's and Go's output is kept. Empty: build nothing.</small>
+            {:else}
+              <small>The checks, for a Cargo or Go project; nothing otherwise.</small>
+            {/if}
+          </div>
+
           <label class="wide">
             <span>Preparation</span>
             <textarea class="grow" bind:value={form.prepare} use:autogrow={form.prepare} rows="2" spellcheck="false" placeholder="cargo fetch --locked"></textarea>

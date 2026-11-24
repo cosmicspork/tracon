@@ -79,6 +79,7 @@ const SENSITIVE: &[&str] = &[
     "repo.build",
     "repo.image",
     "repo.checks",
+    "repo.warm",
     "service.command",
     "supervision.checks",
     "embed.base_url",

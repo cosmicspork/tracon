@@ -243,6 +243,7 @@ async fn a_session_at_its_snapshots_commit_skips_prepare_and_another_prepares_on
         image: pinned.clone(),
         image_source: "stock base",
         checks: Vec::new(),
+        warm: None,
         timeout_secs: 300,
         prepare: PREPARE.iter().map(|s| s.to_string()).collect(),
         egress: Vec::new(),
