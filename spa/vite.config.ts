@@ -96,7 +96,17 @@ const buildId = (): Plugin => ({
   },
 })
 
+// @tracon/ui (packages/ui): the tokens, base styles and theme module this
+// interface shares with plugin pages, taken from the workspace's own copy.
+const ui = fileURLToPath(new URL('../packages/ui/', import.meta.url))
+
 export default defineConfig({
+  resolve: {
+    alias: [
+      { find: /^@tracon\/ui$/, replacement: `${ui}theme.ts` },
+      { find: /^@tracon\/ui\//, replacement: ui },
+    ],
+  },
   define: { __TRACON_VERSION__: JSON.stringify(appVersion), __TRACON_BUILD__: JSON.stringify(appBuild) },
   plugins: [svelte(), buildId(), fixtureMode ? fixtures() : undefined].filter(Boolean) as PluginOption[],
   build: {
@@ -115,7 +125,7 @@ export default defineConfig({
   server: {
     // The generated-name word lists live with the node's copy in proto/, which
     // both sides embed; the dev server may serve that one file from outside.
-    fs: { allow: [searchForWorkspaceRoot(process.cwd()), fileURLToPath(new URL('../proto/src/names-v1.json', import.meta.url))] },
+    fs: { allow: [searchForWorkspaceRoot(process.cwd()), ui, fileURLToPath(new URL('../proto/src/names-v1.json', import.meta.url))] },
     ...(fixtureMode
       ? {}
       : {

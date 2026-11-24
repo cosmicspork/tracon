@@ -13,6 +13,7 @@
   import { api } from '../lib/api'
   import { navigation } from '../lib/navigation.svelte'
   import { pageChannel, pluginTabTitle } from '../lib/plugin-page'
+  import { bridgeFrameTheme, currentTheme, themedFrameUrl } from '../lib/plugin-theme'
   import { router } from '../lib/router.svelte'
   import { store } from '../lib/store.svelte'
   import type { PluginUiOpen } from '../lib/types'
@@ -21,6 +22,10 @@
 
   let opened = $state<PluginUiOpen | null>(null)
   let error = $state<string | null>(null)
+  let frame = $state<HTMLIFrameElement | null>(null)
+  /** The frame's address with this page's theme, fixed when it opens: a
+      later change is posted to it (lib/plugin-theme.ts), not a reload. */
+  let src = $state('')
 
   // What the node says of its plugins now, not what it said when the
   // navigation first read them.
@@ -45,7 +50,9 @@
     api
       .pluginUi(plugin, on)
       .then((o) => {
-        if (plugin === name && on === channel) opened = o
+        if (plugin !== name || on !== channel) return
+        src = themedFrameUrl(o.url, currentTheme())
+        opened = o
       })
       .catch((e) => {
         if (plugin === name && on === channel) error = e instanceof Error ? e.message : String(e)
@@ -61,6 +68,10 @@
     }
   })
 
+  $effect(() => {
+    if (frame && opened) return bridgeFrameTheme(frame, opened.url)
+  })
+
   const problem = $derived(choice && 'error' in choice ? choice.error : error)
 </script>
 
@@ -73,8 +84,9 @@
   {:else if opened}
     <!-- allow-same-origin is the plugin's own origin, never this one's. -->
     <iframe
+      bind:this={frame}
       title={opened.title}
-      src={opened.url}
+      {src}
       sandbox="allow-scripts allow-same-origin allow-forms allow-downloads allow-modals"
     ></iframe>
   {:else}

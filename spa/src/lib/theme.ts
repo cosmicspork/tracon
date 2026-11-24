@@ -1,7 +1,10 @@
 // The colour scheme is a per-browser choice, not a node setting: a phone and a
-// laptop on the same node may reasonably want different ones.
+// laptop on the same node may reasonably want different ones. Applying it is
+// @tracon/ui's applyTheme, which plugin pages use too.
 
-export type Theme = 'auto' | 'light' | 'dark'
+import { applyTheme, type Theme } from '@tracon/ui'
+
+export { applyTheme, type Theme }
 
 export const themes: Theme[] = ['auto', 'light', 'dark']
 
@@ -19,9 +22,12 @@ export function storedTheme(): Theme {
   }
 }
 
-export function applyTheme(theme: Theme, root: HTMLElement = document.documentElement) {
-  if (theme === 'auto') root.removeAttribute('data-theme')
-  else root.setAttribute('data-theme', theme)
+const listeners = new Set<() => void>()
+
+/** Calls `fn` whenever this page's choice changes; returns a function that stops it. */
+export function onThemeChange(fn: () => void): () => void {
+  listeners.add(fn)
+  return () => listeners.delete(fn)
 }
 
 export function setTheme(theme: Theme) {
@@ -32,4 +38,5 @@ export function setTheme(theme: Theme) {
   } catch {
     /* blocked storage: the choice lasts for this page */
   }
+  for (const fn of listeners) fn()
 }

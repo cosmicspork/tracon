@@ -58,7 +58,7 @@
   <code class="key">{field.key}</code>
 
   {#if field.control === 'bool'}
-    <label class="toggle">
+    <label class="opt-check">
       <input
         {id}
         type="checkbox"
@@ -242,7 +242,7 @@
     color: var(--dim);
     white-space: nowrap;
   }
-  .toggle {
+  .opt-check {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -250,7 +250,7 @@
     color: var(--ink);
     font-size: 13.5px;
   }
-  .toggle input {
+  .opt-check input {
     width: 18px;
     height: 18px;
     margin: 0;

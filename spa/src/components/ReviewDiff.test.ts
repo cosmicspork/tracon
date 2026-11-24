@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url'
 
 import { chromium, type Browser, type Page } from 'playwright-core'
 import { compile, compileModule } from 'svelte/compiler'
+import { appCss } from '../lib/app-css'
 
 const here = fileURLToPath(new URL('.', import.meta.url))
 
@@ -163,7 +164,7 @@ async function open(
   page ??= await browser!.newPage({ viewport: { width, height: 800 } })
   const errors: string[] = []
   page.on('pageerror', (e) => errors.push(String(e)))
-  const css = readFileSync(new URL('../app.css', import.meta.url), 'utf8')
+  const css = appCss()
   const js = (await bundle()).replaceAll('</script', '<\\/script')
   const html =
     `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>${css}</style>` +

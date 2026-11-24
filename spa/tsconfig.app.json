@@ -15,7 +15,12 @@
      */
     "allowJs": true,
     "checkJs": true,
-    "moduleDetection": "force"
+    "moduleDetection": "force",
+    /* @tracon/ui from the workspace (packages/ui), as vite.config.ts aliases it. */
+    "paths": {
+      "@tracon/ui": ["../packages/ui/theme.ts"],
+      "@tracon/ui/*": ["../packages/ui/*"]
+    }
   },
   "include": ["src/**/*.ts", "src/**/*.js", "src/**/*.svelte"]
 }

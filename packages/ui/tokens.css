@@ -1,0 +1,84 @@
+/* @tracon/ui tokens: the Ledger × Tonal direction, dark first. The interface
+   and every plugin page build on these, so a plugin looks and themes like the
+   rest of Tracon.
+
+   Rules that go with them:
+   - Amber (--wait) means waiting on you, and nothing else.
+   - Red (--crit) is refusal and failure.
+   - State is carried by a 3px bar plus a wash (--wash-*); nothing has an
+     outline.
+
+   Renaming or removing a token is a breaking change for plugins; adding one
+   is not. */
+
+:root {
+  --bg: #141517;
+  --s1: #1b1c1f;
+  --s2: #222327;
+  --s3: #2b2c31;
+  --ink: #e4e3de;
+  --ink2: #a6a7a2;
+  --dim: #969895;
+  --rule: #2a2c2f;
+  --acc: #7fa6c9;
+  --acc-ink: #0f1418;
+  --wait: #d9a441;
+  --crit: #e27a6d;
+  --ok: #7fb59a;
+  --wash-wait: rgba(217, 164, 65, 0.12);
+  --wash-crit: rgba(217, 107, 96, 0.11);
+  --wash-run: rgba(127, 166, 201, 0.07);
+  --wash-ok: rgba(127, 181, 154, 0.1);
+  --wash-dim: rgba(110, 113, 111, 0.1);
+  --sans: 'Instrument Sans', 'Helvetica Neue', Arial, sans-serif;
+  --mono: 'Fragment Mono', Menlo, Consolas, monospace;
+  color-scheme: dark;
+}
+
+/* Light follows the system unless the page chose dark; an explicit choice wins
+   either way (applyTheme in theme.ts sets or removes data-theme). */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    --bg: #f2f2f0;
+    --s1: #ffffff;
+    --s2: #ebebe8;
+    --s3: #dededa;
+    --ink: #1d1e21;
+    --ink2: #54565b;
+    --dim: #5c5e63;
+    --rule: #d6d6d2;
+    --acc: #315f89;
+    --acc-ink: #ffffff;
+    --wait: #83570d;
+    --crit: #a0342b;
+    --ok: #286344;
+    --wash-wait: rgba(168, 115, 26, 0.1);
+    --wash-crit: rgba(184, 70, 59, 0.09);
+    --wash-run: rgba(61, 110, 154, 0.07);
+    --wash-ok: rgba(59, 127, 94, 0.09);
+    --wash-dim: rgba(138, 140, 144, 0.12);
+    color-scheme: light;
+  }
+}
+
+:root[data-theme='light'] {
+  --bg: #f2f2f0;
+  --s1: #ffffff;
+  --s2: #ebebe8;
+  --s3: #dededa;
+  --ink: #1d1e21;
+  --ink2: #54565b;
+  --dim: #5c5e63;
+  --rule: #d6d6d2;
+  --acc: #315f89;
+  --acc-ink: #ffffff;
+  --wait: #83570d;
+  --crit: #a0342b;
+  --ok: #286344;
+  --wash-wait: rgba(168, 115, 26, 0.1);
+  --wash-crit: rgba(184, 70, 59, 0.09);
+  --wash-run: rgba(61, 110, 154, 0.07);
+  --wash-ok: rgba(59, 127, 94, 0.09);
+  --wash-dim: rgba(138, 140, 144, 0.12);
+  color-scheme: light;
+}

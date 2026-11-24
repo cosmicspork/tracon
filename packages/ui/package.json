@@ -1,0 +1,40 @@
+{
+  "name": "@tracon/ui",
+  "version": "0.60.0",
+  "description": "Tracon's design tokens, base styles and theme bridge, for the interface and plugin pages.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": [
+    "*.css"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/theme.d.ts",
+      "default": "./dist/theme.js"
+    },
+    "./theme": {
+      "types": "./dist/theme.d.ts",
+      "default": "./dist/theme.js"
+    },
+    "./tokens.css": "./tokens.css",
+    "./base.css": "./base.css",
+    "./index.css": "./index.css"
+  },
+  "files": [
+    "dist",
+    "tokens.css",
+    "base.css",
+    "index.css",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check": "tsc -p tsconfig.json",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.0",
+    "typescript": "~6.0.2"
+  }
+}

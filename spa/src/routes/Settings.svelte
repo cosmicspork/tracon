@@ -1368,7 +1368,8 @@
   .grid .wide {
     grid-column: 1 / -1;
   }
-  label,
+  /* A .toggle is @tracon/ui's switch, laid out by base.css. */
+  label:not(.toggle),
   .field {
     display: grid;
     gap: 5px;
@@ -1378,7 +1379,7 @@
   .field {
     max-width: 560px;
   }
-  label > span,
+  label:not(.toggle) > span,
   .field > span {
     font: 500 11px var(--mono);
     letter-spacing: 0.08em;
@@ -1430,71 +1431,11 @@
     font-size: 13px;
   }
 
-  /* General */
-  .segmented {
-    display: inline-flex;
-    justify-self: start;
-    background: var(--s2);
-    border-radius: 6px;
-    padding: 3px;
-    gap: 2px;
-  }
-  .segmented button {
-    border: 0;
-    background: none;
-    color: var(--ink2);
-    font: 500 13px var(--sans);
-    padding: 6px 14px;
-    border-radius: 4px;
-    cursor: pointer;
-  }
-  .segmented button.on {
-    background: var(--s1);
-    color: var(--ink);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
-  }
-  .toggles {
-    display: grid;
-    gap: 2px;
-  }
-  .toggle {
-    display: flex;
-    align-items: flex-start;
-    gap: 12px;
-    padding: 8px 0;
-    cursor: pointer;
-  }
-  .toggle + .toggle {
-    border-top: 1px solid var(--rule);
-  }
-  .toggle input {
-    margin: 3px 0 0;
-    width: 16px;
-    height: 16px;
-    flex: none;
-  }
-  .toggle > span {
-    display: grid;
-    gap: 2px;
-    font: 13.5px var(--sans);
-    letter-spacing: 0;
-    text-transform: none;
-    color: var(--ink);
-  }
-  .toggle b {
-    font-weight: 500;
-  }
+  /* General: .segmented, .toggles and .toggle are @tracon/ui's (base.css). */
   .hint {
     margin: 0;
     font-size: 12.5px;
     color: var(--dim);
-  }
-  kbd {
-    font: 11.5px var(--mono);
-    background: var(--s2);
-    border-radius: 3px;
-    padding: 1px 5px;
-    color: var(--ink2);
   }
   .facts {
     margin: 0;

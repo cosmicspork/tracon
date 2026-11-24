@@ -10,6 +10,11 @@ node-image tag="dev":
 spa:
     cd spa && bun install --frozen-lockfile && bun run build
 
+# Pack @tracon/ui (packages/ui) as target/tracon-ui-<version>.tgz, as each
+# release attaches it.
+ui-pack:
+    cd packages/ui && bun install --frozen-lockfile && bun run build && mkdir -p ../../target && bun pm pack --destination ../../target
+
 # Build the release binary with the SPA embedded.
 build: spa
     cargo build --release
@@ -31,6 +36,7 @@ check:
     cargo fmt --all --check
     cargo clippy --all-targets -- -D warnings
     if cargo nextest --version >/dev/null 2>&1; then cargo nextest run --no-fail-fast && cargo test --doc; else cargo test; fi
+    cd packages/ui && bun install --frozen-lockfile && bun run check && bun test
     cd spa && bun run check && bun test
 
 fmt:

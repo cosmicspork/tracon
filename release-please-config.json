@@ -22,6 +22,11 @@
           "type": "json",
           "path": "wrapper/tauri.conf.json",
           "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "packages/ui/package.json",
+          "jsonpath": "$.version"
         }
       ]
     }
