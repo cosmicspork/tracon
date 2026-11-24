@@ -4,7 +4,7 @@
   import { api } from '../../lib/api'
   import { formatAge, formatDuration } from '../../lib/format'
   import { peerFailure } from '../../lib/peer-admin'
-  import { OFFERS_ANCHOR, inboxOrder, reviewIsStale, shown } from '../../lib/recipes'
+  import { OFFERS_ANCHOR, inboxOrder, reviewIsStale, shown, waitingOffers } from '../../lib/recipes'
   import { router } from '../../lib/router.svelte'
   import { store } from '../../lib/store.svelte'
   import type { RecipeOffer, RecipeOfferView } from '../../lib/types'
@@ -12,11 +12,17 @@
   // `node` shows and accepts the offers a peer administered from here holds.
   // A request to a peer takes no query, so its offers are compared and
   // accepted as placed by default, and declining stays with that node.
-  let { onaccepted, node = '' }: { onaccepted?: () => void; node?: string } = $props()
+  // Only offers waiting on a decision are listed here; `offers` hands every
+  // one read to the card around it, which shows each entry's decided offer
+  // on the entry (#1163).
+  let {
+    onaccepted,
+    node = '',
+    offers = $bindable([]),
+  }: { onaccepted?: () => void; node?: string; offers?: RecipeOffer[] } = $props()
 
   const local = $derived(store.node?.loopback ?? false)
 
-  let offers = $state<RecipeOffer[]>([])
   let open = $state<string | null>(null)
   let view = $state<RecipeOfferView | null>(null)
   let path = $state('')
@@ -26,7 +32,7 @@
   let error = $state('')
   let note = $state('')
 
-  const ordered = $derived(inboxOrder(offers))
+  const ordered = $derived(inboxOrder(waitingOffers(offers)))
   const pending = $derived(offers.filter((offer) => offer.state === 'pending').length)
   const pinned = $derived(Boolean(view?.before?.image && view?.offer.recipe.dockerfile))
   const lends = $derived(view?.credentials.state === 'dropped' || view?.credentials.state === 'kept')
@@ -131,7 +137,7 @@
   }
 </script>
 
-{#if offers.length}
+{#if ordered.length}
   <section class="offers" id={OFFERS_ANCHOR} aria-label="Recipes offered by other nodes">
     <h3>Offered by other nodes{#if pending}{' · '}<span class="count">{pending} waiting</span>{/if}</h3>
     <p class="dim">

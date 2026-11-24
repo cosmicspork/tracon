@@ -48,6 +48,30 @@ export function shown(value: unknown): string {
   return String(value)
 }
 
+/** Offers still waiting on a decision: what the inbox lists. */
+export function waitingOffers(offers: RecipeOffer[]): RecipeOffer[] {
+  return offers.filter((offer) => offer.state === 'pending' || offer.state === 'accepting')
+}
+
+/**
+ * The offers decided onto the `[[repo]]` entry at `path`, newest first: the
+ * one shown on the entry (`latest`, an accepted one) and those it replaced
+ * (`earlier`, kept a day as history).
+ */
+export function decidedOnto(offers: RecipeOffer[], path: string): { latest: RecipeOffer | null; earlier: RecipeOffer[] } {
+  const onto = offers
+    .filter((offer) => path !== '' && offer.decided_path === path && offer.state !== 'pending' && offer.state !== 'accepting')
+    .sort((a, b) => (b.decided_ms ?? b.received_ms) - (a.decided_ms ?? a.received_ms))
+  const latest = onto.find((offer) => offer.state === 'accepted') ?? null
+  return { latest, earlier: onto.filter((offer) => offer !== latest) }
+}
+
+/** An offer as an entry names it: "recipe from bazzite on personal · accepted". */
+export function decidedLine(offer: RecipeOffer): string {
+  const state = offer.state === 'superseded' ? 'accepted, since replaced' : offer.state
+  return `recipe from ${offer.sender_name} on ${offer.channel} · ${state}`
+}
+
 /** Undecided offers first, then the newest. */
 export function inboxOrder(offers: RecipeOffer[]): RecipeOffer[] {
   return [...offers].sort(

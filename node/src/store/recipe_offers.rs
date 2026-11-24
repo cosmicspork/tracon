@@ -89,7 +89,34 @@ fn from_row(r: &Row) -> rusqlite::Result<RecipeOfferRow> {
     })
 }
 
+/// The decided offers (accepted or declined) a newer decided one from the
+/// same sender for the same repository replaces: superseded as of `now_ms`,
+/// so one decided offer per sender and repository stands, and the purge of
+/// untaken offers removes the rest a day later. `keep` limits it to the
+/// offers older than one offer just decided; `None` collapses every pair,
+/// for rows decided before this was kept (#1163).
+fn supersede_decided(
+    conn: &rusqlite::Connection,
+    keep: Option<&str>,
+    now_ms: i64,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE repo_recipe_offer AS old SET state = 'superseded', decided_ms = ?2
+         WHERE old.state IN ('accepted', 'declined')
+           AND EXISTS (
+             SELECT 1 FROM repo_recipe_offer AS new
+             WHERE new.state IN ('accepted', 'declined')
+               AND new.sender_node = old.sender_node AND new.repo = old.repo
+               AND (?1 IS NULL OR new.id = ?1)
+               AND new.id != old.id
+               AND (new.received_ms > old.received_ms
+                    OR (new.received_ms = old.received_ms AND new.id > old.id)))",
+        params![keep, now_ms],
+    )
+}
+
 fn sweep(conn: &rusqlite::Connection, now_ms: i64) -> rusqlite::Result<usize> {
+    supersede_decided(conn, None, now_ms)?;
     conn.execute(
         "UPDATE repo_recipe_offer SET state = 'pending', decided_ms = NULL
          WHERE state = 'accepting' AND decided_ms < ?1",
@@ -207,11 +234,15 @@ impl Store {
         now_ms: i64,
     ) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
-        Ok(conn.execute(
+        let decided = conn.execute(
             "UPDATE repo_recipe_offer SET state = ?2, decided_ms = ?3, decided_path = ?4
              WHERE id = ?1 AND state = 'pending' AND expires_ms >= ?3",
             params![id, state, now_ms, path],
-        )? == 1)
+        )? == 1;
+        if decided {
+            supersede_decided(&conn, Some(id), now_ms)?;
+        }
+        Ok(decided)
     }
 
     /// Take a pending, unexpired offer for one accept, so two cannot both
@@ -229,11 +260,15 @@ impl Store {
     /// The claimed offer was written to `path`.
     pub fn recipe_offer_accepted(&self, id: &str, path: &str, now_ms: i64) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
-        Ok(conn.execute(
+        let accepted = conn.execute(
             "UPDATE repo_recipe_offer SET state = 'accepted', decided_ms = ?2, decided_path = ?3
              WHERE id = ?1 AND state = 'accepting'",
             params![id, now_ms, path],
-        )? == 1)
+        )? == 1;
+        if accepted {
+            supersede_decided(&conn, Some(id), now_ms)?;
+        }
+        Ok(accepted)
     }
 
     /// Hold `row.path` from building until the operator starts it.
@@ -497,6 +532,69 @@ mod tests {
         assert!(store.credential_hold("p").unwrap().is_some());
         assert!(store.credential_hold_release_matching("p", "h1").unwrap());
         assert!(store.credential_hold("p").unwrap().is_none());
+    }
+
+    /// One decided offer stands per sender and repository: accepting a
+    /// repository's newer offer supersedes the earlier accepted one, which
+    /// then goes a day later; another sender's or repository's stands. Rows
+    /// decided before this was kept are collapsed the same way on read.
+    #[test]
+    fn a_newer_decided_offer_supersedes_the_earlier_decided_ones() {
+        let store = Store::open_in_memory().unwrap();
+        let accept = |id: &str, sender: &str, repo: &str, at: i64| {
+            let mut row = offer(id, sender, repo, at);
+            row.expires_ms = i64::MAX / 2;
+            store.recipe_offer_stage(&row, 8).unwrap();
+            assert!(store.recipe_offer_claim(id, at + 1).unwrap());
+            assert!(store.recipe_offer_accepted(id, repo, at + 2).unwrap());
+        };
+        let a = "github.com/o/a";
+        accept("1", "n1", a, 10);
+        accept("2", "n2", a, 20);
+        accept("3", "n1", "github.com/o/b", 30);
+        accept("4", "n1", a, 40);
+        let state = |id: &str| store.recipe_offer(id).unwrap().unwrap().state;
+        assert_eq!(state("1"), "superseded");
+        assert_eq!(state("2"), "accepted");
+        assert_eq!(state("3"), "accepted");
+        assert_eq!(state("4"), "accepted");
+        // Kept as history, with where it was written, until a day after.
+        let old = store.recipe_offer("1").unwrap().unwrap();
+        assert_eq!(old.decided_path.as_deref(), Some(a));
+        assert_eq!(old.decided_ms, Some(42));
+        let mut declined = offer("5", "n1", a, 50);
+        declined.expires_ms = i64::MAX / 2;
+        store.recipe_offer_stage(&declined, 8).unwrap();
+        assert!(store
+            .recipe_offer_decide("5", "declined", None, 51)
+            .unwrap());
+        assert_eq!(state("4"), "superseded");
+        store
+            .recipe_offers_expire(51 + KEEP_UNTAKEN_MS + 1)
+            .unwrap();
+        assert!(store.recipe_offer("1").unwrap().is_none());
+        assert!(store.recipe_offer("4").unwrap().is_none());
+
+        // Rows written before: two accepted offers of one repository.
+        let conn_store = Store::open_in_memory().unwrap();
+        for (id, at) in [("x", 10), ("y", 20)] {
+            let mut row = offer(id, "n1", a, at);
+            row.expires_ms = i64::MAX / 2;
+            conn_store.recipe_offer_stage(&row, 8).unwrap();
+        }
+        conn_store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE repo_recipe_offer SET state = 'accepted', decided_ms = received_ms",
+                [],
+            )
+            .unwrap();
+        conn_store.recipe_offers_expire(100).unwrap();
+        let state = |id: &str| conn_store.recipe_offer(id).unwrap().unwrap().state;
+        assert_eq!(state("x"), "superseded");
+        assert_eq!(state("y"), "accepted");
     }
 
     #[test]
