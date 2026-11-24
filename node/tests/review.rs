@@ -10528,3 +10528,54 @@ async fn a_request_for_changes_needs_a_note_or_an_unresolved_thread() {
         "{refused}"
     );
 }
+
+/// The review history lists a decided review, whose session being archived
+/// does not hide it, and pages with `next`; it filters to external
+/// submissions and refuses a state it does not list.
+#[tokio::test]
+async fn decided_reviews_are_listed_for_the_history_screen() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let v = f.tool("s1", "submit_review", f.submit_args()).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    let (status, body) = f.call("GET", "/api/reviews?state=decided", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["reviews"], json!([]), "{body}");
+
+    let (status, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{id}/verdict"),
+            Some(json!({ "verdict": "reject", "reason": "not now" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    f.store.set_session_archived("s1", Some(1)).unwrap();
+
+    let (status, body) = f.call("GET", "/api/reviews?state=decided", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let row = &body["reviews"][0];
+    assert_eq!(row["id"], id, "{body}");
+    assert_eq!(row["state"], "rejected", "{body}");
+    assert_eq!(row["session_id"], "s1", "{body}");
+    assert_eq!(row["channel"], "work", "{body}");
+    assert_eq!(row["held_here"], true, "{body}");
+    assert!(row["decided_ms"].as_i64().unwrap() > 0, "{body}");
+    assert_eq!(body["next"], Value::Null, "{body}");
+
+    let (_, body) = f
+        .call("GET", "/api/reviews?state=decided&source=external", None)
+        .await;
+    assert_eq!(body["reviews"], json!([]), "{body}");
+    let (_, body) = f
+        .call("GET", "/api/reviews?state=decided&channel=personal", None)
+        .await;
+    assert_eq!(body["reviews"], json!([]), "{body}");
+    let (status, body) = f.call("GET", "/api/reviews?state=new", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, body) = f.call("GET", "/api/reviews?before=nope", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}

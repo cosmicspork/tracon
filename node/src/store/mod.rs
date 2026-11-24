@@ -1368,6 +1368,78 @@ impl Store {
         Ok(rows)
     }
 
+    /// Decided code reviews, newest decision first, for the review history:
+    /// the ones this node holds and the ones it mirrors, each once (a review
+    /// is one row whoever holds it). `external` keeps only those from a
+    /// harness the operator runs; `channel` narrows to one; `before` is the
+    /// last row of the previous page, as `(decided_ms, id)`. When a review was
+    /// decided is its latest approve or reject decision, or when its row last
+    /// changed for one with no decision recorded (a mirrored review's, or one
+    /// from before decisions were). Nothing about its session hides it:
+    /// archiving a session leaves its reviews here.
+    pub fn decided_reviews(
+        &self,
+        channel: Option<&str>,
+        external: bool,
+        before: Option<(i64, &str)>,
+        limit: usize,
+    ) -> Result<Vec<DecidedReview>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM (
+                SELECT r.id, r.node_id, r.channel, r.session_id, r.lane, r.kind, r.title,
+                    r.edited_title, r.provider, r.target, r.state, r.publish_result,
+                    COALESCE((SELECT MAX(d.decided_ms) FROM review_decision d
+                              WHERE d.review_id = r.id AND d.decision IN ('approved', 'rejected')),
+                             r.updated_ms) AS decided_ms
+                FROM review r
+                WHERE r.state IN ('approved', 'rejected') AND r.kind != ?1
+                  AND (?2 IS NULL OR r.channel = ?2)
+                  AND (?3 = 0 OR r.session_id IS NULL)
+             )
+             WHERE ?4 IS NULL OR decided_ms < ?4 OR (decided_ms = ?4 AND id < ?5)
+             ORDER BY decided_ms DESC, id DESC LIMIT ?6",
+        )?;
+        let (before_ms, before_id) = match before {
+            Some((ms, id)) => (Some(ms), id),
+            None => (None, ""),
+        };
+        let rows = stmt
+            .query_map(
+                rusqlite::params![
+                    reports::KIND,
+                    channel,
+                    external,
+                    before_ms,
+                    before_id,
+                    limit as i64
+                ],
+                |r| {
+                    let title: String = r.get("title")?;
+                    let edited: Option<String> = r.get("edited_title")?;
+                    let target: String = r.get("target")?;
+                    let target =
+                        serde_json::from_str::<crate::review::publish::Target>(&target).ok();
+                    Ok(DecidedReview {
+                        id: r.get("id")?,
+                        node_id: r.get("node_id")?,
+                        channel: r.get("channel")?,
+                        session_id: r.get("session_id")?,
+                        lane: r.get("lane")?,
+                        title: edited.filter(|t| !t.trim().is_empty()).unwrap_or(title),
+                        provider: r.get("provider")?,
+                        project: target.as_ref().map(|t| t.project.clone()),
+                        branch: target.map(|t| t.branch),
+                        state: r.get("state")?,
+                        publish_result: r.get("publish_result")?,
+                        decided_ms: r.get("decided_ms")?,
+                    })
+                },
+            )?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
     /// Permission requests on a channel's sessions answered since `since_ms`:
     /// (count, seconds of human latency, request→answer, monotonic on the node
     /// that observed both).
@@ -3338,6 +3410,31 @@ mod records {
         pub publication_failed: Option<String>,
     }
 
+    /// One row of the review history (`Store::decided_reviews`).
+    #[derive(Debug, Clone, PartialEq, Serialize)]
+    pub struct DecidedReview {
+        pub id: String,
+        /// The node that holds it: this one, or the peer it is mirrored from.
+        pub node_id: String,
+        pub channel: String,
+        /// The session that submitted it; none for a harness the operator
+        /// runs.
+        pub session_id: Option<String>,
+        /// The label that harness gave, if any.
+        pub lane: Option<String>,
+        /// What it was approved as: the operator's edit, else the agent's.
+        pub title: String,
+        pub provider: String,
+        /// The forge project, and the branch it publishes.
+        pub project: Option<String>,
+        pub branch: Option<String>,
+        /// `approved` or `rejected`.
+        pub state: String,
+        /// The published change's address, once there is one.
+        pub publish_result: Option<String>,
+        pub decided_ms: i64,
+    }
+
     /// What became of a decided code review, as its owner lists it to peers:
     /// the verdict and what publishing it produced, without the diff a peer
     /// holding the review already has.
@@ -4542,6 +4639,116 @@ mod tests {
                 request_id: None,
             })
             .unwrap();
+    }
+
+    /// The review history lists decided code reviews newest decision first,
+    /// held here or mirrored, each once, a page at a time, filtered to
+    /// external ones or a channel, and never hidden by an archived session.
+    #[test]
+    fn decided_reviews_page_newest_first_and_filter() {
+        let store = Store::open_in_memory().unwrap();
+        let me = node(&store);
+        store.ensure_peer_node("n2").unwrap();
+        session(&store, "s1", &me);
+        store.set_session_archived("s1", Some(7)).unwrap();
+        let review = |id: &str,
+                      session: Option<&str>,
+                      holder: &str,
+                      channel: &str,
+                      state: &str,
+                      updated: i64| {
+            store
+                .insert_review(&ReviewRow {
+                    id: id.into(),
+                    session_id: session.map(str::to_string),
+                    node_id: holder.into(),
+                    channel: channel.into(),
+                    kind: "code".into(),
+                    title: format!("title {id}"),
+                    body: "b".into(),
+                    edited_title: None,
+                    edited_body: None,
+                    provider: "github".into(),
+                    target:
+                        r#"{"provider":"github","project":"o/r","base":"main","branch":"feat/x"}"#
+                            .into(),
+                    diff: String::new(),
+                    files: "[]".into(),
+                    head_sha: "abc".into(),
+                    base_ref: "main".into(),
+                    added: 0,
+                    removed: 0,
+                    state: state.into(),
+                    verdict_reason: None,
+                    publish_result: (state == "approved")
+                        .then(|| "https://github.com/o/r/pull/9".to_string()),
+                    claimed_ms: None,
+                    created_ms: 1,
+                    created_mono_ms: 0,
+                    resolved_mono_ms: None,
+                    updated_ms: updated,
+                    checks_json: None,
+                    review_session_id: None,
+                    ai_verdict_json: None,
+                    revision_patch: None,
+                    lane: session.is_none().then(|| "laptop".to_string()),
+                    publication_failed: None,
+                })
+                .unwrap();
+        };
+        review("a", Some("s1"), &me, "work", "approved", 10);
+        review("b", None, &me, "work", "rejected", 30);
+        review("c", None, "n2", "personal", "approved", 20);
+        review("d", None, &me, "work", "new", 40);
+        let mut report = store.get_review("b").unwrap().unwrap();
+        report.id = "e".into();
+        report.kind = reports::KIND.into();
+        store.insert_review(&report).unwrap();
+        let ids = |rows: Vec<DecidedReview>| rows.into_iter().map(|r| r.id).collect::<Vec<_>>();
+
+        let all = store.decided_reviews(None, false, None, 10).unwrap();
+        assert_eq!(ids(all.clone()), ["b", "c", "a"]);
+        assert_eq!(all[1].node_id, "n2");
+        assert_eq!(all[1].lane.as_deref(), Some("laptop"));
+        assert_eq!(all[2].project.as_deref(), Some("o/r"));
+        assert_eq!(
+            all[2].publish_result.as_deref(),
+            Some("https://github.com/o/r/pull/9")
+        );
+        assert_eq!(
+            ids(store.decided_reviews(None, true, None, 10).unwrap()),
+            ["b", "c"]
+        );
+        assert_eq!(
+            ids(store
+                .decided_reviews(Some("work"), false, None, 10)
+                .unwrap()),
+            ["b", "a"]
+        );
+        let first = store.decided_reviews(None, false, None, 2).unwrap();
+        let last = first.last().unwrap();
+        assert_eq!(
+            ids(store
+                .decided_reviews(None, false, Some((last.decided_ms, &last.id)), 2)
+                .unwrap()),
+            ["a"]
+        );
+
+        // A recorded decision says when, whatever the row's own time.
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 INSERT INTO review_decision (id, review_id, revision_id, source, decision, decided_ms)
+                 VALUES ('d1', 'a', 'rev', 'operator', 'approved', 50);
+                 PRAGMA foreign_keys = ON;",
+            )
+            .unwrap();
+        let all = store.decided_reviews(None, false, None, 10).unwrap();
+        assert_eq!(ids(all.clone()), ["a", "b", "c"]);
+        assert_eq!(all[0].decided_ms, 50);
     }
 
     /// The scheduled sweep archives only this node's own ended sessions,

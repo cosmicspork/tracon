@@ -284,6 +284,7 @@
     <span class="r">
       <button class="lnk" onclick={archiveAll} disabled={busy}>{busy ? 'Archiving…' : 'archive all'}</button>
       <a href="/sessions">all sessions</a>
+      <a href="/reviews">all reviews</a>
     </span>
   </div>
   <div class="rows">

@@ -73,6 +73,7 @@ import type {
   Session,
   SessionUsage,
   ReviewDetails,
+  DecidedReviewPage,
   ShownWork,
   ReviewOutputs,
   ReviewDraft,
@@ -660,6 +661,8 @@ export const api = {
   draft: (id: string) =>
     call<{ text: string; updated_ms: number | null }>('GET', `/api/sessions/${id}/draft`),
   review: (id: string) => call<ReviewDetails>('GET', `/api/reviews/${id}`),
+  /** A page of decided reviews, newest first (`historyQuery` builds the query). */
+  decidedReviews: (query: string) => call<DecidedReviewPage>('GET', `/api/reviews?${query}`),
   /** One reviewed file as it was submitted, for the diff editor. */
   reviewFile: (id: string, path: string) =>
     call<{ path: string; text: string | null }>(

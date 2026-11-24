@@ -72,7 +72,7 @@ export type Screen =
   | { name: 'review' | 'approval' | 'promotion' | 'session' | 'task' | 'plugin'; id: string }
   | { name: 'doc'; channel: string; slug: string; edit: boolean }
   | {
-      name: 'sessions' | 'enroll' | 'usage' | 'tasks' | 'more' | 'docs' | 'memories' | 'plugins' | 'settings' | 'home'
+      name: 'sessions' | 'reviews' | 'enroll' | 'usage' | 'tasks' | 'more' | 'docs' | 'memories' | 'plugins' | 'settings' | 'home'
     }
 
 /** Every screen's name, so a test can hold the screen audit to all of them. */
@@ -83,6 +83,7 @@ export const SCREENS = Object.keys({
   promotion: 1,
   session: 1,
   sessions: 1,
+  reviews: 1,
   enroll: 1,
   usage: 1,
   task: 1,
@@ -111,6 +112,7 @@ export function screenFor(path: string): Screen {
     if (m) return { name, id: m[1] }
   }
   if (path === '/sessions') return { name: 'sessions' }
+  if (path === '/reviews') return { name: 'reviews' }
   if (path === '/nodes/enroll') return { name: 'enroll' }
   if (path === '/usage') return { name: 'usage' }
   const task = path.match(/^\/tasks\/([^/]+)/)

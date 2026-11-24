@@ -48,6 +48,11 @@ land, a failed one shows there without refusing the submission, and a reviewer, 
 the change — or updates the one named by `change` — with the brokered
 credential, exactly as for a session it started.
 
+A decided review has no session to lead back to it, so the history lists it:
+**all reviews** beside *Landed recently* on the home (`/reviews`) shows every
+decided review this node holds or mirrors, newest first, with its verdict, where
+it came from and the change it published; **external only** narrows it to yours.
+
 The same switch gives the agent **`check_run`**, so it tests through the node
 instead of a container runtime of its own (the Dev Container CLI, and the Podman
 machine it keeps running on macOS). `check_run(worktree, checks?, command?)`
