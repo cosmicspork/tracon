@@ -1113,6 +1113,46 @@ A plugin whose manifest has `[ui]` gets a page in the interface's **Plugins** se
 - **Reach.** Pages open on the node's own machine only. Reaching them from the phone
   through the hub comes later.
 
+### Looking native
+
+A plugin page can look and theme like the rest of the interface by building on
+`@tracon/ui`, the tokens, base styles and theme bridge the interface itself uses
+(packages/ui in this repository). Each Tracon release attaches it as
+`tracon-ui-<version>.tgz`, at Tracon's version:
+
+```sh
+bun add https://github.com/cosmicspork/tracon/releases/download/v<version>/tracon-ui-<version>.tgz
+```
+
+```ts
+// main.ts, before anything renders
+import '@tracon/ui/index.css' // tokens.css, then base.css
+import { connectTheme } from '@tracon/ui'
+
+connectTheme()
+```
+
+`tokens.css` gives the custom properties (`--bg`, `--s1`..`--s3`, `--ink`, `--ink2`,
+`--dim`, `--rule`, `--acc`, `--acc-ink`, `--wait`, `--crit`, `--ok`, the `--wash-*`,
+`--sans` and `--mono`) and `base.css` the shared primitives (`.btn` with `.p` and `.d`,
+`.lnk`, `.banner`, `.empty`, `.note`, `.segmented`, `.toggle`, `.chip`, `.tag`, `kbd`).
+Use only the CSS if your page is not written in TypeScript; the files have no framework
+dependency.
+
+- **The theme.** The interface opens a page with `tracon_theme=light` or `dark` in its
+  query, already resolved from the operator's choice and the system setting, so the
+  first paint is right. It then posts `{ type: "tracon/theme", theme: "light" | "dark" }`
+  to the frame, with the frame's origin as the target, when the frame loads, when the
+  operator changes the theme, and when the system scheme changes under "Match system".
+  `connectTheme()` applies both, and ignores any message whose `source` is not the parent
+  window or whose `type` is another. Opened outside the interface (for example your own
+  dev server), it changes nothing and the page follows the system setting.
+- **Colour.** Amber (`--wait`) means waiting on the operator and nothing else. Red
+  (`--crit`) is refusal and failure. State is a 3px bar plus a wash (`--wash-*`), never an
+  outline or a border.
+- **Compatibility.** Renaming or removing a token, a base class or the theme message is
+  a breaking change, listed in the changelog under `@tracon/ui`. Adding one is not.
+
 ## Seeing how a tool is answered
 
 `tracon plugin ls` and Settings › Plugins show, for each of a plugin's tools, how a call

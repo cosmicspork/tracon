@@ -9,8 +9,9 @@ import { afterAll, expect, setDefaultTimeout, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 
 import { chromium, type Browser } from 'playwright-core'
+import { appCss } from '../lib/app-css'
 
-const appCss = readFileSync(new URL('../app.css', import.meta.url), 'utf8')
+const css = appCss()
 // The component's own rules, unscoped: the markup below carries the same
 // classes, so they match it as they match the mounted component.
 const composerCss = /<style>([\s\S]*?)<\/style>/.exec(
@@ -40,7 +41,7 @@ async function lead(width: number): Promise<{ text: string; lead: number }[]> {
   const page = await browser!.newPage({ viewport: { width, height: 400 } })
   await page.setContent(
     `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width">` +
-      `<style>${appCss}</style><style>${composerCss}</style>` +
+      `<style>${css}</style><style>${composerCss}</style>` +
       `<body style="margin:0;padding:0 16px"><div class="line"><div class="ctx">` +
       `<span>personal</span><span>tracon</span><button type="button" class="lnk">adjust</button>` +
       `</div><button class="btn p">Start session</button></div></body>`,

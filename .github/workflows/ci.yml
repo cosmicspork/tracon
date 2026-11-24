@@ -85,6 +85,10 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.2
+      # @tracon/ui (packages/ui): the interface builds on it, and plugins
+      # install its packed tarball from each release.
+      - run: bun install --frozen-lockfile && bun run check && bun test && bun run build && bun pm pack --destination .
+        working-directory: packages/ui
       - run: bun install --frozen-lockfile
         working-directory: spa
       - run: bun run check

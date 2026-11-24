@@ -173,7 +173,7 @@
               </small>
             </label>
             {#if pinned && !node}
-              <label class="toggle">
+              <label class="opt-check">
                 <input
                   type="checkbox"
                   checked={replaceImage}
@@ -187,7 +187,7 @@
               </label>
             {/if}
             {#if lends && view && !node}
-              <label class="toggle">
+              <label class="opt-check">
                 <input
                   type="checkbox"
                   checked={keepCredentials}
@@ -255,7 +255,7 @@
   .review { display: grid; gap: 10px; }
   label { display: grid; gap: 5px; min-width: 0; }
   label > span:first-child { font: 500 11px var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink2); }
-  label.toggle { display: flex; align-items: center; gap: 6px; }
+  label.opt-check { display: flex; align-items: center; gap: 6px; }
   input:not([type='checkbox']) {
     background: var(--s1);
     border: 0;

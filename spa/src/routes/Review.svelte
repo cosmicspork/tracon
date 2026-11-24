@@ -1410,7 +1410,7 @@
   {#if remoteOwner}
     <div class="note dim">Publishes as the agent wrote it. Edit on the node that holds it.</div>
   {:else}
-  <label class="toggle">
+  <label class="opt-check">
     <input type="checkbox" bind:checked={describe} disabled={busy || publishing || closed || surface.phone} />
     {change ? `Replace the ${noun}'s title and description` : `Describe the ${noun} separately from the summary`}
   </label>
@@ -1422,7 +1422,7 @@
       <textarea class="edit body grow" bind:value={descBody} use:autogrow={descBody} disabled={busy || publishing || closed || surface.phone}></textarea>
     {/if}
   {/if}
-  <label class="toggle">
+  <label class="opt-check">
     <input type="checkbox" bind:checked={commenting} disabled={busy || publishing || closed || surface.phone} />
     Comment on the {noun}
   </label>
@@ -2227,7 +2227,7 @@
     cursor: pointer;
     padding: 2px 0;
   }
-  .toggle {
+  .opt-check {
     display: flex;
     align-items: center;
     gap: 8px;

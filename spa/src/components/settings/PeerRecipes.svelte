@@ -137,7 +137,7 @@
               <div class="to">
                 <span>To</span>
                 {#each offerPeers as peer (peer.id)}
-                  <label class="toggle"><input type="checkbox" bind:group={offerNodes} value={peer.id} disabled={busy !== ''} /> {peer.name}</label>
+                  <label class="opt-check"><input type="checkbox" bind:group={offerNodes} value={peer.id} disabled={busy !== ''} /> {peer.name}</label>
                 {/each}
               </div>
               <label>
@@ -189,7 +189,7 @@
     gap: 5px;
     min-width: 0;
   }
-  label.toggle {
+  label.opt-check {
     display: flex;
     align-items: center;
     gap: 6px;

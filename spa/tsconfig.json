@@ -1,5 +1,13 @@
 {
   "files": [],
+  // Read by bun test, which does not follow references: the same paths as
+  // tsconfig.app.json.
+  "compilerOptions": {
+    "paths": {
+      "@tracon/ui": ["../packages/ui/theme.ts"],
+      "@tracon/ui/*": ["../packages/ui/*"]
+    }
+  },
   "references": [
     { "path": "./tsconfig.app.json" },
     { "path": "./tsconfig.node.json" }

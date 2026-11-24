@@ -138,7 +138,7 @@
     <span>Search documents</span>
     <input placeholder="Search by content" bind:value={query} />
   </label>
-  <label class="toggle"><input type="checkbox" bind:checked={showArchived} /> <span>Show archived</span></label>
+  <label class="opt-check"><input type="checkbox" bind:checked={showArchived} /> <span>Show archived</span></label>
 </div>
 
 {#if creating}
@@ -260,7 +260,7 @@
   .bar .search input {
     width: 100%;
   }
-  .bar .toggle {
+  .bar .opt-check {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -268,7 +268,7 @@
     color: var(--ink2);
     white-space: nowrap;
   }
-  .bar .toggle input {
+  .bar .opt-check input {
     flex: none;
   }
   .new {

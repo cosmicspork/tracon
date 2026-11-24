@@ -12,6 +12,8 @@ COPY spa .
 COPY Cargo.toml /build/Cargo.toml
 # The generated-name word lists, which the SPA embeds from the node's copy.
 COPY proto/src/names-v1.json /build/proto/src/names-v1.json
+# Tokens, base styles and the theme module come from @tracon/ui (packages/ui).
+COPY packages/ui/tokens.css packages/ui/base.css packages/ui/index.css packages/ui/theme.ts /build/packages/ui/
 RUN bun run build
 
 # Third-party crates are built in their own layer, keyed on a recipe that

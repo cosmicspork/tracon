@@ -335,7 +335,7 @@
 
           <div class="wide sessions">
             <span class="heading">Required checks</span>
-            <label class="toggle"><input type="checkbox" bind:checked={form.ownChecks} /> This repository has its own</label>
+            <label class="opt-check"><input type="checkbox" bind:checked={form.ownChecks} /> This repository has its own</label>
             {#if form.ownChecks}
               <textarea class="grow" bind:value={form.checks} use:autogrow={form.checks} rows="2" spellcheck="false" placeholder="just check" aria-label="Required checks, one per line"></textarea>
               <small>One per line. Empty: no required checks.</small>
@@ -368,7 +368,7 @@
           </label>
 
           <div class="wide sessions">
-            <label class="toggle"><input type="checkbox" bind:checked={form.sessionEgress} /> Open these registries to this repository's sessions</label>
+            <label class="opt-check"><input type="checkbox" bind:checked={form.sessionEgress} /> Open these registries to this repository's sessions</label>
             <small>Lets an agent install dependencies. <Help label="About session registries">Sessions run what a model decides; anything reachable that accepts uploads can receive them.</Help></small>
             {#if form.sessionEgress && uploads.length}
               <p class="caution">{uploads.join(', ')} reach{uploads.length === 1 ? 'es' : ''} GitHub, which accepts uploads.</p>
@@ -450,7 +450,7 @@
               <div class="wide sessions">
                 <span class="heading">To</span>
                 {#each offerPeers as peer (peer.id)}
-                  <label class="toggle"><input type="checkbox" bind:group={offerNodes} value={peer.id} disabled={busy !== ''} /> {peer.name}</label>
+                  <label class="opt-check"><input type="checkbox" bind:group={offerNodes} value={peer.id} disabled={busy !== ''} /> {peer.name}</label>
                 {/each}
               </div>
               <label class="wide">
@@ -526,7 +526,7 @@
   input:not([type='checkbox']), select { min-height: 36px; }
   select { font-family: var(--sans); }
   input:disabled, select:disabled, textarea:disabled { opacity: 0.5; }
-  label.toggle { display: flex; align-items: center; gap: 6px; color: var(--ink); }
+  label.opt-check { display: flex; align-items: center; gap: 6px; color: var(--ink); }
   small { font-size: 12.5px; color: var(--dim); }
   .builds { margin: 12px 0 0; padding: 0; list-style: none; display: grid; gap: 4px; }
   .builds li { display: grid; gap: 3px; justify-items: start; background: var(--s1); border-radius: 4px; padding: 6px 10px; font: 12px var(--mono); overflow-wrap: anywhere; }

@@ -245,6 +245,11 @@
 {/if}
 
 <style>
+  /* Not @tracon/ui's dim .note: these lines keep the colour of the text
+     around them. */
+  .note {
+    color: inherit;
+  }
   .composer,
   .thread {
     display: flex;

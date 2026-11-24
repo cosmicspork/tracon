@@ -1,0 +1,259 @@
+/* @tracon/ui base: the reset and the shared primitives of Tracon's look.
+   Only what is the look, never one screen's layout: a screen's own rules stay
+   in its component. Needs tokens.css (or import index.css for both).
+
+   Renaming or removing a class here is a breaking change for plugins; adding
+   one is not. */
+
+* { box-sizing: border-box; }
+html { background: var(--bg); }
+
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.5 var(--sans);
+  font-variant-numeric: tabular-nums;
+  min-width: 320px;
+  -webkit-font-smoothing: antialiased;
+}
+
+button, input, select, textarea, summary { font: inherit; touch-action: manipulation; }
+a { color: var(--acc); }
+code { font-family: var(--mono); font-size: 0.92em; }
+
+/* Shared primitives, matching the approved screens. */
+
+.h4 {
+  font: 600 20px/1.25 var(--sans);
+  letter-spacing: -0.02em;
+  color: var(--ink);
+  margin: 6px 0 2px;
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.h4 b { font: 400 12.5px/1.4 var(--mono); letter-spacing: 0; color: var(--ink2); }
+
+.mono {
+  font: 12.5px var(--mono);
+  color: var(--ink2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.btn {
+  font: 500 13px var(--sans);
+  background: var(--s3);
+  color: var(--ink);
+  border: 0;
+  border-radius: 4px;
+  padding: 7px 14px;
+  cursor: pointer;
+}
+.btn.p { background: var(--acc); color: var(--acc-ink); }
+/* Confirms something that cannot be taken back: removal, replacement, rejection. */
+.btn.d { background: var(--crit); color: var(--bg); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.lnk {
+  color: var(--acc);
+  text-decoration: none;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  background: none;
+  padding: 2px 0;
+  cursor: pointer;
+  font: 500 13px var(--sans);
+}
+.lnk:hover { border-bottom-color: currentColor; }
+.lnk.d { color: var(--crit); }
+.lnk:disabled { color: var(--dim); pointer-events: none; }
+
+.btn:focus-visible, .lnk:focus-visible, a:focus-visible, button:focus-visible,
+input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--acc);
+  outline-offset: 2px;
+}
+
+@media (max-width: 700px) {
+  .btn, .lnk {
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  input:not([type='checkbox']):not([type='radio']), select, textarea {
+    min-height: 44px;
+  }
+  /* A list item, not a flex box, so the disclosure marker stays; a summary
+     that draws its own marker sets its own display. */
+  summary {
+    min-height: 44px;
+    display: list-item;
+    padding-block: 11px;
+  }
+  .empty { padding: 18px; }
+  /* A link inside a sentence is exempt from the 44px target (WCAG 2.5.8):
+     growing it would push the sentence's lines apart. */
+  :is(p, small, .empty, .banner) .lnk {
+    min-height: 0;
+    display: inline;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+.banner {
+  background: linear-gradient(90deg, var(--wash-wait), var(--s1) 50%);
+  border-left: 3px solid var(--wait);
+  border-radius: 4px;
+  padding: 8px 12px;
+  font: 12.5px var(--mono);
+  color: var(--wait);
+}
+.banner b { font-weight: 400; color: var(--ink); }
+/* What to do about it, under what happened. */
+.banner i { display: block; margin-top: 3px; font-style: normal; color: var(--ink2); }
+/* Waiting on someone else, not on you. */
+.banner.ok {
+  background: linear-gradient(90deg, var(--wash-run), var(--s1) 50%);
+  border-left-color: var(--acc);
+  color: var(--acc);
+}
+.banner.crit {
+  background: linear-gradient(90deg, var(--wash-crit), var(--s1) 50%);
+  border-left-color: var(--crit);
+  color: var(--crit);
+}
+/* Degraded, not waiting on anyone: the quietest treatment there is. */
+.banner.dim {
+  background: linear-gradient(90deg, var(--wash-dim), var(--s1) 50%);
+  border-left-color: var(--dim);
+  color: var(--ink2);
+}
+
+.empty {
+  background: var(--s1);
+  border-radius: 4px;
+  padding: 20px;
+  text-align: center;
+  color: var(--dim);
+  font-size: 13px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: 12px var(--mono);
+  color: var(--ink2);
+}
+.chip::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
+.chip.off { color: var(--dim); }
+.chip.off::before { background: var(--dim); }
+.chip.bad { color: var(--crit); }
+.chip.bad::before { background: var(--crit); }
+.chip.warn::before { background: var(--wait); }
+/* A plain label beside a thing, where a chip's status dot would claim a state. */
+.tag {
+  display: inline-block;
+  padding: 0 5px;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  font: 11px var(--mono);
+  font-style: normal;
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+/* A choice of a few, as Settings › General's colour scheme: a radiogroup of
+   buttons, the chosen one marked .on. */
+.segmented {
+  display: inline-flex;
+  justify-self: start;
+  background: var(--s2);
+  border-radius: 6px;
+  padding: 3px;
+  gap: 2px;
+}
+.segmented button {
+  border: 0;
+  background: none;
+  color: var(--ink2);
+  font: 500 13px var(--sans);
+  padding: 6px 14px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.segmented button.on {
+  background: var(--s1);
+  color: var(--ink);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
+}
+
+/* A labelled switch: a checkbox, then a title (b) and an optional hint
+   (small) in a span. Consecutive toggles are ruled apart; .toggles groups
+   them. */
+.toggles {
+  display: grid;
+  gap: 2px;
+}
+.toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px 0;
+  cursor: pointer;
+}
+.toggle + .toggle {
+  border-top: 1px solid var(--rule);
+}
+.toggle input {
+  margin: 3px 0 0;
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+.toggle > span {
+  display: grid;
+  gap: 2px;
+  font: 13.5px var(--sans);
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--ink);
+}
+.toggle b {
+  font-weight: 500;
+}
+.toggle small {
+  font-size: 12.5px;
+  color: var(--dim);
+}
+
+/* A short remark beside a control or a row, quieter than the text it
+   follows; .crit when it is a refusal or a failure, .ok when it confirms.
+   Only its colour: its size and face are the surrounding text's. */
+.note {
+  color: var(--dim);
+}
+.note.crit { color: var(--crit); }
+.note.ok { color: var(--ok); }
+
+kbd {
+  font: 11.5px var(--mono);
+  background: var(--s2);
+  border-radius: 3px;
+  padding: 1px 5px;
+  color: var(--ink2);
+}

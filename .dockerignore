@@ -3,3 +3,4 @@ spa/node_modules
 spa/dist
 docs
 .git
+packages/ui/node_modules

@@ -199,6 +199,35 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+/// The interface opens a page with its theme in the query
+/// (`?tracon_theme=dark`, from `@tracon/ui`'s theme bridge); the file server
+/// ignores the query, so the entry is still served.
+#[tokio::test]
+async fn a_query_on_the_entry_still_serves_it() {
+    let n = node("pennant", true, "pages", vec![]).await;
+    let (status, opened) = n.open("pennant", "pages").await;
+    assert_eq!(status, 200, "{opened}");
+    let token = token_of(opened["url"].as_str().unwrap());
+    for path in [
+        "?tracon_theme=dark",
+        "index.html?tracon_theme=light",
+        "index.html?tracon_theme=dark&x=1",
+        "app.js?tracon_theme=dark",
+    ] {
+        let a = n
+            .page("pennant", "GET", &format!("/t/{token}/{path}"), &[], None)
+            .await;
+        assert_eq!(a.status, 200, "{path}");
+        let want = if path.starts_with("app.js") {
+            APP_JS
+        } else {
+            INDEX
+        };
+        assert_eq!(String::from_utf8_lossy(&a.body), want, "{path}");
+        assert_eq!(a.headers["content-security-policy"], PLUGIN_UI_CSP);
+    }
+}
+
 #[tokio::test]
 async fn a_token_opens_its_plugins_page_on_its_own_origin_with_the_csp() {
     let n = node("pageant", true, "pages", vec![]).await;
