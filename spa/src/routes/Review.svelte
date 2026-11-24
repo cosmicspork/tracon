@@ -4,7 +4,7 @@
   import Diff from '../components/Diff.svelte'
   import ReviewDiff from '../components/ReviewDiff.svelte'
   import ReviewThreads from '../components/ReviewThreads.svelte'
-  import { anchorAt, threadsOn, unresolvedCount, type Anchor, type Numbered, type ReviewThread } from '../lib/reviewThreads'
+  import { anchorAt, threadsOn, threadsBlockedReason, unresolvedCount, type Anchor, type Numbered, type ReviewThread } from '../lib/reviewThreads'
   import { splitDiff } from '../lib/diff'
   import { ViewedFiles } from '../lib/viewedFiles.svelte'
   import CommitMessage from '../components/CommitMessage.svelte'
@@ -579,11 +579,11 @@
   )
   /** Why threads cannot be opened or changed here, or null when they can. */
   const threadsBlocked = $derived(
-    closed
-      ? 'Decided: its threads stay as they were.'
-      : remoteOwner && ownerDetail?.state !== 'fetched'
-        ? `Its threads are held by ${nodeLabel(store.nodes, remoteOwner)}, which could not be read; reload once it can.`
-        : null,
+    threadsBlockedReason({
+      closed,
+      remoteOwner: remoteOwner ? nodeLabel(store.nodes, remoteOwner) : null,
+      ownerFetched: ownerDetail?.state === 'fetched',
+    }),
   )
   /** The number of the revision on screen, as a thread written on it says. */
   const revisionNumber = $derived(threads.find((t) => t.revision_id === revision?.id)?.revision ?? null)

@@ -323,7 +323,7 @@ pub async fn list_channels(State(s): State<AppState>) -> ApiResult<Json<serde_js
     let mut out = Vec::new();
     let rows = s.store().channel_list()?;
     // What an external submission's trigger defaults to on this node.
-    let external_checks = s.cfg.external.run_containers;
+    let external_checks = s.cfg.external.check_submissions;
     if rows.is_empty() {
         for name in DEFAULT_CHANNELS.iter().copied() {
             let ceiling = crate::metrics::ceiling(s.store(), &json!({}), name);
@@ -4599,7 +4599,9 @@ async fn start_reviewer_here(
         crate::mcp::review::StartedBy::Operator,
     )
     .await;
-    if started["state"] != "started" {
+    // "starting": the review's checks run first, and the reviewer starts
+    // once they are done (`check_before_reviewer`).
+    if started["state"] != "started" && started["state"] != "starting" {
         return Err(ApiError(
             StatusCode::CONFLICT,
             started["reason"]
