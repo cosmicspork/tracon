@@ -230,3 +230,15 @@ export function createBody(a: Anchor, body: string, revisionId: string | null | 
     end_line: a.kind === 'line' ? (a.end_line ?? a.start_line) : undefined,
   }
 }
+
+/**
+ * Why threads cannot be opened or changed on a review, or null when they
+ * can: it is decided, or the node holding them (`remoteOwner`, by its label)
+ * could not be read.
+ */
+export function threadsBlockedReason(o: { closed: boolean; remoteOwner: string | null; ownerFetched: boolean }): string | null {
+  if (o.closed) return 'Decided: threads are read-only.'
+  if (o.remoteOwner && !o.ownerFetched)
+    return `Its threads are held by ${o.remoteOwner}, which could not be read; reload once it can.`
+  return null
+}
