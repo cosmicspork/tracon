@@ -401,8 +401,8 @@ pub struct SnapshotInputs {
     pub prepare: Vec<String>,
     pub egress: Vec<String>,
     /// What the warm-up builds the default branch with after `prepare`, so
-    /// the snapshot carries the build output checks start from: the
-    /// repository's checks ([`build_output`]).
+    /// the snapshot carries the build output checks start from
+    /// ([`warm_commands`], [`build_output`]).
     pub build: Vec<String>,
 }
 
@@ -531,12 +531,40 @@ pub async fn inputs(
         base,
         image,
         lockfiles: lockfiles(repo, &commit).await,
-        commit,
         prepare: environment.prepare.clone(),
         egress: environment.egress.clone(),
-        build: environment.checks.clone(),
+        build: warm_commands(repo, &commit, environment).await,
+        commit,
     })
 }
+
+/// What the warm-up builds the default branch with at `commit`: the entry's
+/// `warm`, or with none its checks, but only when the default branch has a
+/// Cargo or Go project at its root. Their output is the only build output a
+/// snapshot keeps (`environment::build_env`), so another repository's checks
+/// would run for nothing.
+pub async fn warm_commands(
+    repo: &Path,
+    commit: &str,
+    environment: &RepoEnvironment,
+) -> Vec<String> {
+    if let Some(warm) = &environment.warm {
+        return warm.clone();
+    }
+    let dir = repo.to_string_lossy();
+    for manifest in COMPILED_PROJECTS {
+        if crate::review::resolve(&dir, &format!("{commit}:{manifest}"))
+            .await
+            .is_ok()
+        {
+            return environment.checks.clone();
+        }
+    }
+    Vec::new()
+}
+
+/// The manifests that make a repository's default warm-up build its checks.
+const COMPILED_PROJECTS: &[&str] = &["Cargo.toml", "go.mod"];
 
 /// Which snapshot each base cache volume's copies are seeded from: a copy
 /// made of the base cache while a repository has a snapshot is filled from
@@ -770,6 +798,19 @@ pub(crate) async fn warm_after(
     if let Some(error) = failed_since(repo, &key, seen) {
         return Err(error);
     }
+    let turns = warm_turns(cfg);
+    let _turn = match turns.try_acquire() {
+        Ok(turn) => turn,
+        Err(_) => {
+            tracing::info!(repo = %repo.display(), "waiting for another repository's warm-up to finish");
+            let turn = turns.acquire().await.map_err(|error| error.to_string())?;
+            if let Some(snapshot) = current(backend, store, repo, &key).await {
+                record_seed(&environment.cache_volume, &snapshot);
+                return Ok(Some(snapshot));
+            }
+            turn
+        }
+    };
     let made = make_snapshot(
         backend,
         cfg,
@@ -784,6 +825,15 @@ pub(crate) async fn warm_after(
     .await;
     record_made(repo, &key, made.as_ref().err().map(String::as_str));
     made
+}
+
+/// One permit for each warm-up that may run at once on this node
+/// (`[sandbox] warm_concurrency`), sized by the first warm-up's
+/// configuration: several repositories' warm-ups at once (a base image or a
+/// shared lockfile change) would each build with every core.
+fn warm_turns(cfg: &Config) -> &'static tokio::sync::Semaphore {
+    static TURNS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    TURNS.get_or_init(|| tokio::sync::Semaphore::new(cfg.sandbox.warm_concurrency()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -862,7 +912,10 @@ async fn make_snapshot(
                 // the snapshot's `/cache` holds the output its checks start
                 // from. A build that fails still leaves what it compiled.
                 let built = match &prepared {
-                    Ok(()) => build_output(&held, environment, &name, repo).await,
+                    Ok(()) => {
+                        let cap = cfg.sandbox.max_build_output_bytes();
+                        build_output(&held, environment, &inputs.build, cap, &name, repo).await
+                    }
                     Err(_) => false,
                 };
                 let prepared = match (prepared, &tracked) {
@@ -944,17 +997,30 @@ async fn make_snapshot(
 /// so the snapshot carries the build output under `/cache`
 /// (`environment::build_env`: Cargo's target directory, Go's build cache)
 /// that a review's checks start from, each over a writable layer of its own
-/// (`review::checks::check_cache`). What builds it is the repository's own
-/// checks, run as a check runs (`environment::prepared_check_env`: nothing
-/// fetched, no egress grant, nothing lent), so the output is the very one
-/// they build; their outcome is not evidence of anything and is only
-/// logged. It is made with the snapshot, so a new image, base, lockfile or
-/// recipe rebuilds it, and it goes with the snapshot it is in. Whether any
-/// build ran.
-async fn build_output(held: &Held, environment: &RepoEnvironment, name: &str, repo: &Path) -> bool {
+/// (`review::checks::check_cache`). What builds it is `commands`
+/// ([`warm_commands`]), run as a check runs
+/// (`environment::prepared_check_env`: nothing fetched, no egress grant,
+/// nothing lent) at the lowest CPU priority; their outcome is not evidence
+/// of anything and is only logged. It is made with the snapshot, so a new
+/// image, base, lockfile or recipe rebuilds it, and it goes with the
+/// snapshot it is in.
+///
+/// Only the output under `/cache` is kept: what the build added to `/work`
+/// is removed again ([`ROLL_BACK_WORK`]), what a check would not start from
+/// is trimmed ([`trim_build_output`]), and output still over `cap` bytes is
+/// dropped whole, so the snapshot keeps only what `prepare` fetched. Whether
+/// the snapshot carries build output.
+async fn build_output(
+    held: &Held,
+    environment: &RepoEnvironment,
+    commands: &[String],
+    cap: u64,
+    name: &str,
+    repo: &Path,
+) -> bool {
     use crate::review::checks::{until_stopped, RunToCompletion};
-    let command = |step: &str, script: &str| RunnerCommand {
-        argv: crate::review::output::merged_shell(script),
+    let command = |step: &str, argv: Vec<String>| RunnerCommand {
+        argv,
         env: crate::environment::prepared_check_env(),
         workdir: Some(PREPARED_TREE.into()),
         name: format!("{name}-{step}"),
@@ -965,19 +1031,28 @@ async fn build_output(held: &Held, environment: &RepoEnvironment, name: &str, re
         },
         ..Default::default()
     };
+    let shell = |script: &str| crate::review::output::merged_shell(script);
     // Made by the sandbox's user whether or not anything builds into them,
     // so a check's writable layer over them is its own to write in.
     let made = held
-        .run_capture(command("b", &make_build_dirs()))
+        .run_capture(command("b", shell(&make_build_dirs())))
         .await
         .is_ok_and(|output| output.status.success());
     if !made {
         tracing::warn!(repo = %repo.display(), "no build output: its directories could not be made");
         return false;
     }
-    let mut built = false;
-    for (step, check) in environment.checks.iter().enumerate() {
-        let cmd = command(&format!("b{step}"), check);
+    let listed = !commands.is_empty()
+        && held
+            .run_capture(command("l", shell(LIST_WORK)))
+            .await
+            .is_ok_and(|output| output.status.success());
+    for (step, check) in commands.iter().enumerate() {
+        // `nice` so a warm-up, which nothing waits on at once, gives way to
+        // what someone is waiting on.
+        let mut argv: Vec<String> = ["nice", "-n", "19"].map(String::from).to_vec();
+        argv.extend(shell(check));
+        let cmd = command(&format!("b{step}"), argv);
         let running = cmd.name.clone();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(environment.timeout_secs);
         let began = std::time::Instant::now();
@@ -988,7 +1063,6 @@ async fn build_output(held: &Held, environment: &RepoEnvironment, name: &str, re
             Some((held as &dyn Runner, running.as_str())),
         )
         .await;
-        built = true;
         let took = began.elapsed();
         match ran {
             Ok(Ok(output)) => tracing::info!(
@@ -1009,7 +1083,134 @@ async fn build_output(held: &Held, environment: &RepoEnvironment, name: &str, re
             ),
         }
     }
-    built
+    if listed {
+        let rolled = held
+            .run_capture(command("r", shell(ROLL_BACK_WORK)))
+            .await
+            .is_ok_and(|output| output.status.success());
+        if !rolled {
+            tracing::warn!(repo = %repo.display(), "what the build added to the tree could not be removed");
+        }
+    }
+    if let Err(error) = trim_build_output(held, name).await {
+        tracing::warn!(repo = %repo.display(), %error, "the build output was not trimmed");
+    }
+    let size = build_output_bytes(held, name).await;
+    match size {
+        Some(0) => false,
+        Some(bytes) if bytes <= cap => {
+            tracing::info!(repo = %repo.display(), bytes, "the snapshot keeps the default branch's build output");
+            true
+        }
+        _ => {
+            tracing::warn!(
+                repo = %repo.display(),
+                bytes = ?size,
+                cap,
+                "the build output is over [sandbox] max_build_output_bytes; the snapshot is made without it"
+            );
+            if let Err(error) = drop_build_output(held, name).await {
+                tracing::warn!(repo = %repo.display(), %error, "the build output could not be dropped");
+            }
+            false
+        }
+    }
+}
+
+/// Lists the prepared tree before the warm-up builds, so [`ROLL_BACK_WORK`]
+/// can remove what the build added (a coverage report, a test cache, a
+/// bundle). `prepare`'s own output (`node_modules`, `vendor/`) is listed,
+/// so it stays. The listing is kept outside `/work` and `/cache`, and
+/// removed again by [`ROLL_BACK_WORK`].
+const LIST_WORK: &str =
+    "LC_ALL=C find /work -mindepth 1 -print0 | LC_ALL=C sort -z > /tmp/.tracon-warm-work";
+
+/// Removes every path under `/work` that [`LIST_WORK`] did not list.
+const ROLL_BACK_WORK: &str = "[ -f /tmp/.tracon-warm-work ] || exit 0; \
+LC_ALL=C find /work -mindepth 1 -print0 | LC_ALL=C sort -z \
+| LC_ALL=C comm -z -13 /tmp/.tracon-warm-work - | xargs -0 -r rm -rf --; \
+rm -f /tmp/.tracon-warm-work";
+
+/// What a check's build would not start from, removed from Cargo's target
+/// directory before the snapshot is made. Per profile (each directory Cargo
+/// keeps a `.cargo-lock` in: `<target>/debug`, `<target>/<triple>/release`):
+/// the incremental cache, uplifted examples and binaries, and every linked
+/// test, binary and example executable, which is relinked whenever its
+/// crate changes. Those are in `deps/` in Cargo's original layout, and in
+/// the `out/` of a unit whose fingerprint names it `test-`, `bin-` or
+/// `example-` in the per-unit layout (`build/<package>/<hash>/`). Compiled
+/// dependencies (`.rlib`, `.rmeta`, proc-macro `.so`), build scripts and
+/// their output, and fingerprints stay: they are what saves a check from
+/// compiling the dependency graph.
+fn trim_script(target: &str) -> String {
+    const EXECUTABLES: &str = "-maxdepth 1 -type f -perm -u+x ! -name '*.so' ! -name '*.dylib'";
+    format!(
+        "find {target} -maxdepth 3 -type f -name .cargo-lock 2>/dev/null | while IFS= read -r lock; do \
+         profile=$(dirname \"$lock\"); \
+         rm -rf \"$profile/incremental\" \"$profile/examples\"; \
+         find \"$profile\" {EXECUTABLES} -delete; \
+         [ -d \"$profile/deps\" ] && find \"$profile/deps\" {EXECUTABLES} -delete; \
+         for unit in \"$profile\"/build/*/*; do \
+         ls \"$unit/fingerprint\" 2>/dev/null | grep -qE '^(test|bin|example)-' || continue; \
+         find \"$unit/out\" {EXECUTABLES} -delete 2>/dev/null; \
+         done; \
+         done; true"
+    )
+}
+
+/// [`trim_script`] for Cargo's target directory in `environment::build_env`.
+pub fn trim_build_output_script() -> String {
+    let target = crate::environment::build_env()
+        .into_iter()
+        .find(|(name, _)| name == "CARGO_TARGET_DIR")
+        .map(|(_, dir)| dir)
+        .unwrap_or_else(|| "/cache/target".into());
+    trim_script(&target)
+}
+
+async fn trim_build_output(held: &Held, name: &str) -> Result<(), String> {
+    let output = held
+        .run_capture(RunnerCommand {
+            argv: crate::review::output::merged_shell(&trim_build_output_script()),
+            workdir: Some(PREPARED_TREE.into()),
+            name: format!("{name}-trim"),
+            ..Default::default()
+        })
+        .await
+        .map_err(|error| format!("trim the build output: {error}"))?;
+    match output.status.success() {
+        true => Ok(()),
+        false => Err(format!(
+            "trim the build output: {}",
+            String::from_utf8_lossy(&output.stdout)
+        )),
+    }
+}
+
+/// How many bytes the build output directories hold, or `None` when that
+/// could not be read.
+async fn build_output_bytes(held: &Held, name: &str) -> Option<u64> {
+    let dirs: Vec<String> = crate::environment::build_env()
+        .into_iter()
+        .map(|(_, dir)| dir)
+        .collect();
+    let script = format!(
+        "du -sb {} 2>/dev/null | awk '{{ total += $1 }} END {{ print total + 0 }}'",
+        dirs.join(" ")
+    );
+    let output = held
+        .run_capture(RunnerCommand {
+            argv: vec!["sh".into(), "-c".into(), script],
+            workdir: Some(PREPARED_TREE.into()),
+            name: format!("{name}-size"),
+            ..Default::default()
+        })
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 
 /// The shell step that makes [`crate::environment::build_env`]'s directories.
@@ -1778,6 +1979,181 @@ mod tests {
         );
         assert_eq!(lockfile_identity(b"not a lockfile ["), None);
         assert_eq!(lockfile_identity(b"version = 4\n"), None);
+    }
+
+    /// The trim keeps what saves a check from compiling dependencies and
+    /// removes what it would relink anyway, in every profile and target.
+    #[test]
+    fn the_trim_keeps_compiled_dependencies_and_drops_linked_executables() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        let file = |path: &str, executable: bool| {
+            let path = target.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"x").unwrap();
+            let mode = if executable { 0o755 } else { 0o644 };
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        for profile in ["debug", "x86_64-unknown-linux-musl/release"] {
+            file(&format!("{profile}/.cargo-lock"), false);
+            file(&format!("{profile}/deps/libserde-1.rlib"), false);
+            file(&format!("{profile}/deps/libserde-1.rmeta"), false);
+            file(&format!("{profile}/deps/serde-1.d"), false);
+            file(&format!("{profile}/deps/libderive-1.so"), true);
+            file(&format!("{profile}/deps/node-0a1b2c"), true);
+            file(&format!("{profile}/tracon"), true);
+            file(&format!("{profile}/tracon.d"), false);
+            file(
+                &format!("{profile}/incremental/node-1/s-1/dep-graph.bin"),
+                false,
+            );
+            file(&format!("{profile}/examples/demo"), true);
+            file(&format!("{profile}/build/ring-1/build-script-build"), true);
+            file(&format!("{profile}/build/ring-1/out/helper"), true);
+            file(&format!("{profile}/.fingerprint/serde-1/lib-serde"), false);
+        }
+        // Cargo's per-unit layout: each unit's own fingerprint and output.
+        let units = [
+            (
+                "serde/1/fingerprint/lib-serde",
+                "serde/1/out/libserde-1.rlib",
+                false,
+            ),
+            (
+                "derive/2/fingerprint/lib-derive",
+                "derive/2/out/libderive-2.so",
+                true,
+            ),
+            (
+                "ring/3/fingerprint/build-script-build-script-build",
+                "ring/3/out/build_script_build",
+                true,
+            ),
+            (
+                "ring/4/fingerprint/run-build-script-build-script-build",
+                "ring/4/out/helper",
+                true,
+            ),
+            (
+                "app/5/fingerprint/test-integration-test-ocr",
+                "app/5/out/ocr-5",
+                true,
+            ),
+            ("app/6/fingerprint/bin-app", "app/6/out/app-6", true),
+            ("app/7/fingerprint/example-demo", "app/7/out/demo-7", true),
+        ];
+        file("next/debug/.cargo-lock", false);
+        for (fingerprint, output, executable) in units {
+            file(&format!("next/debug/build/{fingerprint}"), false);
+            file(&format!("next/debug/build/{output}"), executable);
+        }
+        let status = std::process::Command::new("sh")
+            .args(["-c", &trim_script(&target.to_string_lossy())])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        for profile in ["debug", "x86_64-unknown-linux-musl/release"] {
+            let at = |path: &str| target.join(profile).join(path).exists();
+            for kept in [
+                "deps/libserde-1.rlib",
+                "deps/libserde-1.rmeta",
+                "deps/serde-1.d",
+                "deps/libderive-1.so",
+                "tracon.d",
+                "build/ring-1/build-script-build",
+                "build/ring-1/out/helper",
+                ".fingerprint/serde-1/lib-serde",
+            ] {
+                assert!(at(kept), "{profile}/{kept} is kept");
+            }
+            for gone in ["deps/node-0a1b2c", "tracon", "incremental", "examples"] {
+                assert!(!at(gone), "{profile}/{gone} is trimmed");
+            }
+        }
+        let at = |path: &str| target.join("next/debug/build").join(path).exists();
+        for kept in [
+            "serde/1/out/libserde-1.rlib",
+            "derive/2/out/libderive-2.so",
+            "ring/3/out/build_script_build",
+            "ring/4/out/helper",
+        ] {
+            assert!(at(kept), "{kept} is kept");
+        }
+        for gone in ["app/5/out/ocr-5", "app/6/out/app-6", "app/7/out/demo-7"] {
+            assert!(!at(gone), "{gone} is trimmed");
+        }
+        // Nothing to trim is not a failure.
+        let status = std::process::Command::new("sh")
+            .args([
+                "-c",
+                &trim_script(&dir.path().join("none").to_string_lossy()),
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[tokio::test]
+    async fn the_default_warm_up_builds_only_a_compiled_project() {
+        let git = |dir: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let commit_with = |manifest: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(manifest), "x\n").unwrap();
+            git(dir.path(), &["init", "-q", "-b", "main"]);
+            git(dir.path(), &["add", "."]);
+            git(dir.path(), &["commit", "-q", "-m", "one"]);
+            let commit = git(dir.path(), &["rev-parse", "HEAD"]);
+            (dir, commit)
+        };
+        let mut environment = crate::environment::RepoEnvironment {
+            image: "local".into(),
+            image_source: "harness image",
+            checks: vec!["just check".into()],
+            warm: None,
+            timeout_secs: 60,
+            prepare: vec!["true".into()],
+            egress: Vec::new(),
+            session_egress: Vec::new(),
+            cache_volume: "cache".into(),
+            repo: None,
+        };
+        for (manifest, builds) in [
+            ("Cargo.toml", true),
+            ("go.mod", true),
+            ("composer.json", false),
+        ] {
+            let (dir, commit) = commit_with(manifest);
+            let warm = warm_commands(dir.path(), &commit, &environment).await;
+            assert_eq!(!warm.is_empty(), builds, "{manifest}");
+        }
+        let (dir, commit) = commit_with("composer.json");
+        environment.warm = Some(vec!["php artisan optimize".into()]);
+        assert_eq!(
+            warm_commands(dir.path(), &commit, &environment).await,
+            vec!["php artisan optimize".to_string()]
+        );
+        let (dir, commit) = commit_with("Cargo.toml");
+        environment.warm = Some(Vec::new());
+        assert!(warm_commands(dir.path(), &commit, &environment)
+            .await
+            .is_empty());
     }
 
     #[test]

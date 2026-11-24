@@ -127,7 +127,22 @@ pub struct Sandbox {
     /// dropped connection ends the run. Unset, 120.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resume_within_secs: Option<u64>,
+    /// How many repositories' warm-ups run at once; another waits its turn.
+    /// A warm-up builds the default branch with every core it is given, so
+    /// several at once (a base image or a lockfile shared by many repositories
+    /// changing) is what heats a workstation. Unset, 1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warm_concurrency: Option<usize>,
+    /// The most build output a snapshot keeps, in bytes, measured after the
+    /// warm-up trims it (`sandbox_images::TRIM_BUILD_OUTPUT`). Over it, the
+    /// snapshot is made without its build output, keeping the dependencies
+    /// `prepare` fetched. 0 keeps none. Unset, 10 GiB.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_build_output_bytes: Option<u64>,
 }
+
+/// What `[sandbox] max_build_output_bytes` is when unset.
+pub const MAX_BUILD_OUTPUT_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
 /// Where releases are downloaded from, unless `[sandbox] release_url` says.
 pub const RELEASE_URL: &str = "https://github.com/cosmicspork/tracon/releases/download";
@@ -142,6 +157,17 @@ impl Sandbox {
                 env!("CARGO_PKG_VERSION")
             ),
         }
+    }
+
+    /// `warm_concurrency`, at least 1.
+    pub fn warm_concurrency(&self) -> usize {
+        self.warm_concurrency.unwrap_or(1).max(1)
+    }
+
+    /// `max_build_output_bytes`, or [`MAX_BUILD_OUTPUT_BYTES`].
+    pub fn max_build_output_bytes(&self) -> u64 {
+        self.max_build_output_bytes
+            .unwrap_or(MAX_BUILD_OUTPUT_BYTES)
     }
 
     /// `release_url` without a trailing slash, or [`RELEASE_URL`].
@@ -2132,6 +2158,15 @@ pub struct Repo {
     /// An empty list is explicit, as it is there.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checks: Option<Vec<String>>,
+    /// What the warm-up builds the default branch with after `prepare`, so
+    /// the snapshot carries the build output checks start from: commands run
+    /// as a check runs (offline, nothing lent), their outcome only logged.
+    /// Left out, the checks, but only for a repository with a `Cargo.toml` or
+    /// `go.mod` at its root, the only build output a snapshot keeps. Empty
+    /// builds nothing. Something that compiles without running suits it best:
+    /// `cargo test --no-run` rather than `cargo test`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warm: Option<Vec<String>>,
     /// In place of `[supervision] timeout_secs`, for a repository whose
     /// preparation and checks take longer than the rest.
     #[serde(skip_serializing_if = "Option::is_none")]
