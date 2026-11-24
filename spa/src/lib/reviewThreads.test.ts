@@ -3,6 +3,7 @@ import { classifyLines, splitDiff } from './diff'
 import { expand, fileSides } from './diffview'
 import {
   anchorAt,
+  threadsBlockedReason,
   anchorProblem,
   createBody,
   inDiff,
@@ -243,4 +244,16 @@ test('an opened gap numbers its lines as the file does, but no thread starts on 
   for (const l of [rowB('const z = 4'), rowB('added()'), rowB('end()'), rowA('const y = 2'), rowB('const y = 3')]) {
     expect(pickable(l!)).toBe(true)
   }
+})
+
+test('a decided review says its threads are read-only; a held one names its node', () => {
+  expect(threadsBlockedReason({ closed: true, remoteOwner: null, ownerFetched: false })).toBe('Decided: threads are read-only.')
+  expect(threadsBlockedReason({ closed: true, remoteOwner: 'work-pod', ownerFetched: false })).toBe(
+    'Decided: threads are read-only.',
+  )
+  expect(threadsBlockedReason({ closed: false, remoteOwner: 'work-pod', ownerFetched: false })).toBe(
+    'Its threads are held by work-pod, which could not be read; reload once it can.',
+  )
+  expect(threadsBlockedReason({ closed: false, remoteOwner: 'work-pod', ownerFetched: true })).toBeNull()
+  expect(threadsBlockedReason({ closed: false, remoteOwner: null, ownerFetched: false })).toBeNull()
 })
