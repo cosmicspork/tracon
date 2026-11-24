@@ -126,6 +126,7 @@ Top level:
 |---|---|---|---|
 | `entry` | string | required | A plain path under `ui/` that is a file in the archive. |
 | `title` | string | required | Not blank. The plugin's display name: its page is titled with it, and a session's orientation lists the plugin's tools under it (under `name` when there is no `[ui]`). |
+| `icon` | string | optional | A plain path under `ui/` to an `.svg`, `.png` or `.ico` file: the page's icon in the interface's navigation. Unset, the node takes the entry HTML's `<link rel="icon">` (see [Plugin pages](#plugin-pages)). |
 
 Each validation error starts with `tracon-plugin.toml:` and names the field, for
 example:
@@ -1083,6 +1084,28 @@ Calls another plugin's tool as your plugin.
 ## Plugin pages
 
 A plugin whose manifest has `[ui]` gets a page in the interface's **Plugins** section.
+
+- **How it is shown.** The page is the whole screen beside the rail (above the tab bar on
+  a phone): the interface draws no heading, title, channel picker, padding or border
+  around the frame, so your page owns all of it. The browser tab's title is `<title> ·
+  <channel>`.
+- **Which channel.** The page's address is `/plugins/<name>?channel=<channel>`. Without
+  `channel`, it opens on the node's default channel when the plugin is offered there,
+  otherwise on the first channel it is offered on. A `channel` the plugin is not offered
+  on is an error, never a fall back. The Plugins list opens each plugin on that default
+  channel, with a button beside it for each other channel it is offered on.
+- **Its icon.** The interface's navigation shows the page's icon: `[ui] icon` when the
+  manifest names one, otherwise the entry HTML's `<link rel="icon">`, an SVG first, then the
+  largest PNG or ICO by `sizes`. The node reads it from the active build and takes only a
+  file under `ui/`, of at most 256 KiB, SVG, PNG or ICO; anything else means no icon and
+  the interface's generic glyph. It is served from the interface's own origin at `GET
+  /api/plugins/<name>/icon`, with `Content-Security-Policy: sandbox`,
+  `X-Content-Type-Options: nosniff` and the build's digest as its `ETag`, and shown with
+  `<img>`, never as inline markup. `GET /api/plugins` says `icon: true|false` on the active
+  build.
+- **In the navigation.** The operator can add a plugin's page to the rail and the phone's
+  bar (Settings › General › Navigation, or Add to navigation in Settings › Plugins). Its
+  entry opens the page on its default channel.
 
 - **Where it is served.** The node serves the active build's `ui/` files itself, on a
   loopback port kept for the plugin (the first free one in

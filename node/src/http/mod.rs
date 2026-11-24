@@ -354,6 +354,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/plugins/{name}/logs", get(plugins::logs))
         .route("/api/plugins/{name}/restart", post(plugins::restart))
         .route("/api/plugins/{name}/ui", post(plugins::ui))
+        .route("/api/plugins/{name}/icon", get(plugins::icon))
         .route("/api/repos/recent", get(api::recent_repos))
         .route("/api/repos/branches", get(api::repo_branches))
         .route("/api/repos/clone", post(api::clone_repo))
@@ -598,10 +599,14 @@ async fn security_headers_middleware(
 ) -> Response {
     let mut response = next.run(req).await;
     let headers = response.headers_mut();
-    headers.insert(
-        HeaderName::from_static("content-security-policy"),
-        security.csp,
-    );
+    // A handler that set its own policy (a plugin's icon: `sandbox`) keeps
+    // it, and the operator's is added beside it: a browser enforces both.
+    let csp = HeaderName::from_static("content-security-policy");
+    if headers.contains_key(&csp) {
+        headers.append(csp, security.csp);
+    } else {
+        headers.insert(csp, security.csp);
+    }
     headers.insert(
         HeaderName::from_static("x-content-type-options"),
         HeaderValue::from_static("nosniff"),

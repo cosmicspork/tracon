@@ -9,6 +9,9 @@
   import { onMount } from 'svelte'
   import Card from './Card.svelte'
   import NodePicker from './NodePicker.svelte'
+  import PluginIcon from '../PluginIcon.svelte'
+  import { hasPlugin, pluginIconUrl } from '../../lib/nav'
+  import { navigation } from '../../lib/navigation.svelte'
   import { api } from '../../lib/api'
   import { peerFailure } from '../../lib/peer-admin'
   import { store } from '../../lib/store.svelte'
@@ -201,6 +204,22 @@
                 {inFlight === 'rollback' ? 'Rolling back…' : `Roll back to ${plugin.previous.version}`}
               </button>
             {/if}
+            <!-- The navigation is this node's, on this device: a peer's
+                 plugins are not pages here. Same list as General › Navigation. -->
+            {#if !node && plugin.active?.ui}
+              {#if hasPlugin(navigation.list, plugin.name)}
+                <span class="in-nav">
+                  <PluginIcon src={pluginIconUrl(plugin)} size={15} />
+                  In navigation ·
+                  <button class="lnk" type="button" onclick={() => navigation.removePlugin(plugin.name)}>Remove</button>
+                </span>
+              {:else}
+                <button class="btn small add-nav" type="button" onclick={() => navigation.addPlugin(plugin.name)}>
+                  <PluginIcon src={pluginIconUrl(plugin)} size={15} />
+                  Add {plugin.active.ui_title || plugin.name} to navigation
+                </button>
+              {/if}
+            {/if}
           </div>
           {#if confirming === plugin.name && plugin.previous && plugin.active}
             <div class="confirm" role="group" aria-label="Confirm the rollback">
@@ -392,5 +411,15 @@
     color: var(--crit);
     margin: 0;
     overflow-wrap: anywhere;
+  }
+  .add-nav,
+  .in-nav {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .in-nav {
+    font-size: 13px;
+    color: var(--ink2);
   }
 </style>
