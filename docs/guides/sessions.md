@@ -625,7 +625,9 @@ installed, and its log says *workspace prepared from the snapshot*. At any other
 every step in one sandbox from the snapshot on its warm `/work` and `/cache`, and the
 workspace comes back once at the end. The snapshot is keyed on lockfiles, not commits, so
 it stays current as the default branch moves, and sessions on a later commit prepare
-again on top of it. A session's sandbox from a snapshot is never sent the node's copy of
+again on top of it. A `Cargo.lock` counts only for what it fetches: its registry and Git
+packages. A release that bumps the workspace's own versions, or a path dependency added
+between its crates, keeps the snapshot. A session's sandbox from a snapshot is never sent the node's copy of
 its cache: the snapshot's `/cache` is the warm one. A candidate's preparation before its
 checks always runs, since it prepares a tree under review rather than a commit the
 snapshot was made from.

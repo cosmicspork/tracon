@@ -43,8 +43,9 @@
 //!   tree under review, not a commit the snapshot was made from.
 //!
 //! A snapshot is keyed on what it was made from: the base image's digest,
-//! the repository image's digest, the default branch's lockfiles and the
-//! preparation recipe (its commands and egress). A change to any of them
+//! the repository image's digest, the default branch's lockfiles (a
+//! `Cargo.lock` by its third-party packages alone, [`lockfile_identity`]) and
+//! the preparation recipe (its commands and egress). A change to any of them
 //! leaves the snapshot unused and the next session prepares again; the
 //! snapshot it supersedes is removed (`repo_image::supersede`, and
 //! `tracon gc` for any left over). The commit is recorded, not keyed: a
@@ -78,8 +79,9 @@ use crate::store::{RepoImageStart, Store};
 pub const SNAPSHOT: &str = "snapshot";
 
 /// Bumped when what goes into a snapshot changes: 2 added the default
-/// branch's build output under `/cache` ([`build_output`]).
-const SCHEME: &str = "2";
+/// branch's build output under `/cache` ([`build_output`]); 3 keys a
+/// `Cargo.lock` on its third-party packages ([`lockfile_identity`]).
+const SCHEME: &str = "3";
 
 /// On a snapshot image: the digest of the image it was made from.
 pub const FROM_LABEL: &str = "io.tracon.snapshot.from";
@@ -376,7 +378,8 @@ pub fn harness_env(gateway_host: &str, proxy_port: u16, harness_id: &str) -> Vec
     env
 }
 
-/// A lockfile of the default branch, by its Git object id.
+/// A lockfile of the default branch, by what in it preparation depends on
+/// ([`lockfile_identity`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lockfile {
     pub path: String,
@@ -448,7 +451,16 @@ pub async fn lockfiles(repo: &Path, commit: &str) -> Vec<Lockfile> {
     let dir = repo.to_string_lossy();
     let mut found = Vec::new();
     for &(path, _) in crate::environment::LOCKFILES {
-        if let Ok(blob) = crate::review::resolve(&dir, &format!("{commit}:{path}")).await {
+        let object = format!("{commit}:{path}");
+        if let Ok(blob) = crate::review::resolve(&dir, &object).await {
+            let blob = match path {
+                "Cargo.lock" => crate::review::blob(&dir, &object)
+                    .await
+                    .ok()
+                    .and_then(|bytes| lockfile_identity(&bytes))
+                    .unwrap_or(blob),
+                _ => blob,
+            };
             found.push(Lockfile {
                 path: path.to_string(),
                 blob,
@@ -456,6 +468,44 @@ pub async fn lockfiles(repo: &Path, commit: &str) -> Vec<Lockfile> {
         }
     }
     found
+}
+
+/// What a `Cargo.lock` asks preparation to fetch: its packages from a
+/// registry or a Git source, each by name, version, source and checksum.
+/// The workspace's own packages (no `source`) are left out, so a release
+/// that bumps their versions, or a commit that adds a path dependency
+/// between them, keeps the snapshot: `cargo fetch` fetches the same, and a
+/// check rebuilds the workspace's crates anyway. `None` when it does not
+/// read as a lockfile, so the caller keys on its bytes instead.
+pub fn lockfile_identity(bytes: &[u8]) -> Option<String> {
+    let lock: toml::Table = std::str::from_utf8(bytes).ok()?.parse().ok()?;
+    let packages = lock.get("package")?.as_array()?;
+    let field = |package: &toml::Table, name: &str| {
+        package
+            .get(name)
+            .and_then(toml::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let mut fetched: Vec<String> = packages
+        .iter()
+        .filter_map(toml::Value::as_table)
+        .filter(|package| package.contains_key("source"))
+        .map(|package| {
+            ["name", "version", "source", "checksum"]
+                .map(|name| field(package, name))
+                .join("\0")
+        })
+        .collect();
+    fetched.sort();
+    let mut hash = Sha256::new();
+    hash.update(b"cargo-dependencies\0");
+    hash.update(field(&lock, "version").as_bytes());
+    for package in &fetched {
+        hash.update([0]);
+        hash.update(package.as_bytes());
+    }
+    Some(format!("cargo:{}", hex::encode(hash.finalize())))
 }
 
 /// What a snapshot of `repo` in `environment` would be made from now.
@@ -1684,6 +1734,50 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    /// A lockfile as a workspace of two crates and one registry dependency
+    /// writes it, with the workspace at `ours` and the dependency at `theirs`.
+    fn cargo_lock(ours: &str, theirs: &str, internal: bool) -> Vec<u8> {
+        let deps = if internal {
+            "\n dependencies = [\"a\"]"
+        } else {
+            ""
+        };
+        format!(
+            "version = 4\n\n\
+             [[package]]\nname = \"a\"\nversion = \"{ours}\"\ndependencies = [\"serde\"]\n\n\
+             [[package]]\nname = \"b\"\nversion = \"{ours}\"{deps}\n\n\
+             [[package]]\nname = \"serde\"\nversion = \"{theirs}\"\n\
+             source = \"registry+https://github.com/rust-lang/crates.io-index\"\n\
+             checksum = \"{theirs}-sum\"\n"
+        )
+        .into_bytes()
+    }
+
+    /// A release or a new path dependency between the workspace's own crates
+    /// keeps the snapshot; a registry package that moves does not.
+    #[test]
+    fn a_cargo_lock_is_keyed_on_what_it_fetches() {
+        let before = lockfile_identity(&cargo_lock("0.1.0", "1.0.0", false)).unwrap();
+        assert!(before.starts_with("cargo:"));
+        assert_eq!(
+            lockfile_identity(&cargo_lock("0.2.0", "1.0.0", false)).unwrap(),
+            before,
+            "a workspace version bump"
+        );
+        assert_eq!(
+            lockfile_identity(&cargo_lock("0.1.0", "1.0.0", true)).unwrap(),
+            before,
+            "a path dependency between workspace crates"
+        );
+        assert_ne!(
+            lockfile_identity(&cargo_lock("0.1.0", "1.0.1", false)).unwrap(),
+            before,
+            "a registry package update"
+        );
+        assert_eq!(lockfile_identity(b"not a lockfile ["), None);
+        assert_eq!(lockfile_identity(b"version = 4\n"), None);
     }
 
     #[test]
