@@ -1,9 +1,9 @@
 <script lang="ts">
-  // The loading and failed states every list screen shares; `children` is the
-  // answer, empty state included, and renders only once there is one. A
-  // refresh that failed after an answer keeps it, under the error.
+  // The loading and failed states a list shares; `children` is the answer,
+  // empty state included, and renders only once there is one. A refresh that
+  // failed after an answer keeps it, under the error.
   import type { Snippet } from 'svelte'
-  import { loadPhase, type LoadStatus } from '../lib/load'
+  import { loadPhase, type LoadStatus } from '../load'
 
   let {
     status,

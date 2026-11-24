@@ -5,19 +5,10 @@
 
 import { ApiError } from './api'
 
-/** Whether a fetch has answered yet, and why its latest attempt failed. */
-export type LoadStatus = { loaded: boolean; error: string | null }
+import { loadPhase, type LoadStatus } from '@tracon/ui/load'
 
-/**
- * `stale` is a refresh that failed after an answer: the last rows stay, under
- * the error, so a flaky connection does not blank a list it already showed.
- */
-export type LoadPhase = 'loading' | 'failed' | 'stale' | 'ready'
-
-export function loadPhase(s: LoadStatus): LoadPhase {
-  if (s.error !== null) return s.loaded ? 'stale' : 'failed'
-  return s.loaded ? 'ready' : 'loading'
-}
+// The three states, and LoadGate that draws them, are @tracon/ui's.
+export { loadPhase, type LoadPhase, type LoadStatus } from '@tracon/ui/load'
 
 /** Whether there is an answer to show, fresh or not. */
 export function hasAnswer(s: LoadStatus): boolean {

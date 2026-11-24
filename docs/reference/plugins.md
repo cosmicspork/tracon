@@ -1175,6 +1175,10 @@ dependency.
   outline or a border.
 - **Compatibility.** Renaming or removing a token, a base class or the theme message is
   a breaking change, listed in the changelog under `@tracon/ui`. Adding one is not.
+- **Components and layout.** A Svelte page can use `@tracon/ui/svelte` (rows, side
+  buttons, banners, empty states, section headers, a segmented control, toggles, a load
+  gate and a word diff). [Make your plugin look native](../guides/plugin-ui.md) covers
+  them, and how a page lays out, uses colour and behaves inside the frame.
 
 ## Seeing how a tool is answered
 

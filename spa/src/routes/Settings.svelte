@@ -42,6 +42,7 @@
   import PolicyManagement from '../components/settings/PolicyManagement.svelte'
   import ModelPicker from '../components/ModelPicker.svelte'
   import Card from '../components/settings/Card.svelte'
+  import { Segmented, Toggle } from '@tracon/ui/svelte'
   import ConfigForm from '../components/settings/ConfigForm.svelte'
   import { preferences as desktopPreferences, setPreferences as setDesktopPreferences, type DesktopPrefs } from '../lib/desktop-prefs'
   import { setTheme, storedTheme, themes, type Theme } from '../lib/theme'
@@ -712,13 +713,12 @@
 
 {#if activeSection === 'general'}
   <Card title="Appearance" note="This browser only.">
-    <div class="segmented" role="radiogroup" aria-label="Colour scheme">
-      {#each themes as t (t)}
-        <button type="button" role="radio" aria-checked={theme === t} class:on={theme === t} onclick={() => chooseTheme(t)}>
-          {t === 'auto' ? 'Match system' : t === 'light' ? 'Light' : 'Dark'}
-        </button>
-      {/each}
-    </div>
+    <Segmented
+      label="Colour scheme"
+      value={theme}
+      options={themes.map((t) => ({ value: t, label: t === 'auto' ? 'Match system' : t === 'light' ? 'Light' : 'Dark' }))}
+      onchange={chooseTheme}
+    />
   </Card>
 
   <Navigation />
@@ -726,19 +726,10 @@
   {#if desktopPrefs}
     <Card title="Desktop app" note="How the app behaves on this machine. Stored beside node.toml.">
       <div class="toggles">
-        <label class="toggle">
-          <input type="checkbox" checked={desktopPrefs.open_window_at_launch} onchange={(e) => setDesktopPref({ open_window_at_launch: e.currentTarget.checked })} />
-          <span><b>Open the window at launch</b><small>Off: menu bar only.</small></span>
-        </label>
+        <Toggle checked={desktopPrefs.open_window_at_launch} title="Open the window at launch" hint="Off: menu bar only." onchange={(on) => setDesktopPref({ open_window_at_launch: on })} />
         {#if desktopSetup?.platform !== 'linux'}
-          <label class="toggle">
-            <input type="checkbox" checked={desktopPrefs.cmd_q_quits} onchange={(e) => setDesktopPref({ cmd_q_quits: e.currentTarget.checked })} />
-            <span><b>⌘Q quits</b><small>Off: closes to the menu bar.</small></span>
-          </label>
-          <label class="toggle">
-            <input type="checkbox" checked={desktopPrefs.hide_dock_when_closed} onchange={(e) => setDesktopPref({ hide_dock_when_closed: e.currentTarget.checked })} />
-            <span><b>Hide the dock icon while closed</b></span>
-          </label>
+          <Toggle checked={desktopPrefs.cmd_q_quits} title="⌘Q quits" hint="Off: closes to the menu bar." onchange={(on) => setDesktopPref({ cmd_q_quits: on })} />
+          <Toggle checked={desktopPrefs.hide_dock_when_closed} title="Hide the dock icon while closed" onchange={(on) => setDesktopPref({ hide_dock_when_closed: on })} />
         {/if}
       </div>
       <p class="hint">Show or hide: <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>T</kbd></p>

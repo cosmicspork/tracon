@@ -1,7 +1,7 @@
 <script lang="ts">
   // Every session this node knows about, including the ones put away. The home
   // shows what landed lately; this is where the rest of it lives.
-  import LoadGate from '../components/LoadGate.svelte'
+  import { LoadGate } from '@tracon/ui/svelte'
   import SessionRow from '../components/SessionRow.svelte'
   import SignInBanner from '../components/SignInBanner.svelte'
   import TransferInbox from '../components/TransferInbox.svelte'

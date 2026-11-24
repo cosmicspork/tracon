@@ -188,6 +188,7 @@ failed. That refusal is the design working, not a bug to route around.
 - [Commands](docs/reference/cli.md): every `tracon` command; `--help` on any of them says more.
 - [Configuration](docs/reference/configuration.md): the annotated `node.toml`, policy, granting authority, and where things live.
 - [Plugin contract](docs/reference/plugins.md): writing a plugin.
+- [Make your plugin look native](docs/guides/plugin-ui.md): `@tracon/ui` and its Svelte components for a plugin page.
 - [External harness notes](docs/reference/external-harness-notes.md): the external harness trust boundary and operating guidance.
 - [OpenCode migration](docs/reference/opencode-migration.md): the record of the 2026-09 move from omp to OpenCode (OpenCode was itself removed later; it is history).
 

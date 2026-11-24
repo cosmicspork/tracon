@@ -2,7 +2,8 @@
   import Diff from './Diff.svelte'
   import { render } from '../lib/markdown'
   import type { PluginBlock } from '../lib/plugin-card'
-  import { wordCounts, wordDiff } from '../lib/word-diff'
+  import { WordDiff } from '@tracon/ui/svelte'
+  import { wordCounts, wordDiff } from '@tracon/ui/word-diff'
 
   let { blocks }: { blocks: PluginBlock[] } = $props()
 </script>
@@ -24,9 +25,7 @@
     {:else if b.format === 'word_diff'}
       {@const parts = wordDiff(b.before, b.after)}
       {@const counts = wordCounts(parts)}
-      <div class="wd" aria-label="Word diff: {counts.removed} words out, {counts.added} in">
-        {#if counts.added === 0 && counts.removed === 0}<span class="none">no change · </span>{/if}{#each parts as p, j (j)}{#if p.kind === 'add'}<ins>{p.text}</ins>{:else if p.kind === 'del'}<del>{p.text}</del>{:else}{p.text}{/if}{/each}
-      </div>
+      <WordDiff before={b.before} after={b.after} />
       <details class="sides">
         <summary>Before and after · −{counts.removed} +{counts.added} words</summary>
         <div class="pair">
@@ -68,25 +67,6 @@
     padding: 8px 12px;
     white-space: pre-wrap;
   }
-  .wd {
-    background: var(--s2);
-    border-radius: 4px;
-    line-height: 1.6;
-    padding: 8px 12px;
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-  .wd ins {
-    background: color-mix(in srgb, var(--ok) 25%, transparent);
-    text-decoration: none;
-  }
-  .wd del {
-    background: color-mix(in srgb, var(--crit) 20%, transparent);
-    text-decoration: line-through;
-  }
-  .wd .none {
-    color: var(--t2);
-  }
   .sides {
     margin-top: 6px;
   }
@@ -101,34 +81,7 @@
     grid-template-columns: 1fr 1fr;
   }
   @media (max-width: 640px) {
-    .wd {
-    background: var(--s2);
-    border-radius: 4px;
-    line-height: 1.6;
-    padding: 8px 12px;
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-  .wd ins {
-    background: color-mix(in srgb, var(--ok) 25%, transparent);
-    text-decoration: none;
-  }
-  .wd del {
-    background: color-mix(in srgb, var(--crit) 20%, transparent);
-    text-decoration: line-through;
-  }
-  .wd .none {
-    color: var(--t2);
-  }
-  .sides {
-    margin-top: 6px;
-  }
-  .sides summary {
-    color: var(--t2);
-    cursor: pointer;
-    font-size: 12px;
-  }
-  .pair {
+    .pair {
       grid-template-columns: 1fr;
     }
   }
