@@ -1464,6 +1464,83 @@ pub async fn list_sessions(
     Ok(Json(json!(rows)))
 }
 
+#[derive(Deserialize)]
+pub struct ListReviews {
+    /// Only `decided` is listed; the open ones are on the queue.
+    state: Option<String>,
+    /// `external`: only reviews from a harness the operator runs.
+    source: Option<String>,
+    channel: Option<String>,
+    /// The `next` of the page before: `{decided_ms}:{id}`.
+    before: Option<String>,
+    limit: Option<usize>,
+}
+
+/// The review history: decided code reviews, newest first, a page at a
+/// time, from this node's own and the ones it mirrors, each once with the
+/// node that holds it. `next` is what `before` takes for the page after, or
+/// null on the last.
+pub async fn list_reviews(
+    State(s): State<AppState>,
+    Query(q): Query<ListReviews>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if q.state.as_deref().is_some_and(|state| state != "decided") {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "only decided reviews are listed (state=decided); open ones are on the home screen"
+                .into(),
+        ));
+    }
+    let external = match q.source.as_deref() {
+        None | Some("") | Some("any") => false,
+        Some("external") => true,
+        Some(other) => {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                format!("{other:?} is not a source to filter by; external is"),
+            ))
+        }
+    };
+    let before = match q.before.as_deref().filter(|b| !b.is_empty()) {
+        None => None,
+        Some(cursor) => {
+            let parsed = cursor
+                .split_once(':')
+                .and_then(|(ms, id)| Some((ms.parse::<i64>().ok()?, id)));
+            match parsed {
+                Some(before) => Some(before),
+                None => {
+                    return Err(ApiError(
+                        StatusCode::BAD_REQUEST,
+                        "before is the next value a page gave".into(),
+                    ))
+                }
+            }
+        }
+    };
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let channel = q.channel.as_deref().filter(|c| !c.is_empty());
+    // One more than asked, to know whether there is a page after.
+    let mut rows = s
+        .store()
+        .decided_reviews(channel, external, before, limit + 1)?;
+    let more = rows.len() > limit;
+    rows.truncate(limit);
+    let next = more
+        .then(|| rows.last().map(|r| format!("{}:{}", r.decided_ms, r.id)))
+        .flatten();
+    let reviews: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|r| {
+            let held_here = r.node_id == s.node_id;
+            let mut row = json!(r);
+            row["held_here"] = json!(held_here);
+            row
+        })
+        .collect();
+    Ok(Json(json!({ "reviews": reviews, "next": next })))
+}
+
 /// Where sessions have run before, most recent first, so the form can offer a
 /// pick instead of demanding a typed path. Managed clones ride along, so a
 /// repo cloned from a forge is offered before it has ever run a session.

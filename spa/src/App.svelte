@@ -14,6 +14,7 @@
   import Home from './routes/Home.svelte'
   import More from './routes/More.svelte'
   import Sessions from './routes/Sessions.svelte'
+  import Reviews from './routes/Reviews.svelte'
   import Settings from './routes/Settings.svelte'
   import Session from './routes/Session.svelte'
   import Enroll from './routes/Enroll.svelte'
@@ -240,6 +241,8 @@
       <Session id={screen.id} />
     {:else if screen.name === 'sessions'}
       <Sessions />
+    {:else if screen.name === 'reviews'}
+      <Reviews />
     {:else if screen.name === 'enroll'}
       <Enroll />
     {:else if screen.name === 'usage'}

@@ -1584,6 +1584,33 @@ export interface ChannelBindings {
   [key: string]: unknown
 }
 
+/** One decided review in the review history (`GET /api/reviews`). */
+export interface DecidedReview {
+  id: string
+  /** The node that holds it: this one, or the peer it is mirrored from. */
+  node_id: string
+  held_here: boolean
+  channel: string
+  /** The submitting session; null for a harness the operator runs. */
+  session_id: string | null
+  /** The label that harness gave, if any. */
+  lane: string | null
+  title: string
+  provider: string
+  project: string | null
+  branch: string | null
+  state: 'approved' | 'rejected'
+  /** The published change's address, once there is one. */
+  publish_result: string | null
+  decided_ms: number
+}
+
+/** A page of the review history; `next` is the `before` of the page after, or null on the last. */
+export interface DecidedReviewPage {
+  reviews: DecidedReview[]
+  next: string | null
+}
+
 export interface ChannelInfo {
   name: string
   nodes: string[]

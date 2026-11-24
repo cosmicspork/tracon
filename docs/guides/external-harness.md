@@ -48,6 +48,11 @@ land, a failed one shows there without refusing the submission, and a reviewer, 
 the change — or updates the one named by `change` — with the brokered
 credential, exactly as for a session it started.
 
+A decided review has no session to lead back to it, so the history lists it:
+**all reviews** beside *Landed recently* on the home (`/reviews`) shows every
+decided review this node holds or mirrors, newest first, with its verdict, where
+it came from and the change it published; **external only** narrows it to yours.
+
 With `check_submissions` off, a submission runs nothing, but a reviewer still
 gets the checks: one started on it (by you, or by an `auto` trigger the channel
 sets) first runs the repository's required checks on the review's candidate, as
