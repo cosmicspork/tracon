@@ -9,6 +9,7 @@
   import { otherChannels, pluginDefaultChannel, pluginHref } from '../lib/plugin-page'
   import { store } from '../lib/store.svelte'
   import type { PluginSummary } from '../lib/types'
+  import { Banner, Empty, Row, SectionHeader, SideButton } from '@tracon/ui/svelte'
 
   let plugins = $state<PluginSummary[] | null>(null)
   let error = $state<string | null>(null)
@@ -24,42 +25,42 @@
   const nodeDefault = $derived(store.node?.default_channel)
 </script>
 
-<div class="h4">Plugins <b>{plugins ? withUi.length : '…'} with a page</b></div>
+<SectionHeader detail="{plugins ? withUi.length : '…'} with a page">Plugins</SectionHeader>
 
 {#if error}
-  <div class="banner crit">plugins <b>· {error}</b></div>
+  <Banner tone="crit" detail={error}>plugins</Banner>
 {:else if plugins === null}
-  <div class="empty">Loading…</div>
+  <Empty loading>Loading…</Empty>
 {:else if withUi.length === 0}
-  <div class="empty">
+  <Empty>
     No installed plugin has a page. Plugins are installed and run from
     <a href="/settings#plugins">Settings › Plugins</a>.
-  </div>
+  </Empty>
 {:else}
   <nav class="list" aria-label="Plugin pages">
     {#each withUi as p (p.name)}
       {@const first = pluginDefaultChannel(p.offered_on, nodeDefault)}
       {@const title = p.active?.ui_title || p.name}
-      <div class="line">
-        {#if first}
-          <a class="row" href={pluginHref(p.name)} title="Open on {first}">
-            <PluginIcon src={pluginIconUrl(p)} />
-            <span class="t"><b>{title}</b><small>{p.name} {p.active?.version} · {p.repo} · {first}</small></span>
-          </a>
-          {#each otherChannels(p.offered_on, nodeDefault) as c (c)}
-            <a class="arch" href={pluginHref(p.name, c)} aria-label="Open {title} on {c}">{c}</a>
-          {/each}
-        {:else}
-          <div class="row off" aria-disabled="true">
-            <PluginIcon src={pluginIconUrl(p)} />
-            <span class="t"
-              ><b>{title}</b><small
-                >not offered on any channel · <a href="/settings#plugins">Settings › Plugins</a></small
-              ></span
-            >
-          </div>
-        {/if}
-      </div>
+      {#if first}
+        <Row href={pluginHref(p.name)} title="Open on {first}" minHeight={52}>
+          {#snippet lead()}<PluginIcon src={pluginIconUrl(p)} />{/snippet}
+          <span class="t"><b>{title}</b><small>{p.name} {p.active?.version} · {p.repo} · {first}</small></span>
+          {#snippet actions()}
+            {#each otherChannels(p.offered_on, nodeDefault) as c (c)}
+              <SideButton href={pluginHref(p.name, c)} label="Open {title} on {c}">{c}</SideButton>
+            {/each}
+          {/snippet}
+        </Row>
+      {:else}
+        <Row off minHeight={52}>
+          {#snippet lead()}<PluginIcon src={pluginIconUrl(p)} />{/snippet}
+          <span class="t off"
+            ><b>{title}</b><small
+              >not offered on any channel · <a href="/settings#plugins">Settings › Plugins</a></small
+            ></span
+          >
+        </Row>
+      {/if}
     {/each}
   </nav>
   <p class="note">Installed, updated and restarted from <a href="/settings#plugins">Settings › Plugins</a>.</p>
@@ -70,33 +71,6 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
-  }
-  /* As an external harness line (components/ExternalAgents.svelte): the row
-     takes what the side buttons leave, all of it when there are none. */
-  .line {
-    display: flex;
-    align-items: stretch;
-    gap: 4px;
-    min-width: 0;
-  }
-  .row {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    min-height: 52px;
-    padding: 10px 14px;
-    background: var(--s1);
-    border-radius: 4px;
-    color: var(--ink);
-    text-decoration: none;
-  }
-  a.row:hover {
-    background: var(--s2);
-  }
-  .row.off {
-    color: var(--dim);
   }
   .t {
     display: grid;
@@ -113,24 +87,9 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .row.off b,
-  .row.off small {
+  .t.off b,
+  .t.off small {
     color: var(--dim);
-  }
-  .arch {
-    flex: none;
-    display: flex;
-    align-items: center;
-    background: var(--s1);
-    border-radius: 4px;
-    color: var(--dim);
-    font: 12.5px var(--sans);
-    padding: 0 12px;
-    text-decoration: none;
-  }
-  .arch:hover {
-    color: var(--ink);
-    background: var(--s2);
   }
   .note {
     color: var(--ink2);

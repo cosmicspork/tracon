@@ -1,6 +1,6 @@
 <script lang="ts">
   import HtmlImport from '../components/HtmlImport.svelte'
-  import LoadGate from '../components/LoadGate.svelte'
+  import { LoadGate } from '@tracon/ui/svelte'
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'

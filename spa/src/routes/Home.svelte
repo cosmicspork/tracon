@@ -9,7 +9,7 @@
   import Composer from '../components/Composer.svelte'
   import ExternalAgents from '../components/ExternalAgents.svelte'
   import FirstTaskGuide from '../components/FirstTaskGuide.svelte'
-  import LoadGate from '../components/LoadGate.svelte'
+  import { LoadGate } from '@tracon/ui/svelte'
   import OperatorIssueCard from '../components/OperatorIssueCard.svelte'
   import OperatorQuestionCard from '../components/OperatorQuestionCard.svelte'
   import PermissionCard from '../components/PermissionCard.svelte'

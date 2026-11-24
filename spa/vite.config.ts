@@ -104,8 +104,12 @@ export default defineConfig({
   resolve: {
     alias: [
       { find: /^@tracon\/ui$/, replacement: `${ui}theme.ts` },
+      { find: /^@tracon\/ui\/svelte$/, replacement: `${ui}svelte/index.js` },
       { find: /^@tracon\/ui\//, replacement: ui },
     ],
+    // The package's components are compiled here, against this interface's
+    // own Svelte, even where packages/ui has one installed for its tests.
+    dedupe: ['svelte'],
   },
   define: { __TRACON_VERSION__: JSON.stringify(appVersion), __TRACON_BUILD__: JSON.stringify(appBuild) },
   plugins: [svelte(), buildId(), fixtureMode ? fixtures() : undefined].filter(Boolean) as PluginOption[],

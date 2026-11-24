@@ -1,5 +1,5 @@
 <script lang="ts">
-  import LoadGate from '../components/LoadGate.svelte'
+  import { LoadGate } from '@tracon/ui/svelte'
   import WorkRow from '../components/WorkRow.svelte'
   import { api } from '../lib/api'
   import { autogrow } from '../lib/autogrow'

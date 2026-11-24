@@ -2,8 +2,8 @@
 
 Tracon's design tokens, base styles and theme bridge. The Tracon interface is
 built on them, and so can a plugin page, so that it looks and themes like the
-rest of the interface. Plain CSS and a small TypeScript module, with no
-framework dependency.
+rest of the interface. Plain CSS and small TypeScript modules with no framework
+dependency, plus optional Svelte 5 components built on them.
 
 ## Install
 
@@ -31,6 +31,20 @@ connectTheme()
 - `base.css`: the reset and shared primitives (`.btn`, `.lnk`, `.banner`,
   `.empty`, `.note`, `.segmented`, `.toggle`, `.chip`, `.tag`, `kbd`, ...).
 - `theme`: `applyTheme(theme)`, `connectTheme()` and `THEME_MESSAGE`.
+- `word-diff`, `load`, `segmented`: the framework-free helpers behind the
+  components (`wordDiff` / `wordCounts`, `loadPhase`, `segmentedKey`).
+- `svelte` (needs `svelte` ^5): the interface's own `Row`, `SideButton`,
+  `Banner`, `Empty`, `SectionHeader`, `Segmented`, `Toggle`, `LoadGate` and
+  `WordDiff`. The interface uses these same files, so a plugin page built with
+  them matches it.
+
+```svelte
+<script lang="ts">
+  import { Row, SideButton } from '@tracon/ui/svelte'
+</script>
+
+<Row href="/items/1">Item one{#snippet actions()}<SideButton href="/items/1/edit">edit</SideButton>{/snippet}</Row>
+```
 
 `connectTheme()` applies the `tracon_theme` query parameter the interface adds to
 a plugin frame's URL, then every `{ type: "tracon/theme", theme: "light" | "dark" }`
@@ -41,7 +55,8 @@ Colour rules: amber (`--wait`) means waiting on the operator and nothing else, r
 (`--crit`) is refusal and failure, and state is a 3px bar plus a wash, never an
 outline.
 
-See docs/reference/plugins.md, "Looking native".
+See docs/guides/plugin-ui.md, "Make your plugin look native", for which
+component to use where, and docs/reference/plugins.md, "Looking native".
 
 ## Compatibility
 
@@ -52,6 +67,7 @@ change and is listed in Tracon's changelog under `@tracon/ui`. Adding one is not
 
 ```sh
 bun install && bun test && bun run check
+bun run dev    # every component in each state, dark and light, at localhost:5173
 just ui-pack   # from the repository root: target/tracon-ui-<version>.tgz
 ```
 

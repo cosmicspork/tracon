@@ -6,5 +6,5 @@
     "declaration": true,
     "outDir": "dist"
   },
-  "include": ["theme.ts"]
+  "include": ["theme.ts", "word-diff.ts", "load.ts", "segmented.ts"]
 }

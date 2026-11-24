@@ -1,6 +1,6 @@
 <script lang="ts">
   import Help from '../components/Help.svelte'
-  import LoadGate from '../components/LoadGate.svelte'
+  import { LoadGate } from '@tracon/ui/svelte'
   import { api } from '../lib/api'
   import { codexLimitLabel, formatCodexLimits, formatTokens } from '../lib/format'
   import { Loader } from '../lib/loader.svelte'
