@@ -313,6 +313,16 @@ pub async fn fetch(
         .collect();
     let (asset, url) = match archives.as_slice() {
         [one] => (one.0.clone(), one.1.clone()),
+        // A release made by release-please exists, with its tag, before the
+        // build matrix attaches anything: an empty one is still being
+        // published, not broken.
+        [] if release.assets.is_empty() => {
+            return Err(refused(format!(
+                "{spec} {} has no assets yet; its release is probably still being \
+                 published. Try again in a few minutes",
+                release.tag
+            )))
+        }
         [] => {
             return Err(refused(format!(
                 "{spec} {} publishes no archive for {target}",
@@ -809,6 +819,10 @@ pub(crate) mod tests {
             (no_sums, "publishes no checksums.txt"),
             (two, "more than one archive"),
             (vec![(CHECKSUMS.into(), Vec::new())], "publishes no archive"),
+            (
+                Vec::new(),
+                "v0.1.0 has no assets yet; its release is probably still being published",
+            ),
             (renamed, "its manifest says sql-review-0.1.0-"),
         ];
         for (assets, says) in cases {
