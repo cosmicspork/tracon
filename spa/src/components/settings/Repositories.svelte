@@ -3,8 +3,10 @@
   import Card from './Card.svelte'
   import DecidedOffer from './DecidedOffer.svelte'
   import RecipeOffers from './RecipeOffers.svelte'
+  import { onDestroy, tick } from 'svelte'
   import { api } from '../../lib/api'
   import { autogrow } from '../../lib/autogrow'
+  import { router } from '../../lib/router.svelte'
   import { store } from '../../lib/store.svelte'
   import { forgeIdentity, offerResultLine, offerTargets } from '../../lib/recipes'
   import {
@@ -28,6 +30,11 @@
   /** Every offer the inbox read: each entry shows the one decided onto it. */
   let offers = $state<RecipeOffer[]>([])
   let forms = $state<RepoForm[]>([])
+  /** Entries removed here and not yet saved, each shown struck through
+      where it was (before the form now at `at`) with an Undo. */
+  let removing = $state<{ form: RepoForm; at: number }[]>([])
+  /** The "changed on the node" banner, focused when a save meets it. */
+  let banner = $state<HTMLElement | null>(null)
   // The table the forms were seeded from, and its file's version: a save
   // edits entries where they were in it and names this version, never a
   // later poll's. Both come from one read of node.toml (`GET /api/config`),
@@ -55,6 +62,7 @@
     seeded = writtenRepos(cfg.document)
     seededHash = cfg.hash
     forms = seeded.map((entry, origin) => ({ ...toForm(entry), origin }))
+    removing = []
     moved = false
     current = null
     fieldErrors = {}
@@ -163,6 +171,9 @@
     }
     current = { entries: now, hash: cfg.hash }
     moved = true
+    await tick()
+    banner?.scrollIntoView({ block: 'center' })
+    banner?.focus()
   }
 
   /** Carry these edits onto the table as the node has it now: only the
@@ -254,17 +265,60 @@
     forms = [...forms, blankForm()]
   }
 
+  // A removal is staged like any other edit: the entry stays in view, struck
+  // through, until the save writes it or Undo puts it back.
   function remove(index: number) {
+    removing = [...removing, { form: forms[index], at: index }]
     forms = forms.filter((_, at) => at !== index)
   }
+
+  function undoRemove(item: { form: RepoForm; at: number }) {
+    removing = removing.filter((r) => r !== item)
+    const next = [...forms]
+    next.splice(Math.min(item.at, next.length), 0, item.form)
+    forms = next
+  }
+
+  function discard() {
+    forms = seeded.map((entry, origin) => ({ ...toForm(entry), origin }))
+    removing = []
+    note = ''
+    fieldErrors = {}
+  }
+
+  const leaving = 'Leave without saving your repository changes?'
+  const unguard = router.guard(() => (dirty ? leaving : null))
+  function beforeUnload(event: BeforeUnloadEvent) {
+    if (!dirty) return
+    event.preventDefault()
+    event.returnValue = leaving
+  }
+  window.addEventListener('beforeunload', beforeUnload)
+  onDestroy(() => {
+    unguard()
+    window.removeEventListener('beforeunload', beforeUnload)
+  })
+
+  const removedAt = (index: number) => removing.filter((r) => Math.min(r.at, forms.length) === index)
+  const changes = $derived(`${ops.length} unsaved change${ops.length === 1 ? '' : 's'}`)
 </script>
+
+{#snippet removedRow(item: { form: RepoForm; at: number })}
+  <div class="entry removed" data-removed={item.form.path}>
+    <div class="line">
+      <code><s>{item.form.path || 'new repository'}</s></code>
+      <small>Will be removed when you save; its image and any managed clone stay until <code>tracon gc --apply</code>.</small>
+      <button class="lnk" type="button" onclick={() => undoRemove(item)} disabled={busy !== ''}>Undo</button>
+    </div>
+  </div>
+{/snippet}
 
 <Card
   title="Repository environments"
   note="Image, checks and dependency setup per repository. Kept in node.toml so a candidate can't choose its own checks."
 >
   {#if moved}
-    <div class="held" role="alert">
+    <div class="held" role="alert" tabindex="-1" bind:this={banner}>
       <p>Changed on the node while you were editing.</p>
       <div class="acts">
         <button class="btn" type="button" onclick={keepMine} disabled={busy !== ''}>Keep my edits</button>
@@ -276,7 +330,7 @@
   <RecipeOffers bind:offers onaccepted={() => void load(true)} />
 
   {#if loaded}
-    {#if forms.length === 0}
+    {#if forms.length === 0 && removing.length === 0}
       <p class="dim">None. Every repository uses the harness image and node-wide checks.</p>
     {/if}
     {#each forms as form, index (index)}
@@ -285,6 +339,7 @@
       {@const refused = refusalOf(form.path)}
       {@const unbuilt = unbuiltOf(form.path)}
       {@const uploads = acceptsUploads(words(form.egress), presets)}
+      {#each removedAt(index) as item (item)}{@render removedRow(item)}{/each}
       <details class="entry" open={!form.path || forms.length <= 2}>
         <summary>
           <code>{form.path || 'new repository'}</code>
@@ -504,15 +559,24 @@
       </details>
     {/each}
 
+    {#each removedAt(forms.length) as item (item)}{@render removedRow(item)}{/each}
+
     <div class="acts">
       <button class="lnk" type="button" onclick={add} disabled={busy !== ''}>+ Add a repository</button>
-      {#if dirty}
+    </div>
+
+    {#if dirty}
+      <div class="savebar" role="region" aria-label="Unsaved repository changes">
+        <span class="count" class:bad={moved}>
+          {moved ? `Not saved: node.toml changed; review and save · ${changes}` : changes}
+        </span>
         <button class="btn p" type="button" onclick={() => void save()} disabled={busy !== '' || invalid.length > 0 || moved}>
           {busy === 'save' ? 'Saving…' : 'Save repositories'}
         </button>
-      {/if}
-      {#if dirty && invalid.length}<small class="bad">{invalid[0]}</small>{/if}
-    </div>
+        <button class="lnk" type="button" onclick={discard} disabled={busy !== ''}>Discard</button>
+        {#if invalid.length}<small class="bad">{invalid[0]}</small>{/if}
+      </div>
+    {/if}
   {:else if !error}
     <p class="dim">Reading the repository table…</p>
   {/if}
@@ -560,4 +624,22 @@
   .dim, .note, .error { margin: 0; font-size: 12.5px; }
   .dim { color: var(--dim); }
   .note { color: var(--ok); }
+  .removed { opacity: 0.75; }
+  .removed .line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+  .removed code { font: 13px var(--mono); overflow-wrap: anywhere; }
+  .savebar {
+    position: sticky;
+    bottom: 0;
+    z-index: 1;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 14px;
+    margin-top: 12px;
+    padding: 10px 12px;
+    background: var(--s2);
+    border-top: 1px solid var(--line, var(--s1));
+    border-radius: 4px;
+  }
+  .savebar .count { font-size: 12.5px; color: var(--ink2); }
 </style>

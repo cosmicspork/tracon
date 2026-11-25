@@ -21,9 +21,37 @@ class Router {
    */
   previous: string | null = null
 
+  /** Screens with unsaved edits, each saying what leaving would lose. */
+  private guards = new Set<() => string | null>()
+
+  /**
+   * Ask before an in-app navigation, or Back, leaves while `guard` says
+   * something would be lost (its question, or null when nothing would). A
+   * reload or a closed tab is the screen's own `beforeunload`. Returns the
+   * call that removes the guard.
+   */
+  guard(guard: () => string | null): () => void {
+    this.guards.add(guard)
+    return () => this.guards.delete(guard)
+  }
+
+  /** Whether leaving may go ahead: no guard objects, or the operator agreed. */
+  private mayLeave(): boolean {
+    for (const guard of this.guards) {
+      const question = guard()
+      if (question && !window.confirm(question)) return false
+    }
+    return true
+  }
+
   start() {
     this.read()
     window.addEventListener('popstate', () => {
+      if (!this.mayLeave()) {
+        // Back already moved the address: put back the one being left.
+        history.pushState(null, '', this.path + this.search + this.hash)
+        return
+      }
       this.previous = null
       this.read()
       this.revision += 1
@@ -42,6 +70,7 @@ class Router {
 
   go(path: string) {
     const current = this.path + this.search + this.hash
+    if (path !== current && !this.mayLeave()) return
     if (path !== current) {
       this.previous = current
       history.pushState(null, '', path)

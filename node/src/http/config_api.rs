@@ -768,6 +768,32 @@ fn actor(req: &AdminRequest) -> &'static str {
     }
 }
 
+/// The keys `ops` name, in order, without repeats.
+fn op_keys(ops: &[Op]) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    for op in ops {
+        let key = match op {
+            Op::Set { key, .. } | Op::Remove { key } => key.to_string(),
+            Op::Reorder { array, .. } | Op::Insert { array, .. } => array.to_string(),
+        };
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    keys
+}
+
+/// Leave a trace of an edit refused because node.toml changed since the
+/// caller read it, so a lost change (a removal that never landed) can be
+/// found later: nothing else on the node records it.
+fn not_saved(req: &AdminRequest, ops: &[Op]) {
+    tracing::info!(
+        actor = actor(req),
+        keys = %op_keys(ops).join(", "),
+        "config::edit: not saved, node.toml changed since read"
+    );
+}
+
 /// `PATCH /api/config`: apply typed operations to `node.toml`, if the file
 /// is still the version the caller read.
 ///
@@ -802,7 +828,7 @@ pub async fn patch_config(
         return Err(refused_keys(&errors));
     }
 
-    let (text, _) = read_expected(&expected)?;
+    let (text, _) = read_expected(&expected).inspect_err(|_| not_saved(&req, &ops))?;
     let (changes, summary) = prompt(&text, &ops)?;
     let errors = check_changes(&changes, editor);
     if !errors.is_empty() {
@@ -818,6 +844,11 @@ pub async fn patch_config(
     req.confirm(&s, &summary).await?;
 
     let outcome = edit::edit_live(&s.cfg, s.store(), &ops, Some(&expected), actor(&req))
+        .inspect_err(|error| {
+            if matches!(error, edit::EditError::Conflict { .. }) {
+                not_saved(&req, &ops)
+            }
+        })
         .map_err(edit_refusal)?;
     let (restart_required, pending) = restart_owed(&s, &outcome).await;
     reprobe_after(&s, &outcome);
@@ -1221,6 +1252,22 @@ pub async fn patch_node_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A refused edit's trace names each key it would have changed once.
+    #[test]
+    fn a_not_saved_edit_names_its_keys() {
+        let key = |k: &str| KeyPath::parse(k).unwrap();
+        let ops = [
+            Op::remove(key("repo[3]")),
+            Op::set(key("repo[1].warm"), "x"),
+            Op::Reorder {
+                array: key("repo"),
+                order: vec![1, 0],
+            },
+            Op::remove(key("repo[3]")),
+        ];
+        assert_eq!(op_keys(&ops), ["repo[3]", "repo[1].warm", "repo"]);
+    }
 
     fn change(key: &str, before: Option<toml::Value>, after: Option<toml::Value>) -> Change {
         Change {
