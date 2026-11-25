@@ -4,7 +4,7 @@
   import { api } from '../../lib/api'
   import { formatAge, formatDuration } from '../../lib/format'
   import { peerFailure } from '../../lib/peer-admin'
-  import { OFFERS_ANCHOR, inboxOrder, reviewIsStale, shown, waitingOffers } from '../../lib/recipes'
+  import { OFFERS_ANCHOR, buildStepsDiff, inboxOrder, reviewIsStale, shown, waitingOffers } from '../../lib/recipes'
   import { router } from '../../lib/router.svelte'
   import { store } from '../../lib/store.svelte'
   import type { RecipeOffer, RecipeOfferView } from '../../lib/types'
@@ -28,17 +28,24 @@
   let path = $state('')
   let replaceImage = $state(false)
   let keepCredentials = $state(false)
+  /** Write the offered build steps: on by default, unticked to keep the entry's own. */
+  let applyBuild = $state(true)
   let busy = $state('')
   let error = $state('')
   let note = $state('')
 
   const ordered = $derived(inboxOrder(waitingOffers(offers)))
   const pending = $derived(offers.filter((offer) => offer.state === 'pending').length)
-  const pinned = $derived(Boolean(view?.before?.image && view?.offer.recipe.dockerfile))
+  const pinned = $derived(
+    Boolean(view?.before?.image && (view?.offer.recipe.dockerfile || (view?.offer.recipe.build?.length && applyBuild))),
+  )
   const lends = $derived(view?.credentials.state === 'dropped' || view?.credentials.state === 'kept')
   // An accept writes only what was reviewed: a change to the form waits for
   // another comparison.
-  const stale = $derived(reviewIsStale(view, path, replaceImage, keepCredentials))
+  const stale = $derived(reviewIsStale(view, path, replaceImage, keepCredentials, applyBuild))
+  const offeredSteps = $derived(view?.offer.recipe.build ?? [])
+  /** The changes table: offered build steps have a section of their own. */
+  const tableChanges = $derived((view?.changes ?? []).filter((c) => !(c.field === 'build' && offeredSteps.length)))
 
   async function load() {
     try {
@@ -71,7 +78,7 @@
     try {
       view = node
         ? await api.recipeOffer(offer.id, '', false, false, node)
-        : await api.recipeOffer(offer.id, path.trim(), replaceImage, keepCredentials)
+        : await api.recipeOffer(offer.id, path.trim(), replaceImage, keepCredentials, '', applyBuild)
       path = view.target.path
     } catch (cause) {
       view = null
@@ -92,6 +99,7 @@
     path = ''
     replaceImage = false
     keepCredentials = false
+    applyBuild = true
     void compare(offer)
   }
 
@@ -105,6 +113,7 @@
         path: view.target.path,
         replace_image: view.replace_image,
         keep_credentials: view.keep_credentials,
+        apply_build: view.apply_build ?? true,
         viewed_hash: view.viewed_hash,
       }, node)
       note = `Accepted onto ${done.path} in node.toml.${done.building ? ` ${node ? 'That' : 'This'} node is building its own image from it now.` : ''}`
@@ -178,6 +187,33 @@
                 {#if node}Placed as that node would by default; choose another entry there.{/if}
               </small>
             </label>
+            {#if view && offeredSteps.length}
+              <div class="steps" data-build-steps>
+                <span class="heading">Build steps (run as root when the image is built)</span>
+                <ul>
+                  {#each buildStepsDiff(view.before?.build ?? [], offeredSteps) as line, i (i)}
+                    <li class={line.mark}><code>{line.mark === 'added' ? '+ ' : line.mark === 'removed' ? '− ' : '  '}{line.step}</code></li>
+                  {/each}
+                </ul>
+                {#if !node}
+                  <label class="opt-check">
+                    <input
+                      type="checkbox"
+                      checked={applyBuild}
+                      onchange={(event) => {
+                        applyBuild = event.currentTarget.checked
+                        void compare(offer)
+                      }}
+                      disabled={busy !== ''}
+                    />
+                    Apply these build steps
+                  </label>
+                  <small>
+                    {applyBuild ? 'They run as root on this node’s stock base when its image is built.' : 'This entry keeps its own image source as it is.'}
+                  </small>
+                {/if}
+              </div>
+            {/if}
             {#if pinned && !node}
               <label class="opt-check">
                 <input
@@ -189,7 +225,7 @@
                   }}
                   disabled={busy !== ''}
                 />
-                Build the offered Dockerfile in place of the image this entry pins
+                Build the offered {view?.offer.recipe.dockerfile ? 'Dockerfile' : 'build steps'} in place of the image this entry pins
               </label>
             {/if}
             {#if lends && view && !node}
@@ -211,11 +247,11 @@
               <button class="lnk" type="button" onclick={() => void compare(offer)} disabled={busy !== '' || !stale}>Compare</button>
             </div>
             {#if view && !stale}
-              {#if view.changes.length}
+              {#if tableChanges.length}
                 <table>
                   <thead><tr><th>Field</th><th>Here now</th><th>Offered</th></tr></thead>
                   <tbody>
-                    {#each view.changes as change (change.field)}
+                    {#each tableChanges as change (change.field)}
                       <tr>
                         <th scope="row">{change.field}</th>
                         <td><pre>{shown(change.before)}</pre></td>
@@ -224,7 +260,7 @@
                     {/each}
                   </tbody>
                 </table>
-              {:else}
+              {:else if !offeredSteps.length}
                 <p class="dim">No changes.</p>
               {/if}
               {#each view.notes as line (line)}<p class="caution">{line}</p>{/each}
@@ -283,4 +319,10 @@
   .dim { color: var(--dim); }
   .note { color: var(--ok); }
   .error { color: var(--crit); }
+  .steps { display: grid; gap: 6px; background: var(--s1); border-radius: 4px; padding: 8px 10px; }
+  .steps .heading { font: 500 11px var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink2); }
+  .steps ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; }
+  .steps code { font: 12px var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .steps .added code { color: var(--ok); }
+  .steps .removed code { color: var(--crit); text-decoration: line-through; }
 </style>

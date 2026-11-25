@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
-import { OFFERS_LINK, decidedLine, decidedOnto, forgeIdentity, inboxOrder, offerResultLine, offerTargets, reviewIsStale, shown, waitingOffers } from './recipes'
+import { OFFERS_LINK, buildStepsDiff, decidedLine, decidedOnto, forgeIdentity, inboxOrder, offerResultLine, offerTargets, reviewIsStale, shown, waitingOffers } from './recipes'
 import type { ChannelInfo, NodeInfo, RecipeOffer, RecipeOfferView } from './types'
 
 const channel = (name: string, nodes: string[], archived: number | null = null) =>
@@ -58,6 +58,10 @@ test('an accept waits for a review of exactly what it would write', () => {
   expect(reviewIsStale(view, '/srv/app', false, false)).toBe(true)
   expect(reviewIsStale(view, 'github.com/acme/app', true, false)).toBe(true)
   expect(reviewIsStale(view, 'github.com/acme/app', false, true)).toBe(true)
+  // Build steps apply by default; opting out is a different review.
+  expect(reviewIsStale(view, 'github.com/acme/app', false, false, true)).toBe(false)
+  expect(reviewIsStale(view, 'github.com/acme/app', false, false, false)).toBe(true)
+  expect(reviewIsStale({ ...view, apply_build: false }, 'github.com/acme/app', false, false, false)).toBe(false)
 })
 
 test("the push for a staged offer opens the same place as Home's card", () => {
@@ -102,4 +106,13 @@ describe('decided offers', () => {
     expect(decidedLine(latest!)).toBe('recipe from bazzite on personal · accepted')
     expect(decidedLine(earlier[0])).toBe('recipe from bazzite on personal · accepted, since replaced')
   })
+})
+
+test('offered build steps are compared with the entry own, line by line', () => {
+  expect(buildStepsDiff(['apt-get update', 'apk add jq'], ['apt-get update', 'apt-get install -y jq'])).toEqual([
+    { step: 'apk add jq', mark: 'removed' },
+    { step: 'apt-get update', mark: 'same' },
+    { step: 'apt-get install -y jq', mark: 'added' },
+  ])
+  expect(buildStepsDiff([], ['make'])).toEqual([{ step: 'make', mark: 'added' }])
 })

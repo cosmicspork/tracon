@@ -942,7 +942,7 @@ export const api = {
       body,
     ),
   recipeOffers: (node = '') => call<{ offers: RecipeOffer[] }>('GET', nodePath(node, '/api/repos/offers')),
-  recipeOffer: (id: string, path = '', replaceImage = false, keepCredentials = false, node = '') => {
+  recipeOffer: (id: string, path = '', replaceImage = false, keepCredentials = false, node = '', applyBuild = true) => {
     // A peer's offer is compared as it would be placed by default: a
     // request to a peer takes no query.
     if (node) return call<RecipeOfferView>('GET', nodePath(node, `/api/repos/offers/${encodeURIComponent(id)}`))
@@ -950,12 +950,13 @@ export const api = {
     if (path) query.set('path', path)
     if (replaceImage) query.set('replace_image', 'true')
     if (keepCredentials) query.set('keep_credentials', 'true')
+    if (!applyBuild) query.set('apply_build', 'false')
     const suffix = query.size ? `?${query}` : ''
     return call<RecipeOfferView>('GET', `/api/repos/offers/${encodeURIComponent(id)}${suffix}`)
   },
   acceptRecipeOffer: (
     id: string,
-    body: { path: string; replace_image: boolean; keep_credentials: boolean; viewed_hash: string },
+    body: { path: string; replace_image: boolean; keep_credentials: boolean; apply_build?: boolean; viewed_hash: string },
     node = '',
   ) =>
     call<{ accepted: boolean; path: string; changed: boolean; restart_required: boolean; building: boolean }>(

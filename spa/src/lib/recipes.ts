@@ -102,11 +102,22 @@ export function reviewIsStale(
   path: string,
   replaceImage: boolean,
   keepCredentials: boolean,
+  applyBuild = true,
 ): boolean {
   if (!view) return true
   return (
     path.trim() !== view.target.path ||
     replaceImage !== view.replace_image ||
-    keepCredentials !== view.keep_credentials
+    keepCredentials !== view.keep_credentials ||
+    applyBuild !== (view.apply_build ?? true)
   )
+}
+
+/** Offered build steps against the entry's own, line by line: each line
+    of either, marked `added` (offered only), `removed` (here only) or `same`. */
+export function buildStepsDiff(here: string[], offered: string[]): { step: string; mark: 'added' | 'removed' | 'same' }[] {
+  const out: { step: string; mark: 'added' | 'removed' | 'same' }[] = []
+  for (const step of here) if (!offered.includes(step)) out.push({ step, mark: 'removed' })
+  for (const step of offered) out.push({ step, mark: here.includes(step) ? 'same' : 'added' })
+  return out
 }

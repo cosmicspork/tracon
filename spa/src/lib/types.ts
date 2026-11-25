@@ -2314,6 +2314,8 @@ export interface RepoRecipe {
   repo: string
   dockerfile?: string
   context?: string
+  /** Build steps on the stock base, run as root when the image is built; absent when none. */
+  build?: string[]
   checks?: string[]
   prepare: string[]
   egress: string[]
@@ -2353,6 +2355,8 @@ export interface RecipeOfferView {
   credentials: { state: 'none' | 'unaffected' | 'dropped' | 'kept' | 'still_held'; names: string[] }
   replace_image: boolean
   keep_credentials: boolean
+  /** Whether the offered build steps are written; absent from older builds. */
+  apply_build?: boolean
   /** Names exactly this review; an accept must carry it. */
   viewed_hash: string
 }

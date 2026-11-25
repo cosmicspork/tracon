@@ -316,7 +316,7 @@ pub async fn list(State(s): State<AppState>) -> ApiResult<Json<Value>> {
     Ok(Json(json!({ "offers": offers })))
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize)]
 pub struct Placement {
     /// The `[[repo]]` path to apply the offer to: an entry's own path, or a
     /// new entry's. Left out, the entry whose path is the offered
@@ -331,6 +331,14 @@ pub struct Placement {
     /// changes. Without it they are dropped.
     #[serde(default)]
     keep_credentials: bool,
+    /// Write the offered build steps (when it carries any). On unless the
+    /// operator unticks it; off, the entry's own are kept as they are.
+    #[serde(default = "yes")]
+    apply_build: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Placement {
@@ -338,6 +346,7 @@ impl Placement {
         Choices {
             replace_image: self.replace_image,
             keep_credentials: self.keep_credentials,
+            apply_build: self.apply_build,
             held: false,
         }
     }
@@ -402,12 +411,13 @@ fn viewed_hash(path: &Path, exists: bool, after: &Repo, choices: Choices) -> Str
         "after": after,
         "replace_image": choices.replace_image,
         "keep_credentials": choices.keep_credentials,
+        "apply_build": choices.apply_build,
         "held": choices.held,
     });
     hex::encode(Sha256::digest(seen.to_string().as_bytes()))
 }
 
-/// `GET /api/repos/offers/{id}?path=&replace_image=&keep_credentials=`: the
+/// `GET /api/repos/offers/{id}?path=&replace_image=&keep_credentials=&apply_build=`: the
 /// offer, the entry it would be applied to, what would change there, and the
 /// `viewed_hash` an accept of exactly this names.
 pub async fn view(
@@ -430,6 +440,7 @@ pub async fn view(
         "credentials": credentials_json(&p.applied.credentials),
         "replace_image": placement.replace_image,
         "keep_credentials": placement.keep_credentials,
+        "apply_build": placement.apply_build,
         "viewed_hash": p.hash,
     })))
 }
@@ -454,7 +465,7 @@ struct AcceptBody {
 }
 
 /// `POST /api/repos/offers/{id}/accept {path?, replace_image?,
-/// keep_credentials?, viewed_hash}`: apply the offer to an entry and write it
+/// keep_credentials?, apply_build?, viewed_hash}`: apply the offer to an entry and write it
 /// to `node.toml` through the `[[repo]]` writer, which keeps every comment
 /// and every field the offer does not carry.
 ///
@@ -1053,6 +1064,15 @@ mod tests {
             viewed_hash(
                 Path::new("a"),
                 true,
+                &entry,
+                Choices {
+                    apply_build: true,
+                    ..Default::default()
+                },
+            ),
+            viewed_hash(
+                Path::new("a"),
+                true,
                 &Repo {
                     prepare: vec!["x".into()],
                     ..Default::default()
@@ -1062,5 +1082,15 @@ mod tests {
         ] {
             assert_ne!(base, other);
         }
+    }
+
+    /// An accept that does not say leaves the offered build steps on: they
+    /// are applied by default, and an operator opts out.
+    #[test]
+    fn build_steps_apply_unless_the_operator_opts_out() {
+        let placed: Placement = serde_json::from_value(json!({})).unwrap();
+        assert!(placed.choices().apply_build);
+        let placed: Placement = serde_json::from_value(json!({ "apply_build": false })).unwrap();
+        assert!(!placed.choices().apply_build);
     }
 }

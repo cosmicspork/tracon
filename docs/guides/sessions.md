@@ -398,13 +398,16 @@ image it has and is rebuilt behind the session.
 
 **Offer a repository's recipe to another node.** On a mesh, an entry's **Offer to…** in
 Settings → Repositories sends its recipe to the other members of a channel you pick:
-the Dockerfile and its context, the checks, the preparation, its registries and whether
-sessions reach them, and the time limit, with the repository named by its forge identity
-(`github.com/owner/name`). Never its pinned image or any digest, its build steps (they run
-as root on each node's own base, so each node writes its own, and an entry keeps them
-unless you replace them with an offered Dockerfile), the credentials it lends
-to preparation, its path, or how its commits are published; a command naming a home
-directory is refused. Each receiving node only stages the offer and notifies its
+the Dockerfile and its context or its build steps, the checks, the preparation, its
+registries and whether sessions reach them, and the time limit, with the repository named
+by its forge identity (`github.com/owner/name`). Never its pinned image or any digest, the
+credentials it lends to preparation, its path, or how its commits are published; a command
+naming a home directory is refused. Build steps run as root on the receiving node's own
+stock base when its image is built, so the accept card shows them in a section of their
+own, against the entry's current steps, with **Apply these build steps** ticked: accepting
+writes them in place of the entry's own image source (a pinned image only if you choose to
+replace it), and unticking keeps the entry's own `build` or Dockerfile exactly as it is. An
+entry with no build steps offers none, so a node from before they travelled still takes it. Each receiving node only stages the offer and notifies its
 operator, who sees what would change on the entry it lands on (the entry already
 answering for the repository by name, or one they name) and accepts or declines it.
 Offering and accepting are admin actions, confirmed with a passkey from off the node, and
