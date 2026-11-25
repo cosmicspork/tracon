@@ -1419,19 +1419,8 @@ async fn mesh_command(cmd: MeshCommand) -> Result<()> {
             })?;
             let (id, _) = identity::load_or_generate()?;
             let v = tracon::mesh::client::MeshClient::get_once(&id, &hub, "/v0/members").await?;
-            for m in v.as_array().cloned().unwrap_or_default() {
-                let channels: Vec<&str> = m["channels"]
-                    .as_array()
-                    .map(|a| a.iter().filter_map(|c| c.as_str()).collect())
-                    .unwrap_or_default();
-                let nid = m["node_id"].as_str().unwrap_or("");
-                println!(
-                    "{}  {:<16} {}{}",
-                    &nid[..nid.len().min(16)],
-                    m["name"].as_str().unwrap_or(""),
-                    channels.join(", "),
-                    if nid == id.node_id() { "  (you)" } else { "" }
-                );
+            for line in member_lines(&v, &id.node_id()) {
+                println!("{line}");
             }
             Ok(())
         }
@@ -5136,12 +5125,75 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
+/// One line per hub member for `tracon mesh members`: the full node id (the
+/// form every command and API that takes a node id accepts), the name padded
+/// so the channels line up across rows, the channels, and `(you)` on this
+/// node's row.
+fn member_lines(members: &serde_json::Value, me: &str) -> Vec<String> {
+    let members = members.as_array().map(Vec::as_slice).unwrap_or_default();
+    let field = |m: &serde_json::Value, k: &str| m[k].as_str().unwrap_or("").to_string();
+    let id_width = members
+        .iter()
+        .map(|m| field(m, "node_id").chars().count())
+        .max()
+        .unwrap_or(0);
+    let name_width = members
+        .iter()
+        .map(|m| field(m, "name").chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(16);
+    members
+        .iter()
+        .map(|m| {
+            let channels: Vec<&str> = m["channels"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|c| c.as_str()).collect())
+                .unwrap_or_default();
+            let nid = field(m, "node_id");
+            format!(
+                "{nid:<id_width$}  {:<name_width$} {}{}",
+                field(m, "name"),
+                channels.join(", "),
+                if nid == me { "  (you)" } else { "" }
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
+    use super::member_lines;
     use super::plugin_tool_line;
     use super::resolve_prefix;
     use super::{awaited_build, build_started, offered_line, AwaitedBuild};
     use serde_json::json;
+
+    /// `tracon mesh members` prints each member's whole node id, since no
+    /// command or API takes a prefix, and the columns still line up.
+    #[test]
+    fn mesh_members_print_whole_node_ids_in_aligned_columns() {
+        let me = "2b310f36c18605ac".to_string() + &"a".repeat(48);
+        let peer = "ca5dddf6756ad8fa".to_string() + &"b".repeat(48);
+        let lines = member_lines(
+            &json!([
+                { "node_id": me, "name": "bazzite", "channels": ["@mesh", "personal"] },
+                { "node_id": peer, "name": "a-name-longer-than-16", "channels": ["work"] },
+            ]),
+            &me,
+        );
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines[0].starts_with(&format!("{me}  bazzite ")),
+            "{}",
+            lines[0]
+        );
+        assert!(lines[0].ends_with("@mesh, personal  (you)"), "{}", lines[0]);
+        assert!(lines[1].starts_with(&format!("{peer}  a-name-longer-than-16 work")));
+        assert!(!lines[1].contains("(you)"));
+        assert_eq!(lines[0].find("@mesh"), lines[1].find("work"));
+        assert!(member_lines(&json!({}), &me).is_empty());
+    }
 
     /// Where a plugin is offered, with the entry's channels when they narrow
     /// it, and nothing from a node too old to say.
