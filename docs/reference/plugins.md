@@ -166,6 +166,9 @@ unauthenticated, so drafts and pre-releases are never installed. It carries:
   The node takes the one asset whose name ends `-<target>.tar.gz` for its own host;
   none, or more than one, is refused. Release whichever targets you support; a node on
   a missing one is refused with `<owner>/<repo> <tag> publishes no archive for <target>`.
+  A release with no assets at all, as one is for a few minutes while its release
+  workflow is still building, is refused with `<tag> has no assets yet; its release is
+  probably still being published`: try again once the workflow has attached them.
 - `checksums.txt`, one `<sha256>  <file>` line per archive, as `sha256sum` writes it.
   Each archive must be listed exactly once.
 
