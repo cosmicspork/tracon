@@ -2653,12 +2653,13 @@ Three surfaces, three answers, and the differences are the point.
   superseded image is removed only when nothing still runs from it under Podman; a
   registry's copy is deleted by digest, and frees space only when the registry's garbage
   collection runs. No other node reuses a pushed image: each node builds and pins its
-  own ([#1094](https://github.com/cosmicspork/tracon/issues/1094)).
+  own.
 - A run's dependency cache and each check's tree are copies. Where the runtime's storage
   has no reflinks they are full copies, made once per run and once per check. Checks
   start from the warm dependency cache made when the node builds a repository's image,
   but keep no build output: every run of a compiled project's checks builds from nothing
-  ([#1083](https://github.com/cosmicspork/tracon/issues/1083)). Sessions keep theirs, but
+  (measured on tracon, a warm build output saved about 35 s of a 13-minute `just check`,
+  since Cargo rebuilds the workspace's own crates either way). Sessions keep theirs, but
   only Cargo's is moved out of the tree; a bundler's cache inside `node_modules` lives
   and goes with the workspace.
 - A per-client egress grant (a session's, a preparation's) filters by host, not by
