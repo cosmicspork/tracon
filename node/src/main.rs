@@ -2221,7 +2221,9 @@ async fn repo_command(command: RepoCommand) -> Result<()> {
                 anyhow::bail!("no [[repo]] entry has path {path}");
             }
             save_repo_entries(entries, &hash).await?;
-            println!("removed");
+            println!(
+                "removed; its images stay until `tracon gc --apply` reclaims them, and a managed clone of it stays on disk"
+            );
             Ok(())
         }
         RepoCommand::Build { repo } => {
