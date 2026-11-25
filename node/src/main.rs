@@ -5181,7 +5181,11 @@ mod tests {
             &me,
         );
         assert_eq!(lines.len(), 2);
-        assert!(lines[0].starts_with(&format!("{me}  bazzite ")), "{}", lines[0]);
+        assert!(
+            lines[0].starts_with(&format!("{me}  bazzite ")),
+            "{}",
+            lines[0]
+        );
         assert!(lines[0].ends_with("@mesh, personal  (you)"), "{}", lines[0]);
         assert!(lines[1].starts_with(&format!("{peer}  a-name-longer-than-16 work")));
         assert!(!lines[1].contains("(you)"));
