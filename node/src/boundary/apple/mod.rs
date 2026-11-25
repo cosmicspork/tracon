@@ -320,6 +320,9 @@ impl AppleBackend {
         target: &str,
     ) -> Result<(String, bool), String> {
         if self.container(&["image", "inspect", target]).await.is_ok() {
+            // Held already, perhaps under another release's tag (a base whose
+            // digest did not change): make sure it is named as configured too.
+            self.name_as_configured(configured, target).await;
             return Ok((target.to_string(), false));
         }
         tracing::info!(image = %target, "pulling the sandbox base image for {VM_PLATFORM}");
@@ -340,14 +343,35 @@ impl AppleBackend {
             self.container(&["image", "tag", configured, target])
                 .await
                 .map_err(|error| format!("tag {configured} as {target}: {error}"))?;
-        } else if !configured.contains('@') {
-            // Named as configured too, so a start that cannot reach the
-            // registry still finds it.
-            if let Err(error) = self.container(&["image", "tag", target, configured]).await {
-                tracing::warn!(image = %target, %error, "could not name the base as configured");
-            }
+        } else {
+            self.name_as_configured(configured, target).await;
         }
         Ok((target.to_string(), true))
+    }
+
+    /// The digest `container` says `image` is held as, if it holds it.
+    async fn descriptor_digest(&self, image: &str) -> Option<String> {
+        let text = self.container(&["image", "inspect", image]).await.ok()?;
+        let inspected: Vec<InspectedImage> = serde_json::from_str(&text).ok()?;
+        Some(inspected.first()?.configuration.descriptor.digest.clone())
+    }
+
+    /// Name `target` (the base's platform manifest, held) as `configured`
+    /// when that tag does not already name the same image, so a start that
+    /// cannot reach the registry still finds the base by its configured
+    /// reference. A digest reference names itself. A failure is only a
+    /// warning: the base is still pinned by digest for this run.
+    async fn name_as_configured(&self, configured: &str, target: &str) {
+        if configured.contains('@') {
+            return;
+        }
+        let named = self.descriptor_digest(configured).await;
+        if named.is_some() && named == self.descriptor_digest(target).await {
+            return;
+        }
+        if let Err(error) = self.container(&["image", "tag", target, configured]).await {
+            tracing::warn!(image = %target, %error, "could not name the base as configured");
+        }
     }
 
     fn store_error(volume: &str, error: files::FilesError) -> BoundaryError {

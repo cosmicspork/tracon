@@ -735,3 +735,37 @@ async fn while_the_node_fetches_its_bundles_the_check_is_pending_not_fetching() 
     assert!(fake.calls.lock().unwrap().is_empty());
     assert!(!bundle.exists());
 }
+
+/// A base already held by its platform's digest (another release's, with the
+/// same digest) is named as configured once, with no pull, so an offline
+/// start finds it; one already named so is left alone.
+#[tokio::test]
+async fn a_held_base_is_named_as_configured_without_a_pull() {
+    let configured = "ghcr.io/cosmicspork/tracon-sandbox-base:0.61.0";
+    let target = format!("ghcr.io/cosmicspork/tracon-sandbox-base@{DIGEST}");
+    let fake = Fake::default();
+    *fake.images.lock().unwrap() = vec![target.clone()];
+    let (b, fake) = backend(fake);
+    assert_eq!(
+        b.pull_platform(configured, &target).await.unwrap(),
+        (target.clone(), false)
+    );
+    let calls = fake.calls.lock().unwrap().clone();
+    let tags: Vec<_> = calls.iter().filter(|c| c[1] == "tag").collect();
+    assert_eq!(
+        tags,
+        [&["image", "tag", &target, configured]
+            .map(String::from)
+            .to_vec()]
+    );
+    assert!(!calls.iter().any(|c| c[1] == "pull"), "{calls:?}");
+
+    // Named as configured now: a second start tags nothing.
+    fake.calls.lock().unwrap().clear();
+    assert!(!b.pull_platform(configured, &target).await.unwrap().1);
+    let calls = fake.calls.lock().unwrap().clone();
+    assert!(
+        !calls.iter().any(|c| c[1] == "tag" || c[1] == "pull"),
+        "{calls:?}"
+    );
+}
