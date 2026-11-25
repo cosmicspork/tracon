@@ -1981,8 +1981,12 @@ Invariants on top of the wire:
   `[[repo]]` entry's recipe to the other members of a channel it shares with them
   (`RecipeOffer`, sealed to each receiver like any command). The recipe names the
   repository by its forge identity (`github.com/owner/name`) and carries only the
-  portable part of the entry: `dockerfile`, `context`, `checks`, `prepare`,
-  `egress`, `session_egress` and `timeout_secs`. It never carries the entry's
+  portable part of the entry: `dockerfile`, `context`, `build` (left out when
+  empty, so an older receiver that refuses the field still takes the rest),
+  `checks`, `prepare`, `egress`, `session_egress` and `timeout_secs`. Build steps
+  run as root on the receiver's own base, so the accept card shows them apart, and
+  they apply by default with an opt-out (`apply_build`) that keeps the entry's own
+  image source as it is. It never carries the entry's
   `image` (a digest names what one node built or chose), `prepare_credentials`,
   its `path`, or its `commits` and `style`. Both ends check it: the sender before
   it sends, and the receiver, which also refuses any field a recipe does not have
