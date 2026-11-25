@@ -912,50 +912,6 @@ impl super::ImageBuilder for PodmanBackend {
         image_identity(image).await
     }
 
-    async fn push_to(
-        &self,
-        image: &str,
-        destination: &str,
-        auth: &std::path::Path,
-    ) -> Result<String, String> {
-        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-        let digestfile = dir.path().join("digest");
-        let (auth, digestfile_arg) = (auth.to_string_lossy(), digestfile.to_string_lossy());
-        podman(&[
-            "push",
-            "--quiet",
-            "--authfile",
-            &auth,
-            "--digestfile",
-            &digestfile_arg,
-            image,
-            destination,
-        ])
-        .await
-        .map_err(|e| format!("push {image} to {destination}: {e}"))?;
-        let digest = std::fs::read_to_string(&digestfile)
-            .map_err(|e| format!("push {image} to {destination}: no digest written: {e}"))?;
-        Ok(digest.trim().to_string())
-    }
-
-    async fn pull_as(
-        &self,
-        image: &str,
-        auth: &std::path::Path,
-        tag: &str,
-    ) -> Result<String, String> {
-        let auth = auth.to_string_lossy();
-        podman(&["pull", "--quiet", "--authfile", &auth, image])
-            .await
-            .map_err(|e| format!("pull {image}: {e}"))?;
-        podman(&["tag", image, tag])
-            .await
-            .map_err(|e| format!("tag {image} as {tag}: {e}"))?;
-        image_identity(tag)
-            .await
-            .ok_or_else(|| format!("{tag} is not in the image store after the pull"))
-    }
-
     /// A pinned `name@sha256:…` goes with every tag of that name on the
     /// image. Each build has a tag of its own, so a cached rebuild that made
     /// the same image again left it under two, and Podman refuses to remove

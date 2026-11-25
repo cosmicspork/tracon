@@ -319,10 +319,6 @@ pub struct Registry {
     digitalocean_host: String,
     digitalocean_api: String,
     digitalocean_token: Option<PathBuf>,
-    /// A credential for one registry host held here rather than in a Docker
-    /// config: a Podman node's DigitalOcean API token, which DigitalOcean's
-    /// registry takes as both user and password.
-    credential: Option<(String, String, String)>,
 }
 
 impl Registry {
@@ -339,16 +335,7 @@ impl Registry {
             digitalocean_host: DIGITALOCEAN_HOST.into(),
             digitalocean_api: DIGITALOCEAN_API.into(),
             digitalocean_token: None,
-            credential: None,
         }
-    }
-
-    /// Present `user` and `password` to `host`'s registry, whatever the
-    /// Docker config holds for it: how a Podman node, which has no Docker
-    /// config of its own, asks DigitalOcean's registry with its API token.
-    pub fn with_credential(mut self, host: &str, user: &str, password: &str) -> Self {
-        self.credential = Some((host.into(), user.into(), password.into()));
-        self
     }
 
     /// The token the DigitalOcean API fallback presents, instead of the
@@ -369,9 +356,6 @@ impl Registry {
     }
 
     fn credentials(&self, host: &str) -> Result<Option<(String, String)>, RegistryError> {
-        if let Some((_, user, password)) = self.credential.as_ref().filter(|(h, ..)| h == host) {
-            return Ok(Some((user.clone(), password.clone())));
-        }
         match self.docker_config.as_deref() {
             // Read through the path guard: the directory checked, and the
             // file compared with what the check found once it is open.
@@ -1380,33 +1364,6 @@ pub(crate) mod tests {
             .await
             .unwrap_err();
         assert!(error.0.contains("holds none"), "{error}");
-    }
-
-    /// A credential held by the client, as a Podman node holds its
-    /// DigitalOcean token, is presented to its host alone, with no Docker
-    /// config, for a token and for Basic alike.
-    #[tokio::test]
-    async fn a_held_credential_is_presented_to_its_host_alone() {
-        let (fake, host) = serve().await;
-        fake.put("ns/app", "t1", DIGEST);
-        let image = format!("{host}/ns/app@{DIGEST}");
-        let held = Registry::new(None)
-            .with_credential(&host, "pusher", "secret")
-            .for_test("unused", "unused");
-        assert_eq!(held.digest(&image).await.unwrap(), Some(DIGEST.into()));
-        *fake.basic.lock().unwrap() = true;
-        assert_eq!(held.digest(&image).await.unwrap(), Some(DIGEST.into()));
-        *fake.basic.lock().unwrap() = false;
-
-        let wrong = Registry::new(None)
-            .with_credential(&host, "pusher", "wrong")
-            .for_test("unused", "unused");
-        assert!(wrong.digest(&image).await.is_err());
-        let elsewhere = Registry::new(None)
-            .with_credential("registry.example", "pusher", "secret")
-            .for_test("unused", "unused");
-        let error = elsewhere.digest(&image).await.unwrap_err();
-        assert!(error.0.contains("holds no credential"), "{error}");
     }
 
     /// A registry that does not answer leaves an image's presence unknown,

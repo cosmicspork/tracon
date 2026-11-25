@@ -45,7 +45,6 @@ pub mod provider;
 pub mod providers;
 pub mod readiness;
 pub mod repo_image;
-pub mod repo_image_share;
 pub mod repo_setup;
 pub mod restart;
 pub mod review;

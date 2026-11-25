@@ -98,7 +98,6 @@ pub const KINDS: &[(&str, &[&str])] = &[
             "opencode_state",
             "opencode_part_claim",
             "repo_image",
-            "repo_image_statement",
             "service_volume",
         ],
     ),

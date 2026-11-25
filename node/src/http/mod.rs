@@ -913,15 +913,6 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
         client.set_broker(broker.clone(), crate::broker::Broker::path());
         bus.with_tap(client.spawn());
         manager.set_mesh(client.clone());
-        // A repository image built here is pushed for the channels' other
-        // members, and one they pushed may be taken in place of a build.
-        crate::repo_image_share::install(
-            cfg.clone(),
-            store.clone(),
-            backend.clone(),
-            broker.clone(),
-            client.clone(),
-        );
         tracing::info!(hub = %url, "mesh client started");
         let relay = &cfg.mesh.sandbox_relay;
         if relay.enabled && relay.target.is_empty() {

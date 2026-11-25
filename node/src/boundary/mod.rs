@@ -289,31 +289,6 @@ pub trait ImageBuilder: Send + Sync {
     fn registry(&self) -> Option<String> {
         None
     }
-    /// Push `image`, one this builder holds, to `destination` (a tag in a
-    /// registry), presenting the registry auth file `auth`; returns the
-    /// digest the registry holds it under, `sha256:…`. Only a builder whose
-    /// images stay in a local store pushes one (Podman's): a registry's
-    /// builder has pushed it already.
-    async fn push_to(
-        &self,
-        _image: &str,
-        _destination: &str,
-        _auth: &std::path::Path,
-    ) -> Result<String, String> {
-        Err("this runtime pushes no repository image to a peer's registry".into())
-    }
-    /// Pull `image` (`name@sha256:…`) from its registry, presenting the
-    /// registry auth file `auth`, and tag it `tag` here; returns `tag` by
-    /// digest, as [`identity`](Self::identity) names it. Only a builder whose
-    /// images stay in a local store pulls one (Podman's).
-    async fn pull_as(
-        &self,
-        _image: &str,
-        _auth: &std::path::Path,
-        _tag: &str,
-    ) -> Result<String, String> {
-        Err("this runtime takes no repository image from a peer".into())
-    }
 }
 
 /// One harness's image as the runtime holds it.
