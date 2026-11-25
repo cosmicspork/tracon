@@ -71,10 +71,6 @@ pub struct RepoRecipe {
     pub build: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checks: Option<Vec<String>>,
-    /// Sent only when the entry sets it: a node from before `warm` refuses
-    /// a recipe with a field it does not know.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub warm: Option<Vec<String>>,
     #[serde(default)]
     pub prepare: Vec<String>,
     #[serde(default)]
@@ -172,7 +168,6 @@ impl RepoRecipe {
             context: entry.context.clone(),
             build: entry.build.clone(),
             checks: entry.checks.clone(),
-            warm: entry.warm.clone(),
             prepare: entry.prepare.clone(),
             egress: entry.egress.clone(),
             session_egress: entry.session_egress,
@@ -229,7 +224,6 @@ impl RepoRecipe {
         for (field, commands) in [
             ("build", &self.build[..]),
             ("checks", self.checks.as_deref().unwrap_or_default()),
-            ("warm", self.warm.as_deref().unwrap_or_default()),
             ("prepare", &self.prepare[..]),
         ] {
             if commands.len() > MAX_COMMANDS {
@@ -274,7 +268,6 @@ impl RepoRecipe {
             context: self.context.clone(),
             build: self.build.clone(),
             checks: self.checks.clone(),
-            warm: self.warm.clone(),
             prepare: self.prepare.clone(),
             egress: self.egress.clone(),
             session_egress: self.session_egress,
@@ -301,7 +294,6 @@ impl RepoRecipe {
         let mut entry = was.clone();
         entry.path = path;
         entry.checks = self.checks.clone();
-        entry.warm = self.warm.clone();
         entry.prepare = self.prepare.clone();
         entry.egress = self.egress.clone();
         entry.session_egress = self.session_egress;
@@ -496,7 +488,6 @@ pub fn changes(before: Option<&Repo>, after: &Repo) -> Vec<Value> {
         ("context", json!(was.context), json!(after.context)),
         ("build", json!(was.build), json!(after.build)),
         ("checks", json!(was.checks), json!(after.checks)),
-        ("warm", json!(was.warm), json!(after.warm)),
         ("prepare", json!(was.prepare), json!(after.prepare)),
         ("egress", json!(was.egress), json!(after.egress)),
         (
@@ -749,7 +740,6 @@ mod tests {
             context: Some(".".into()),
             build: Vec::new(),
             checks: Some(vec!["just check".into()]),
-            warm: None,
             timeout_secs: Some(1200),
             prepare: vec!["composer install".into(), "npm ci".into()],
             egress: vec!["npm".into(), "packagist".into(), "nova.laravel.com".into()],
@@ -861,7 +851,6 @@ mod tests {
             dockerfile: Some("Dockerfile".into()),
             context: None,
             build: Vec::new(),
-            warm: None,
             checks: Some(vec!["just all".into()]),
             prepare: vec!["npm ci".into()],
             egress: vec!["npm".into()],

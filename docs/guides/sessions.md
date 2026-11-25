@@ -636,24 +636,12 @@ checks always runs, since it prepares a tree under review rather than a commit t
 snapshot was made from.
 
 The warm-up also builds the default branch, so checks do not compile it from nothing.
-After `prepare`, in the same sandbox, it runs the entry's `warm` commands the way a check
-runs (no egress, nothing lent, nothing fetched), at the lowest CPU priority, with build
-output under `/cache`: Cargo's in `/cache/target` (`CARGO_TARGET_DIR`), Go's in
-`/cache/go-build` (`GOCACHE`). An entry without `warm` builds with its checks, but only when
-the default branch has a `Cargo.toml` or `go.mod` at its root, since nothing else's output is
-kept; `warm = []` builds nothing. Commands that compile without running suit it best:
-`cargo test --no-run` builds what `cargo test` would, without the wait. Whether they pass is
-only logged. Before the snapshot is made, the warm-up keeps only what saves a check work:
-anything the build added to `/work` (a coverage report, a test cache) is removed, and so are
-Cargo's incremental cache and every linked test, binary and example executable, which a
-check relinks whenever its crate changes anyway. Compiled dependencies, build scripts and
-their output stay. If what is left is still over `[sandbox] max_build_output_bytes` (10 GiB
-unless set), the snapshot is made without it. One repository warms up at a time
-(`[sandbox] warm_concurrency`); another waits its turn.
-
-The snapshot keeps that output, is keyed on the warm-up's commands as well as the lockfiles
-and `prepare`, and so is rebuilt, output included, whenever the image, the base, a
-lockfile, `prepare` or those commands change, and removed with it. A
+After `prepare`, in the same sandbox, it runs the repository's checks the way a check
+runs (no egress, nothing lent, nothing fetched) with build output under `/cache`:
+Cargo's in `/cache/target` (`CARGO_TARGET_DIR`), Go's in `/cache/go-build` (`GOCACHE`).
+Whether they pass is only logged. The snapshot keeps that output, is keyed on the checks
+as well as the lockfiles and `prepare`, and so is rebuilt, output included, whenever the
+image, the base, a lockfile, `prepare` or the checks change, and removed with it. A
 review's checks from the snapshot are pointed at the same directories and get the cache
 read-only beneath a writable layer of their own that goes with each check: their builds
 start from the default branch's output and change nothing another check or session

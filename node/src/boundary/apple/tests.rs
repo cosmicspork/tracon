@@ -315,7 +315,6 @@ async fn a_repository_is_prepared_once_and_its_sessions_start_from_the_snapshot(
         image: crate::sandbox_images::base_image(&cfg),
         image_source: "base",
         checks: Vec::new(),
-        warm: None,
         timeout_secs: 600,
         prepare: vec![
             "mkdir -p /cache/e2e && echo warm > /cache/e2e/made && cat tracked > \"$HOME/prepared\""

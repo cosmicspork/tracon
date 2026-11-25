@@ -272,15 +272,6 @@ enum RepoCommand {
         /// Go back to the node-wide `[supervision] checks`.
         #[arg(long, conflicts_with = "checks")]
         inherit_checks: bool,
-        /// What the warm-up builds the default branch with after `prepare`;
-        /// repeat for several. Replaces the entry's list; one empty value
-        /// builds nothing.
-        #[arg(long = "warm")]
-        warm: Vec<String>,
-        /// Go back to the default warm-up build: the checks, for a
-        /// repository with a `Cargo.toml` or `go.mod` at its root.
-        #[arg(long, conflicts_with = "warm")]
-        default_warm: bool,
         /// A preparation command; repeat for several. Replaces the entry's
         /// list; one empty value clears it.
         #[arg(long = "prepare")]
@@ -2074,8 +2065,6 @@ async fn repo_command(command: RepoCommand) -> Result<()> {
             build,
             checks,
             inherit_checks,
-            warm,
-            default_warm,
             prepare,
             prepare_credentials,
             egress,
@@ -2122,12 +2111,6 @@ async fn repo_command(command: RepoCommand) -> Result<()> {
             }
             if inherit_checks {
                 fields.remove("checks");
-            }
-            if !warm.is_empty() {
-                fields.insert("warm".into(), flag_list(warm));
-            }
-            if default_warm {
-                fields.remove("warm");
             }
             if !prepare.is_empty() {
                 fields.insert("prepare".into(), flag_list(prepare));
