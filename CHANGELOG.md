@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.62.0](https://github.com/cosmicspork/tracon/compare/v0.61.0...v0.62.0) (2026-11-25)
+
+
+### Features
+
+* **recipes:** carry build steps in a recipe offer, applied by default ([#1187](https://github.com/cosmicspork/tracon/issues/1187)) ([87de152](https://github.com/cosmicspork/tracon/commit/87de152084620f01b748388648c9daf8ef888bf9))
+
+
+### Bug Fixes
+
+* **apple:** name a base already held by digest as configured ([#1186](https://github.com/cosmicspork/tracon/issues/1186)) ([58e7506](https://github.com/cosmicspork/tracon/commit/58e750629478cbc99c1521c9b9de4e7d499a3547))
+* **apple:** say what the converge is doing while the base is not pinned ([#1185](https://github.com/cosmicspork/tracon/issues/1185)) ([f3b2c84](https://github.com/cosmicspork/tracon/commit/f3b2c847e01b04b1ea9ebc343f5a78d78338da37))
+* **cli:** print whole node ids in tracon mesh members ([#1184](https://github.com/cosmicspork/tracon/issues/1184)) ([e9ff524](https://github.com/cosmicspork/tracon/commit/e9ff5247290970d9f93b9dd882fdb9493ebbf2d8))
+* **gc:** retire a managed clone's builds once its entry is removed ([#1180](https://github.com/cosmicspork/tracon/issues/1180)) ([2c535f7](https://github.com/cosmicspork/tracon/commit/2c535f7982c27134a7db0568001a2a10cbf14d31))
+* **node:** list only external harnesses under Your own agents ([#1181](https://github.com/cosmicspork/tracon/issues/1181)) ([849b369](https://github.com/cosmicspork/tracon/commit/849b369940e98501e333e138badec11e041b4a44))
+* **plugin:** say a release with no assets is still being published ([#1179](https://github.com/cosmicspork/tracon/issues/1179)) ([3e20258](https://github.com/cosmicspork/tracon/commit/3e20258b98454e11c11d5fe4f77f78359d8dbf43))
+* **spa:** hide a plugin's frame until it loads ([#1175](https://github.com/cosmicspork/tracon/issues/1175)) ([b98b0a4](https://github.com/cosmicspork/tracon/commit/b98b0a4297939b51c4c30cffc1e5292ca46919ca))
+* **spa:** keep a repository removal visible until it is saved ([#1182](https://github.com/cosmicspork/tracon/issues/1182)) ([50bcd31](https://github.com/cosmicspork/tracon/commit/50bcd31b6d86b7888077a97b48929e338ce0d1c3))
+* **spa:** never offer a default channel the node does not have for update cards ([#1183](https://github.com/cosmicspork/tracon/issues/1183)) ([3461d97](https://github.com/cosmicspork/tracon/commit/3461d97098d78e83efc43c9022b182debdd1a698))
+
 ## [0.61.0](https://github.com/cosmicspork/tracon/compare/v0.60.0...v0.61.0) (2026-11-24)
 
 
