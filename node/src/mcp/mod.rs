@@ -161,6 +161,17 @@ impl CallContext {
         matches!(self.caller, Caller::External { .. })
     }
 
+    /// Which kind of session-less caller this is, for the channel's log; a
+    /// session's calls are logged on the session and never ask.
+    pub fn caller_kind(&self) -> crate::store::external::CallerKind {
+        use crate::store::external::CallerKind;
+        match &self.caller {
+            Caller::Operator { .. } => CallerKind::Operator,
+            Caller::Plugin { .. } => CallerKind::Plugin,
+            Caller::External { .. } | Caller::Session(_) => CallerKind::External,
+        }
+    }
+
     pub fn lane(&self) -> Option<&str> {
         match &self.caller {
             Caller::External { lane, .. } => lane.as_deref(),

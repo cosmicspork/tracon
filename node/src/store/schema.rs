@@ -1954,6 +1954,16 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE plugin ADD COLUMN listed TEXT;
     "#,
+    // 93: who a session-less entry in a channel's external log came from
+    // (`store::external::CallerKind`): an external harness, the operator API
+    // (a plugin's page, under its route) or a plugin's own instance. Only
+    // external harnesses are listed as the operator's agents. Rows from
+    // before are told apart by their lane's form.
+    r#"
+    ALTER TABLE external_event ADD COLUMN caller TEXT NOT NULL DEFAULT 'external';
+    UPDATE external_event SET caller = 'plugin' WHERE lane LIKE 'plugin:%';
+    UPDATE external_event SET caller = 'operator' WHERE lane LIKE '/%';
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

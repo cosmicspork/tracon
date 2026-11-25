@@ -35,6 +35,41 @@ impl ExternalEventRow {
     }
 }
 
+/// Who a session-less entry in a channel's log came from, as stored in
+/// `external_event.caller`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallerKind {
+    /// A harness the operator runs themselves, under its lane.
+    External,
+    /// The operator API calling on the operator's behalf (a plugin's page,
+    /// under its route).
+    Operator,
+    /// A plugin's own instance calling the node.
+    Plugin,
+}
+
+impl CallerKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CallerKind::External => "external",
+            CallerKind::Operator => "operator",
+            CallerKind::Plugin => "plugin",
+        }
+    }
+
+    /// The kind a lane's form says, for an entry with no call context to
+    /// ask (an approval's outcome): `plugin:<name>` is a plugin's, a route
+    /// (`/…`) the operator API's, anything else an external harness's. The
+    /// same rule backfilled rows written before the column existed.
+    pub fn of_lane(lane: Option<&str>) -> Self {
+        match lane {
+            Some(l) if l.starts_with("plugin:") => CallerKind::Plugin,
+            Some(l) if l.starts_with('/') => CallerKind::Operator,
+            _ => CallerKind::External,
+        }
+    }
+}
+
 /// One label's activity on a channel, most recent first.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExternalLane {
@@ -49,7 +84,10 @@ pub struct ExternalLane {
 
 impl Store {
     /// Every lane that called since `since_ms`, newest first. Only tool calls
-    /// count: the log's other entries are outcomes of those calls.
+    /// count: the log's other entries are outcomes of those calls. Only
+    /// external harnesses are lanes: a plugin calling the node, or a plugin's
+    /// page calling through the operator route, is in the channel's log but
+    /// is no agent of the operator's.
     /// A lane with something still open for the operator is listed however
     /// long ago it last called.
     pub fn external_lanes(&self, since_ms: i64) -> Result<Vec<ExternalLane>> {
@@ -69,7 +107,7 @@ impl Store {
              ),
              calls AS (
                  SELECT channel, lane, MAX(at_ms) AS last_ms, COUNT(*) AS calls
-                   FROM external_event WHERE kind = 'tool_call'
+                   FROM external_event WHERE kind = 'tool_call' AND caller = 'external'
                   GROUP BY channel, lane
              )
              SELECT c.channel, c.lane, c.last_ms, c.calls, COALESCE(o.pending, 0) AS pending
@@ -93,11 +131,13 @@ impl Store {
     }
 
     /// Append to a channel's external log; the row as stored, with its seq.
+    /// `caller` is the kind of session-less caller (`CallerKind`).
     #[allow(clippy::too_many_arguments)]
     pub fn append_external_event(
         &self,
         channel: &str,
         node_id: &str,
+        caller: CallerKind,
         lane: Option<&str>,
         kind: &str,
         ref_id: Option<&str>,
@@ -106,8 +146,8 @@ impl Store {
     ) -> Result<ExternalEventRow> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO external_event (channel, node_id, lane, kind, ref_id, payload, at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO external_event (channel, node_id, lane, kind, ref_id, payload, at_ms, caller)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 channel,
                 node_id,
@@ -115,7 +155,8 @@ impl Store {
                 kind,
                 ref_id,
                 serde_json::to_string(payload)?,
-                at_ms
+                at_ms,
+                caller.as_str()
             ],
         )?;
         Ok(ExternalEventRow {
@@ -162,6 +203,7 @@ mod tests {
             .append_external_event(
                 "work",
                 "n1",
+                CallerKind::External,
                 Some("tracon:main"),
                 "tool_call",
                 None,
@@ -170,12 +212,22 @@ mod tests {
             )
             .unwrap();
         store
-            .append_external_event("personal", "n1", None, "tool_call", None, &json!({}), 2)
+            .append_external_event(
+                "personal",
+                "n1",
+                CallerKind::External,
+                None,
+                "tool_call",
+                None,
+                &json!({}),
+                2,
+            )
             .unwrap();
         store
             .append_external_event(
                 "work",
                 "n1",
+                CallerKind::External,
                 None,
                 "tool_result",
                 None,
@@ -210,6 +262,7 @@ mod tests {
             .append_external_event(
                 "work",
                 "n1",
+                CallerKind::External,
                 Some("repo:x"),
                 "tool_call",
                 None,
@@ -246,5 +299,68 @@ mod tests {
         assert_eq!(lanes.len(), 1, "{lanes:?}");
         assert_eq!(lanes[0].lane.as_deref(), Some("repo:x"));
         assert_eq!(lanes[0].pending, 1);
+    }
+
+    /// A plugin calling the node and a plugin's page calling through the
+    /// operator route are in the channel's log, but only an external
+    /// harness is one of the operator's agents.
+    #[test]
+    fn only_external_harnesses_are_lanes() {
+        let store = Store::open_in_memory().unwrap();
+        for (caller, lane) in [
+            (CallerKind::External, ".claude"),
+            (CallerKind::Plugin, "plugin:workboard"),
+            (CallerKind::Operator, "/plugins/workboard/ui"),
+        ] {
+            store
+                .append_external_event(
+                    "work",
+                    "n1",
+                    caller,
+                    Some(lane),
+                    "tool_call",
+                    None,
+                    &json!({}),
+                    5,
+                )
+                .unwrap();
+        }
+        let lanes = store.external_lanes(0).unwrap();
+        let named: Vec<_> = lanes.iter().map(|l| l.lane.as_deref()).collect();
+        assert_eq!(named, [Some(".claude")]);
+        assert_eq!(store.external_events_after("work", 0, 10).unwrap().len(), 3);
+        assert_eq!(CallerKind::of_lane(Some("plugin:hoja")), CallerKind::Plugin);
+        assert_eq!(
+            CallerKind::of_lane(Some("/plugins/hoja/ui")),
+            CallerKind::Operator
+        );
+        assert_eq!(CallerKind::of_lane(Some("repo:x")), CallerKind::External);
+        assert_eq!(CallerKind::of_lane(None), CallerKind::External);
+    }
+
+    /// Rows from before the caller was stored are told apart by their lane.
+    #[test]
+    fn rows_from_before_the_caller_column_are_backfilled_by_lane() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::store::schema::migrate_to(&conn, 92).unwrap();
+        conn.execute_batch(
+            "INSERT INTO external_event (channel, node_id, lane, kind, payload, at_ms) VALUES
+                ('work', 'n1', '.claude', 'tool_call', '{}', 1),
+                ('work', 'n1', NULL, 'tool_call', '{}', 1),
+                ('work', 'n1', 'plugin:workboard', 'tool_call', '{}', 1),
+                ('work', 'n1', '/plugins/workboard/ui', 'tool_call', '{}', 1);",
+        )
+        .unwrap();
+        crate::store::schema::migrate(&conn).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT lane, caller FROM external_event ORDER BY seq")
+            .unwrap();
+        let rows: Vec<(Option<String>, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        let callers: Vec<&str> = rows.iter().map(|(_, c)| c.as_str()).collect();
+        assert_eq!(callers, ["external", "external", "plugin", "operator"]);
     }
 }
