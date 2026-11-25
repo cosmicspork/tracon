@@ -26,8 +26,10 @@ const harness = `
         { id: 'self', name: 'bazzite', is_self: true, reachable: true },
         { id: 'peer-b', name: 'homelab', is_self: false, reachable: true },
       ]
+    if (location.hash === '#default') store.nodes = [{ id: 'self', name: 'bazzite', is_self: true, reachable: true, default_channel: 'orbit' }]
+    const channels = location.hash === '#nochannels' ? [] : ['personal', 'orbit']
   </script>
-  <Plugins channels={['personal', 'orbit']} />
+  <Plugins {channels} />
 `
 const entry = `
   import { mount } from 'svelte'
@@ -176,6 +178,46 @@ test.skipIf(!browser)('a plugin whose active build is the latest says it is up t
   await row(page, 'sql-review').getByText('Up to date: 0.3.1 is the latest release.').waitFor()
   // The card would go to the channel being viewed.
   expect(seen['POST /api/plugins/sql-review/update']).toEqual([{ channel: 'orbit' }])
+  await page.close()
+})
+
+test.skipIf(!browser)('with no default channel, update cards go to a real channel picked for the operator', async () => {
+  const { page, seen } = await open({
+    'GET /api/plugins': { body: { plugins: [RELEASED] } },
+    'POST /api/plugins/sql-review/update': { body: { up_to_date: true, version: '0.3.1', digest: 'bb' } },
+  })
+  const select = page.getByLabel('Channel update cards go to')
+  expect(await select.locator('option').allInnerTexts()).toEqual(['personal', 'orbit'])
+  expect(await select.inputValue()).toBe('personal')
+  await row(page, 'sql-review').getByRole('button', { name: 'Check for update' }).click()
+  await row(page, 'sql-review').getByText('Up to date: 0.3.1 is the latest release.').waitFor()
+  expect(seen['POST /api/plugins/sql-review/update']).toEqual([{ channel: 'personal' }])
+  await page.close()
+})
+
+test.skipIf(!browser)('a node default channel is named, and choosing it sends no channel', async () => {
+  const { page, seen } = await open(
+    {
+      'GET /api/plugins': { body: { plugins: [RELEASED] } },
+      'POST /api/plugins/sql-review/update': { body: { up_to_date: true, version: '0.3.1', digest: 'bb' } },
+    },
+    '#default',
+  )
+  const select = page.getByLabel('Channel update cards go to')
+  expect(await select.locator('option').allInnerTexts()).toEqual(['the default channel (orbit)', 'personal', 'orbit'])
+  expect(await select.inputValue()).toBe('')
+  await row(page, 'sql-review').getByRole('button', { name: 'Check for update' }).click()
+  await row(page, 'sql-review').getByText('Up to date: 0.3.1 is the latest release.').waitFor()
+  expect(seen['POST /api/plugins/sql-review/update']).toEqual([{}])
+  await page.close()
+})
+
+test.skipIf(!browser)('with no channel and no default, Check for update is disabled and says why', async () => {
+  const { page, seen } = await open({ 'GET /api/plugins': { body: { plugins: [RELEASED] } } }, '#nochannels')
+  expect(await page.getByLabel('Channel update cards go to').count()).toBe(0)
+  expect(await row(page, 'sql-review').getByRole('button', { name: 'Check for update' }).isDisabled()).toBe(true)
+  expect(await page.locator('[data-no-card]').innerText()).toContain('no channel to raise an update card on')
+  expect(seen['POST /api/plugins/sql-review/update']).toBeUndefined()
   await page.close()
 })
 
