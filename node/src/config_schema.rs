@@ -263,7 +263,6 @@ pub const KEYS: &[KeySpec] = &[
     live("repo.context"),
     live("repo.build"),
     live("repo.checks"),
-    live("repo.warm"),
     live("repo.timeout_secs"),
     live("repo.prepare"),
     live("repo.egress"),
@@ -386,8 +385,6 @@ pub const KEYS: &[KeySpec] = &[
     restart("sandbox.base_image").host_only(),
     restart("sandbox.release_url").host_only(),
     restart("sandbox.resume_within_secs"),
-    restart("sandbox.warm_concurrency"),
-    restart("sandbox.max_build_output_bytes"),
     // [work]
     live("work.default_priority"),
     // [[work.priority]]

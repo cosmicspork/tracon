@@ -6191,7 +6191,6 @@ mod tests {
             image: "local".into(),
             image_source: "harness image",
             checks: Vec::new(),
-            warm: None,
             timeout_secs,
             prepare: prepare.iter().map(|command| command.to_string()).collect(),
             egress: Vec::new(),

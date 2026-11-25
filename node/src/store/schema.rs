@@ -1964,6 +1964,11 @@ const MIGRATIONS: &[&str] = &[
     UPDATE external_event SET caller = 'plugin' WHERE lane LIKE 'plugin:%';
     UPDATE external_event SET caller = 'operator' WHERE lane LIKE '/%';
     "#,
+    // 94: drops 90's `repo_image_statement`: repository images are no
+    // longer shared through a registry, so nothing signs or reads them.
+    r#"
+    DROP TABLE IF EXISTS repo_image_statement;
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

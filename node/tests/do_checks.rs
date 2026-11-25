@@ -353,7 +353,6 @@ async fn checks_are_prepared_once_and_forked_per_check() {
         image: image(),
         image_source: "prepared snapshot",
         checks,
-        warm: None,
         timeout_secs: 60,
         prepare: vec!["echo prepared > marker; printf '%s' \"$HTTPS_PROXY\" > proxy-seen".into()],
         egress: vec!["registry.example".into()],

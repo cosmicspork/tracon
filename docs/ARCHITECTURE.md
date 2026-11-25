@@ -1356,29 +1356,7 @@ cache is the run's own, copied from the repository's base cache and removed with
 run; from a prepared snapshot on a pod or an Apple VM, whose image carries the base
 cache at `/cache`, it starts empty and is sent over that `/cache`, never onto storage
 that would hide it, so preparation starts warm and only what it added comes back
-(`Exclusions::Unchanged`, by change time) to be sent over the same image to each check.
-The warm-up also **builds** the default branch: after `prepare`, in the same sandbox,
-it runs the entry's `warm` commands, or with none its checks when the default branch is
-a Cargo or Go project (`sandbox_images::warm_commands`), as a check runs them (offline,
-no grant, nothing lent, under `nice`; their outcome only logged) with build output under
-`/cache` (`environment::build_env`: `CARGO_TARGET_DIR=/cache/target`,
-`GOCACHE=/cache/go-build`), so the snapshot carries that output
-(`sandbox_images::build_output`). Only that output is kept: what the build added to
-`/work` is removed against a listing taken before it, Cargo's incremental cache and
-linked test, binary and example executables are trimmed in both of Cargo's target
-layouts (`sandbox_images::trim_script`), and output still over `[sandbox]
-max_build_output_bytes` is dropped. Warm-ups take turns across repositories
-(`[sandbox] warm_concurrency`, one by default). The snapshot is keyed on those commands
-too, so the output is rebuilt with it and removed with it, never refreshed on its own.
-A check from the snapshot is pointed at the same directories (`prepared_check_env`) and
-gets its cache read-only beneath a writable layer of its own
-(`review::checks::check_cache`): on Podman the run cache, seeded from the snapshot's
-`/cache`, is the lower layer of an overlay (`Mount::overlay`, `-v name:/cache:O`) that
-goes with the container; on a pod, an Apple VM or a DigitalOcean fork the snapshot's own
-`/cache` is the sandbox's own copy of the image. Its build starts from the default
-branch's output and nothing it writes is read by another run. No session cache is ever
-its lower layer. A pod-hosted node that cannot read so much back to build the snapshot
-makes it again without the output. The base is written by one thing only — a preparation of the default branch, made
+(`Exclusions::Unchanged`, by change time) to be sent over the same image to each check. The base is written by one thing only — a preparation of the default branch, made
 when the repository's image is built — so a candidate's install, which may run the
 candidate's own scripts, can reach its own evidence and nobody else's.
 That warm-up is also the only preparation lent a registry credential: the entry's
@@ -1420,8 +1398,7 @@ Sessions get a cache of their own, one per repository and channel, that outlives
 session: it starts as a copy of the base, and what an agent fetches or compiles into it
 (Cargo's output goes there through `CARGO_TARGET_DIR`) is there for the channel's next
 session on the repository. No check mounts it, so nothing an agent wrote can make the
-review gate pass; a check still prepares from the base, and builds on the snapshot's
-build output instead. A session that needs
+review gate pass; a check still prepares from the base. A session that needs
 something running beside it (a browser to drive, a database to test against) asks for
 it by name from the operator's `[[service]]` catalogue with `service_start`, which
 waits, within a tool call's budget, for the entry's readiness probe; `service_status`
@@ -2676,12 +2653,13 @@ Three surfaces, three answers, and the differences are the point.
   superseded image is removed only when nothing still runs from it under Podman; a
   registry's copy is deleted by digest, and frees space only when the registry's garbage
   collection runs. No other node reuses a pushed image: each node builds and pins its
-  own ([#1094](https://github.com/cosmicspork/tracon/issues/1094)).
+  own.
 - A run's dependency cache and each check's tree are copies. Where the runtime's storage
   has no reflinks they are full copies, made once per run and once per check. Checks
   start from the warm dependency cache made when the node builds a repository's image,
   but keep no build output: every run of a compiled project's checks builds from nothing
-  ([#1083](https://github.com/cosmicspork/tracon/issues/1083)). Sessions keep theirs, but
+  (measured on tracon, a warm build output saved about 35 s of a 13-minute `just check`,
+  since Cargo rebuilds the workspace's own crates either way). Sessions keep theirs, but
   only Cargo's is moved out of the tree; a bundler's cache inside `node_modules` lives
   and goes with the workspace.
 - A per-client egress grant (a session's, a preparation's) filters by host, not by

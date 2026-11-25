@@ -25,8 +25,6 @@ test('an entry survives the form unchanged', () => {
     { path: 'owner/pinned', image: 'localhost/tc@sha256:abc', prepare: [], egress: ['example.org'] },
     { path: '/src/plain', prepare: [], egress: [] },
     { path: '/src/db', prepare: [], egress: [], service_volumes: ['postgres', 'redis'] },
-    { path: '/src/compiled', checks: ['just check'], warm: ['cargo test --locked --no-run'], prepare: ['cargo fetch --locked'], egress: ['crates'] },
-    { path: '/src/unwarmed', warm: [], prepare: ['cargo fetch --locked'], egress: ['crates'] },
     {
       path: 'github.com/owner/stepped',
       build: ['apt-get update', 'apt-get install -y --no-install-recommends jq'],
@@ -89,17 +87,6 @@ test('explicitly no checks is not the same as the node-wide checks', () => {
   const none = toForm({ path: '/a', checks: [], prepare: [], egress: [] })
   expect(none.ownChecks).toBe(true)
   expect(toEntry(none).checks).toEqual([])
-})
-
-test('building nothing in the warm-up is not the same as the default build', () => {
-  const inherited = toForm({ path: '/a', prepare: [], egress: [] })
-  expect(inherited.ownWarm).toBe(false)
-  expect(toEntry(inherited).warm).toBeUndefined()
-  const none = toForm({ path: '/a', warm: [], prepare: [], egress: [] })
-  expect(none.ownWarm).toBe(true)
-  expect(toEntry(none).warm).toEqual([])
-  const own = { ...blankForm(), path: '/a', source: 'harness' as const, ownWarm: true, warm: 'cargo clippy --all-targets\n\n cargo test --no-run ' }
-  expect(toEntry(own).warm).toEqual(['cargo clippy --all-targets', 'cargo test --no-run'])
 })
 
 test('a source the operator moved away from is not sent', () => {

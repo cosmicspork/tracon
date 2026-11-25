@@ -33,7 +33,6 @@ pub mod auth;
 pub mod enroll;
 pub mod envelope;
 pub mod frame;
-pub mod image;
 pub mod keyring;
 pub mod keys;
 pub mod names;

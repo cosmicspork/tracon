@@ -1202,65 +1202,15 @@ async fn ensure_with(
         Ok(id) => id,
         Err(error) => return fallback(error.to_string()),
     };
-    // Built here, by this build or the trial it adopts, rather than taken
-    // from a co-member: only what a node built is pushed for the others.
-    let mut built_here = true;
     let built = match tried {
         Some(tried) => Ok(tried),
         None => {
-            // A channel member that built the same recipe may have pushed
-            // its image; taken by the digest it signed, it is pinned here
-            // as this node's own. Asked to build, the node builds.
-            let taken = match force {
-                true => crate::repo_image_share::Taken::NotOffered,
-                false => {
-                    let tag = build_tag(&image_name(repo), &recipe.hash, &id);
-                    crate::repo_image_share::take(cfg, store, builder, repo, &recipe.hash, &tag)
-                        .await
-                }
-            };
-            match taken {
-                crate::repo_image_share::Taken::Image { image, note } => {
-                    tracing::info!(repo = %repo.display(), recipe = %recipe.hash, %image, "repository image taken from a channel member's build");
-                    built_here = false;
-                    Ok(Built {
-                        image: BuiltImage {
-                            image,
-                            log_tail: note,
-                        },
-                        source: String::new(),
-                    })
-                }
-                taken => {
-                    let why = taken.refusal();
-                    if let Some(why) = &why {
-                        tracing::info!(repo = %repo.display(), recipe = %recipe.hash, "{why}");
-                    }
-                    tracing::info!(repo = %repo.display(), recipe = %recipe.hash, "building repository image");
-                    let opened = |log: &mut String| {
-                        if let Some(why) = &why {
-                            *log = format!("{why}\n{log}");
-                        }
-                    };
-                    build(builder, cfg, store, repo, &recipe, &id)
-                        .await
-                        .map(|mut built| {
-                            opened(&mut built.image.log_tail);
-                            built
-                        })
-                        .map_err(|mut failure| {
-                            opened(&mut failure.log_tail);
-                            failure
-                        })
-                }
-            }
+            tracing::info!(repo = %repo.display(), recipe = %recipe.hash, "building repository image");
+            build(builder, cfg, store, repo, &recipe, &id).await
         }
     };
     match built {
         Ok(built) => {
-            if built_here {
-                crate::repo_image_share::after_build(repo, &recipe.hash, &built.image.image);
-            }
             let warnings = missing_tools(runner, &built.image.image, commands).await;
             let _ = store.finish_repo_image(
                 &id,

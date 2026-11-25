@@ -129,18 +129,6 @@ impl Mirror {
                 }
                 r
             }
-            // The repository images a co-member pushed, in statements it
-            // signed: kept for a build of the same recipe to take.
-            Payload::RepoImages { images } => {
-                match crate::repo_image_share::receive(&self.store, sender, channel, &images) {
-                    crate::repo_image_share::Received::Stored => Applied::Stored,
-                    crate::repo_image_share::Received::Impersonation => Applied::Impersonation,
-                    crate::repo_image_share::Received::Malformed(error) => {
-                        tracing::warn!(%sender, %channel, %error, "repository images refused");
-                        Applied::Malformed
-                    }
-                }
-            }
             Payload::Questions { waiting } => {
                 let r = self.apply_questions(sender, channel, &waiting);
                 if r == Applied::Stored {

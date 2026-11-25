@@ -42,7 +42,7 @@ use super::checks::{
 use crate::{
     boundary::Backend,
     config::Config,
-    environment::RepoEnvironment,
+    environment::{check_env, RepoEnvironment},
     provider::{
         capabilities::ImageIdentityKind, ImageIdentity, ProviderKind, Requirements, SandboxProvider,
     },
@@ -565,11 +565,9 @@ async fn forked(
     }
 
     // Every check at once, each in its own child.
-    // From the snapshot's template, the default branch's build output is in
-    // the child's own `/cache`, a copy no other child or run reads.
     let env = match environment.prepare.is_empty() {
         true => Vec::new(),
-        false => super::checks::check_cache(environment, "").0,
+        false => check_env(),
     };
     let ran = pending
         .iter()

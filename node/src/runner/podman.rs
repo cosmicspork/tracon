@@ -234,14 +234,6 @@ impl RunSpec {
                 a.push(format!("type=volume,dst={},U=true", m.target));
                 continue;
             }
-            if m.overlay {
-                // The volume as the lower layer of an overlay whose upper
-                // layer Podman makes for this container and removes with it:
-                // the run writes over the volume and never into it.
-                a.push("--volume".into());
-                a.push(overlay_volume(m));
-                continue;
-            }
             let mut mount = format!("type=volume,src={},dst={}", m.volume, m.target);
             if !m.sub_path.is_empty() {
                 mount.push_str(",volume-subpath=");
@@ -277,12 +269,6 @@ impl RunSpec {
         }
         a
     }
-}
-
-/// `m` as a `--volume` overlay of a named volume (`--mount` has no overlay
-/// option): `name:target:O`. A sub-path is not overlaid; none is asked for.
-fn overlay_volume(m: &Mount) -> String {
-    format!("{}:{}:O", m.volume, m.target)
 }
 
 pub struct PodmanRunner {
@@ -471,54 +457,6 @@ mod tests {
         let line = run("img").join(" ");
         assert!(
             line.contains("--network none --add-host tracon-gw:127.0.0.1"),
-            "{line}"
-        );
-    }
-
-    /// A check's cache is the lower layer of an overlay the container writes
-    /// to, never the volume itself: the build output in it is built on, and
-    /// nothing the check writes reaches the next check or the snapshot's.
-    #[test]
-    fn an_overlaid_volume_is_mounted_beneath_a_layer_of_the_containers_own() {
-        let launch = SandboxLaunch {
-            bundle: "/b".into(),
-            socket_dir: "/s".into(),
-            pin: "sha256:00".into(),
-            entry: SandboxEntry::Pid1,
-            cpu_millis: None,
-            memory_bytes: None,
-            connect_timeout_ms: 1000,
-            log_file: None,
-            user: None,
-            userns: None,
-            env: Vec::new(),
-            service_bundles: Vec::new(),
-        };
-        let mounts = [
-            Mount::volume("tracon-check-1", "/work", false),
-            Mount::overlay("tracon-prep-cache-1", "/cache"),
-        ];
-        let args = spec().sandbox_args("tracon-c-1", "img", &mounts, &launch, false);
-        let line = args.join(" ");
-        assert!(
-            line.contains("--volume tracon-prep-cache-1:/cache:O"),
-            "{line}"
-        );
-        assert!(
-            !line.contains("src=tracon-prep-cache-1"),
-            "mounted once, as the overlay: {line}"
-        );
-        assert!(
-            line.contains("--mount type=volume,src=tracon-check-1,dst=/work"),
-            "{line}"
-        );
-        // A plain read-only mount is still the volume itself, read-only.
-        let plain = [Mount::volume("tracon-prep-cache-1", "/cache", true)];
-        let line = spec()
-            .sandbox_args("tracon-c-1", "img", &plain, &launch, false)
-            .join(" ");
-        assert!(
-            line.contains("type=volume,src=tracon-prep-cache-1,dst=/cache,ro"),
             "{line}"
         );
     }

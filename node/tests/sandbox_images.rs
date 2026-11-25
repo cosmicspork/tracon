@@ -412,7 +412,6 @@ async fn prepare(rig: &mut Rig, repo: &Path, round: &str) -> (String, String, st
         lockfiles: tracon::sandbox_images::lockfiles(repo, &commit).await,
         prepare: PREPARE.iter().map(|s| s.to_string()).collect(),
         egress: Vec::new(),
-        build: Vec::new(),
     };
     assert_eq!(
         inputs
@@ -606,36 +605,6 @@ async fn a_repository_prepares_once_and_its_sessions_fork_from_the_snapshot() {
             said.replace('\n', " | ")
         );
     }
-
-    // A check gets its cache, seeded from the snapshot's, read-only beneath
-    // a layer of its own: it builds over what is there, and nothing it wrote
-    // is in the volume after.
-    let cache = rig.volume("cache-check");
-    tracon::boundary::Backend::clone_volume(&backend, &base_cache, &cache)
-        .await
-        .unwrap();
-    let out = rig
-        .runner(&snapshot, vec![Mount::overlay(cache.clone(), "/cache")])
-        .run_capture(rig.command(
-            "c1",
-            "test -e /cache/npm/step-two-saw-step-one && mkdir -p /cache/npm/built \
-             && touch /cache/npm/built/out && echo overlaid",
-        ))
-        .await
-        .unwrap();
-    let said = text(&out.stdout);
-    assert!(out.status.success(), "{said}{}", text(&out.stderr));
-    assert!(said.contains("overlaid"), "{said}");
-    let out = rig
-        .runner(&snapshot, vec![Mount::volume(cache.clone(), "/cache", true)])
-        .run_capture(rig.command(
-            "c2",
-            "test -e /cache/npm/step-two-saw-step-one && test ! -e /cache/npm/built && echo untouched",
-        ))
-        .await
-        .unwrap();
-    let said = text(&out.stdout);
-    assert!(said.contains("untouched"), "{said}{}", text(&out.stderr));
 
     // A fork reads as derived from the image it was made from.
     let provider = rig.provider();
