@@ -62,6 +62,23 @@ pub(super) async fn check_all_while(
     BoundaryReport { checks }
 }
 
+/// What a runtime check waiting on the converge says of a base not pinned
+/// yet: what the converge is doing to it, and that it is pulling only when
+/// it is.
+fn awaiting_base(base: &str, stage: Option<&crate::sandbox_images::BaseStage>) -> String {
+    use crate::sandbox_images::BaseStage;
+    match stage {
+        Some(BaseStage::Resolving) => format!(
+            "the base image {base} is not pinned yet; the node is resolving its {} digest",
+            super::VM_PLATFORM
+        ),
+        Some(BaseStage::Pulling(image)) => {
+            format!("the base image {base} is not pinned yet; the node is pulling {image}")
+        }
+        None => format!("the base image {base} is not pinned yet"),
+    }
+}
+
 /// `container` running, the bundle with its supervisor, and the base pinned.
 async fn check_runtime(b: &AppleBackend, cfg: &Config, building: bool) -> CheckResult {
     if building {
@@ -76,9 +93,7 @@ async fn check_runtime(b: &AppleBackend, cfg: &Config, building: bool) -> CheckR
         if !base.contains("@sha256:") {
             return CheckResult::pending(
                 CheckId::Runtime,
-                format!(
-                    "the base image {base} is not pulled and pinned yet; the node is pulling it"
-                ),
+                awaiting_base(&base, crate::sandbox_images::base_stage().as_ref()),
             );
         }
     } else if let Err(why) = b.converge_images().await {
@@ -282,6 +297,30 @@ async fn check_egress(b: &AppleBackend, cfg: &Config) -> CheckResult {
 mod tests {
     use super::*;
     use crate::provider::capabilities::{ImageIdentityKind, Privilege};
+
+    /// A check waiting on the converge says what it is doing to the base:
+    /// pulling only while it pulls.
+    #[test]
+    fn a_waiting_runtime_check_says_what_the_converge_is_doing() {
+        use crate::sandbox_images::BaseStage;
+        let base = "ghcr.io/cosmicspork/tracon-sandbox-base:0.61.0";
+        assert_eq!(
+            awaiting_base(base, Some(&BaseStage::Resolving)),
+            format!("the base image {base} is not pinned yet; the node is resolving its linux/arm64 digest")
+        );
+        let target = "ghcr.io/cosmicspork/tracon-sandbox-base@sha256:abc";
+        assert_eq!(
+            awaiting_base(base, Some(&BaseStage::Pulling(target.into()))),
+            format!("the base image {base} is not pinned yet; the node is pulling {target}")
+        );
+        assert_eq!(
+            awaiting_base(base, None),
+            format!("the base image {base} is not pinned yet")
+        );
+        for stage in [Some(BaseStage::Resolving), None] {
+            assert!(!awaiting_base(base, stage.as_ref()).contains("pulling"));
+        }
+    }
 
     fn seen(uid: &str, writable: bool, route: Route, dns: Dns) -> Seen {
         Seen {

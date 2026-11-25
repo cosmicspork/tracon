@@ -128,6 +128,30 @@ pub fn enabled(cfg: &Config) -> bool {
 /// The base image as configured, and as this process pinned it.
 static PINNED: RwLock<Option<(String, String)>> = RwLock::new(None);
 
+/// What a converge is doing to the base before it is pinned, so a check that
+/// waits on it says so rather than guessing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BaseStage {
+    /// Asking the registry which manifest the configured base is for the
+    /// sandbox's platform.
+    Resolving,
+    /// Pulling this image.
+    Pulling(String),
+}
+
+static STAGE: RwLock<Option<BaseStage>> = RwLock::new(None);
+
+/// Say what the converge is doing to the base now; `None` once it is done
+/// (pinned, or given up).
+pub fn set_base_stage(stage: Option<BaseStage>) {
+    *STAGE.write().unwrap() = stage;
+}
+
+/// What the converge is doing to the base, if it is at it.
+pub fn base_stage() -> Option<BaseStage> {
+    STAGE.read().unwrap().clone()
+}
+
 /// The stock base: pinned by digest once the boundary has converged, the
 /// configured reference until then.
 pub fn base_image(cfg: &Config) -> String {
