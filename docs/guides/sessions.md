@@ -152,7 +152,7 @@ labels naming its owner, `io.tracon.node.prefix` (the `resource_prefix`) and
 | Class | Removed with `--apply` |
 |---|---|
 | `base` | a `tracon-sandbox-base` other than the one the node pins, once nothing is built on it. Pulled bases carry no owner label, so a node with a prefix of its own leaves them to the default node unless `--adopt-unlabelled` |
-| `repository` | a repository image no current build, snapshot or open session uses. A repository no `[[repo]]` entry names, and that is no managed clone, has no current build |
+| `repository` | a repository image no current build, snapshot or open session uses. A repository no `[[repo]]` entry names, and no open session runs on, has no current build (a managed clone whose entry was removed included) |
 | `snapshot` | a prepared snapshot that is no repository's current one |
 | `dangling` | a `<none>` image of this node's whose tag a later build took |
 | `legacy` | what older releases built and nothing runs now: the harness images and the gateway's (named from `[boundary] harness_image` and `gateway_image` where an older `node.toml` still sets them), and the layered `-claude`/`-native` session images; and, one line per tag, each `tracon-sandbox-base` tag of another release on a base image that stays (the pinned base under an earlier release's tag, or a base only other bases are built on), which goes by untagging and leaves the image. A tag stays, naming the image, while an image that is no base (a live repository image) is built on its base; only with `--legacy` |

@@ -115,9 +115,12 @@ pub struct Owners {
     pub version: String,
     /// Images this node's current builds, snapshots and open sessions name.
     pub kept_images: Vec<crate::image_gc::Kept>,
+    /// Repositories (clone paths) open sessions on this node run on.
+    pub used_repositories: HashSet<String>,
     /// Repositories with builds recorded that no `[[repo]]` entry names and
-    /// that are no managed clone: nothing builds or prepares for them again,
-    /// so their last builds and snapshots are superseded rather than current.
+    /// no open session runs on: nothing builds or prepares for them again, so
+    /// their last builds and snapshots are superseded rather than current.
+    /// A managed clone whose entry was removed is one of them.
     pub retired_repositories: HashSet<String>,
     /// The file names under `bundles/` of the tars of the bundles this node
     /// serves now (`crate::provider::kubernetes::served_tar_name`).
@@ -134,8 +137,8 @@ pub struct Owners {
 pub struct ServiceVolumeOwner {
     pub repo: String,
     pub service: String,
-    /// A `[[repo]]` entry still names the repository (or it is a managed
-    /// clone).
+    /// A `[[repo]]` entry still names the repository, or an open session
+    /// runs on it.
     pub current: bool,
 }
 
@@ -144,6 +147,7 @@ impl Default for Owners {
         Owners {
             prefix: crate::config::DEFAULT_RESOURCE_PREFIX.into(),
             open_sessions: HashSet::new(),
+            used_repositories: HashSet::new(),
             known_sessions: HashSet::new(),
             used_workspaces: HashSet::new(),
             running_checks: HashSet::new(),
@@ -183,6 +187,9 @@ impl Owners {
                 continue;
             }
             owners.open_sessions.insert(session.id.clone());
+            if !session.repo_path.starts_with("workspace://") {
+                owners.used_repositories.insert(session.repo_path.clone());
+            }
             let workspace = session
                 .repo_path
                 .strip_prefix("workspace://")
@@ -199,7 +206,7 @@ impl Owners {
         owners.retired_repositories = rows
             .iter()
             .map(|row| row.repo_path.clone())
-            .filter(|repo| !repository_is_current(repos, Path::new(repo)))
+            .filter(|repo| !owners.repository_is_current(repos, repo))
             .collect();
         // The latest ready snapshot of each repository the node still
         // builds for; rows are newest first within a repository.
@@ -220,7 +227,7 @@ impl Owners {
             .service_volumes()?
             .into_iter()
             .map(|row| {
-                let current = repository_is_current(repos, Path::new(&row.repo_path));
+                let current = owners.repository_is_current(repos, &row.repo_path);
                 (
                     row.volume,
                     ServiceVolumeOwner {
@@ -235,10 +242,20 @@ impl Owners {
     }
 }
 
-/// Whether the node still builds for `repo`: a `[[repo]]` entry names it, or
-/// it is a managed clone.
-fn repository_is_current(repos: &[crate::config::Repo], repo: &Path) -> bool {
-    repos.iter().any(|entry| entry.matches(repo)) || crate::forge::managed_clone(repo).is_ok()
+impl Owners {
+    /// Whether the node still builds for `repo`: a `[[repo]]` entry names
+    /// it, or an open session runs on it. A managed clone left behind by a
+    /// removed entry is not enough: the clone outlives the entry, so its
+    /// images would be kept forever. A setup trial for a repository no entry
+    /// names yet keeps its newest build regardless (see `kept_images`).
+    fn repository_is_current(&self, repos: &[crate::config::Repo], repo: &str) -> bool {
+        repository_is_named(repos, Path::new(repo)) || self.used_repositories.contains(repo)
+    }
+}
+
+/// Whether a `[[repo]]` entry names `repo`.
+fn repository_is_named(repos: &[crate::config::Repo], repo: &Path) -> bool {
+    repos.iter().any(|entry| entry.matches(repo))
 }
 
 /// What a repository's work runs in now: the newest finished build of each
@@ -1357,8 +1374,8 @@ mod tests {
         }
     }
 
-    /// A build of a repository no `[[repo]]` entry names any more (and that
-    /// is no managed clone) is superseded: it keeps neither its image, nor
+    /// A build of a repository no `[[repo]]` entry names any more (and no
+    /// open session runs on) is superseded: it keeps neither its image, nor
     /// what that was built on, nor its snapshot.
     #[test]
     fn a_build_of_a_repository_the_node_no_longer_names_is_superseded() {
@@ -1410,8 +1427,8 @@ mod tests {
             path: "/src/kept".into(),
             ..Default::default()
         }];
-        assert!(repository_is_current(&repos, Path::new("/src/kept")));
-        assert!(!repository_is_current(&repos, Path::new("/src/gone")));
+        assert!(repository_is_named(&repos, Path::new("/src/kept")));
+        assert!(!repository_is_named(&repos, Path::new("/src/gone")));
 
         let o = Owners::read(&store, "node-a", false, &repos).unwrap();
         assert_eq!(
@@ -1433,5 +1450,47 @@ mod tests {
                 "localhost/kept-snap:1"
             ]
         );
+    }
+
+    /// Removing the entry for a managed clone retires it, though the clone
+    /// stays on disk: its builds are listed for removal like any other
+    /// retired repository's, unless an open session still runs on it.
+    #[test]
+    fn a_managed_clone_whose_entry_is_removed_is_retired() {
+        let root = crate::forge::managed_root(&crate::config::Config::state_dir());
+        let clone = root.join("github.com/gc-test/retired-clone");
+        std::fs::create_dir_all(clone.join(".git")).unwrap();
+        let clone = clone.canonicalize().unwrap().to_string_lossy().into_owned();
+        assert!(crate::forge::managed_clone(Path::new(&clone)).is_ok());
+        let store = Store::open_in_memory().unwrap();
+        let id = store
+            .start_repo_image(&crate::store::RepoImageStart {
+                repo_path: &clone,
+                kind: crate::repo_image::BASE,
+                recipe_hash: "r",
+                source_ref: "",
+                source_commit: "c",
+                parent_image: "localhost/clone-src:1",
+            })
+            .unwrap();
+        store
+            .finish_repo_image(&id, Ok("localhost/clone:1"), "", &[])
+            .unwrap();
+
+        let o = Owners::read(&store, "node-a", false, &[]).unwrap();
+        assert_eq!(o.retired_repositories, HashSet::from([clone.clone()]));
+        assert!(o.kept_images.is_empty(), "{:?}", o.kept_images);
+
+        // An open session on the clone keeps it current.
+        let mut o = Owners::default();
+        assert!(!o.repository_is_current(&[], &clone));
+        o.used_repositories.insert(clone.clone());
+        assert!(o.repository_is_current(&[], &clone));
+        // And an entry naming it does too.
+        let named = vec![crate::config::Repo {
+            path: clone.clone().into(),
+            ..Default::default()
+        }];
+        assert!(Owners::default().repository_is_current(&named, &clone));
     }
 }
