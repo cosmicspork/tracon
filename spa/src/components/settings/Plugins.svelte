@@ -18,8 +18,9 @@
   import { rollbackNote, rolledBack, updateFailure, updateNote, waitingCard, type PluginNote } from '../../lib/plugin-actions'
   import type { PluginInstance, PluginSummary } from '../../lib/types'
 
-  /** The channels an update card can go to; none picked is the node's
-      `[session] default_channel`. */
+  /** The channels an update card can go to. "The default channel" (the
+      node's `[session] default_channel`) is offered beside them only when the
+      node has one; otherwise the first of these is picked. */
   let { channels = [] }: { channels?: string[] } = $props()
 
   /** The node administered: empty for this one, or a peer's id. */
@@ -30,8 +31,24 @@
   /** Open log views, by `plugin/channel`. */
   let logs = $state<Record<string, string[] | string>>({})
   let restarting = $state<Record<string, boolean>>({})
-  /** The channel update cards go to: the one being viewed, or the node's default. */
+  /** The channel update cards go to: one picked, or '' for the node's default. */
   let channel = $state('')
+  /** The administered node's `[session] default_channel`, '' when it has none
+      or does not say (only the serving node's row carries it). */
+  const nodeDefault = $derived(
+    (node ? store.nodes.find((n) => n.id === node)?.default_channel : store.node?.default_channel) || '',
+  )
+  // A default that would be refused is never the choice: with none set,
+  // cards go to a real channel.
+  $effect(() => {
+    if (!nodeDefault && !channels.includes(channel)) channel = channels[0] ?? ''
+  })
+  /** Why Check for update cannot be sent, when there is nowhere for its card to go. */
+  const noCardChannel = $derived(
+    !nodeDefault && !channel
+      ? 'The node has no channel to raise an update card on: add a channel, or set [session] default_channel.'
+      : '',
+  )
   /** A request in flight for a plugin, by name. */
   let acting = $state<Record<string, 'update' | 'rollback'>>({})
   /** The plugin whose rollback waits on the in-page confirmation. */
@@ -151,11 +168,11 @@
 >
   {#snippet actions()}
     <NodePicker value={node} onchange={pick} />
-    {#if plugins?.length}
+    {#if plugins?.length && (nodeDefault || channels.length)}
       <label class="to">
         Cards to
         <select bind:value={channel} aria-label="Channel update cards go to">
-          <option value="">the default channel</option>
+          {#if nodeDefault}<option value="">the default channel ({nodeDefault})</option>{/if}
           {#each channels as c (c)}<option value={c}>{c}</option>{/each}
         </select>
       </label>
@@ -164,6 +181,9 @@
   {/snippet}
   {#if error}
     <p class="crit">{error}</p>
+  {/if}
+  {#if plugins?.length && noCardChannel}
+    <p class="meta" data-no-card>{noCardChannel}</p>
   {/if}
   {#if !plugins}
     {#if !error}<p class="dim">Loading…</p>{/if}
@@ -191,7 +211,12 @@
           {/if}
           <div class="acts">
             {#if note?.kind !== 'refused'}
-              <button class="btn small" onclick={() => void checkUpdate(plugin)} disabled={!!inFlight || !!waiting}>
+              <button
+                class="btn small"
+                onclick={() => void checkUpdate(plugin)}
+                disabled={!!inFlight || !!waiting || !!noCardChannel}
+                title={noCardChannel || undefined}
+              >
                 {inFlight === 'update' ? 'Checking…' : 'Check for update'}
               </button>
             {/if}
