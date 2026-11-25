@@ -264,8 +264,22 @@ impl AppleBackend {
             Err(error) => return Err(format!("harness bundle: {error}")),
         };
         let configured = self.cfg.sandbox.base_image_ref();
+        let pinned = self.converge_base(&configured).await;
+        crate::sandbox_images::set_base_stage(None);
+        let (pinned, pulled) = pinned?;
+        crate::sandbox_images::pin(&configured, &pinned);
+        let browser = crate::service_bundle::converge(&self.cfg).await?;
+        Ok(fetched || pulled || browser)
+    }
+
+    /// The base resolved for the sandbox's platform, pulled if it is not held,
+    /// and the reference to pin it by; `true` when it pulled. Each stage is
+    /// told to the runtime check as it starts (`sandbox_images::BaseStage`).
+    async fn converge_base(&self, configured: &str) -> Result<(String, bool), String> {
+        use crate::sandbox_images::{set_base_stage, BaseStage};
+        set_base_stage(Some(BaseStage::Resolving));
         let registry = crate::boundary::registry::Registry::new(None);
-        let resolved = match crate::sandbox_images::resolve_base(&registry, &configured, VM_ARCH)
+        let resolved = match crate::sandbox_images::resolve_base(&registry, configured, VM_ARCH)
             .await
         {
             Ok(resolved) => resolved,
@@ -274,27 +288,25 @@ impl AppleBackend {
                 None
             }
         };
-        let (pinned, pulled) = match resolved {
-            Some(target) => self.pull_platform(&configured, &target).await?,
+        match resolved {
+            Some(target) => self.pull_platform(configured, &target).await,
             None => {
                 let mut pulled = false;
-                if self.image_identity(&configured).await.is_none() {
+                if self.image_identity(configured).await.is_none() {
                     tracing::info!(image = %configured, "pulling the sandbox base image");
-                    self.container(&["image", "pull", "--platform", VM_PLATFORM, &configured])
+                    set_base_stage(Some(BaseStage::Pulling(configured.to_string())));
+                    self.container(&["image", "pull", "--platform", VM_PLATFORM, configured])
                         .await
                         .map_err(|error| format!("pull {configured}: {error}"))?;
                     pulled = true;
                 }
                 let pinned = self
-                    .pin_locally(&configured)
+                    .pin_locally(configured)
                     .await
                     .ok_or_else(|| format!("{configured} has no digest to pin"))?;
-                (pinned, pulled)
+                Ok((pinned, pulled))
             }
-        };
-        crate::sandbox_images::pin(&configured, &pinned);
-        let browser = crate::service_bundle::converge(&self.cfg).await?;
-        Ok(fetched || pulled || browser)
+        }
     }
 
     /// `target`, the arm64 manifest `configured` resolved to, held under its
@@ -311,11 +323,17 @@ impl AppleBackend {
             return Ok((target.to_string(), false));
         }
         tracing::info!(image = %target, "pulling the sandbox base image for {VM_PLATFORM}");
+        crate::sandbox_images::set_base_stage(Some(crate::sandbox_images::BaseStage::Pulling(
+            target.to_string(),
+        )));
         let by_digest = self
             .container(&["image", "pull", "--platform", VM_PLATFORM, target])
             .await;
         if let Err(error) = by_digest {
             tracing::warn!(image = %target, %error, "could not pull the base by its platform's digest; pulling it as configured");
+            crate::sandbox_images::set_base_stage(Some(crate::sandbox_images::BaseStage::Pulling(
+                configured.to_string(),
+            )));
             self.container(&["image", "pull", "--platform", VM_PLATFORM, configured])
                 .await
                 .map_err(|error| format!("pull {configured}: {error}"))?;
