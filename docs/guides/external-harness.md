@@ -23,7 +23,10 @@ process is still running. Each row expands into its recent calls; a lane drops
 off after a day without a call unless something of it is still open, and
 **dismiss** hides one until it calls again. The label is for display only:
 nothing is authorized or routed by it. A plain `claude mcp add --transport http
-… /mcp/external/work` works too; its calls show as one unlabelled lane.
+… /mcp/external/work` works too; its calls show as one unlabelled lane. Plugins
+calling the node, and a plugin's page calling on your behalf, are no agents of yours:
+they stay in the channel's log, and the approval and review cards name them, but they
+are never listed here.
 
 The `timeout` lifts Claude Code's per-call limit to twenty minutes, and
 `--wait-budget` (or `TRACON_WAIT_BUDGET`) tells the node so: a status tool such

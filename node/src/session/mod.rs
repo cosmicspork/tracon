@@ -4580,6 +4580,7 @@ impl Manager {
             }),
             None => self.record_external(
                 &approval.channel,
+                crate::store::external::CallerKind::of_lane(approval.lane.as_deref()),
                 approval.lane.as_deref(),
                 kind,
                 Some(&approval.id),
@@ -4952,7 +4953,14 @@ impl Manager {
                 at_ms: now_ms(),
                 mono_ms: 0,
             }),
-            None => self.record_external(&ctx.channel, ctx.lane(), kind, ref_id, payload),
+            None => self.record_external(
+                &ctx.channel,
+                ctx.caller_kind(),
+                ctx.lane(),
+                kind,
+                ref_id,
+                payload,
+            ),
         }
     }
 
@@ -4965,6 +4973,7 @@ impl Manager {
     pub fn record_external(
         &self,
         channel: &str,
+        caller: crate::store::external::CallerKind,
         lane: Option<&str>,
         kind: &str,
         ref_id: Option<&str>,
@@ -4973,6 +4982,7 @@ impl Manager {
         match self.store.append_external_event(
             channel,
             &self.node_id,
+            caller,
             lane,
             kind,
             ref_id,
