@@ -1,6 +1,6 @@
 {
   "name": "@tracon/ui",
-  "version": "0.62.0",
+  "version": "0.63.0",
   "description": "Tracon's design tokens, base styles, theme bridge and Svelte components, for the interface and plugin pages.",
   "license": "MIT",
   "type": "module",

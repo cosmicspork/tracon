@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.63.0](https://github.com/cosmicspork/tracon/compare/v0.62.0...v0.63.0) (2026-11-26)
+
+
+### Features
+
+* **node,spa:** review dependencies, approval waits on the review it publishes after ([#1207](https://github.com/cosmicspork/tracon/issues/1207)) ([96908f8](https://github.com/cosmicspork/tracon/commit/96908f891ac2c2ea257e805fbe8f76c0ae56995b))
+* **node:** check_run returns a run id, polled with check_run_status ([#1208](https://github.com/cosmicspork/tracon/issues/1208)) ([e377d0b](https://github.com/cosmicspork/tracon/commit/e377d0bbcb1b8d88f81fc6161a4e8f04f244c287))
+* **node:** let a plugin withdraw a card it raised (approval/withdraw) ([#1206](https://github.com/cosmicspork/tracon/issues/1206)) ([5f4a6bd](https://github.com/cosmicspork/tracon/commit/5f4a6bd1396c633b664dc5a310897f5eefa87040))
+* **node:** review_status shows external callers the node's checks on their submission ([#1209](https://github.com/cosmicspork/tracon/issues/1209)) ([e1b59a8](https://github.com/cosmicspork/tracon/commit/e1b59a832abb3692610be30a3200fbc53d6baefc))
+* **spa:** collapse review Threads to one line under the diff ([#1204](https://github.com/cosmicspork/tracon/issues/1204)) ([4075e2f](https://github.com/cosmicspork/tracon/commit/4075e2f484028315572d6fc13b07d7e375f9721a))
+* **spa:** edit the forge text in On the forge's Source tab, see and clear your edits ([#1202](https://github.com/cosmicspork/tracon/issues/1202)) ([645fcc6](https://github.com/cosmicspork/tracon/commit/645fcc6f80394150921415372b5a21a2fc653fb8))
+* **spa:** fold stale shown work to one line under the current note ([#1203](https://github.com/cosmicspork/tracon/issues/1203)) ([a191b1f](https://github.com/cosmicspork/tracon/commit/a191b1fa116d0a05642199c647875b56aa8562a0))
+* **spa:** name the review and say its checks, reviewer and task in one header line ([#1201](https://github.com/cosmicspork/tracon/issues/1201)) ([e3be59a](https://github.com/cosmicspork/tracon/commit/e3be59a85b0c405286a09c069e2617625df31171))
+* **spa:** one file list on a review: the diff, folded, and the same frame to edit it ([#1205](https://github.com/cosmicspork/tracon/issues/1205)) ([4a6bec8](https://github.com/cosmicspork/tracon/commit/4a6bec830e38dced04bd4a93fb267f8418d24fdf))
+
+
+### Bug Fixes
+
+* **node:** snapshots clone a missing managed clone and repair its origin/HEAD ([#1210](https://github.com/cosmicspork/tracon/issues/1210)) ([486abbf](https://github.com/cosmicspork/tracon/commit/486abbf0fefaa14429f40eb756749023db106dba))
+
 ## [0.62.0](https://github.com/cosmicspork/tracon/compare/v0.61.0...v0.62.0) (2026-11-25)
 
 
