@@ -705,6 +705,11 @@ export function eventLine(e: Event): EventLine | null {
     }
     case 'approval_settled': {
       const state = str(p.state) || 'settled'
+      if (state === 'withdrawn') {
+        // Taken back by the plugin that raised it: nobody decided it.
+        const by = str(p.withdrawn_by).replace(/^plugin:/, '')
+        return line('mark', ['card withdrawn', by ? `by plugin ${by}` : 'by its plugin', str(p.reason)])
+      }
       const tone = state === 'succeeded' ? 'ok' : state === 'failed' ? 'crit' : state === 'uncertain' ? 'wait' : 'mark'
       const what = state === 'uncertain' ? 'outcome unknown' : state
       return line(tone, [`approved call ${what}`, str(p.tool), state === 'succeeded' ? '' : str(p.reason)])

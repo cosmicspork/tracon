@@ -1280,6 +1280,8 @@ export type AuditDecision =
   | 'rejected'
   | 'changes_requested'
   | 'expired'
+  /** A plugin's card, taken back by that plugin before anyone decided it. */
+  | 'withdrawn'
 
 /** One call a session made to the node's tools, from its audit. */
 export interface AuditCall {
@@ -1291,7 +1293,8 @@ export interface AuditCall {
   decision: AuditDecision
   /**
    * `policy`, `grant` or `node`; for a held call, the operator and where they
-   * answered from, `nobody` when it expired, or null while it waits.
+   * answered from, `nobody` when it expired, `plugin:<name>` when that plugin
+   * withdrew its card, or null while it waits.
    */
   decided_by: string | null
   rule?: string | null

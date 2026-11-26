@@ -27,6 +27,9 @@ pub const REJECTED: &str = "rejected";
 /// Not run: the operator wants the caller to revise it and ask again.
 pub const CHANGES_REQUESTED: &str = "changes_requested";
 pub const EXPIRED: &str = "expired";
+/// Taken back, while it waited, by the plugin that raised it
+/// (`approval/withdraw`): the card was moot, so nobody decided it.
+pub const WITHDRAWN: &str = "withdrawn";
 
 /// The option an operator picks to send a call back for revision.
 pub const OPTION_REQUEST_CHANGES: &str = "request_changes";
@@ -173,7 +176,7 @@ impl ApprovalRow {
     pub fn is_settled(&self) -> bool {
         matches!(
             self.state.as_str(),
-            SUCCEEDED | FAILED | UNCERTAIN | REJECTED | CHANGES_REQUESTED | EXPIRED
+            SUCCEEDED | FAILED | UNCERTAIN | REJECTED | CHANGES_REQUESTED | EXPIRED | WITHDRAWN
         )
     }
 
@@ -609,6 +612,19 @@ impl Store {
         Ok(n == 1)
     }
 
+    /// Withdraw one pending approval, with why, for the plugin that raised
+    /// it: it leaves the queue with nobody's decision. False when it was no
+    /// longer pending (decided, expired or withdrawn first).
+    pub fn withdraw_approval(&self, id: &str, reason: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE approval SET state='withdrawn', reason=?2, claimed_ms=NULL, finished_ms=?3
+             WHERE id=?1 AND state='pending'",
+            rusqlite::params![id, reason, now_ms()],
+        )?;
+        Ok(n == 1)
+    }
+
     pub fn expire_due_approvals(&self) -> Result<Vec<ApprovalRow>> {
         let conn = self.conn.lock().unwrap();
         let now = now_ms();
@@ -808,6 +824,30 @@ mod tests {
         assert_eq!(expired.len(), 1);
         assert_eq!(store.get_approval("a1").unwrap().unwrap().state, EXPIRED);
         assert!(!store.decide_approval("a1", &allow()).unwrap());
+    }
+
+    #[test]
+    fn a_withdrawn_approval_leaves_the_queue_settled_and_cannot_then_be_decided() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .insert_approval(&row("a1", "k", now_ms() + 60_000))
+            .unwrap();
+        store.claim_approval("a1").unwrap();
+        assert!(store.withdraw_approval("a1", "decided elsewhere").unwrap());
+        let a = store.get_approval("a1").unwrap().unwrap();
+        assert_eq!(a.state, WITHDRAWN);
+        assert_eq!(a.reason.as_deref(), Some("decided elsewhere"));
+        assert!(a.is_settled());
+        assert_eq!(a.decided_ms, None, "nobody decided it");
+        assert!(a.finished_ms.is_some());
+        assert_eq!(a.claimed_ms, None);
+        assert!(store.open_approval_cards("[]").unwrap().is_empty());
+        assert!(!store.decide_approval("a1", &allow()).unwrap());
+        assert!(!store.withdraw_approval("a1", "again").unwrap());
+        assert_eq!(
+            store.get_approval("a1").unwrap().unwrap().reason.as_deref(),
+            Some("decided elsewhere")
+        );
     }
 
     #[test]

@@ -1226,7 +1226,11 @@ for the plugin to act on. A card raised `on_behalf` of the agent call being serv
 that session's once the node has verified the context is its own signature for this
 instance and channel, so the session's wait covers it: the plugin can attribute only a
 call it was actually sent. `approval/status` waits as an agent's status call does, on the
-plugin's own cards only. `tools/call` runs through the node's unheld path
+plugin's own cards only. `approval/withdraw` moves one of them still pending to the terminal
+`withdrawn` state with the plugin's reason (`Store::withdraw_approval`, guarded on
+`state='pending'`, so a decision or expiry that came first stands and is returned) and
+settles it through the manager with the plugin as `withdrawn_by`, so the queue, the
+session's wait and its audit read it as the plugin's, not the operator's. `tools/call` runs through the node's unheld path
 (`Tools::call_for_operator`) with a `Caller::Plugin`, so the signed policy and the
 callee's entry decide it, the channel's external log records it, and an ask is a refusal.
 
