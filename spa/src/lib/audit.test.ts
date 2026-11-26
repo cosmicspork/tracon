@@ -17,6 +17,7 @@ test('each decision reads as words, the operator’s edit apart from a plain app
   expect(decisionLabel(call({ decision: 'edited' }))).toEqual(['approved with edits', 'wait'])
   expect(decisionLabel(call({ decision: 'denied' }))[1]).toBe('crit')
   expect(decisionLabel(call({ decision: 'pending' }))[0]).toBe('waiting on you')
+  expect(decisionLabel(call({ decision: 'withdrawn' }))).toEqual(['withdrawn by its plugin', 'mark'])
 })
 
 test('who decided names the rule for the policy and the place for the operator', () => {
@@ -24,6 +25,7 @@ test('who decided names the rule for the policy and the place for the operator',
   expect(decidedBy(call({ decided_by: 'grant', rule: 'g-1' }))).toBe('grant · g-1')
   expect(decidedBy(call({ decided_by: 'operator (at the node)', rule: 'always-asked' }))).toBe('operator (at the node)')
   expect(decidedBy(call({ decided_by: null }))).toBe('nobody yet')
+  expect(decidedBy(call({ decided_by: 'plugin:hoja' }))).toBe('plugin hoja')
 })
 
 test('the note under a call says why it did not run, or how its run ended', () => {
@@ -32,6 +34,7 @@ test('the note under a call says why it did not run, or how its run ended', () =
   expect(outcomeNote(call({ decision: 'approved', approval_state: 'succeeded' }))).toBe('')
   expect(outcomeNote(call({ decision: 'changes_requested', note: 'shorter' }))).toBe('shorter')
   expect(outcomeNote(call({ outcome: 'error', error: 'no such doc' }))).toBe('no such doc')
+  expect(outcomeNote(call({ decision: 'withdrawn', reason: 'decided in its page' }))).toBe('decided in its page')
 })
 
 test('the summary counts what the operator decided and what was refused', () => {

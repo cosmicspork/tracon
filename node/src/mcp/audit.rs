@@ -33,6 +33,8 @@ pub const EDITED: &str = "edited";
 pub const REJECTED: &str = "rejected";
 pub const CHANGES_REQUESTED: &str = "changes_requested";
 pub const EXPIRED: &str = "expired";
+/// Taken back by the plugin that raised it, before anyone decided it.
+pub const WITHDRAWN: &str = "withdrawn";
 
 /// Longest text an audit record keeps of one argument.
 const MAX_TEXT: usize = 2_000;
@@ -183,6 +185,8 @@ struct Told {
     answer: Option<EventRow>,
     expired_ms: Option<i64>,
     settled: Option<(String, Option<String>)>,
+    /// Who withdrew it, when its settling said so.
+    withdrawn_by: Option<String>,
 }
 
 /// Every brokered call `session_id` made, oldest first, each with how it was
@@ -208,6 +212,7 @@ pub fn session_audit(
             ek::PERMISSION_ANSWER => entry.answer = Some(e.clone()),
             ek::PERMISSION_EXPIRED => entry.expired_ms = Some(e.at_ms),
             ek::APPROVAL_SETTLED => {
+                entry.withdrawn_by = e.payload["withdrawn_by"].as_str().map(str::to_string);
                 entry.settled = Some((
                     e.payload["state"].as_str().unwrap_or_default().to_string(),
                     e.payload["reason"].as_str().map(str::to_string),
@@ -290,19 +295,23 @@ fn resolve(entry: &mut Value, row: Option<&ApprovalRow>, told: Option<&Told>) {
             a::REJECTED => (REJECTED, Some(by)),
             a::CHANGES_REQUESTED => (CHANGES_REQUESTED, Some(by)),
             a::EXPIRED => (EXPIRED, Some("nobody".to_string())),
+            a::WITHDRAWN => (WITHDRAWN, Some(withdrawn_by(row, told))),
             _ if edited.is_some() => (EDITED, Some(by)),
             _ => (APPROVED, Some(by)),
         };
         entry["decision"] = json!(decision);
         entry["decided_by"] = json!(decided_by);
-        entry["decided_ms"] = json!(row
-            .decided_ms
-            .or(row.finished_ms.filter(|_| decision == EXPIRED)));
+        entry["decided_ms"] = json!(row.decided_ms.or(row
+            .finished_ms
+            .filter(|_| decision == EXPIRED || decision == WITHDRAWN)));
         entry["approval_state"] = json!(row.state);
         if let Some(edit) = edited {
             entry["edited_arguments"] = redacted(&edit);
         }
-        if matches!(row.state.as_str(), a::FAILED | a::UNCERTAIN | a::REJECTED) {
+        if matches!(
+            row.state.as_str(),
+            a::FAILED | a::UNCERTAIN | a::REJECTED | a::WITHDRAWN
+        ) {
             entry["reason"] = json!(row.reason);
         }
         if let Some(note) = &row.operator_note {
@@ -328,6 +337,13 @@ fn resolve(entry: &mut Value, row: Option<&ApprovalRow>, told: Option<&Told>) {
         }
         let settled = told.settled.as_ref().map(|(s, _)| s.as_str());
         entry["approval_state"] = json!(settled.unwrap_or(state));
+    } else if let Some((a::WITHDRAWN, reason)) =
+        told.settled.as_ref().map(|(s, r)| (s.as_str(), r.clone()))
+    {
+        entry["decision"] = json!(WITHDRAWN);
+        entry["decided_by"] = json!(told.withdrawn_by.as_deref().unwrap_or("plugin"));
+        entry["approval_state"] = json!(a::WITHDRAWN);
+        entry["reason"] = json!(reason);
     } else if let Some(at) = told.expired_ms {
         entry["decision"] = json!(EXPIRED);
         entry["decided_by"] = json!("nobody");
@@ -337,6 +353,21 @@ fn resolve(entry: &mut Value, row: Option<&ApprovalRow>, told: Option<&Told>) {
         entry["decision"] = json!(PENDING);
         entry["decided_by"] = Value::Null;
     }
+}
+
+/// Who withdrew a card: the plugin that raised it, as its settling named
+/// it, or else as its arguments do. Never the operator.
+fn withdrawn_by(row: &ApprovalRow, told: Option<&Told>) -> String {
+    told.and_then(|t| t.withdrawn_by.clone())
+        .unwrap_or_else(|| {
+            let plugin = serde_json::from_str::<Value>(&row.arguments)
+                .ok()
+                .and_then(|args| args["plugin"].as_str().map(str::to_string));
+            match plugin {
+                Some(name) => format!("plugin:{name}"),
+                None => "plugin".to_string(),
+            }
+        })
 }
 
 #[cfg(test)]

@@ -114,6 +114,8 @@ test('a settled approval says what became of it', () => {
   expect(outcome('pending')).toBeNull()
   expect(outcome('changes_requested')).toBe('Changes requested · nothing ran')
   expect(outcome('something_new')).toBe('something_new')
+  expect(outcome('withdrawn', 'decided in its page', 'hoja')).toBe('Withdrawn by plugin hoja · nobody decided it')
+  expect(outcome('withdrawn')).toBe('Withdrawn by the plugin that raised it · nobody decided it')
   expect(outcome('failed', 'stale: plugin jira: the issue moved')).toBe('Allowed · failed · stale, nothing was sent')
   expect(outcome('failed', 'plugin jira: no')).toBe('Allowed · it failed')
 })

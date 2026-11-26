@@ -3,8 +3,8 @@
 //! (`tests/support/fake_plugin.rs`), whose `node` tool forwards one call: it
 //! raises a card for the agent whose call it is serving and waits on it, is
 //! refused with another token or a method its manifest does not name, pushes
-//! a notification, and calls another plugin's tool as itself, decided by
-//! policy.
+//! a notification, calls another plugin's tool as itself, decided by
+//! policy, and withdraws a card it raised once it is moot.
 
 #[path = "support/mod.rs"]
 mod support;
@@ -30,7 +30,7 @@ const CALLER: &str = r#"name = "caller"
 version = "1.0.0"
 contract = 1
 exec = ["bin/caller"]
-node_methods = ["approval/request", "approval/status", "notify", "tools/call"]
+node_methods = ["approval/request", "approval/status", "approval/withdraw", "notify", "tools/call"]
 
 [[tool]]
 name = "node"
@@ -648,4 +648,184 @@ async fn a_tool_the_channel_is_not_offered_is_refused_before_anything_is_asked()
 /// [`rig`], for a second rig in one test.
 fn rig_with(channel: &str, entries: Vec<PluginEntry>, policy: Policy) -> Rig {
     rig(channel, entries, policy)
+}
+
+#[tokio::test]
+async fn a_plugin_withdraws_a_card_it_raised_and_nobody_is_said_to_have_decided_it() {
+    let rig = rig(
+        "withdraw",
+        vec![],
+        allowing(&["caller__node", "modest__node"]),
+    );
+    let out = rig
+        .node_as(
+            "caller",
+            "approval/request",
+            card("Edit risk R1"),
+            json!({ "on_behalf": true }),
+        )
+        .await;
+    let id = result(&out)["approval_id"].as_str().unwrap().to_string();
+    assert_eq!(
+        rig.store
+            .get_approval(&id)
+            .unwrap()
+            .unwrap()
+            .session_id
+            .as_deref(),
+        Some("withdraw")
+    );
+
+    // A status call waiting on it ends on the withdrawal, not as approved.
+    let waiting = {
+        let tools = rig.tools.clone();
+        let ctx = rig.ctx.clone();
+        let id = id.clone();
+        tokio::spawn(async move {
+            tools
+                .handle(
+                    &ctx,
+                    &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                        "name": "approval_status",
+                        "arguments": { "approval_id": id, "wait_secs": 20 },
+                    }}),
+                )
+                .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let out = rig
+        .node(
+            "approval/withdraw",
+            json!({ "approval_id": id, "reason": "accepted in the plugin's page" }),
+        )
+        .await;
+    let withdrawn = result(&out);
+    assert_eq!(withdrawn["state"], "withdrawn", "{out}");
+    assert_eq!(withdrawn["withdrew"], true);
+    assert_eq!(withdrawn["reason"], "accepted in the plugin's page");
+    assert_eq!(withdrawn["decided_ms"], Value::Null);
+
+    let out = tokio::time::timeout(std::time::Duration::from_secs(10), waiting)
+        .await
+        .expect("the wait ends on the withdrawal")
+        .unwrap()
+        .unwrap();
+    let agent: Value =
+        serde_json::from_str(out["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(agent["state"], "withdrawn", "{agent}");
+    assert!(
+        agent["message"]
+            .as_str()
+            .unwrap()
+            .contains("Plugin caller withdrew"),
+        "{agent}"
+    );
+
+    // It left the queue, and status reads it as withdrawn with the reason.
+    let queue = rig.store.open_approval_cards("[]").unwrap();
+    assert!(queue.iter().all(|c| c.request.id != id), "{queue:?}");
+    let status = rig
+        .node(
+            "approval/status",
+            json!({ "approval_id": id, "wait_secs": 0 }),
+        )
+        .await;
+    assert_eq!(result(&status)["state"], "withdrawn");
+    assert_eq!(result(&status)["reason"], "accepted in the plugin's page");
+    // The session's wait on it is over, told as withdrawn.
+    let wait = rig
+        .manager
+        .waits()
+        .of("withdraw")
+        .into_iter()
+        .find(|w| w.id == id)
+        .expect("the session waited on it");
+    assert_eq!(wait.decided.as_ref().unwrap()["state"], "withdrawn");
+
+    // The audit names the plugin as who ended it, never the operator.
+    let audit = tracon::mcp::audit::session_audit(&rig.store, "withdraw").unwrap();
+    let entry = audit
+        .iter()
+        .find(|e| e["approval_id"] == id.as_str())
+        .unwrap_or_else(|| panic!("{audit:?}"));
+    assert_eq!(entry["decision"], "withdrawn", "{entry}");
+    assert_eq!(entry["decided_by"], "plugin:caller", "{entry}");
+    assert_eq!(entry["reason"], "accepted in the plugin's page");
+    let events = rig
+        .store
+        .session_events_of_kinds("withdraw", &["approval_settled"])
+        .unwrap();
+    let settled = events
+        .iter()
+        .find(|e| e.payload["approval_id"] == id.as_str())
+        .expect("its settling is in the session's log");
+    assert_eq!(settled.payload["state"], "withdrawn");
+    assert_eq!(settled.payload["withdrawn_by"], "plugin:caller");
+    assert!(settled.payload.get("decided_by").is_none(), "{settled:?}");
+
+    // Twice is nothing the second time, and keeps the first reason.
+    let out = rig
+        .node(
+            "approval/withdraw",
+            json!({ "approval_id": id, "reason": "again" }),
+        )
+        .await;
+    assert_eq!(result(&out)["state"], "withdrawn");
+    assert_eq!(result(&out)["withdrew"], false);
+    assert_eq!(result(&out)["reason"], "accepted in the plugin's page");
+
+    // One the operator decided stays decided, and is returned as it is.
+    let out = rig.node("approval/request", card("Edit risk R2")).await;
+    let decided = result(&out)["approval_id"].as_str().unwrap().to_string();
+    rig.answer(&decided, "reject_once", None, None)
+        .await
+        .unwrap();
+    let out = rig
+        .node(
+            "approval/withdraw",
+            json!({ "approval_id": decided, "reason": "moot" }),
+        )
+        .await;
+    assert_eq!(result(&out)["state"], "rejected", "{out}");
+    assert_eq!(result(&out)["withdrew"], false);
+    let row = rig.store.get_approval(&decided).unwrap().unwrap();
+    assert_eq!(row.state, approvals::REJECTED);
+    assert_ne!(row.reason.as_deref(), Some("moot"));
+
+    // Another plugin's card, an unknown one, and a reason left out are
+    // params it does not take.
+    let out = rig
+        .node_as("modest", "approval/request", card("mine"), json!({}))
+        .await;
+    let theirs = result(&out)["approval_id"].as_str().unwrap().to_string();
+    for params in [
+        json!({ "approval_id": theirs, "reason": "moot" }),
+        json!({ "approval_id": "no-such-card", "reason": "moot" }),
+        json!({ "approval_id": decided }),
+        json!({ "approval_id": decided, "reason": " " }),
+    ] {
+        let out = rig.node("approval/withdraw", params.clone()).await;
+        assert_eq!(error(&out)["code"], -32602, "{params}: {out}");
+    }
+    assert_eq!(
+        rig.store.get_approval(&theirs).unwrap().unwrap().state,
+        approvals::PENDING
+    );
+
+    // A manifest that does not name the method is not answered.
+    let out = rig
+        .node_as(
+            "modest",
+            "approval/withdraw",
+            json!({ "approval_id": theirs, "reason": "moot" }),
+            json!({}),
+        )
+        .await;
+    assert_eq!(error(&out)["code"], -32601, "{out}");
+    assert_eq!(
+        rig.store.get_approval(&theirs).unwrap().unwrap().state,
+        approvals::PENDING
+    );
+    rig.manager.plugins().shutdown().await;
 }

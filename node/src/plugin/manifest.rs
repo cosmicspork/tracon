@@ -27,6 +27,10 @@ pub const NODE_METHODS: &[(&str, &str)] = &[
         "raises approval cards for the operator, as itself",
     ),
     ("approval/status", "waits on the cards it raised"),
+    (
+        "approval/withdraw",
+        "withdraws a pending card it raised, once it is moot",
+    ),
     ("notify", "sends the operator a push notification"),
     (
         "tools/call",

@@ -13,6 +13,8 @@ export type ApprovalState =
   | 'rejected'
   | 'changes_requested'
   | 'expired'
+  /** Taken back by the plugin that raised it, before anyone decided it. */
+  | 'withdrawn'
 
 export interface ApprovalRow {
   id: string
@@ -28,7 +30,7 @@ export interface ApprovalRow {
   answer_option_id: string | null
   edited_arguments: string | null
   result: string | null
-  /** Why it was refused, expired, or failed. */
+  /** Why it was refused, expired, failed, or withdrawn. */
   reason: string | null
   /** The operator's notes on a request for changes, or a remark with an allow. */
   operator_note: string | null
@@ -625,8 +627,13 @@ const SETTLED: Record<string, string> = {
 /** How the reason of a call failed as stale begins: what the card showed had moved, and nothing was sent. */
 export const STALE_REASON = 'stale:'
 
-/** What became of a decided approval, or null while it waits. */
-export function outcome(state: string, reason?: string | null): string | null {
+/**
+ * What became of a decided approval, or null while it waits. A withdrawn card
+ * names the plugin that took it back (`plugin`, when the page knows it): it
+ * was nobody's decision.
+ */
+export function outcome(state: string, reason?: string | null, plugin?: string | null): string | null {
   if (state === 'failed' && reason?.startsWith(STALE_REASON)) return 'Allowed · failed · stale, nothing was sent'
+  if (state === 'withdrawn') return `Withdrawn by ${plugin ? `plugin ${plugin}` : 'the plugin that raised it'} · nobody decided it`
   return state === 'pending' ? null : (SETTLED[state] ?? state)
 }

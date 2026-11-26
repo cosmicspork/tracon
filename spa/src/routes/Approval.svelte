@@ -416,7 +416,7 @@
       <dd class="m">{formatAge(a.decided_ms, clock.now)} ago</dd>
     {/if}
     {#if a.finished_ms !== null}
-      <dt>{a.state === 'expired' ? 'Expired' : 'Finished'}</dt>
+      <dt>{a.state === 'expired' ? 'Expired' : a.state === 'withdrawn' ? 'Withdrawn' : 'Finished'}</dt>
       <dd class="m">{formatAge(a.finished_ms, clock.now)} ago</dd>
     {/if}
     {#each pluginRows(details, lentOutdated) as row (row.key)}
@@ -442,8 +442,8 @@
   {/if}
 
   {#if !pending}
-    <div class="banner" class:ok={a.state === 'succeeded' || a.state === 'running'} class:crit={a.state === 'failed' || a.state === 'uncertain'} class:dim={a.state === 'rejected' || a.state === 'expired' || a.state === 'changes_requested'}>
-      {outcome(a.state, a.reason)}
+    <div class="banner" class:ok={a.state === 'succeeded' || a.state === 'running'} class:crit={a.state === 'failed' || a.state === 'uncertain'} class:dim={a.state === 'rejected' || a.state === 'expired' || a.state === 'changes_requested' || a.state === 'withdrawn'}>
+      {outcome(a.state, a.reason, card?.plugin)}
       {#if notRunDetail(a.state, a.reason)}
         <b>· {notRunDetail(a.state, a.reason)}</b>
       {/if}

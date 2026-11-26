@@ -273,7 +273,7 @@ methods it calls in its manifest, and the install card lists them under **Calls 
 node**:
 
 ```toml
-node_methods = ["approval/request", "approval/status", "notify", "tools/call"]
+node_methods = ["approval/request", "approval/status", "approval/withdraw", "notify", "tools/call"]
 ```
 
 A plugin that names any is started with `--node-socket <path>` as well: a socket the node
@@ -304,8 +304,15 @@ not take, `-32003` for a refusal (`data.decision` is `denied` or `asked` for a t
 - **`approval/status`** takes `approval_id` (or `approval_ids`) of cards this plugin
   raised on this channel and waits up to `wait_secs` (at most 45, the default) for a
   decision, as an agent's status call does: `still_waiting`, `approved`, `rejected`,
-  `changes_requested` (with your `notes`) or `expired`. Allowing a card runs nothing on
-  the node; the plugin does what it asked to once it reads `approved`.
+  `changes_requested` (with your `notes`), `expired` or `withdrawn`. Allowing a card runs
+  nothing on the node; the plugin does what it asked to once it reads `approved`.
+- **`approval/withdraw`** takes `approval_id` and a `reason`, and takes back a card the
+  plugin raised on this channel while it still waits: once it is moot, say because you
+  decided the same thing in the plugin's own page. The card leaves your queue at once and
+  ends `withdrawn`; its page and the session's audit say the plugin withdrew it, with its
+  reason, not that you decided it or that it expired. A card already decided, expired or
+  withdrawn is left as it is and its state returned, so a retry is safe. Another plugin's
+  or channel's card is refused with `-32602`.
 - **`notify`** takes `title`, `message` and an optional `path`, and pushes to your
   devices as `notify_operator` does, its title led by the plugin's name.
 - **`tools/call`** takes `name` (`<plugin>__<tool>`, another plugin's) and `arguments`,
