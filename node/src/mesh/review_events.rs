@@ -61,6 +61,10 @@ pub struct ReviewMeta {
     /// A report's text; none for a code review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    /// The reviews it publishes after, as the owner holds them: a peer keeps
+    /// them with its copy and never changes them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub after: Vec<String>,
 }
 
 impl ReviewMeta {
@@ -88,6 +92,7 @@ impl ReviewMeta {
             created_ms: r.created_ms,
             updated_ms: r.updated_ms,
             body: (r.kind == reports::KIND).then(|| r.body.clone()),
+            after: r.after.clone(),
         }
     }
 
@@ -150,6 +155,7 @@ impl ReviewMeta {
             revision_patch: None,
             lane: self.lane.clone(),
             publication_failed: self.publication_failed.clone(),
+            after: self.after.clone(),
         }
     }
 }
@@ -499,6 +505,7 @@ mod tests {
             revision_patch: None,
             lane: None,
             publication_failed: None,
+            after: Vec::new(),
         }
     }
 

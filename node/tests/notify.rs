@@ -255,6 +255,7 @@ fn review(id: &str, state: &str) -> ReviewRow {
         revision_patch: None,
         lane: None,
         publication_failed: None,
+        after: Vec::new(),
     }
 }
 

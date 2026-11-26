@@ -2796,6 +2796,7 @@ mod tests {
             revision_patch: None,
             lane: None,
             publication_failed: None,
+            after: Vec::new(),
         };
         store
             .insert_review_with_revision(&row, &revision(store, id, head))

@@ -2045,6 +2045,7 @@ mod tests {
                         revision_patch: None,
                         lane: None,
                         publication_failed: None,
+                        after: Vec::new(),
                     },
                     &crate::store::ReviewRevisionRow {
                         id: format!("rev-{id}"),

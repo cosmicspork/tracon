@@ -7,6 +7,7 @@
   import { publicationFailure, reviewChecks, reviewVerdict, type Review } from '../lib/types'
   import { checksState } from '../lib/verdicts'
   import { directMarker, parseTarget } from '../lib/direct'
+  import { afterLine } from '../lib/reviewDependencies'
   let { review }: { review: Review } = $props()
 
   const noun = $derived(review.provider === 'gitlab' ? 'MR' : 'PR')
@@ -25,6 +26,8 @@
   /** Pushes straight to its base, while the operator is warned of that. */
   const direct = $derived(narrative ? null : directMarker(parseTarget(review.target)))
   const failed = $derived(publicationFailure(review))
+  /** What it publishes after, by name. */
+  const after = $derived(narrative ? null : afterLine(review.after))
   const label = $derived.by(() => {
     if (isNarrativeReport(review)) {
       const state = review.state
@@ -49,7 +52,7 @@
         {#if direct}· <span class="chip warn">{direct}</span>{/if}
         · {direct ? 'no ' + noun : noun} · {files} file{files === 1 ? '' : 's'} · +{review.added} −{review.removed} · {review.channel}{review.claimed_ms
           ? ' · claimed'
-          : ''}{#if checks}{' · '}{checks === 'running' ? 'checks running' : checks === 'passed' ? 'checks ✓' : 'checks ✗'}{/if}{#if verdict}{' · '}<span class="chip" class:warn={verdict.verdict === 'request_changes'} class:ok={verdict.verdict === 'approve'}>{verdict.verdict === 'approve' ? 'approves' : 'changes suggested'}</span>{:else if review.review_session_id}{' · '}reviewing{/if}{#if failed}{' · '}<span class="why">{failed}</span>{/if}
+          : ''}{#if checks}{' · '}{checks === 'running' ? 'checks running' : checks === 'passed' ? 'checks ✓' : 'checks ✗'}{/if}{#if verdict}{' · '}<span class="chip" class:warn={verdict.verdict === 'request_changes'} class:ok={verdict.verdict === 'approve'}>{verdict.verdict === 'approve' ? 'approves' : 'changes suggested'}</span>{:else if review.review_session_id}{' · '}reviewing{/if}{#if after}{' · '}{after}{/if}{#if failed}{' · '}<span class="why">{failed}</span>{/if}
       {/if}
     </small>
   </span>

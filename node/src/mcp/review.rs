@@ -107,6 +107,11 @@ pub fn definitions() -> Vec<Value> {
                     "message": { "type": "string", "description": "The commit message the change ships with; the title, body and forge description never become it. Omitted, it is your one commit's own message, and that commit ships as it is, SHA and signature, when it sits directly on the base; with several commits beyond the base, `message` is required. Another message ships one new, unsigned commit of the reviewed tree (a repository set to keep its commits pushes them as written). The operator may edit it; the result says what ships (`ships`, `commit_message`, `drops_signatures`)." },
                     "branch": { "type": "string", "description": "The forge branch a new change is pushed to, e.g. feat/short-description. Defaults to your worktree's branch, or one named from the title. Fixed by a review's first submit; an existing change is pushed to its own branch. Naming the base itself (branch equal to base) pushes straight to it: approval fast-forwards the base, opens no change, and CI runs after the push; your work must build on origin/<base>, a rewrite is refused, and a base the forge protects (a pull request required, say) rejects the push, which the result's `direct.protection` says before the operator decides." },
                     "rewrite": { "type": "boolean", "description": "The branch's history was rewritten (rebase, amend), so the push replaces what the forge's branch holds, only over what it held at submit and always approved by the operator." },
+                    "after": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "The review_ids of reviews on this channel whose changes must land before this one: it is not approved until each is approved, published and, when it opened or updated a change, merged (the operator can still approve it first, saying why). On a resubmission it replaces the list; left out, the list stays as it was. A review that does not exist here, a rejected one, or one that would make a cycle is refused.",
+                    },
                     "threads": {
                         "type": "array",
                         "description": "With review_id: what this revision does about the operator's review threads that review_status returned. Name each thread it answers; `addressed: true` says this revision addresses it (the operator still resolves or reopens it), and `reply` says what you did, or why you left it.",
@@ -154,7 +159,11 @@ pub fn definitions() -> Vec<Value> {
                  would have refused with, and nothing was submitted. Changes requested \
                  returns the operator's `notes`, any edited `patch`, and `threads`: their \
                  points still open, each bound to a revision, a path, a side and lines, \
-                 reading `unresolved`, `addressed` or `outdated`. While it waits, `reviewer` says what an AI reviewer of the \
+                 reading `unresolved`, `addressed` or `outdated`. A review submitted with \
+                 `after` carries `after`: each review it publishes after, with its `state`, \
+                 what it `says` (`merged`, `waiting on merge`, `waiting on review`…) and \
+                 whether it is `satisfied`; until each is, the operator cannot approve it \
+                 without saying why. While it waits, `reviewer` says what an AI reviewer of the \
                  latest revision is doing (`state`: starting, running, done, failed or none) \
                  and, once it has given one, its `verdict`, `summary` and `findings`; a \
                  verdict arriving ends the wait early. Its summary and findings are sent \
@@ -389,6 +398,16 @@ async fn submit(
     // What the agent says of the operator's threads, checked against the
     // review now and recorded with the revision it comes with.
     let threads = threads_arg(store, args, resubmission.as_ref())?;
+    // What it publishes after, checked before anything is captured or run.
+    let after = review::dependencies::after_arg(args)?;
+    if let Some(after) = &after {
+        review::dependencies::check(
+            store,
+            &ctx.channel,
+            resubmission.as_ref().map(|r| r.id.as_str()).or(named),
+            after,
+        )?;
+    }
     // A client that gave up waiting may retry a submission that is still
     // running or already recorded. Same-commit submits from one worktree run
     // one at a time, and a fresh one finds the checks or the review the other
@@ -482,6 +501,13 @@ async fn submit(
                             note,
                         )?;
                     }
+                }
+                if let Some(after) = &after {
+                    review::dependencies::check(store, &ctx.channel, Some(&existing.id), after)?;
+                    store
+                        .set_review_dependencies(&existing.id, after)
+                        .map_err(|e| e.to_string())?;
+                    manager.publish_queue().await;
                 }
                 return publish_if_granted(manager, ctx, already_submitted(&existing)).await;
             }
@@ -924,6 +950,7 @@ async fn submit(
         authorship,
         ships,
         threads,
+        after,
     };
     // The operator's own toolchain is where an external harness's checks
     // run, never this node's container: nothing here can execute a command
@@ -1232,6 +1259,9 @@ struct Submission {
     /// What the agent says of the operator's threads, recorded with the
     /// revision once it is.
     threads: Vec<crate::store::review_thread::ThreadAnswer>,
+    /// What it publishes after, when the submission named it: recorded
+    /// with the review, replacing what a resubmitted one named.
+    after: Option<Vec<String>>,
 }
 
 impl Submission {
@@ -1263,6 +1293,7 @@ impl Submission {
             authorship,
             ships,
             threads,
+            after,
         } = self;
         let external = session.is_none();
         let source = if external {
@@ -1340,6 +1371,7 @@ impl Submission {
                     tracing::warn!(%error, review = %id, "answers to review threads not stored");
                 }
             }
+            record_after(store, manager, &id, after.as_deref()).await?;
             let reviewer = keep_and_review(
                 store,
                 manager,
@@ -1410,6 +1442,7 @@ impl Submission {
             revision_patch: None,
             lane: ctx.lane().map(str::to_string),
             publication_failed: None,
+            after: Vec::new(),
         };
         let revision = ReviewRevisionRow {
             id: uuid::Uuid::now_v7().to_string(),
@@ -1431,6 +1464,7 @@ impl Submission {
         store
             .insert_review_with_revision(&row, &revision)
             .map_err(|error| error.to_string())?;
+        record_after(store, manager, &id, after.as_deref()).await?;
         if let Some(note) = note.as_deref() {
             // Before the reviewer starts, which reads shown work; a note that
             // cannot be stored does not undo the review it came with.
@@ -1495,6 +1529,48 @@ impl Submission {
         with_ran_on(&mut submitted, &checks);
         with_ships(&mut submitted, &ships);
         Ok(submitted)
+    }
+}
+
+/// Record what review `id` publishes after, when the submission named it.
+/// Checked again here: a dependency may have been rejected, or have come to
+/// publish after this one, while the checks ran.
+async fn record_after(
+    store: &Store,
+    manager: &Manager,
+    id: &str,
+    after: Option<&[String]>,
+) -> Result<(), String> {
+    let Some(after) = after else {
+        return Ok(());
+    };
+    let channel = store
+        .get_review(id)
+        .map_err(|e| e.to_string())?
+        .map(|r| r.channel)
+        .unwrap_or_default();
+    if let Err(refusal) = review::dependencies::check(store, &channel, Some(id), after) {
+        // The review is recorded; what it publishes after is left as it was.
+        tracing::warn!(review = %id, %refusal, "what a review publishes after not recorded");
+        return Ok(());
+    }
+    if store
+        .set_review_dependencies(id, after)
+        .map_err(|e| e.to_string())?
+    {
+        manager.publish_queue().await;
+    }
+    Ok(())
+}
+
+/// What `review` publishes after, as `review_status` returns it: each
+/// dependency with where it stands. Nothing when it publishes after none.
+fn with_after(store: &Store, review: &ReviewRow, view: &mut Value) {
+    let Ok(after) = review::dependencies::after(store, review) else {
+        return;
+    };
+    if !after.is_empty() && view.is_object() {
+        view["after"] = json!(after);
     }
 }
 
@@ -3273,6 +3349,7 @@ async fn submit_report(
         revision_patch: None,
         lane: ctx.lane().map(str::to_string),
         publication_failed: None,
+        after: Vec::new(),
     };
     store
         .insert_review(&report)
@@ -5311,9 +5388,10 @@ async fn status(
                 "that id is a standalone narrative report; call report_status instead".into(),
             );
         }
-        if let Some(view) = decided_review_view(store, &r) {
+        if let Some(mut view) = decided_review_view(store, &r) {
             told_review(manager, ctx, &r);
             review_decided(manager, &r.id);
+            with_after(store, &r, &mut view);
             return Ok(view);
         }
         if read
@@ -5398,9 +5476,10 @@ async fn status(
                 );
                 view["waited_secs"] = json!(waited);
                 view["reviewer"] = reviewer();
+                with_after(store, &r, &mut view);
                 return Ok(view);
             }
-            return Ok(json!({
+            let mut view = json!({
                 "review_id": r.id,
                 "state": r.state,
                 "still_waiting": true,
@@ -5414,7 +5493,9 @@ async fn status(
                     super::wait::capped(ctx),
                     crate::session::waits::brought_back_review(ctx.session_id().is_some())
                 ),
-            }));
+            });
+            with_after(store, &r, &mut view);
+            return Ok(view);
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
@@ -5656,6 +5737,7 @@ mod tests {
             revision_patch: None,
             lane: None,
             publication_failed: None,
+            after: Vec::new(),
         }
     }
 
