@@ -51,6 +51,19 @@ land, a failed one shows there without refusing the submission, and a reviewer, 
 the change — or updates the one named by `change` — with the brokered
 credential, exactly as for a session it started.
 
+The agent sees those checks itself, not only through a reviewer or your notes:
+every `review_status` answer to it carries `checks` for the review's latest
+commit, with its `head_sha`, a `state` (`running`, `passed`, `failed`,
+`could_not_run`, or `none` with a `why`, as when `check_submissions` is off) and
+each check's `command`, `outcome`, `exit` and `ms`. Checks settling end a
+`review_status` wait early, as a verdict does. The end of a failed check's output
+(`tail`) is sent once per commit; later polls carry outcomes only, unless the
+agent passes `include_findings: true`. A failure puts a line at the start of the
+message naming the check and saying the submission still stands, so the agent
+can fix it and resubmit with the same `review_id` without waiting on anyone. A
+resubmission on a new commit never shows the last commit's results. So an agent
+can run targeted tests itself and leave the full suite to the node.
+
 A decided review has no session to lead back to it, so the history lists it:
 **all reviews** beside *Landed recently* on the home (`/reviews`) shows every
 decided review this node holds or mirrors, newest first, with its verdict, where
