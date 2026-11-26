@@ -1286,6 +1286,13 @@ pub fn lend_to_preparation(broker: SharedBroker, node_id: &str) {
     let _ = LENT_TO_PREPARATION.set((broker, node_id.to_string()));
 }
 
+/// The node's broker and id, as `serve` installed them: what a warm-up
+/// clones and fetches a managed clone with, having no request to carry
+/// them. `None` in a process that never serves.
+pub fn node_broker() -> Option<(SharedBroker, String)> {
+    LENT_TO_PREPARATION.get().cloned()
+}
+
 /// The environment `names` lend `repo`'s default-branch preparation, read from
 /// the broker as it is now, so a credential imported in Settings applies to
 /// the next warm-up without a restart.

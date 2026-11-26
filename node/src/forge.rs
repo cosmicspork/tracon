@@ -1175,7 +1175,24 @@ pub async fn refresh_for_build(
     )
     .await
     .map_err(|_| "git fetch ran out of time".to_string())??;
+    // A missing, dangling or plain `origin/HEAD` would leave the build with
+    // no default branch to read, as a session's sync would be left.
+    set_head(repo_path, &credential).await;
     Ok(true)
+}
+
+/// Point `origin/HEAD` at the forge's default branch as it is now: the
+/// forge may have renamed it since the clone was made, and a clone's
+/// `origin/HEAD` can be missing, dangling or a plain ref rather than the
+/// symbolic one Git makes. Best effort: a failure leaves the one it had.
+/// It asks the forge, so it carries the fetch's credential.
+async fn set_head(repo: &Path, credential: &crate::git_remote::Credential<'_>) {
+    if let Ok(mut command) = managed_git(repo, credential) {
+        command
+            .args(["remote", "set-head", "origin", "--auto"])
+            .kill_on_drop(true);
+        let _ = tokio::time::timeout(Duration::from_secs(60), command.output()).await;
+    }
 }
 
 /// One writer at a time per managed clone: a session seeding from it while
@@ -1267,15 +1284,7 @@ pub async fn sync_managed(
         .unwrap_or_else(|_| Err("git fetch ran out of time".into()));
     let stale = fetched.err();
     if stale.is_none() {
-        // The forge may have renamed its default branch since the clone was
-        // made. Best effort: a failure leaves the `origin/HEAD` it had.
-        // It asks the forge, so it carries the fetch's credential.
-        if let Ok(mut command) = managed_git(repo, credential) {
-            command
-                .args(["remote", "set-head", "origin", "--auto"])
-                .kill_on_drop(true);
-            let _ = tokio::time::timeout(Duration::from_secs(60), command.output()).await;
-        }
+        set_head(repo, credential).await;
     }
     let head = match local_git(
         repo,
@@ -1634,7 +1643,7 @@ pub async fn clone(
     // Dot-named, so the picker's walk (`managed_repos`) never lists it.
     let partial =
         Partial(parent.join(format!(".{leaf}.cloning-{}", uuid::Uuid::now_v7().simple())));
-    let url = format!("https://{host}/{owner}/{name}.git");
+    let url = clone_url(host, owner, name);
     let mut cmd =
         crate::git_remote::git("git", FORGE_HOME, credential).map_err(|e| e.to_string())?;
     cmd.args(["clone", "--no-local", "--no-hardlinks", &url])
@@ -1660,6 +1669,38 @@ pub async fn clone(
     // An empty directory at `dest` is replaced; anything else was refused.
     std::fs::rename(&partial.0, dest).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Where [`clone`] fetches `host/owner/name` from: its forge, over HTTPS,
+/// or in a test the local repository standing in for it.
+fn clone_url(host: &str, owner: &str, name: &str) -> String {
+    #[cfg(test)]
+    if let Some(path) = test_forge::stand_in_for(&format!("{host}/{owner}/{name}")) {
+        return path;
+    }
+    format!("https://{host}/{owner}/{name}.git")
+}
+
+/// Local repositories that stand in for a forge's in tests, by identity, so
+/// a managed clone can be made without the network.
+#[cfg(test)]
+pub(crate) mod test_forge {
+    use std::{collections::HashMap, sync::Mutex};
+
+    static STAND_INS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+
+    /// Clone `identity` from `path` from now on.
+    pub(crate) fn stand_in(identity: &str, path: &std::path::Path) {
+        STAND_INS
+            .lock()
+            .unwrap()
+            .get_or_insert_with(HashMap::new)
+            .insert(identity.to_string(), path.to_string_lossy().into_owned());
+    }
+
+    pub(super) fn stand_in_for(identity: &str) -> Option<String> {
+        STAND_INS.lock().unwrap().as_ref()?.get(identity).cloned()
+    }
 }
 
 /// A clone being made, removed when it is dropped: by then it was either
@@ -2049,6 +2090,37 @@ mod tests {
             refresh_for_build(&broker, host.path(), "n1").await,
             Ok(false)
         );
+        let _ = std::fs::remove_dir_all(clone.parent().unwrap());
+    }
+
+    /// A fetch for a build repairs `origin/HEAD`, as a session's sync does,
+    /// whether it was deleted or replaced by a plain ref (#1191).
+    #[tokio::test]
+    async fn a_fetch_for_a_build_repairs_a_missing_or_plain_origin_head() {
+        let (_tmp, clone) = managed_fixture("set-head");
+        let tip = sh(&clone, "git rev-parse origin/main");
+        let broker = crate::broker::Broker::default().shared();
+        for break_it in [
+            "git symbolic-ref --delete refs/remotes/origin/HEAD",
+            "git symbolic-ref --delete refs/remotes/origin/HEAD \
+             && git update-ref refs/remotes/origin/HEAD origin/main",
+        ] {
+            sh(&clone, break_it);
+            assert!(
+                sh(
+                    &clone,
+                    "git symbolic-ref -q refs/remotes/origin/HEAD || true"
+                )
+                .is_empty(),
+                "{break_it}"
+            );
+            assert_eq!(refresh_for_build(&broker, &clone, "n1").await, Ok(true));
+            assert_eq!(
+                crate::repo_image::default_commit(&clone).await,
+                Ok(("origin/main".to_string(), tip.clone())),
+                "{break_it}"
+            );
+        }
         let _ = std::fs::remove_dir_all(clone.parent().unwrap());
     }
 

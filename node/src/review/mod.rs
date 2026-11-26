@@ -217,6 +217,16 @@ pub(crate) async fn resolve(dir: &str, revision: &str) -> Result<String, ReviewE
     .await
 }
 
+/// [`resolve`], with Git's own error when it does not resolve.
+pub(crate) async fn verify(dir: &str, revision: &str) -> Result<String, ReviewError> {
+    git(dir, "rev-parse", &["rev-parse", "--verify", revision]).await
+}
+
+/// The ref the symbolic ref `name` points at, in full (`refs/remotes/origin/main`).
+pub(crate) async fn symbolic_ref(dir: &str, name: &str) -> Result<String, ReviewError> {
+    git(dir, "symbolic-ref", &["symbolic-ref", name]).await
+}
+
 /// A blob's bytes, addressed by hash or by `<commit>:<path>`.
 pub(crate) async fn blob(dir: &str, object: &str) -> Result<Vec<u8>, ReviewError> {
     git_bytes(dir, "cat-file", &["cat-file", "blob", object]).await
