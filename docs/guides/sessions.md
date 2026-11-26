@@ -630,8 +630,10 @@ first; when they cannot be read or do not match, the gap says so instead. A rena
 binary file and a change of mode are each labelled as what they are.
 To find your way through a large change, the bar above the diff filters the files by
 path, totals the lines added and removed, folds or opens every file, and steps to the
-next or previous change (**n** and **p** on the keyboard). Each file folds under its
-header with its own counts and a **Viewed** mark. A mark is your reading progress on this
+next or previous change (**n** and **p** on the keyboard). The diff is the review's only
+file list: every file starts folded under its header with its own counts and a
+**Viewed** mark (a diff of one file starts open), and a file the worktree changed after
+submit says *changed since submit* there. A mark is your reading progress on this
 device, bound to the revision you made it on and to the file's diff as it was then: when
 the agent resubmits, files it left alone stay viewed and files it changed lose the mark
 and say they changed since you viewed them. Viewed never means approved; nothing is sent
@@ -643,7 +645,9 @@ file that says it is generated) and oversized ones (over 1,500 changed lines, or
 over 5,000 characters) start folded with the reason and a **Load diff** button.
 `bun scripts/diff-bench.ts` in `spa/` measures a review of a few hundred files in Chromium.
 You approve, reject with a reason, or — on a desktop — edit the diff and send it back as
-a request for changes. A request for changes is how a review comes back: the agent
+a request for changes. **Edit the diff** keeps the same frame: the files fold and filter
+as they do when you read them, start folded except those you already edited, and an
+edited file says *edited* on its header. A request for changes is how a review comes back: the agent
 resubmits with the same `review_id`. A rejection is final: `submit_review` refuses a
 rejected review's id, quoting your reason, and the agent submits the work again as a new
 review if it continues. Approval publishes exactly the reviewed tree with the brokered

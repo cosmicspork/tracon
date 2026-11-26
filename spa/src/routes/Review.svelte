@@ -2,6 +2,7 @@
   import ReportReview from '../components/ReportReview.svelte'
   import Name from '../components/Name.svelte'
   import Diff from '../components/Diff.svelte'
+  import DiffFiles from '../components/DiffFiles.svelte'
   import ReviewDiff from '../components/ReviewDiff.svelte'
   import ReviewThreads from '../components/ReviewThreads.svelte'
   import { anchorAt, threadsOn, threadsBlockedReason, unresolvedCount, type Anchor, type Numbered, type ReviewThread } from '../lib/reviewThreads'
@@ -568,6 +569,16 @@
    */
   const ships = $derived(shipping(intent, shippedMessage(outputs, intent), reworded))
   const diffFiles = $derived(splitDiff(review?.diff ?? ''))
+  /** The files as Edit the diff lists them, editable or shown read-only, in the diff's order. */
+  const editItems = $derived.by(() => {
+    const listed = new Set([...editable.keys(), ...readOnly.map((r) => r.path)])
+    const inDiff = diffFiles.filter((d) => listed.has(d.path))
+    const rest = [...listed].filter((p) => !inDiff.some((d) => d.path === p))
+    return [
+      ...inDiff.map((d) => ({ path: d.path, added: d.added, removed: d.removed, counted: d.added + d.removed > 0 })),
+      ...rest.map((path) => ({ path, added: 0, removed: 0, counted: false })),
+    ]
+  })
   /**
    * The files the reader has marked viewed on this revision, kept on this
    * device. Their own progress through the change: never approval.
@@ -723,9 +734,6 @@
     return failuresOf(run) || run.log.trimEnd().split('\n').slice(-12).join('\n')
   }
 
-  /** The diff showing when the editor is not. */
-  let reviewDiff = $state<ReturnType<typeof ReviewDiff> | null>(null)
-
   /**
    * How the diff reads a file whole for the lines a hunk leaves out: from
    * what the revision pinned, never the worktree. `from`, for the diff since
@@ -739,18 +747,6 @@
       }
       return { base: got.base.text, head: got.head.text }
     }
-  }
-
-  /** Scroll to a file's changes, in the diff or the editor, whichever is showing. */
-  async function showFile(path: string) {
-    if (!editing && diffView === 'since' && !sinceReviewed?.files?.some((f) => f.path === path)) {
-      diffView = 'full'
-      await tick()
-    }
-    if (!editing) return reviewDiff?.showFile(path)
-    document
-      .querySelector(`.filehead[data-path="${CSS.escape(path)}"]`)
-      ?.scrollIntoView({ block: 'start', behavior: 'smooth' })
   }
 
   // An attempt approved on another device, or before this page was opened,
@@ -1523,23 +1519,9 @@
     {/if}
   {/if}
 
-  <div class="h4">Files <b>{files.length}</b></div>
-  {#if !surface.phone}
-    <div class="files">
-      {#each files as f (f.path)}
-        <button type="button" class:moved={stale.includes(f.path)} onclick={() => showFile(f.path)}>
-          <span class="p">{f.path}</span>
-          {#if viewed?.state(f.path) === 'viewed'}<span class="seen">viewed</span>{/if}
-          <span class={stale.includes(f.path) ? 'bad' : 'ok'}
-            >{stale.includes(f.path) ? 'changed since submit' : 'unchanged'}</span
-          >
-        </button>
-      {/each}
-    </div>
-  {/if}
-
-  <!-- On the phone the file list is the diff: it decides most reviews, and each
-       file opens to its hunks when it does not. -->
+  <!-- The diff is the file list: every file folds under a header with its
+       counts, and one changed since submit says so there. Editing keeps the
+       same frame, with an editor as an editable file's body. -->
   {#if editing}
     {#if loadingFiles}
       <div class="empty">Opening the files…</div>
@@ -1551,23 +1533,23 @@
           nothing here can be edited <b>· each file below says why</b>
         </div>
       {/if}
-      {#each [...editable] as [path, f] (path)}
-        <div class="filehead" data-path={path}>
-          <span class="p">{path}</span>
-          {#if f.now !== f.head}<span class="chip warn">edited</span>{/if}
-        </div>
-        {#if DiffEditor}
-          <DiffEditor {path} original={f.original} head={f.head} onchange={onFileChange} />
-        {/if}
-      {/each}
-      {#each readOnly as r (r.path)}
-        {@const block = diffFiles.find((d) => d.path === r.path)}
-        <div class="filehead" data-path={r.path}>
-          <span class="p">{r.path}</span>
-          <span class="chip" class:warn={stale.includes(r.path)}>read-only · {r.why}</span>
-        </div>
-        {#if block}<Diff diff={block.lines.join('\n')} />{/if}
-      {/each}
+      <DiffFiles items={editItems} startOpen={() => [...editable].filter(([, f]) => f.now !== f.head).map(([p]) => p)}>
+        {#snippet chips(path)}
+          {@const f = editable.get(path)}
+          {@const r = readOnly.find((x) => x.path === path)}
+          {#if f && f.now !== f.head}<span class="chip warn">edited</span>{/if}
+          {#if r}<span class="chip" class:warn={stale.includes(path)}>read-only · {r.why}</span>{/if}
+        {/snippet}
+        {#snippet body(path)}
+          {@const f = editable.get(path)}
+          {#if f}
+            {#if DiffEditor}<DiffEditor {path} original={f.original} head={f.head} onchange={onFileChange} />{/if}
+          {:else}
+            {@const block = diffFiles.find((d) => d.path === path)}
+            {#if block}<Diff diff={block.lines.join('\n')} />{/if}
+          {/if}
+        {/snippet}
+      </DiffFiles>
     {/if}
   {:else}
     {#if sinceReviewed?.diff}
@@ -1582,17 +1564,17 @@
     {/if}
     {#if diffView === 'since' && sinceReviewed?.diff}
       <ReviewDiff
-        bind:this={reviewDiff}
         diff={sinceReviewed.diff}
-        collapsed={surface.phone}
+        collapsed
+        {stale}
         context={pinnedContext(sinceReviewed.revision_id)}
         {viewed}
       />
     {:else}
       <ReviewDiff
-        bind:this={reviewDiff}
         diff={review.diff}
-        collapsed={surface.phone}
+        collapsed
+        {stale}
         context={pinnedContext()}
         {viewed}
         onpick={threadsBlocked ? undefined : pickLine}
@@ -2255,23 +2237,6 @@
   .editbar .note {
     color: var(--dim);
   }
-  .filehead {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-top: 4px;
-  }
-  .filehead .p {
-    font: 12.5px var(--mono);
-    color: var(--ink2);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .filehead .chip.warn {
-    background: var(--wash-wait);
-    color: var(--wait);
-  }
   .commits {
     list-style: none;
     margin: 0 0 8px;
@@ -2315,48 +2280,6 @@
   .branch input {
     flex: 1;
     margin: 0;
-  }
-  .files {
-    background: var(--s1);
-    border-radius: 4px;
-    font: 12.5px var(--mono);
-    overflow: hidden;
-  }
-  /* Each file is a way into its changes in the diff below. */
-  .files button {
-    display: flex;
-    justify-content: space-between;
-    gap: 10px;
-    width: 100%;
-    padding: 6px 12px;
-    border: 0;
-    border-top: 1px solid var(--rule);
-    background: none;
-    color: inherit;
-    font: inherit;
-    text-align: left;
-    cursor: pointer;
-  }
-  .files button:first-child {
-    border-top: 0;
-  }
-  .files button:hover .p {
-    color: var(--acc);
-  }
-  .files .p {
-    flex: 1;
-    min-width: 0;
-    overflow-wrap: anywhere;
-  }
-  .files .ok {
-    color: var(--dim);
-  }
-  .files .bad {
-    color: var(--crit);
-  }
-  .files .seen {
-    color: var(--dim);
-    font-style: italic;
   }
   .draft-state {
     font: 12px var(--mono);

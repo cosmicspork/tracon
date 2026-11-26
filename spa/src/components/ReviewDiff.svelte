@@ -24,11 +24,13 @@
   // what can be seen. Generated and very large files start folded with the
   // reason, and are drawn on "Load diff".
   //
-  // A large change is found and kept track of file by file: a filter on the
-  // paths, every file folding under its header with its own counts, a step
-  // to the next or previous change (also `n` and `p`), and, given `viewed`,
-  // a mark on each file the reader has read. Viewed is the reader's progress
-  // and never approval; the bar says so beside the count.
+  // A large change is found and kept track of file by file in DiffFiles, the
+  // frame editing the diff uses too: a filter on the paths, every file
+  // folding under its header with its own counts, a step to the next or
+  // previous change (also `n` and `p`), and, given `viewed`, a mark on each
+  // file the reader has read. Given `collapsed`, every file starts folded
+  // unless the diff has only the one; given `stale`, a file changed since it
+  // was submitted says so on its header, and no other file says anything.
   //
   // The unchanged lines a hunk leaves out are counted on its header and, given
   // `context`, shown on request: the file is read whole, once, from what the
@@ -41,6 +43,7 @@
   import { tick, untrack } from 'svelte'
 
   import Diff from './Diff.svelte'
+  import DiffFiles from './DiffFiles.svelte'
   import type { ViewedFiles } from '../lib/viewedFiles.svelte'
   import { splitDiff, type DiffFile } from '../lib/diff'
   import {
@@ -52,6 +55,7 @@
     fileSides,
     noLines,
     parseHunks,
+    scrollParent,
     storedMode,
     storedWrap,
     storeMode,
@@ -70,9 +74,13 @@
     viewed,
     onpick,
     marks,
+    stale = [],
   }: {
     diff: string
+    /** Every file starts folded under its header, unless there is only the one. */
     collapsed?: boolean
+    /** The files changed since the review was submitted. */
+    stale?: string[]
     /** The reader's viewed marks on this revision; absent, files cannot be marked. */
     viewed?: ViewedFiles
     /** Read one file whole on both sides, as the revision pinned it; absent, gaps are only counted. */
@@ -135,6 +143,7 @@
     return shown
   }
   const files = $derived(parsed.map(show))
+  const byPath = $derived(new Map(files.map((f) => [f.file.path, f])))
 
   /** Read a file's pinned sides, once, and check them against its diff. */
   async function readContext(file: DiffFile): Promise<boolean> {
@@ -189,21 +198,19 @@
   /** The mode showing; null until the diff has a width to decide by. */
   const mode = $derived<DiffMode | null>(chosen ?? (width > 0 ? defaultMode(width) : null))
 
-  // Open files, by path. On the phone every file starts folded, since the
-  // list decides most reviews; elsewhere every file starts open but the ones
-  // already viewed on this revision.
-  let open = $state(new Set<string>())
-  let seeded = ''
-  $effect(() => {
-    const key = files.map((f) => f.file.path).join('\n')
-    if (key === seeded) return
-    seeded = key
-    untrack(() => {
-      open = collapsed
-        ? new Set()
-        : new Set(files.filter((f) => !f.heavy && viewed?.state(f.file.path) !== 'viewed').map((f) => f.file.path))
-    })
-  })
+  /**
+   * The files open at first: none when collapsed, unless the diff has only
+   * the one; otherwise all but the heavy ones and those already viewed on
+   * this revision.
+   */
+  function startOpen(paths: string[]): string[] {
+    if (collapsed && paths.length > 1) return []
+    return files.filter((f) => (paths.length === 1 || !f.heavy) && viewed?.state(f.file.path) !== 'viewed').map((f) => f.file.path)
+  }
+  const items = $derived(
+    files.map(({ file, sides }) => ({ path: file.path, added: file.added, removed: file.removed, counted: sides.hunks })),
+  )
+  let frame = $state<ReturnType<typeof DiffFiles>>()
 
   // --- drawing only what is near --------------------------------------------
 
@@ -257,7 +264,7 @@
               if (at >= 0) waiting.splice(at, 1)
               if (!drawn[path]) continue
               const body = el.querySelector<HTMLElement>(':scope > .body')
-              const sides = files.find((f) => f.file.path === path)?.sides
+              const sides = byPath.get(path)?.sides
               // Fractional: rounding each file's height would add up to a drift.
               const px = body?.getBoundingClientRect().height
               if (px && sides) heights.set(path, { sides, mode, wrap, px })
@@ -284,9 +291,12 @@
    * at before it has ever been drawn: its header, and when it is open, the
    * body its editors take or the line said in their place.
    */
-  function intrinsic(path: string, sides: FileSides, isOpen: boolean, isHeld: boolean): number {
+  function intrinsic(path: string, isOpen: boolean): number {
     if (!isOpen) return head
-    return head + 4 + (!sides.hunks || isHeld ? 40 : placeholder(path, sides))
+    const f = byPath.get(path)
+    if (!f) return head
+    const isHeld = f.heavy !== null && !loaded.has(path)
+    return head + 4 + (!f.sides.hunks || isHeld ? 40 : placeholder(path, f.sides))
   }
 
   /** The height a file's editors will take, held until they are made. */
@@ -300,111 +310,19 @@
 
   // --- finding the way through ----------------------------------------------
 
-  /** What the reader typed to narrow the files to. */
-  let filter = $state('')
-  const matches = (path: string) => !filter.trim() || path.toLowerCase().includes(filter.trim().toLowerCase())
-  const shownCount = $derived(files.filter((f) => matches(f.file.path)).length)
-  const totals = $derived(
-    files.reduce((t, f) => ({ added: t.added + f.file.added, removed: t.removed + f.file.removed }), { added: 0, removed: 0 }),
-  )
-
-  /** Mark a file viewed and fold it, or take the mark off and open it again. */
-  function markViewed(path: string, on: boolean) {
-    viewed?.set(path, on)
-    toggle(path, !on)
+  /** Where each change of a drawn file starts on screen; null for one not drawn yet. */
+  function changeTops(path: string): number[] | null {
+    return views.get(path)?.changeTops() ?? null
   }
+  /** A heavy file is stepped through only once the reader has loaded it. */
+  const steppable = (path: string) => !heavyOf(path) || loaded.has(path)
+  /** A step never opens a heavy file on its own. */
+  const opensOnStep = (path: string) => !heavyOf(path)
+  const heavyOf = (path: string) => byPath.get(path)?.heavy ?? null
 
-  /** Open or fold every file the filter shows. */
-  function foldAll(on: boolean) {
-    const next = new Set(open)
-    for (const { file } of files) {
-      if (!matches(file.path)) continue
-      if (on) next.delete(file.path)
-      else next.add(file.path)
-    }
-    open = next
-  }
-
-  let bar = $state<HTMLDivElement>()
-
-  /**
-   * Where the diff's view starts on screen: below the bar, where the bar
-   * sits once it sticks. Until the page has scrolled that far the bar is
-   * lower, so its own position would move under every step.
-   */
-  function viewTop(): number {
-    const box = scroller()
-    return (box ? box.getBoundingClientRect().top : 0) + (bar?.offsetHeight ?? 0)
-  }
-
-  /** Where each change in an open, shown file starts on screen, top to bottom. */
-  function changeTops(): { path: string; top: number }[] {
-    const tops: { path: string; top: number }[] = []
-    for (const { file, heavy: h } of files) {
-      if (!open.has(file.path) || !matches(file.path) || (h && !loaded.has(file.path))) continue
-      const view = views.get(file.path)
-      // A file not drawn yet is stepped to by its header, which draws it.
-      if (!view) {
-        const el = sections.get(file.path)
-        if (el && file.added + file.removed > 0) tops.push({ path: file.path, top: el.getBoundingClientRect().top })
-        continue
-      }
-      for (const top of view.changeTops()) tops.push({ path: file.path, top })
-    }
-    return tops
-  }
-
-  /** A change brought to just below the bar, with a few rows above it showing. */
-  const LEAD = 56
-  function scrollTo(top: number) {
-    const by = top - (viewTop() + LEAD)
-    const box = scroller()
-    if (box) box.scrollTop += by
-    else window.scrollBy(0, by)
-  }
-
-  /**
-   * Bring the next (or previous) change into view. Past the last change of
-   * the open files, the next shown file that is folded and not yet viewed is
-   * opened at its first change.
-   */
-  export async function step(dir: 1 | -1) {
-    const at = viewTop() + LEAD
-    const tops = changeTops()
-    const target = dir > 0 ? tops.find((t) => t.top > at + 2) : tops.findLast((t) => t.top < at - 2)
-    if (target) return scrollTo(target.top)
-    if (dir < 0) return
-    const below = files.find(({ file, heavy: h }) => {
-      const el = sections.get(file.path)
-      return (
-        el &&
-        !h &&
-        matches(file.path) &&
-        !open.has(file.path) &&
-        viewed?.state(file.path) !== 'viewed' &&
-        el.getBoundingClientRect().top > viewTop()
-      )
-    })
-    if (!below) return
-    toggle(below.file.path, true)
-    // Its editors are made a frame or two after it opens.
-    for (let i = 0; i < 30; i++) {
-      await tick()
-      await new Promise((r) => requestAnimationFrame(r))
-      const first = views.get(below.file.path)?.changeTops()[0]
-      if (first !== undefined) return scrollTo(first)
-    }
-    sections.get(below.file.path)?.scrollIntoView({ block: 'start' })
-  }
-
-  /** `n` and `p` step change to change, unless the reader is typing. */
-  function onkey(e: KeyboardEvent) {
-    if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || (e.key !== 'n' && e.key !== 'p')) return
-    const t = e.target as HTMLElement | null
-    if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return
-    if (!root?.isConnected || !files.length) return
-    e.preventDefault()
-    void step(e.key === 'n' ? 1 : -1)
+  /** Bring the next (or previous) change into view. */
+  export function step(dir: 1 | -1) {
+    return frame?.step(dir)
   }
 
   const views = new Map<string, MergeDiffInstance>()
@@ -420,34 +338,15 @@
     }
     if (near) near.observe(node)
     else drawn[path] = true
-    return {
-      destroy: () => {
-        near?.unobserve(node)
-        sections.delete(path)
-      },
+    return () => {
+      near?.unobserve(node)
+      sections.delete(path)
     }
-  }
-
-  function toggle(path: string, on: boolean) {
-    if (on === open.has(path)) return
-    const next = new Set(open)
-    if (on) next.add(path)
-    else next.delete(path)
-    open = next
-  }
-
-  /** The nearest ancestor that scrolls the diff vertically, or null for the window. */
-  function scroller(): HTMLElement | null {
-    for (let el = root?.parentElement; el; el = el.parentElement) {
-      const y = getComputedStyle(el).overflowY
-      if ((y === 'auto' || y === 'scroll') && el.scrollHeight > el.clientHeight) return el
-    }
-    return null
   }
 
   /** What is at the top of the view: a file, and a row of it when its diff is showing. */
   function anchor(): { path: string; line: number | null; at: number; into: number } | null {
-    const box = scroller()
+    const box = scrollParent(root)
     const at = Math.max(box ? box.getBoundingClientRect().top : 0, root?.getBoundingClientRect().top ?? 0)
     for (const { file } of files) {
       const el = sections.get(file.path)
@@ -470,7 +369,7 @@
     const now = top != null ? top + a.into : el.getBoundingClientRect().top + a.into
     const by = now - a.at
     if (Math.abs(by) < 1) return
-    const box = scroller()
+    const box = scrollParent(root)
     if (box) box.scrollTop += by
     else window.scrollBy(0, by)
   }
@@ -504,45 +403,27 @@
     })()
   })
 
-  /** Open a file and bring its header to the top: how the file list moves to it. */
-  export async function showFile(path: string) {
-    toggle(path, true)
-    await tick()
-    sections.get(path)?.scrollIntoView({ block: 'start', behavior: 'smooth' })
-  }
-
-  function stat(added: number, removed: number) {
-    return `+${added} −${removed}`
+  /** Open a file and bring its header to the top. */
+  export function showFile(path: string) {
+    return frame?.showFile(path)
   }
 </script>
 
-<svelte:window onkeydown={onkey} />
-
-<div class="review-diff" bind:this={root} bind:clientWidth={width}>
-  <div class="bar" bind:this={bar}>
-    <div class="find">
-      <input
-        type="search"
-        class="filter"
-        placeholder="Filter files"
-        aria-label="Filter files by path"
-        bind:value={filter}
-      />
-      {#if filter.trim()}<span class="count">{shownCount} of {files.length}</span>{/if}
-      <span class="total" title="Lines added and removed in this diff">{stat(totals.added, totals.removed)}</span>
-    </div>
-    {#if viewed}
-      {@const p = viewed.progress}
-      <span class="progress" title="Viewed marks are your own reading progress. They approve nothing.">
-        {p.viewed}/{p.of} viewed <span class="not">· not approval</span>
-      </span>
-    {/if}
-    <div class="steps">
-      <button type="button" title="Previous change (p)" aria-label="Previous change" onclick={() => step(-1)}>↑</button>
-      <button type="button" title="Next change (n)" aria-label="Next change" onclick={() => step(1)}>↓</button>
-      <button type="button" title="Fold every file shown" onclick={() => foldAll(true)}>Fold all</button>
-      <button type="button" title="Open every file shown" onclick={() => foldAll(false)}>Open all</button>
-    </div>
+<DiffFiles
+  bind:this={frame}
+  bind:root
+  bind:width
+  class="review-diff"
+  {items}
+  {viewed}
+  {startOpen}
+  {changeTops}
+  {steppable}
+  {opensOnStep}
+  onsection={register}
+  {intrinsic}
+>
+  {#snippet tools()}
     <div class="modes" role="radiogroup" aria-label="Diff layout">
       <button
         type="button"
@@ -560,171 +441,61 @@
       >
     </div>
     <button type="button" class="wrap" aria-pressed={wrap} class:on={wrap} onclick={toggleWrap}>Wrap lines</button>
-  </div>
-  {#if filter.trim() && shownCount === 0}
-    <div class="empty">No file path contains “{filter.trim()}”.</div>
-  {/if}
-  {#each files as { file, sides, view, unavailable, heavy: h, pickable } (file.path)}
-    {@const seen = viewed?.state(file.path) ?? 'unviewed'}
-    {@const held = h !== null && !loaded.has(file.path)}
-    <details
-      class="file"
-      class:viewed={seen === 'viewed'}
-      hidden={!matches(file.path)}
-      data-path={file.path}
-      open={open.has(file.path)}
-      ontoggle={(e) => toggle(file.path, (e.currentTarget as HTMLDetailsElement).open)}
-      use:register={file.path}
-      style:contain-intrinsic-block-size="auto {intrinsic(file.path, sides, open.has(file.path), held)}px"
-    >
-      <summary>
-        <span class="path">{file.path}</span>
-        {#each sides.notes as n (n)}<span class="note">{n === 'binary' ? 'binary file' : n}</span>{/each}
-        {#if h}<span class="heavy-note">{h.kind === 'generated' ? 'generated' : 'large'}</span>{/if}
-        {#if seen === 'changed'}<span class="changed">changed since you viewed it</span>{/if}
-        {#if sides.hunks}<span class="stat"
-            ><span class="add">+{file.added}</span> <span class="del">−{file.removed}</span></span
-          >{/if}
-        {#if viewed?.tracks(file.path)}
-          <!-- A click on the mark is the mark's, not the fold's. -->
-          <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
-          <label class="seen" title="Your own reading progress. Marking a file viewed does not approve it." onclick={(e) => e.stopPropagation()}>
-            <input
-              type="checkbox"
-              checked={seen === 'viewed'}
-              onchange={(e) => markViewed(file.path, (e.currentTarget as HTMLInputElement).checked)}
-            />
-            Viewed
-          </label>
-        {/if}
-      </summary>
-      {#if open.has(file.path)}
-        <div class="body">
-          {#if !sides.hunks}
-            <div class="empty">{noLines(sides)}</div>
-          {:else if held}
-            <div class="held">
-              <span>{h?.why}: folded so the rest of the review stays quick.</span>
-              <button type="button" onclick={() => load(file.path)}>Load diff</button>
-            </div>
-          {:else if !drawn[file.path]}
-            <div class="pending" style:height="{placeholder(file.path, sides)}px"></div>
-          {:else if MergeDiff && mode}
-            <MergeDiff
-              {sides}
-              {mode}
-              {wrap}
-              gaps={view.gaps}
-              tail={view.tail}
-              {unavailable}
-              onexpand={context ? (gap: number) => openGap(file, gap) : undefined}
-              {onpick}
-              {marks}
-              {pickable}
-              bind:this={
-                () => views.get(file.path),
-                (v) => {
-                  if (v) views.set(file.path, v)
-                  else views.delete(file.path)
-                }
-              }
-            />
-          {:else}
-            <Diff diff={file.lines.join('\n')} {onpick} {marks} />
-          {/if}
+  {/snippet}
+
+  {#snippet chips(path: string)}
+    {@const f = byPath.get(path)}
+    {#if f}
+      {#each f.sides.notes as n (n)}<span class="note">{n === 'binary' ? 'binary file' : n}</span>{/each}
+      {#if f.heavy}<span class="heavy-note">{f.heavy.kind === 'generated' ? 'generated' : 'large'}</span>{/if}
+    {/if}
+    {#if stale.includes(path)}
+      <span class="chip warn" title="this file changed in the worktree after the review was submitted">changed since submit</span>
+    {/if}
+  {/snippet}
+
+  {#snippet body(path: string)}
+    {@const f = byPath.get(path)}
+    {#if f}
+      {@const { file, sides, view, unavailable, heavy: h, pickable } = f}
+      {@const held = h !== null && !loaded.has(path)}
+      {#if !sides.hunks}
+        <div class="empty">{noLines(sides)}</div>
+      {:else if held}
+        <div class="held">
+          <span>{h?.why}: folded so the rest of the review stays quick.</span>
+          <button type="button" onclick={() => load(path)}>Load diff</button>
         </div>
+      {:else if !drawn[path]}
+        <div class="pending" style:height="{placeholder(path, sides)}px"></div>
+      {:else if MergeDiff && mode}
+        <MergeDiff
+          {sides}
+          {mode}
+          {wrap}
+          gaps={view.gaps}
+          tail={view.tail}
+          {unavailable}
+          onexpand={context ? (gap: number) => openGap(file, gap) : undefined}
+          {onpick}
+          {marks}
+          {pickable}
+          bind:this={
+            () => views.get(path),
+            (v) => {
+              if (v) views.set(path, v)
+              else views.delete(path)
+            }
+          }
+        />
+      {:else}
+        <Diff diff={file.lines.join('\n')} {onpick} {marks} />
       {/if}
-    </details>
-  {/each}
-</div>
+    {/if}
+  {/snippet}
+</DiffFiles>
 
 <style>
-  .review-diff {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    min-width: 0;
-  }
-  /* The switch stays in reach however far into the diff the reader is. */
-  .bar {
-    position: sticky;
-    top: 0;
-    z-index: 2;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px 8px;
-    align-items: center;
-    justify-content: flex-end;
-    padding: 4px 0;
-    background: var(--bg);
-  }
-  .find {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex: 1 1 220px;
-    min-width: 0;
-  }
-  .filter {
-    flex: 1;
-    min-width: 0;
-    max-width: 320px;
-    font: 12px var(--mono);
-    padding: 4px 8px;
-    border: 1px solid var(--rule);
-    border-radius: 4px;
-    background: var(--s1);
-    color: var(--ink);
-  }
-  .count,
-  .total,
-  .progress {
-    font: 12px var(--mono);
-    color: var(--dim);
-    white-space: nowrap;
-  }
-  .progress .not {
-    color: var(--dim);
-    font-style: italic;
-  }
-  .steps {
-    display: inline-flex;
-    gap: 4px;
-  }
-  .steps button {
-    font: 12px var(--mono);
-    padding: 4px 8px;
-    border: 1px solid var(--rule);
-    border-radius: 4px;
-    background: var(--s1);
-    color: var(--ink);
-    cursor: pointer;
-  }
-  .add {
-    color: var(--ok);
-  }
-  .del {
-    color: var(--crit);
-  }
-  .changed {
-    color: var(--wait);
-    white-space: nowrap;
-    font-size: 11.5px;
-  }
-  .seen {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    color: var(--dim);
-    white-space: nowrap;
-    cursor: pointer;
-  }
-  .file.viewed summary .path {
-    color: var(--dim);
-  }
-  .file[hidden] {
-    display: none;
-  }
   .wrap {
     font: 12px var(--mono);
     padding: 4px 10px;
@@ -759,54 +530,9 @@
     color: var(--ink);
     background: var(--s3);
   }
-  /* A file scrolled to lands below the sticky switch, not under it. */
-  .file {
-    scroll-margin-top: 40px;
-    /* A file far from the view is skipped by layout and paint altogether,
-       at the size it last had or (inline) the size it will have. */
-    content-visibility: auto;
-  }
-  summary {
-    display: flex;
-    gap: 10px;
-    align-items: baseline;
-    padding: 8px 12px;
-    background: var(--s1);
-    border-radius: 4px;
-    cursor: pointer;
-    list-style: none;
-    font: 12.5px var(--mono);
-    min-width: 0;
-  }
-  summary::-webkit-details-marker {
-    display: none;
-  }
-  summary::before {
-    content: '▸';
-    color: var(--dim);
-  }
-  details[open] summary::before {
-    content: '▾';
-  }
-  .path {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--ink);
-  }
   .note {
     color: var(--dim);
     white-space: nowrap;
-  }
-  .stat {
-    color: var(--dim);
-    white-space: nowrap;
-  }
-  .body {
-    margin-top: 4px;
-    min-width: 0;
   }
   .heavy-note {
     color: var(--wait);
@@ -843,5 +569,9 @@
     border-radius: 4px;
     color: var(--dim);
     font: 12px var(--mono);
+  }
+  .chip.warn {
+    white-space: nowrap;
+    font-size: 11.5px;
   }
 </style>

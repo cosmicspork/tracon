@@ -47,9 +47,9 @@ listed with it.
    verdict; editing means editing that diff and submitting it as a request for
    changes.
    *Decides:* no file browser; the diff viewer is the most invested component; the
-   requirements sit beside the diff, not the implementation transcript. On the phone
-   the file list *is* the diff — each file folds open — because the list decides
-   most reviews and 390px will not hold both.
+   requirements sit beside the diff, not the implementation transcript. The file list
+   *is* the diff — each file starts folded and folds open — because the list decides
+   most reviews and 390px will not hold both; editing the diff uses the same frame.
 
 6. **Nothing is lost when the client dies.** Sessions live in the node, so the
    interface never holds state the node does not have. Unsent prompt drafts are held

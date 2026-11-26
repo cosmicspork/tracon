@@ -456,3 +456,12 @@ export function estimatedRows(sides: Pick<FileSides, 'bLines' | 'blocks'>, mode:
   for (const k of sides.blocks) rows += mode === 'split' ? Math.max(0, k.aN - k.bN) : k.aN
   return rows
 }
+
+/** The nearest ancestor that scrolls `from` vertically, or null for the window. */
+export function scrollParent(from: HTMLElement | null | undefined): HTMLElement | null {
+  for (let el = from?.parentElement; el; el = el.parentElement) {
+    const y = getComputedStyle(el).overflowY
+    if ((y === 'auto' || y === 'scroll') && el.scrollHeight > el.clientHeight) return el
+  }
+  return null
+}
