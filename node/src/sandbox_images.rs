@@ -537,7 +537,8 @@ pub async fn inputs(
         &cfg.sandbox.base_image_ref(),
         PINNED.read().unwrap().as_ref(),
     )?;
-    let (_, commit) = crate::repo_image::default_commit(repo).await?;
+    // A managed clone not on disk yet is made first, as a build makes it.
+    let (_, commit) = crate::repo_image::managed_default_commit(repo).await?;
     Ok(SnapshotInputs {
         base,
         image,
@@ -685,7 +686,10 @@ pub async fn snapshot_for(
     let inputs = match inputs(backend, cfg, repo, environment).await {
         Ok(inputs) => inputs,
         Err(error) => {
-            tracing::info!(repo = %repo.display(), %error, "no snapshot for this repository");
+            // Said once for each reason, not on every check that looks.
+            if said_no_snapshot(repo, &error) {
+                tracing::info!(repo = %repo.display(), %error, "no snapshot for this repository");
+            }
             return None;
         }
     };
@@ -699,6 +703,19 @@ pub async fn snapshot_for(
         record_seed(&environment.cache_volume, snapshot);
     }
     found
+}
+
+/// Whether `error` is new as the reason `repo` has no snapshot, recording
+/// it as the reason when it is.
+fn said_no_snapshot(repo: &Path, error: &str) -> bool {
+    static SAID: std::sync::OnceLock<Mutex<HashMap<std::path::PathBuf, String>>> =
+        std::sync::OnceLock::new();
+    let mut said = SAID.get_or_init(Default::default).lock().unwrap();
+    if said.get(repo).is_some_and(|said| said == error) {
+        return false;
+    }
+    said.insert(repo.to_path_buf(), error.to_string());
+    true
 }
 
 /// The default-branch preparation with the setting on: `repo`'s `prepare`
@@ -768,6 +785,9 @@ pub(crate) async fn warm_after(
     secrets: &crate::environment::PrepareSecrets,
     seen: u64,
 ) -> Result<Option<String>, String> {
+    // What the forge's default branch holds now, as a build reads it, with
+    // the clone's `origin/HEAD` repaired if it needs it.
+    crate::repo_image::refresh_managed(repo).await;
     let inputs = inputs(backend, cfg, repo, environment).await?;
     let key = inputs.key();
     let Some(preparer) = backend.preparer() else {

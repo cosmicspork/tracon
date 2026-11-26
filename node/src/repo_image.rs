@@ -421,7 +421,7 @@ pub async fn recipe(repo: &Path, entry: &Repo, run_as: &RunAs) -> Result<Recipe,
             .unwrap_or_default(),
     };
     let dir = repo.to_string_lossy();
-    let (source_ref, source_commit) = default_commit(repo).await?;
+    let (source_ref, source_commit) = managed_default_commit(repo).await?;
     let found = |what: &str, path: &str| {
         format!(
             "{what} {path} is not in {source_ref} ({})",
@@ -482,7 +482,7 @@ pub(crate) async fn default_commit(repo: &Path) -> Result<(String, String), Stri
         return Ok((name, commit));
     }
     if repo.starts_with(crate::forge::managed_root(&Config::state_dir())) {
-        return Err("the clone has no origin/HEAD to read the Dockerfile from".into());
+        return Err(no_origin_head(repo).await);
     }
     crate::review::resolve(&dir, "HEAD^{commit}")
         .await
@@ -493,6 +493,122 @@ pub(crate) async fn default_commit(repo: &Path) -> Result<(String, String), Stri
                 repo.display()
             )
         })
+}
+
+/// Why a managed clone's `origin/HEAD` gives no commit to read: missing,
+/// naming a branch that is not there, or a plain ref rather than the
+/// symbolic one Git makes, with the clone's path and what Git said.
+async fn no_origin_head(repo: &Path) -> String {
+    let dir = repo.to_string_lossy();
+    let at = repo.display();
+    const REPAIR: &str = "a fetch for a build or a session runs `git remote set-head origin \
+         --auto` to repair it";
+    match crate::review::symbolic_ref(&dir, "refs/remotes/origin/HEAD").await {
+        Ok(target) => {
+            let said = crate::review::verify(&dir, &format!("{target}^{{commit}}"))
+                .await
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_default();
+            format!(
+                "the clone at {at} has an origin/HEAD naming {target}, which is not there \
+                 (dangling), so there is no default branch to read the Dockerfile from; \
+                 {REPAIR}: {said}"
+            )
+        }
+        Err(symbolic) => match crate::review::verify(&dir, "refs/remotes/origin/HEAD").await {
+            Ok(object) => format!(
+                "the clone at {at} has an origin/HEAD that is not a symbolic ref but a plain \
+                 one, to {object}, which is not a commit; {REPAIR}: {symbolic}"
+            ),
+            Err(missing) => format!(
+                "the clone at {at} has no origin/HEAD to read the Dockerfile from; {REPAIR}: \
+                 {missing}"
+            ),
+        },
+    }
+}
+
+/// How long a managed clone that could not be made is left before the next
+/// read tries again: a snapshot is looked for on every check, and a clone
+/// asked of an unreachable forge on each would hold every one up.
+const CLONE_RETRY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// The managed clones that could not be made lately, with when and why.
+fn unmade() -> &'static std::sync::Mutex<HashMap<PathBuf, (std::time::Instant, String)>> {
+    static UNMADE: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<PathBuf, (std::time::Instant, String)>>,
+    > = std::sync::OnceLock::new();
+    UNMADE.get_or_init(Default::default)
+}
+
+/// [`default_commit`] for a repository read to build or snapshot: a managed
+/// clone not on disk yet is made first, from its forge with the node's
+/// credential or anonymously, as `tracon repo build` makes one. One that
+/// could not be made is said once in the log, and not tried again for
+/// [`CLONE_RETRY`]: until then each read is refused with the same error.
+pub(crate) async fn managed_default_commit(repo: &Path) -> Result<(String, String), String> {
+    let root = crate::forge::managed_root(&Config::state_dir());
+    if let Ok(rest) = repo.strip_prefix(&root) {
+        if !repo.join(".git").exists() {
+            make_managed_clone(repo, rest).await?;
+        }
+    }
+    default_commit(repo).await
+}
+
+async fn make_managed_clone(repo: &Path, under_root: &Path) -> Result<(), String> {
+    let identity = under_root
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    if let Some((since, error)) = unmade().lock().unwrap().get(repo).cloned() {
+        if since.elapsed() < CLONE_RETRY {
+            return Err(error);
+        }
+    }
+    let (broker, node_id) = crate::broker::node_broker()
+        .unwrap_or_else(|| (crate::broker::Broker::default().shared(), String::new()));
+    match crate::forge::ensure_clone_for_build(&broker, &node_id, &identity).await {
+        Ok(_) => {
+            unmade().lock().unwrap().remove(repo);
+            tracing::info!(repo = %repo.display(), %identity, "made the managed clone to read its default branch");
+            Ok(())
+        }
+        Err(error) => {
+            let error = format!(
+                "{identity} could not be cloned to {}: {error}",
+                repo.display()
+            );
+            let mut unmade = unmade().lock().unwrap();
+            let said = unmade.get(repo).is_some_and(|(_, said)| *said == error);
+            if !said {
+                tracing::warn!(repo = %repo.display(), %error, "no managed clone to read the default branch from");
+            }
+            unmade.insert(
+                repo.to_path_buf(),
+                (std::time::Instant::now(), error.clone()),
+            );
+            Err(error)
+        }
+    }
+}
+
+/// Fetch a managed clone before its default branch is read for a warm-up,
+/// as `tracon repo build` fetches it, which also repairs its `origin/HEAD`
+/// (`forge::refresh_for_build`). Best effort: a fetch that fails leaves the
+/// default branch it fetched last, and says so in the log.
+pub(crate) async fn refresh_managed(repo: &Path) {
+    let root = crate::forge::managed_root(&Config::state_dir());
+    if !repo.starts_with(&root) || !repo.join(".git").exists() {
+        return;
+    }
+    let (broker, node_id) = crate::broker::node_broker()
+        .unwrap_or_else(|| (crate::broker::Broker::default().shared(), String::new()));
+    if let Err(error) = crate::forge::refresh_for_build(&broker, repo, &node_id).await {
+        tracing::warn!(repo = %repo.display(), %error, "the managed clone could not be fetched before its warm-up; reading what it fetched last");
+    }
 }
 
 /// `localhost/tracon-repo-<name>-<hash>`: readable in `podman images`, and
@@ -3100,5 +3216,114 @@ WORKDIR /work
             std::slice::from_ref(&recipe.steps_egress)
         );
         assert!(built.image.image.starts_with(&image_name(&repo)));
+    }
+
+    fn sh_out(dir: &Path, script: &str) -> String {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{script}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A bare repository standing in for the forge of `github.com/<owner>/proj`
+    /// with one commit on `main`, and where its managed clone goes.
+    fn forge_stand_in(tag: &str) -> (tempfile::TempDir, PathBuf, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let tip = sh_out(
+            tmp.path(),
+            "git init -q --bare -b main upstream.git && git clone -q upstream.git work 2>/dev/null \
+             && cd work && echo one > Dockerfile && git add Dockerfile \
+             && git -c user.name=t -c user.email=t@t commit -qm one && git push -q origin main \
+             && git rev-parse HEAD",
+        );
+        let owner = format!("{tag}-{}", uuid::Uuid::now_v7().simple());
+        let clone = crate::forge::managed_root(&Config::state_dir())
+            .join("github.com")
+            .join(&owner)
+            .join("proj");
+        crate::forge::test_forge::stand_in(
+            &format!("github.com/{owner}/proj"),
+            &tmp.path().join("upstream.git"),
+        );
+        (tmp, clone, tip)
+    }
+
+    /// A `[[repo]]` entry for a managed clone no session has made yet still
+    /// gets its default branch read, for a snapshot or a build's recipe: the
+    /// clone is made first, as `tracon repo build` makes it (#1191).
+    #[tokio::test]
+    async fn a_managed_clone_not_on_disk_is_made_before_its_default_branch_is_read() {
+        let (_forge, clone, tip) = forge_stand_in("uncloned");
+        assert!(!clone.exists());
+        assert_eq!(
+            managed_default_commit(&clone).await,
+            Ok(("origin/main".to_string(), tip))
+        );
+        assert!(clone.join(".git").exists());
+        let _ = std::fs::remove_dir_all(clone.parent().unwrap());
+    }
+
+    /// A clone that cannot be made is refused with why, and not asked of the
+    /// forge again on the next read: a snapshot is looked for on every check.
+    #[tokio::test]
+    async fn a_managed_clone_that_cannot_be_made_is_not_tried_on_every_read() {
+        let (forge, clone, _) = forge_stand_in("unreachable");
+        let upstream = forge.path().join("upstream.git");
+        let away = forge.path().join("away.git");
+        std::fs::rename(&upstream, &away).unwrap();
+        let refused = managed_default_commit(&clone).await.unwrap_err();
+        assert!(refused.contains("could not be cloned"), "{refused}");
+        assert!(refused.contains(&clone.display().to_string()), "{refused}");
+        // The forge is back, but the next read does not ask it yet.
+        std::fs::rename(&away, &upstream).unwrap();
+        assert_eq!(managed_default_commit(&clone).await.unwrap_err(), refused);
+        assert!(!clone.exists());
+        unmade().lock().unwrap().remove(&clone);
+        assert!(managed_default_commit(&clone).await.is_ok());
+        let _ = std::fs::remove_dir_all(clone.parent().unwrap());
+    }
+
+    /// A managed clone's `origin/HEAD` that gives no commit is told apart:
+    /// missing, dangling, or a plain ref, each with the clone's path and
+    /// what Git said.
+    #[tokio::test]
+    async fn a_broken_origin_head_says_how_it_is_broken() {
+        let (_forge, clone, _) = forge_stand_in("broken-head");
+        managed_default_commit(&clone).await.unwrap();
+        let at = clone.display().to_string();
+
+        sh(&clone, "git symbolic-ref --delete refs/remotes/origin/HEAD");
+        let missing = default_commit(&clone).await.unwrap_err();
+        assert!(missing.contains("has no origin/HEAD"), "{missing}");
+        assert!(missing.contains(&at), "{missing}");
+        assert!(missing.contains("fatal"), "{missing}");
+
+        sh(
+            &clone,
+            "git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/gone",
+        );
+        let dangling = default_commit(&clone).await.unwrap_err();
+        assert!(dangling.contains("refs/remotes/origin/gone"), "{dangling}");
+        assert!(dangling.contains("dangling"), "{dangling}");
+        assert!(dangling.contains(&at), "{dangling}");
+
+        sh(
+            &clone,
+            "git symbolic-ref --delete refs/remotes/origin/HEAD \
+             && git update-ref refs/remotes/origin/HEAD \
+                $(git rev-parse origin/main^{tree})",
+        );
+        let plain = default_commit(&clone).await.unwrap_err();
+        assert!(plain.contains("not a symbolic ref"), "{plain}");
+        assert!(plain.contains(&at), "{plain}");
+        let _ = std::fs::remove_dir_all(clone.parent().unwrap());
     }
 }

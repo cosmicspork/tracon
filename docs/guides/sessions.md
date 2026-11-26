@@ -274,7 +274,12 @@ fails leaves the last image that worked in place and is not retried until you as
 `tracon repo ls` shows each repository's image and any command it has no tool for.
 `tracon repo build host/owner/name` on a repository no session has cloned yet clones it
 first, with the node's forge credential or anonymously, so `repo set` then `repo build`
-works on a fresh node.
+works on a fresh node. A repository's snapshot does the same: an entry for a managed
+clone not on disk yet has it cloned before its default branch is read (one that cannot
+be cloned is said once in the log and not tried again for ten minutes), and a warm-up
+fetches the clone first. Each of those fetches repairs a missing, dangling or plain
+`origin/HEAD` with `git remote set-head origin --auto`; one still unreadable is
+refused with the clone's path, which of those it is, and what Git said.
 
 ### Repository recipes on the stock base
 
