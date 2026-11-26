@@ -106,6 +106,8 @@
   let threads = $state<ReviewThread[]>([])
   /** Where the next thread goes: the composer's, or a line picked in the diff. */
   let threadAnchor = $state<Anchor>({ kind: 'general' })
+  /** The thread composer is open: from `+ Thread`, or a line picked in the diff. */
+  let threadComposing = $state(false)
   /** What changed since your last verdict, and which diff is showing. */
   let sinceReviewed = $state<SinceReviewed | null>(null)
   let diffView = $state<'since' | 'full'>('full')
@@ -226,6 +228,7 @@
         requirements = d.requirements
         threads = d.threads ?? []
         threadAnchor = { kind: 'general' }
+        threadComposing = false
         sinceReviewed = d.since_reviewed ?? null
         // A resubmission opens on what answered your feedback; the full diff
         // is one tap away.
@@ -592,8 +595,10 @@
    * the one being written into a range. The since-last-verdict diff is
    * numbered against the last verdict, not this revision, so it offers none.
    */
-  function pickLine(line: Numbered) {
+  async function pickLine(line: Numbered) {
     threadAnchor = anchorAt(line, threadAnchor) ?? threadAnchor
+    threadComposing = true
+    await tick()
     document.querySelector('[aria-label="new thread"]')?.scrollIntoView({ block: 'center', behavior: 'smooth' })
   }
   /**
@@ -1609,6 +1614,7 @@
       paths={diffFiles.map((f) => f.path)}
       {threads}
       bind:anchor={threadAnchor}
+      bind:composing={threadComposing}
       blocked={threadsBlocked}
       onthreads={(next) => (threads = next)}
     />

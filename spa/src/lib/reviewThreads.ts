@@ -206,6 +206,15 @@ export function unresolvedCount(threads: ReviewThread[]): number {
   return threads.filter((t) => t.state === 'unresolved' || t.state === 'outdated').length
 }
 
+/**
+ * The Threads section starts open while a thread asks for something: one
+ * unresolved, or one the agent says it addressed and you have still to
+ * judge. Every thread resolved or outdated, it starts folded to its line.
+ */
+export function threadsStartOpen(threads: ReviewThread[]): boolean {
+  return threads.some((t) => t.state === 'unresolved' || t.state === 'addressed')
+}
+
 /** What a composer's anchor is short of, or null when it can be sent with `body`. */
 export function anchorProblem(a: Anchor, body: string): string | null {
   if (!body.trim()) return 'say something'

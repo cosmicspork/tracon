@@ -797,7 +797,10 @@ that a peer has none.
 ### Review threads
 
 Feedback on a review can be a set of threads instead of one note. Under the diff,
-open a thread on the whole change, on a file, or on a line or range: pick a line
+Threads is one line until it is used: **+ Thread** opens the composer on the whole
+change, and with threads the line counts the open and resolved ones. It starts open
+while a thread is unresolved or addressed, and folded when every thread is resolved
+or outdated. Open a thread on the whole change, on a file, or on a line or range: pick a line
 number in the full diff's gutter, side by side or unified, to start one there, and
 another to make it a range. Lines that carry a thread read bold in the gutter. The
 since-last-verdict diff offers no line numbers to pick. Each
