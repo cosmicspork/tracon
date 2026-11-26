@@ -10,7 +10,7 @@ test('shown work, the submitter note among it, comes before the files, and the e
   const shown = markup.indexOf('<ShownWork ')
   expect(shown).toBeGreaterThan(-1)
   expect(markup.indexOf('<ShownWork ', shown + 1)).toBe(-1)
-  const files = markup.indexOf('Files <b>')
+  const files = markup.indexOf('<ReviewDiff')
   expect(files).toBeGreaterThan(-1)
   expect(shown).toBeLessThan(files)
   // The status line says what they said, in one line under the title.
@@ -20,6 +20,26 @@ test('shown work, the submitter note among it, comes before the files, and the e
   expect(markup).not.toContain('<div class="recover">\n      {#if control')
   // A review from before capture still says so, as a banner.
   expect(markup).toContain('verification evidence missing')
+})
+
+test('the diff is the only file list, folded from the start on every screen, with the stale files marked', () => {
+  expect(markup).not.toContain('Files <b>')
+  expect(review).not.toContain('function showFile(')
+  const diffs = markup.split('<ReviewDiff').slice(1).map((d) => d.slice(0, d.indexOf('/>')))
+  expect(diffs.length).toBe(2)
+  for (const d of diffs) {
+    expect(d).toMatch(/\n\s+collapsed\n/)
+    expect(d).toContain('{stale}')
+  }
+})
+
+test('Edit the diff lists its files in the same frame as the diff, edited ones open', () => {
+  const edit = markup.slice(markup.indexOf('{#if editing}\n    {#if loadingFiles}'), markup.indexOf("{#if sinceReviewed?.diff}"))
+  expect(edit).toContain('<DiffFiles items={editItems}')
+  expect(edit).toContain('<span class="chip warn">edited</span>')
+  expect(edit).toContain('<DiffEditor ')
+  expect(edit).toContain('<Diff diff=')
+  expect(edit).not.toContain('filehead')
 })
 
 test('the header names the review with its id chip, and drops the claimed jargon', () => {
@@ -201,7 +221,7 @@ test('the opener is part of the review draft', () => {
 })
 
 test('review threads sit after the diff and before the verdict bar, and start from a line picked in the full diff only', () => {
-  const diff = markup.indexOf('<ReviewDiff\n        bind:this={reviewDiff}\n        diff={review.diff}')
+  const diff = markup.indexOf('<ReviewDiff\n        diff={review.diff}')
   const threads = markup.indexOf('<ReviewThreads')
   const bar = markup.indexOf('<div class="decide"')
   expect(diff).toBeGreaterThan(-1)

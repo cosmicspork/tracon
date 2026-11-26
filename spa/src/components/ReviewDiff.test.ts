@@ -22,7 +22,7 @@ const harness = `
     import ReviewDiff from ${JSON.stringify(`${here}ReviewDiff.svelte`)}
     import { ViewedFiles } from ${JSON.stringify(`${here}../lib/viewedFiles.svelte.ts`)}
     import { splitDiff } from ${JSON.stringify(`${here}../lib/diff.ts`)}
-    const { diff, collapsed, contexts, revision, threads } = window.reviewDiff
+    const { diff, collapsed, contexts, revision, threads, stale } = window.reviewDiff
     // The reader's viewed marks, as the review screen keeps them, when asked for.
     const viewed = revision ? new ViewedFiles('rv', revision, splitDiff(diff)) : undefined
     // What the node's /context would answer, by path: both sides, or why not.
@@ -40,7 +40,7 @@ const harness = `
     const marks = threads ? (line) => (line.path === 'README.md' && line.new === 2 ? 1 : 0) : undefined
   </script>
   <textarea id="reason"></textarea>
-  <ReviewDiff {diff} {collapsed} {context} {viewed} {onpick} {marks} />
+  <ReviewDiff {diff} {collapsed} {context} {viewed} {onpick} {marks} {stale} />
 `
 const entry = `
   import { mount } from 'svelte'
@@ -155,10 +155,11 @@ type Opts = {
   contexts?: object
   revision?: string
   threads?: boolean
+  stale?: string[]
 }
 
 async function open(
-  { width = 1280, collapsed = false, init = '', diff = DIFF, contexts, revision, threads = false }: Opts = {},
+  { width = 1280, collapsed = false, init = '', diff = DIFF, contexts, revision, threads = false, stale }: Opts = {},
   page?: Page,
 ): Promise<Page> {
   page ??= await browser!.newPage({ viewport: { width, height: 800 } })
@@ -169,7 +170,7 @@ async function open(
   const html =
     `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>${css}</style>` +
     `<body style="margin:0;padding:0 16px"><div id="app"></div>` +
-    `<script>${init};window.reviewDiff = ${JSON.stringify({ diff, collapsed, contexts, revision, threads })}</script><script type="module">${js}</script></body>`
+    `<script>${init};window.reviewDiff = ${JSON.stringify({ diff, collapsed, contexts, revision, threads, stale })}</script><script type="module">${js}</script></body>`
   await page.route('http://tracon.test/**', (route) => route.fulfill({ contentType: 'text/html', body: html }))
   await page.goto('http://tracon.test/')
   await page.waitForSelector('.review-diff', { timeout: 5000 }).catch((e) => {
@@ -487,6 +488,33 @@ test.skipIf(!browser)('a filter narrows the files to the paths that contain it',
   // Each file has its own counts, and the bar the whole diff's.
   expect(await page.locator('details[data-path="README.md"] summary .stat').textContent()).toBe('+1 −1')
   expect(await page.locator('.bar .total').textContent()).toBe('+54 −37')
+  await page.close()
+})
+
+test.skipIf(!browser)('collapsed on a desktop, every file starts folded under its header with its counts', async () => {
+  const page = await open({ collapsed: true })
+  expect(await mode(page)).toBe('Side by side')
+  expect(await page.locator('details.file').count()).toBe(3)
+  expect(await page.locator('details.file[open]').count()).toBe(0)
+  expect(await page.locator('details[data-path="README.md"] summary .stat').textContent()).toBe('+1 −1')
+  await page.close()
+})
+
+test.skipIf(!browser)('collapsed, a diff of a single file starts open', async () => {
+  const one = DIFF.slice(0, DIFF.indexOf('diff --git a/src/lib.rs'))
+  const page = await open({ collapsed: true, diff: one })
+  expect(await page.locator('details.file[open]').count()).toBe(1)
+  await page.close()
+})
+
+test.skipIf(!browser)('only a file changed since submit says so on its header', async () => {
+  const page = await open({ collapsed: true, stale: ['src/lib.rs'] })
+  const chip = (path: string) => page.locator(`details[data-path="${path}"] summary .chip.warn`)
+  expect(await chip('src/lib.rs').textContent()).toBe('changed since submit')
+  expect(await chip('README.md').count()).toBe(0)
+  expect(await chip('src/new.rs').count()).toBe(0)
+  // No file reads as "unchanged": the others say nothing.
+  expect(await page.getByText('unchanged').count()).toBe(0)
   await page.close()
 })
 
