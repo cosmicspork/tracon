@@ -1,6 +1,8 @@
 <script lang="ts">
   import ReportReview from '../components/ReportReview.svelte'
   import Name from '../components/Name.svelte'
+  import ReviewId from '../components/ReviewId.svelte'
+  import { checksStatus, reviewerStatus } from '../lib/reviewStatus'
   import Diff from '../components/Diff.svelte'
   import ReviewDiff from '../components/ReviewDiff.svelte'
   import ReviewThreads from '../components/ReviewThreads.svelte'
@@ -57,7 +59,6 @@
     CLOSED_STATES,
     GENERATED_DETAILS,
     basisLabel,
-    checksState,
     composerLabel,
     openerFor,
     lostOwner,
@@ -206,6 +207,7 @@
     draftFromEarlier = false
     draftTheirs = null
     draftMessage = null
+    expanded = null
     Promise.all([api.review(id), api.reviewDraft(id).catch(() => ({ draft: null }))])
       .then(([d, held]) => {
         review = d.review
@@ -617,8 +619,6 @@
   const checks = $derived(review ? reviewChecks(review) : [])
   /** Checks the node tried to run on an external candidate and could not. */
   const unrun = $derived(checks.find((c) => c.outcome === 'could_not_run'))
-  /** The node is running an external candidate's checks; they gate nothing. */
-  const checksRunning = $derived(checksState(checks) === 'running')
   /** A reviewer is waiting on them: only when the channel binds a review model. */
   const reviewerWaits = $derived(reviewerReason?.startsWith('waiting for') ?? false)
   const session = $derived(review?.session_id ? store.sessions.get(review.session_id) : undefined)
@@ -642,6 +642,24 @@
       ? reviewerView.verdict_revision
       : null,
   )
+  /** The status line's checks item: the node's runs, else the review's own record of them. */
+  const checkStatus = $derived(checksStatus(evidence?.checks ?? [], checks, reviewerWaits))
+  /** The status line's reviewer item: its verdict, a reviewer at work, or the control that starts one. */
+  const reviewerItem = $derived(
+    review
+      ? reviewerStatus(control, verdict, {
+          away: reviewerAway,
+          peerReading: remoteOwner !== null && ownerDetail?.state !== 'fetched' && review.review_session_id !== null,
+        })
+      : null,
+  )
+  /** The task the review was captured against, or the session's: only when there is one. */
+  const taskId = $derived(requirements?.id ?? session?.work_item_id ?? null)
+  /** Which status item is open to its detail under the header, if one is. */
+  let expanded = $state<'checks' | 'task' | 'docs' | null>(null)
+  function expand(item: 'checks' | 'task' | 'docs') {
+    expanded = expanded === item ? null : item
+  }
   /** Review again replaces the verdict shown; it asks first. */
   let confirmingAgain = $state(false)
   // A reviewer that ends, or one the node had not recorded yet, is read
@@ -1027,15 +1045,163 @@
       <em>{closed ? CLOSED_LABEL[review.state] : stale.length > 0 ? 'Changed since submit' : 'Review'}</em>
       {title || review.title}
       <small
-        ><Name kind={review.kind === 'report' ? 'report' : 'review'} id={review.id} renamable /> · {files.length} files · +{review.added} −{review.removed} · {review.channel}{!closed && review.claimed_ms
-          ? ' · claimed'
-          : ''}</small
+        ><ReviewId kind={review.kind === 'report' ? 'report' : 'review'} id={review.id} /> · {files.length} files · +{review.added} −{review.removed} · {review.channel}</small
       >
     </span>
     {#if landed}
       <a class="pr" href={landed.url} target="_blank" rel="noreferrer">{publishedLabel(review.provider, landed, forgeState)}</a>
     {/if}
   </div>
+
+  <!-- Who checked this, in one line under the title: checks, reviewer, task,
+       model and who submitted it, each only when it has something to say.
+       Each opens to its detail beneath. -->
+  <div class="status" aria-label="Review status">
+    <span class="item">
+      {#if checkStatus.expands}
+        <button
+          type="button"
+          class="lnk tone-{checkStatus.tone}"
+          aria-expanded={expanded === 'checks'}
+          onclick={() => expand('checks')}>{checkStatus.label}</button
+        >
+      {:else}
+        <span class="dim">{checkStatus.label}</span>
+      {/if}
+    </span>
+    {#if reviewerItem}
+      <span class="item reviewer">
+        {#if reviewerItem.kind === 'reviewing'}
+          <span class="dim" title="a fresh session is reading this review · its verdict lands here; yours decides"
+            >reviewing…{reviewerItem.since ? ` ${formatAge(reviewerItem.since, clock.now)}` : ''}</span
+          >
+        {:else if reviewerItem.kind === 'away'}
+          <span class="dim">{reviewerItem.note}</span>
+        {:else if reviewerItem.kind === 'no_model'}
+          <span class="dim">no review model on {review.channel} · <a class="lnk" href="/settings#channels">Settings → Channels</a></span>
+        {:else if reviewerItem.kind === 'verdict'}
+          <span
+            class="chip"
+            class:ok={verdict?.verdict === 'approve'}
+            class:bad={verdict?.verdict !== 'approve'}
+            title={[verdict?.model, startedHow(reviewerView?.started_by)].filter(Boolean).join(' · ')}
+            >{reviewerItem.label}{reviewerItem.action === 'stale'
+              ? ` · revision ${reviewerItem.revision ?? 'earlier'}`
+              : ''}</span
+          >
+          {#if reviewerItem.action === 'stale'}
+            <button class="btn" disabled={busy} onclick={startReviewer}>Review this revision</button>
+          {:else if reviewerItem.action === 'again'}
+            {#if confirmingAgain}
+              <span class="dim">A new reviewer replaces the verdict shown.</span>
+              <button class="btn" disabled={busy} onclick={() => { confirmingAgain = false; void startReviewer() }}>Review again</button>
+              <button class="lnk" disabled={busy} onclick={() => (confirmingAgain = false)}>Keep this verdict</button>
+            {:else}
+              <button class="lnk" disabled={busy} onclick={() => (confirmingAgain = true)}>Review again…</button>
+            {/if}
+          {/if}
+        {:else if reviewerItem.kind === 'start'}
+          <button class="btn" disabled={busy} onclick={startReviewer}>Start reviewer</button>
+          {#if reviewerItem.note}<span class="dim">{reviewerItem.note}</span>{/if}
+        {:else if reviewerItem.kind === 'retry'}
+          <button class="btn" disabled={busy} onclick={startReviewer}>Retry reviewer</button>
+          <span class="dim">{reviewerItem.reason}</span>
+        {:else if reviewerItem.kind === 'stale'}
+          <span class="dim">verdict on revision {reviewerItem.revision ?? 'an earlier one'}</span>
+          <button class="btn" disabled={busy} onclick={startReviewer}>Review this revision</button>
+        {/if}
+      </span>
+    {/if}
+    {#if taskId}
+      <span class="item"
+        >task <Name kind="task" id={taskId} href="/tasks/{taskId}" />{#if requirements}<button
+            type="button"
+            class="lnk fold"
+            aria-expanded={expanded === 'task'}
+            aria-label={expanded === 'task' ? 'hide the requirements' : 'show the requirements'}
+            onclick={() => expand('task')}>{expanded === 'task' ? '▾' : '▸'}</button
+          >{/if}</span
+      >
+    {/if}
+    {#if evidence?.demonstrations.length}
+      <span class="item">
+        <button type="button" class="lnk" aria-expanded={expanded === 'docs'} onclick={() => expand('docs')}
+          >docs {evidence.demonstrations.length}</button
+        >
+      </span>
+    {/if}
+    {#if session}
+      <span class="item dim">{session.model} · {session.phase}</span>
+    {/if}
+    {#if review.session_id}
+      <span class="item">session <Name kind="session" id={review.session_id} href="/sessions/{review.session_id}" /></span>
+    {:else}
+      <span class="item dim">submitted by {review.lane ?? 'an external agent'}</span>
+    {/if}
+  </div>
+  {#if reviewerRefusal}
+    <div class="note">{reviewerRefusal}</div>
+  {/if}
+  {#if expanded === 'checks'}
+    <div class="expand" aria-label="Checks">
+      {#if authoritativeChecks.length}
+        <p class="runs-said" class:bad={checkStatus.tone === 'bad'}>{runsSummary(authoritativeChecks)}</p>
+        <ul class="runs">
+          {#each authoritativeChecks as run (run.id)}
+            {@const tone = runTone(run)}
+            {@const failed = tone === 'bad' ? whatFailed(run) : ''}
+            <li>
+              <div class="run">
+                <button class="line" type="button" aria-haspopup="dialog" onclick={() => (openRun = run)}>
+                  <span class="dot {tone}" aria-label={outcomeLabel(run)}></span>
+                  <code>{run.command ?? 'command not recorded'}</code>
+                  <span class="dur">{tone === 'bad' ? `${outcomeLabel(run)} · ` : ''}{runDuration(run)}</span>
+                </button>
+                {#if failed}
+                  <button
+                    class="lnk fold"
+                    type="button"
+                    aria-expanded={!folded.has(run.id)}
+                    aria-label={folded.has(run.id) ? 'show what failed' : 'hide what failed'}
+                    onclick={() => fold(run.id)}>{folded.has(run.id) ? '▸' : '▾'}</button
+                  >
+                {/if}
+              </div>
+              {#if failed && !folded.has(run.id)}
+                <pre class="failures" aria-label="what failed">{failed}</pre>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      {:else if unrun}
+        <p class="missing">{unrun.tail}</p>
+      {:else}
+        <!-- The review's older record of the same checks. -->
+        <div class="checks">
+          {#each checks as c, index (index)}{@const running = c.outcome === 'running'}<span class="chip" class:ok={c.ok} class:bad={!c.ok && !running} title={c.ok ? undefined : c.tail}>{c.ok ? '✓' : running ? '…' : '✗'} {c.command}{running ? ' · running' : ` · ${Math.round(c.ms / 1000)}s`}</span>{/each}
+        </div>
+      {/if}
+    </div>
+  {:else if expanded === 'task' && requirements}
+    <div class="expand" aria-label="Requirements">
+      <b>{requirements.title}</b>
+      {#if requirements.body.trim()}
+        <div class="md">{@html renderMessage(requirements.body)}</div>
+      {:else}
+        <p class="missing">No additional requirement detail.</p>
+      {/if}
+    </div>
+  {:else if expanded === 'docs' && evidence?.demonstrations.length}
+    <div class="expand demonstrations" aria-label="Curated demonstrations">
+      {#each evidence.demonstrations as demo (demo.id)}
+        <a href={`/docs/${demo.channel}/${demo.document_slug}`}>{demo.label}</a>
+        {#if demo.stale}
+          <span class="chip warn" title="the document has changed since this was attached">stale</span>
+        {/if}
+      {/each}
+      <small>Linked context documents.</small>
+    </div>
+  {/if}
 
   {#if direct && !closed}
     <DirectPush {target} provider={review.provider} from={intent.lease} protection={protection ?? intent.protection} />
@@ -1081,13 +1247,6 @@
       {/if}
     </dd>
 
-    {#if review.session_id}
-      <dt>Session</dt>
-      <dd class="m"><Name kind="session" id={review.session_id} href="/sessions/{review.session_id}" /></dd>
-    {:else}
-      <dt>Submitted by</dt>
-      <dd class="m">{review.lane ?? 'an external agent'}</dd>
-    {/if}
   </dl>
   {#if remoteOwner && ownerDetail?.state === 'fetched'}
     <div class="banner dim">
@@ -1106,7 +1265,7 @@
     <div class="verdict" class:rc={verdict.verdict === 'request_changes'}>
       <span class="vbar"></span>
       <div class="in">
-        <div class="who"><b>{verdict.verdict === 'approve' ? 'Approves' : 'Request changes'}</b>{verdictRevision !== null ? ` · for revision ${verdictRevision}` : ''} · {verdict.model}{basisLabel(verdict.basis) ? ` · ${basisLabel(verdict.basis)}` : ''}{reviewer && verdictRevision === null ? ` · ${Math.round(reviewer.tokens_used / 1000)}k tokens` : ''}</div>
+        <div class="who"><b>{verdict.verdict === 'approve' ? 'Approves' : 'Request changes'}</b>{verdictRevision !== null ? ` · for revision ${verdictRevision}` : ''} · {verdict.model}{basisLabel(verdict.basis) ? ` · ${basisLabel(verdict.basis)}` : ''}{reviewer && verdictRevision === null ? ` · ${Math.round(reviewer.tokens_used / 1000)}k tokens` : ''}{verdictRevision === null && startedHow(reviewerView?.started_by) ? ` · ${startedHow(reviewerView?.started_by)}` : ''}</div>
         <div class="sum">{verdict.summary}</div>
         {#if verdict.findings?.length}
           <ul class="findings">
@@ -1122,48 +1281,6 @@
     </div>
   {/if}
 
-  {#if control?.kind === 'running'}
-    <div class="banner dim">
-      a fresh session is reading this review{control.since ? ` · ${formatAge(control.since, clock.now)}` : ''} <b>· its verdict lands here; yours decides</b>
-    </div>
-  {:else if remoteOwner && ownerDetail?.state !== 'fetched' && review.review_session_id && !verdict}
-    <div class="banner dim">a fresh session is reading this review <b>· its verdict lands here; yours decides</b></div>
-  {:else if reviewerAway}
-    <div class="recover"><span class="note">{reviewerAway}</span></div>
-  {:else if control?.kind === 'no_model'}
-    <div class="recover">
-      <span class="note">No review model on {review.channel} · <a class="lnk" href="/settings#channels">Settings → Channels</a></span>
-    </div>
-  {:else if control?.kind === 'start'}
-    <div class="recover">
-      {#if control.note}<span class="note">{control.note}</span>{/if}
-      {#if reviewerRefusal}<span class="note">{reviewerRefusal}</span>{/if}
-      <button class="btn" disabled={busy} onclick={startReviewer}>Start reviewer</button>
-    </div>
-  {:else if control?.kind === 'retry'}
-    <div class="recover">
-      <span class="note">{control.reason}</span>
-      {#if reviewerRefusal}<span class="note">{reviewerRefusal}</span>{/if}
-      <button class="btn" disabled={busy} onclick={startReviewer}>Retry reviewer</button>
-    </div>
-  {:else if control?.kind === 'stale'}
-    <div class="recover">
-      <span class="note">the reviewer's verdict is on revision {control.revision ?? 'an earlier one'}; this is revision {reviewerView?.revision ?? 'a later one'}</span>
-      {#if reviewerRefusal}<span class="note">{reviewerRefusal}</span>{/if}
-      <button class="btn" disabled={busy} onclick={startReviewer}>Review this revision</button>
-    </div>
-  {:else if control?.kind === 'again'}
-    <div class="recover">
-      {#if reviewerRefusal}<span class="note">{reviewerRefusal}</span>{/if}
-      {#if confirmingAgain}
-        <span class="note">A new reviewer replaces the verdict shown.</span>
-        <button class="btn" disabled={busy} onclick={() => { confirmingAgain = false; void startReviewer() }}>Review again</button>
-        <button class="lnk" disabled={busy} onclick={() => (confirmingAgain = false)}>Keep this verdict</button>
-      {:else}
-        <button class="lnk" disabled={busy} onclick={() => (confirmingAgain = true)}>Review again…</button>
-      {/if}
-    </div>
-  {/if}
   <!-- Before the evidence, prose and files: it is what saves reading them again. -->
   {#if sinceReviewed}
     <section class="since">
@@ -1196,100 +1313,11 @@
   <!-- The submitter's note and what it showed, before the evidence and files:
        its account of what it verified and what it did not is read first. -->
   <ShownWork items={shownWork} onReview reviewer={review.review_session_id} />
-  {#if remoteOwner && !evidence}
-    <!-- what the owner holds could not be read; the banner above says why -->
-  {:else if !evidence}
+  {#if !remoteOwner && !evidence}
     <div class="banner crit">
       verification evidence missing <b>· this review predates immutable candidate capture</b>
     </div>
-  {:else}
-    <section class="evidence">
-      <div class="h4">Candidate evidence</div>
-      <div class="evidence-grid">
-        <div class="evidence-panel">
-          <h3>Requirements</h3>
-          {#if requirements}
-            <b>{requirements.title}</b>
-            {#if requirements.body.trim()}
-              <div class="md">{@html renderMessage(requirements.body)}</div>
-            {:else}
-              <p>No additional requirement detail.</p>
-            {/if}
-            <a href="/tasks/{requirements.id}">open task</a>
-          {:else}
-            <p class="missing">No task was linked when this review was captured.</p>
-          {/if}
-        </div>
-        <div class="evidence-panel">
-          <h3>Runtime evidence</h3>
-          {#if authoritativeChecks.length}
-            {@const summary = runsSummary(authoritativeChecks)}
-            <p class="runs-said" class:bad={authoritativeChecks.some((r) => runTone(r) === 'bad')}>{summary}</p>
-            <ul class="runs">
-              {#each authoritativeChecks as run (run.id)}
-                {@const tone = runTone(run)}
-                {@const failed = tone === 'bad' ? whatFailed(run) : ''}
-                <li>
-                  <div class="run">
-                    <button class="line" type="button" aria-haspopup="dialog" onclick={() => (openRun = run)}>
-                      <span class="dot {tone}" aria-label={outcomeLabel(run)}></span>
-                      <code>{run.command ?? 'command not recorded'}</code>
-                      <span class="dur">{tone === 'bad' ? `${outcomeLabel(run)} · ` : ''}{runDuration(run)}</span>
-                    </button>
-                    {#if failed}
-                      <button
-                        class="lnk fold"
-                        type="button"
-                        aria-expanded={!folded.has(run.id)}
-                        aria-label={folded.has(run.id) ? 'show what failed' : 'hide what failed'}
-                        onclick={() => fold(run.id)}>{folded.has(run.id) ? '▸' : '▾'}</button
-                      >
-                    {/if}
-                  </div>
-                  {#if failed && !folded.has(run.id)}
-                    <pre class="failures" aria-label="what failed">{failed}</pre>
-                  {/if}
-                </li>
-              {/each}
-            </ul>
-          {:else if checksRunning}
-            <p class="missing">Checks running{reviewerWaits ? ' · reviewer starts after' : ''}</p>
-          {:else if unrun}
-            <p class="missing">{unrun.tail}</p>
-          {:else if target?.worktree}
-            <p class="missing">From your own harness · no checks run</p>
-          {:else}
-            <p class="missing">No required checks were configured for this candidate.</p>
-          {/if}
-        </div>
-      </div>
-      {#if evidence.demonstrations.length}
-        <div class="demonstrations">
-          <b>Curated demonstrations</b>
-          {#each evidence.demonstrations as demo (demo.id)}
-            <a href={`/docs/${demo.channel}/${demo.document_slug}`}>{demo.label}</a>
-            {#if demo.stale}
-              <span class="chip warn" title="the document has changed since this was attached">stale</span>
-            {/if}
-          {/each}
-          <small>Linked context documents.</small>
-        </div>
-      {/if}
-    </section>
   {/if}
-
-  <!-- The older record of the same checks; the runtime evidence above is the node's own when there is any. -->
-  {#if checks.length && !authoritativeChecks.length}
-    <div class="checks">
-      {#each checks as c, index (index)}{@const running = c.outcome === 'running'}<span class="chip" class:ok={c.ok} class:bad={!c.ok && !running} title={c.ok ? undefined : c.tail}>{c.ok ? '✓' : running ? '…' : '✗'} {c.command}{running ? ' · running' : ` · ${Math.round(c.ms / 1000)}s`}</span>{/each}
-    </div>
-  {/if}
-
-  <dl class="prov">
-    <div><dt>Model</dt><dd>{session ? `${session.model} · ${session.phase}` : '—'}</dd></div>
-    <div><dt>Task</dt><dd>{#if session?.work_item_id}<Name kind="task" id={session.work_item_id} href="/tasks/{session.work_item_id}" />{:else}none{/if}</dd></div>
-    <div><dt>Reviewed by</dt><dd>{reviewer ? `${reviewer.model} · fresh session` : review.review_session_id ? 'fresh session' : (reviewerReason ?? 'no review session')}{reviewer && startedHow(reviewerView?.started_by) ? ` · ${startedHow(reviewerView?.started_by)}` : ''}</dd></div>
-  </dl>
 
   {#if review.state === 'revising'}
     <div class="banner ok">
@@ -1842,40 +1870,68 @@
     font: 12.5px var(--mono);
     color: var(--ink2);
   }
-  .evidence {
+  /* The status line: items in a row, a dot between each. */
+  .status {
     display: flex;
-    flex-direction: column;
-    gap: 9px;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px 0;
+    margin: 6px 0 2px;
+    font: 12px var(--mono);
+    color: var(--ink2);
   }
-  .evidence-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 10px;
-  }
-  .evidence-panel {
+  .status .item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
     min-width: 0;
+  }
+  .status .item + .item::before {
+    content: '·';
+    margin: 0 8px;
+    color: var(--dim);
+  }
+  .status .dim {
+    color: var(--dim);
+  }
+  .status .lnk {
+    font: inherit;
+  }
+  .status .btn {
+    padding: 2px 9px;
+    font-size: 12px;
+  }
+  .status .tone-ok {
+    color: var(--ok);
+  }
+  .status .tone-bad {
+    color: var(--crit);
+  }
+  .status .tone-running {
+    color: var(--wait);
+  }
+  .status .fold {
+    font-size: 11px;
+    color: var(--dim);
+  }
+  .expand {
+    margin: 4px 0 6px;
     padding: 10px;
     border-radius: 4px;
     background: var(--s1);
     font-size: 12.5px;
   }
-  .evidence-panel h3 {
-    margin: 0 0 7px;
-    font: 11px var(--mono);
-    color: var(--dim);
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-  }
-  .evidence-panel p {
+  .expand p {
     margin: 5px 0;
     white-space: pre-wrap;
   }
-  .evidence-panel .md {
+  .expand .md {
     margin: 5px 0;
     overflow-wrap: anywhere;
   }
   /* Wrapped: a failure line cut off at the panel's edge says nothing. */
-  .evidence pre.failures {
+  .expand pre.failures {
     max-height: 210px;
     margin: 2px 0 4px 16px;
     overflow: auto;
@@ -1983,33 +2039,6 @@
   .checks .chip.bad {
     background: var(--wash-crit);
     color: var(--crit);
-  }
-  .prov {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-    gap: 10px 16px;
-    background: var(--s1);
-    border-radius: 4px;
-    padding: 10px 14px;
-    margin: 0;
-  }
-  .prov div {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-width: 0;
-  }
-  .prov dt {
-    font: 11px var(--mono);
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--dim);
-  }
-  .prov dd {
-    margin: 0;
-    font: 12.5px var(--mono);
-    color: var(--ink2);
-    overflow-wrap: anywhere;
   }
   .verdict {
     display: grid;
