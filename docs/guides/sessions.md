@@ -664,10 +664,18 @@ already has (`change`, named at first submit). The review's title and body are t
 agent's summary for you; what reaches the forge is separate and editable before
 you approve: a description (a new change's, or a replacement for an existing
 one's), a comment, both, or — for an update — nothing but the push. They are
-edited as Markdown source, and below them the review page shows what the forge
-gets, rendered (sanitized, nothing fetched) or as the exact source: the node
-composes it with the same function approval publishes with, so it includes
-anything the node adds, such as the opener and fold of `[review] generated_details`. Submit checks
+edited in one place, under *On the forge*: its **Preview** tab shows what the forge
+gets, rendered (sanitized, nothing fetched); **Source** edits the title and body as
+Markdown, above the exact source the node composes with the same function approval
+publishes with, so it includes anything the node adds, such as the opener and fold
+of `[review] generated_details`; and **Changes** diffs each field you edited, word
+by word, against the agent's text. An *edited* chip marks the text as yours, and
+**Clear edits** puts every forge field back as the agent wrote it (commit messages
+and the branch are left alone). Your edits are kept as a draft on the node, so they
+come back on a reload, on another device and over a resubmission; a draft from an
+earlier revision says so above the tabs, with the fields it overrides. When the
+review's title and body are only the agent's summary for you, they show read-only
+above *Shown work*. Submit checks
 the forge first: a branch with an open change must name it, and an update must be
 an open change of that repository into that base. An update is pushed to the
 change's own branch, whatever the worktree's is called. A review that opened a

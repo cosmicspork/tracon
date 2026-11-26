@@ -90,30 +90,93 @@ test('under generated details the opener sits above the agent text, which is col
   expect(snippet).not.toContain('<OutgoingPreview')
 })
 
-test('the outgoing title and body are previewed below their source, as approval sends them', () => {
+test('the forge text is edited in one place: the Source tab of On the forge, beside what it composes', () => {
   const at = markup.indexOf('<OutgoingPreview')
   expect(at).toBeGreaterThan(-1)
   expect(markup.indexOf('<OutgoingPreview', at + 1)).toBe(-1)
-  // After every editor of the text it shows.
-  expect(at).toBeGreaterThan(markup.indexOf('bind:value={title}'))
-  expect(at).toBeGreaterThan(markup.indexOf('bind:value={descBody}'))
-  expect(at).toBeGreaterThan(markup.indexOf('bind:value={comment}'))
+  const end = markup.indexOf('</OutgoingPreview>', at)
+  const inside = markup.slice(at, end)
+  // The Title and body section is gone; its editors are the Source tab's.
+  expect(markup).not.toContain('Title and body')
+  const editor = inside.slice(inside.indexOf('{#snippet editor()}'), inside.indexOf('{/snippet}', inside.indexOf('{#snippet editor()}')))
+  expect(editor).toContain('bind:value={title}')
+  expect(editor).toContain('bind:value={body}')
+  expect(editor).toContain('bind:value={descTitle}')
+  expect(editor).toContain('bind:value={descBody}')
+  expect(markup.split('bind:value={title}').length - 1).toBe(1)
+  expect(markup.split('bind:value={descTitle}').length - 1).toBe(1)
+  // Read-only on a phone and for a review another node holds.
+  expect(editor).toContain('{@const locked = busy || publishing || surface.phone || remoteOwner !== null}')
+  // The comment stays under its checkbox, before the tabs.
+  expect(markup.indexOf('bind:value={comment}')).toBeLessThan(at)
+  expect(markup.indexOf('bind:value={comment}')).toBeGreaterThan(markup.indexOf('bind:checked={commenting}'))
+  // The tab follows the page, so the banner's Show changes can open Changes.
+  expect(inside.slice(0, inside.indexOf('>\n'))).toContain('bind:view={forgeView}')
   // The node is asked with what approve would send it.
-  const preview = markup.slice(at, markup.indexOf('/>', at))
-  expect(preview).toContain('outputs: remoteOwner ? undefined : outputs')
-  expect(preview).toContain('opener: opening ? opener : undefined')
-  expect(preview).toContain('revision_id: revision?.id')
+  expect(inside).toContain('outputs: remoteOwner ? undefined : outputs')
+  expect(inside).toContain('opener: opening ? opener : undefined')
+  expect(inside).toContain('revision_id: revision?.id')
   const decide = review.slice(review.indexOf('async function decide('))
   const call = decide.slice(0, decide.indexOf('})\n'))
   expect(call).toContain("outputs: verdict === 'approve' && !remoteOwner ? outputs : undefined")
   expect(call).toContain("opener: verdict === 'approve' && opening ? opener : undefined")
 })
 
+test('no section shows the body twice: the summary sits above shown work only when it is not the forge text', () => {
+  const summary = markup.indexOf('{#if summaryOnly}')
+  expect(summary).toBeGreaterThan(-1)
+  expect(markup.split('{#if summaryOnly}').length - 1).toBe(1)
+  expect(markup.indexOf('<ShownWork ')).toBeGreaterThan(summary)
+  expect(markup.slice(summary, markup.indexOf('<ShownWork '))).toContain('renderMessage(review.body)')
+  // Decided, the title and body show once, as they went, and only when they were the forge text.
+  expect(markup).toContain('{:else if !summaryOnly}\n    <!-- Decided: the title and body as they went. -->')
+})
+
+test('an edited chip and Clear edits sit beside the tabs; Changes diffs each edited field by word', () => {
+  const at = markup.indexOf('<OutgoingPreview')
+  const inside = markup.slice(at, markup.indexOf('</OutgoingPreview>', at))
+  const actions = inside.slice(inside.indexOf('{#snippet actions()}'), inside.indexOf('{/snippet}', inside.indexOf('{#snippet actions()}')))
+  expect(actions).toContain('{#if forgeChanged.length}')
+  expect(actions).toContain('>edited</span>')
+  expect(actions).toContain('onclick={clearEdits}>Clear edits</button>')
+  const changes = inside.slice(inside.indexOf('{#snippet changes()}'))
+  expect(changes).toContain('No edits')
+  expect(changes).toContain('<WordDiff before={e.before} after={e.after} />')
+  // The old note is replaced by the chip.
+  expect(markup).not.toContain('Edited · approving publishes this version')
+})
+
+test('Clear edits restores every forge field and toggle, and leaves commit messages and the branch', () => {
+  const clear = review.slice(review.indexOf('function clearEdits()'))
+  const fn = clear.slice(0, clear.indexOf('\n  }\n'))
+  for (const f of ['title', 'body', 'describe', 'descTitle', 'descBody', 'commenting', 'comment']) {
+    expect(fn).toContain(`${f} = agentText.${f}`)
+  }
+  expect(fn).not.toContain('message')
+  expect(fn).not.toContain('branchName')
+  // The draft sync saves it like any edit, so it reaches other devices.
+  expect(review).toContain('if (loaded) draftSync?.edit(fields)')
+})
+
+test('a draft from an earlier revision says what it overrides, with Show changes and Clear edits', () => {
+  const at = markup.indexOf('{#if !closed && draftFromEarlier && forgeChanged.length}')
+  expect(at).toBeGreaterThan(-1)
+  const banner = markup.slice(at, markup.indexOf('{/if}\n  {#if !closed}', at))
+  expect(banner).toContain('your edits are from {draftRevisionLabel} <b>· the agent changed {fieldList(forgeChanged)} since</b>')
+  expect(banner).toContain("onclick={() => (forgeView = 'changes')}>Show changes</button>")
+  expect(banner).toContain('onclick={clearEdits}>Clear edits</button>')
+  // Inside On the forge, before the tabs.
+  expect(at).toBeGreaterThan(markup.indexOf('<div class="h4">On the forge'))
+  expect(at).toBeLessThan(markup.indexOf('<OutgoingPreview'))
+  // The footer keeps only saving, saved and the conflict.
+  expect(review).not.toContain("' · written against an earlier revision'")
+})
+
 test('the opener shows only where approval sends a description, and only with the setting on', () => {
   expect(review).toContain('openerFor(generatedDetails && !closed, { change: change !== null, initial, describe })')
   // A new change's body, or the description replacing a change's; otherwise the plain editor.
-  expect(markup).toContain("{#if opening === 'body'}\n      {@render generated('body')}\n    {:else}")
-  expect(markup).toContain("{#if opening === 'description'}\n      {@render generated('description')}\n    {:else}")
+  expect(markup).toContain("{#if opening === 'body'}\n            {@render generated('body')}\n          {:else}")
+  expect(markup).toContain("{#if opening === 'description'}\n            {@render generated('description')}\n          {:else}")
   // Nothing else renders it: "Comment on the …" never gets one.
   expect(markup.split("{@render generated(").length - 1).toBe(2)
 })

@@ -11,6 +11,8 @@
   import { ViewedFiles } from '../lib/viewedFiles.svelte'
   import CommitMessage from '../components/CommitMessage.svelte'
   import OutgoingPreview from '../components/OutgoingPreview.svelte'
+  import { WordDiff } from '@tracon/ui/svelte'
+  import { agentForge, fieldList, forgeEdits } from '../lib/forgeEdits'
   import ShownWork from '../components/ShownWork.svelte'
   import CheckDetail from '../components/CheckDetail.svelte'
   import PublicationSteps from '../components/PublicationSteps.svelte'
@@ -156,6 +158,10 @@
   let draftState = $state<DraftState>('clean')
   /** The draft on the screen was written against an earlier revision. */
   let draftFromEarlier = $state(false)
+  /** The revision that draft was written against. */
+  let draftRevision = $state<string | null>(null)
+  /** The On the forge tab showing: Preview, Source (where it is edited) or Changes. */
+  let forgeView = $state<'preview' | 'source' | 'changes'>('preview')
   /** What another device saved, while the two disagree. */
   let draftTheirs = $state<ReviewDraftFields | null>(null)
   /**
@@ -205,6 +211,8 @@
     draftSync = null
     draftState = 'clean'
     draftFromEarlier = false
+    draftRevision = null
+    forgeView = 'preview'
     draftTheirs = null
     draftMessage = null
     expanded = null
@@ -256,6 +264,7 @@
           const applied = draftForRevision(held.draft, d.revision?.id, proposedMessage)
           applyDraft(applied.fields)
           draftFromEarlier = applied.fromEarlier
+          draftRevision = applied.fromEarlier ? held.draft.revision_id : null
           draftMessage = squashing ? applied.staleMessage : null
         }
         draftSync = new ReviewDraftSync(id, d.revision?.id, (state) => {
@@ -710,19 +719,33 @@
     }, WATCH_RENEW_MS)
     return () => clearInterval(t)
   })
-  const edited = $derived(
-    review !== null &&
-      (title !== review.title ||
-        body !== review.body ||
-        JSON.stringify(outputs) !==
-          JSON.stringify({
-            description: intent.forge.description,
-            comment: intent.forge.comment,
-            draft: change === null ? intent.forge.draft : undefined,
-            commit: squashing ? intent.forge.commit : undefined,
-            branch: undefined,
-          })),
+  /** What the agent asked the forge to get: what Clear edits puts back. */
+  const agentText = $derived(review ? agentForge(review, intent.forge) : null)
+  /** The forge fields you changed from the agent's text, each with its before and after. */
+  const forgeChanged = $derived(
+    agentText ? forgeEdits({ title, body, describe, descTitle, descBody, commenting, comment }, agentText) : [],
   )
+  /** The revision an earlier draft was written on, by number where a thread names it. */
+  const draftRevisionLabel = $derived.by(() => {
+    const n = threads.find((t) => t.revision_id === draftRevision)?.revision
+    return n != null ? `revision ${n}` : 'an earlier revision'
+  })
+
+  /**
+   * Put every forge field and its toggle back to the agent's text. The draft
+   * sync saves that like any edit, so the other devices and a reload see it
+   * cleared. Commit messages and the branch are left as they are.
+   */
+  function clearEdits() {
+    if (!agentText) return
+    title = agentText.title
+    body = agentText.body
+    describe = agentText.describe
+    descTitle = agentText.descTitle
+    descBody = agentText.descBody
+    commenting = agentText.commenting
+    comment = agentText.comment
+  }
   const authoritativeChecks = $derived(evidence?.checks ?? [])
   /** The run whose detail is open, if one is. */
   let openRun = $state<CandidateCheckRun | null>(null)
@@ -994,7 +1017,7 @@
     draftState === 'saving'
       ? 'saving draft…'
       : draftState === 'saved'
-        ? `draft saved${draftFromEarlier ? ' · written against an earlier revision' : ''}`
+        ? 'draft saved'
         : draftState === 'unsaved'
           ? 'draft not saved · the node could not be reached; it saves on your next edit'
           : '',
@@ -1312,6 +1335,15 @@
   {/if}
   <!-- The submitter's note and what it showed, before the evidence and files:
        its account of what it verified and what it did not is read first. -->
+  {#if summaryOnly}
+    <!-- The agent's summary, when it is not the forge text: read first, with what it showed. -->
+    <div class="h4">Summary <b>for you · not sent to the forge</b></div>
+    <div class="summary">
+      <b>{review.title}</b>
+      <!-- The agent's Markdown, rendered as its session messages are: nothing fetched, links open beside. -->
+      <div class="md">{@html renderMessage(review.body)}</div>
+    </div>
+  {/if}
   <ShownWork items={shownWork} onReview reviewer={review.review_session_id} />
   {#if !remoteOwner && !evidence}
     <div class="banner crit">
@@ -1392,9 +1424,9 @@
     <details class="generated">
       <summary>{GENERATED_DETAILS} <b>the agent's text · collapsed on the forge</b></summary>
       {#if which === 'body'}
-        <textarea class="edit body grow" bind:value={body} use:autogrow={body} disabled={busy || publishing || surface.phone}></textarea>
+        <textarea class="edit body grow" bind:value={body} use:autogrow={body} disabled={locked}></textarea>
       {:else}
-        <textarea class="edit body grow" bind:value={descBody} use:autogrow={descBody} disabled={busy || publishing || surface.phone}></textarea>
+        <textarea class="edit body grow" bind:value={descBody} use:autogrow={descBody} disabled={locked}></textarea>
       {/if}
     </details>
   {/snippet}
@@ -1415,26 +1447,7 @@
     </div>
   {/if}
 
-  {#if summaryOnly}
-    <div class="h4">Summary <b>for you · not sent to the forge</b></div>
-    <div class="summary">
-      <b>{review.title}</b>
-      <!-- The agent's Markdown, rendered as its session messages are: nothing fetched, links open beside. -->
-      <div class="md">{@html renderMessage(review.body)}</div>
-    </div>
-  {:else}
-    <div class="h4">
-      Title and body <b>{closed ? 'as decided' : surface.phone ? 'edited on the desktop' : 'Markdown source · edit before approving; the preview below is what is sent'}</b>
-    </div>
-    <input class="edit" bind:value={title} disabled={busy || publishing || closed || surface.phone} />
-    {#if opening === 'body'}
-      {@render generated('body')}
-    {:else}
-      <textarea class="edit body grow" bind:value={body} use:autogrow={body} disabled={busy || publishing || closed || surface.phone}></textarea>
-    {/if}
-  {/if}
-
-  <div class="h4">On the forge <b>{closed ? 'as decided' : remoteOwner ? `as the agent asked · edited on ${nodeLabel(store.nodes, remoteOwner)}` : surface.phone ? 'edited on the desktop' : 'what approval sends besides the commits'}</b></div>
+  <div class="h4">On the forge <b>{closed ? 'as decided' : remoteOwner ? `as the agent asked · edited on ${nodeLabel(store.nodes, remoteOwner)}` : surface.phone ? 'edited on the desktop' : 'what approval sends besides the commits · edit in Source'}</b></div>
   {#if remoteOwner}
     <div class="note dim">Publishes as the agent wrote it. Edit on the node that holds it.</div>
   {:else}
@@ -1442,30 +1455,33 @@
     <input type="checkbox" bind:checked={describe} disabled={busy || publishing || closed || surface.phone} />
     {change ? `Replace the ${noun}'s title and description` : `Describe the ${noun} separately from the summary`}
   </label>
-  {#if describe}
-    <input class="edit" bind:value={descTitle} placeholder="title" disabled={busy || publishing || closed || surface.phone} />
-    {#if opening === 'description'}
-      {@render generated('description')}
-    {:else}
-      <textarea class="edit body grow" bind:value={descBody} use:autogrow={descBody} disabled={busy || publishing || closed || surface.phone}></textarea>
-    {/if}
-  {/if}
   <label class="opt-check">
     <input type="checkbox" bind:checked={commenting} disabled={busy || publishing || closed || surface.phone} />
     Comment on the {noun}
   </label>
   {#if commenting}
-    <textarea class="edit body grow" bind:value={comment} use:autogrow={comment} disabled={busy || publishing || closed || surface.phone}></textarea>
+    <textarea class="edit body grow" aria-label="comment" bind:value={comment} use:autogrow={comment} disabled={busy || publishing || closed || surface.phone}></textarea>
   {/if}
   {#if change && !describe && !(commenting && comment.trim())}
     <div class="note dim">Approving only pushes; the {noun}'s text is left as it is.</div>
   {/if}
   {/if}
+  {#if !closed && draftFromEarlier && forgeChanged.length}
+    <!-- Your draft carried over a resubmission: say what it overrides. -->
+    <div class="banner draft-earlier" role="status">
+      <span>your edits are from {draftRevisionLabel} <b>· the agent changed {fieldList(forgeChanged)} since</b></span>
+      <button class="btn" onclick={() => (forgeView = 'changes')}>Show changes</button>
+      {#if !(busy || publishing || surface.phone || remoteOwner)}
+        <button class="btn" onclick={clearEdits}>Clear edits</button>
+      {/if}
+    </div>
+  {/if}
   {#if !closed}
-    <!-- The source is edited above; this is exactly what approving sends. -->
+    <!-- The one place the forge text is edited: Source, beside what it composes. -->
     <OutgoingPreview
       {id}
       {noun}
+      bind:view={forgeView}
       remote={remoteOwner !== null}
       asked={{
         title,
@@ -1483,10 +1499,56 @@
         generatedDetails,
         opener,
       }}
-    />
-  {/if}
-  {#if edited && !closed}
-    <div class="note">Edited · approving publishes this version</div>
+    >
+      {#snippet actions()}
+        {#if forgeChanged.length}
+          <span class="chip warn" title="approving publishes your version">edited</span>
+          {#if !(busy || publishing || surface.phone || remoteOwner)}
+            <button class="lnk" onclick={clearEdits}>Clear edits</button>
+          {/if}
+        {/if}
+      {/snippet}
+      {#snippet editor()}
+        {@const locked = busy || publishing || surface.phone || remoteOwner !== null}
+        {#if !summaryOnly}
+          <input class="edit" aria-label="title" bind:value={title} disabled={locked} />
+          {#if opening === 'body'}
+            {@render generated('body')}
+          {:else}
+            <textarea class="edit body grow" aria-label="body" bind:value={body} use:autogrow={body} disabled={locked}></textarea>
+          {/if}
+        {:else if describe}
+          <input class="edit" aria-label="description title" bind:value={descTitle} placeholder="title" disabled={locked} />
+          {#if opening === 'description'}
+            {@render generated('description')}
+          {:else}
+            <textarea class="edit body grow" aria-label="description" bind:value={descBody} use:autogrow={descBody} disabled={locked}></textarea>
+          {/if}
+        {:else}
+          <div class="note dim">No title or description is sent{change ? `; tick “Replace the ${noun}'s title and description” to write one` : ''}.</div>
+        {/if}
+      {/snippet}
+      {#snippet changes()}
+        {#if forgeChanged.length === 0}
+          <div class="note dim">No edits</div>
+        {:else}
+          {#each forgeChanged as e (e.field)}
+            <div class="edit-field">{e.field}</div>
+            {#if e.turned}
+              <div class="note dim">{e.turned === 'on' ? 'sent, where the agent asked for none' : 'not sent, where the agent asked for one'}</div>
+            {:else}
+              <WordDiff before={e.before} after={e.after} />
+            {/if}
+          {/each}
+        {/if}
+      {/snippet}
+    </OutgoingPreview>
+  {:else if !summaryOnly}
+    <!-- Decided: the title and body as they went. -->
+    <div class="summary">
+      <b>{title || review.title}</b>
+      <div class="md">{@html renderMessage(body)}</div>
+    </div>
   {/if}
 
   {#if intent.commits?.length || squashing}
@@ -2394,6 +2456,18 @@
   /* Kept in the page for the live region; takes no room while it says nothing. */
   .draft-state:empty {
     margin-top: -8px;
+  }
+  .draft-earlier {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin: 6px 0;
+  }
+  .edit-field {
+    font: 11.5px var(--mono);
+    color: var(--dim);
+    margin-top: 4px;
   }
   .draft-conflict {
     display: flex;
