@@ -10,6 +10,7 @@ import {
   numberLines,
   sideRows,
   threadsOn,
+  threadsStartOpen,
   unresolvedCount,
   whereLabel,
   type ReviewThread,
@@ -256,4 +257,11 @@ test('a decided review says its threads are read-only; a held one names its node
   )
   expect(threadsBlockedReason({ closed: false, remoteOwner: 'work-pod', ownerFetched: true })).toBeNull()
   expect(threadsBlockedReason({ closed: false, remoteOwner: null, ownerFetched: false })).toBeNull()
+})
+
+test('the Threads section starts open while a thread asks for something, folded once all are resolved or outdated', () => {
+  expect(threadsStartOpen([])).toBe(false)
+  expect(threadsStartOpen([thread({ state: 'resolved' }), thread({ state: 'outdated', outdated: true })])).toBe(false)
+  expect(threadsStartOpen([thread({ state: 'resolved' }), thread({ state: 'unresolved' })])).toBe(true)
+  expect(threadsStartOpen([thread({ state: 'addressed' })])).toBe(true)
 })

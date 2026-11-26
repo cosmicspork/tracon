@@ -211,6 +211,10 @@ test('review threads sit after the diff and before the verdict bar, and start fr
   // since-last-verdict diff is not, and offers no picks.
   expect(markup.slice(diff, threads)).toContain('onpick={threadsBlocked ? undefined : pickLine}')
   expect(markup.slice(diff, threads)).toContain('marks={threadMarks}')
+  // A pick opens the composer, folded or not, before it is scrolled to.
+  const pick = review.slice(review.indexOf('async function pickLine('))
+  expect(pick.slice(0, pick.indexOf('\n  }\n'))).toContain('threadComposing = true')
+  expect(markup.slice(threads)).toContain('bind:composing={threadComposing}')
   const since = markup.slice(markup.indexOf('diff={sinceReviewed.diff}'))
   expect(since.slice(0, since.indexOf('/>'))).not.toContain('onpick')
 })

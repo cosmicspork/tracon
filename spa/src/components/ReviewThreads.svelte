@@ -4,12 +4,15 @@
   // a line number picked in the diff fills the composer's anchor. Each
   // thread stays on the revision it was written on: one whose lines a later
   // revision changed reads outdated and still shows the lines it meant.
+  // Unused, the section is one line; with threads it folds to a count, open
+  // while any of them asks for something.
   import { api } from '../lib/api'
+  import Help from './Help.svelte'
   import {
     STATE_LABEL,
     anchorProblem,
     createBody,
-    unresolvedCount,
+    threadsStartOpen,
     whereLabel,
     type Anchor,
     type ReviewThread,
@@ -23,6 +26,7 @@
     paths,
     threads,
     anchor = $bindable(),
+    composing = $bindable(false),
     blocked,
     onthreads,
   }: {
@@ -36,6 +40,8 @@
     threads: ReviewThread[]
     /** Where the next thread goes; a pick in the diff sets it. */
     anchor: Anchor
+    /** The composer is open; `+ Thread` or a pick in the diff opens it. */
+    composing?: boolean
     /** Why threads cannot be changed from here, or null when they can. */
     blocked: string | null
     onthreads: (threads: ReviewThread[]) => void
@@ -51,7 +57,9 @@
 
   const open = $derived(threads.filter((t) => t.state !== 'resolved'))
   const resolved = $derived(threads.filter((t) => t.state === 'resolved'))
-  const waiting = $derived(unresolvedCount(threads))
+  /** The operator's fold, once they have toggled it; until then the threads decide. */
+  let userOpen = $state<boolean | null>(null)
+  const expanded = $derived(userOpen ?? threadsStartOpen(threads))
   const problem = $derived(anchorProblem(anchor, body))
 
   function setKind(kind: ThreadKind) {
@@ -93,7 +101,19 @@
     if (await act(() => api.createReviewThread(reviewId, createBody(anchor, body, revisionId)))) {
       body = ''
       anchor = { kind: 'general' }
+      composing = false
     }
+  }
+
+  function compose() {
+    anchor = { kind: 'general' }
+    composing = true
+  }
+
+  function cancel() {
+    body = ''
+    anchor = { kind: 'general' }
+    composing = false
   }
 
   async function sendReply(thread: string) {
@@ -105,13 +125,26 @@
   }
 </script>
 
-<div class="h4">
-  Threads <b>{threads.length ? `${waiting} for the agent · ${threads.length} in all` : 'none yet'}</b>
+<div class="h4 head">
+  {#if threads.length}
+    <button class="fold" aria-expanded={expanded} onclick={() => (userOpen = !expanded)}
+      >Threads <b>· {open.length} open · {resolved.length} resolved</b></button
+    >
+  {:else}
+    <span>Threads <b>· none</b></span>
+  {/if}
+  {#if !blocked && !composing}
+    <button class="lnk add" onclick={compose}>+ Thread</button>
+  {/if}
+  <Help label="About threads"
+    >A thread is on the whole change, a file, or lines of revision {revisionNumber ?? 1}, and the agent reads it. Pick a
+    line number in the diff to start one there; pick another to make it a range. Request changes sends the open ones.</Help
+  >
 </div>
 
 {#if error}<div class="banner crit">refused <b>· {error}</b></div>{/if}
 
-{#if !blocked}
+{#if composing && !blocked}
   <div class="composer">
     <div class="row">
       <label>
@@ -173,14 +206,11 @@
     ></textarea>
     <div class="row">
       <button class="btn" disabled={busy || problem !== null} onclick={add}>Add thread</button>
-      <span class="note dim"
-        >{problem && body.trim()
-          ? problem
-          : `On revision ${revisionNumber ?? 1}. Pick a line number in the diff to start there; pick another to make it a range.`}</span
-      >
+      <button class="btn" disabled={busy} onclick={cancel}>Cancel</button>
+      {#if problem && body.trim()}<span class="note dim">{problem}</span>{/if}
     </div>
   </div>
-{:else}
+{:else if blocked && expanded}
   <p class="note dim">{blocked}</p>
 {/if}
 
@@ -236,12 +266,14 @@
   </article>
 {/snippet}
 
-{#each open as t (t.id)}{@render card(t)}{/each}
-{#if resolved.length}
-  <button class="lnk" onclick={() => (showResolved = !showResolved)}>
-    {showResolved ? 'Hide' : 'Show'} {resolved.length} resolved
-  </button>
-  {#if showResolved}{#each resolved as t (t.id)}{@render card(t)}{/each}{/if}
+{#if expanded}
+  {#each open as t (t.id)}{@render card(t)}{/each}
+  {#if resolved.length}
+    <button class="lnk" onclick={() => (showResolved = !showResolved)}>
+      {showResolved ? 'Hide' : 'Show'} {resolved.length} resolved
+    </button>
+    {#if showResolved}{#each resolved as t (t.id)}{@render card(t)}{/each}{/if}
+  {/if}
 {/if}
 
 <style>
@@ -249,6 +281,29 @@
      around them. */
   .note {
     color: inherit;
+  }
+  .head {
+    align-items: center;
+  }
+  .fold {
+    font: inherit;
+    letter-spacing: inherit;
+    color: inherit;
+    background: none;
+    border: 0;
+    padding: 0;
+    cursor: pointer;
+    text-align: left;
+  }
+  .fold::before {
+    content: '▸ ';
+    color: var(--dim);
+  }
+  .fold[aria-expanded='true']::before {
+    content: '▾ ';
+  }
+  .add {
+    font: 12.5px var(--mono);
   }
   .composer,
   .thread {
