@@ -26,6 +26,8 @@ export function decisionLabel(call: Pick<AuditCall, 'decision'>): [string, Audit
       return ['changes requested', 'wait']
     case 'expired':
       return ['expired unanswered', 'mark']
+    case 'withdrawn':
+      return ['withdrawn by its plugin', 'mark']
     case 'pending':
     case 'asked':
       return ['waiting on you', 'wait']
@@ -40,6 +42,8 @@ export function decidedBy(call: Pick<AuditCall, 'decided_by' | 'rule'>): string 
   if (!who) return 'nobody yet'
   const rule = call.rule ? ` · ${call.rule}` : ''
   if (who === 'policy' || who === 'grant' || who === 'node') return `${who}${rule}`
+  // A card its plugin withdrew: the plugin ended it, not the operator.
+  if (who.startsWith('plugin:')) return `plugin ${who.slice('plugin:'.length)}`
   return who
 }
 
@@ -54,6 +58,7 @@ export function outcomeNote(call: AuditCall): string {
     return call.reason ?? call.error ?? ''
   }
   if (call.decision === 'changes_requested') return call.note ?? ''
+  if (call.decision === 'withdrawn') return call.reason ?? ''
   if (call.outcome === 'error') return call.error ?? 'failed'
   return ''
 }

@@ -464,6 +464,7 @@ impl Fixture {
                 revision_patch: None,
                 lane: None,
                 publication_failed: None,
+                after: Vec::new(),
             })
             .unwrap();
         id
@@ -3488,7 +3489,10 @@ async fn check_run_is_offered_only_where_the_operator_turns_it_on() {
         c.external.repo_roots = vec![Config::state_dir()];
     })
     .await;
-    assert!(!names(&off, tracon::mcp::Audience::External).contains(&"check_run".to_string()));
+    let offered = names(&off, tracon::mcp::Audience::External);
+    for tool in ["check_run", "check_run_status", "check_run_cancel"] {
+        assert!(!offered.contains(&tool.to_string()), "{tool}");
+    }
     let refused = check_run(&off, json!({ "command": "true" }))
         .await
         .unwrap_err();
@@ -3501,12 +3505,33 @@ async fn check_run_is_offered_only_where_the_operator_turns_it_on() {
         c.external.check_run = true;
     })
     .await;
-    assert!(names(&on, tracon::mcp::Audience::External).contains(&"check_run".to_string()));
-    assert!(!names(
+    let external = names(&on, tracon::mcp::Audience::External);
+    let execute = names(
         &on,
-        tracon::mcp::Audience::Session(tracon::session::Phase::Execute)
-    )
-    .contains(&"check_run".to_string()));
+        tracon::mcp::Audience::Session(tracon::session::Phase::Execute),
+    );
+    for tool in ["check_run", "check_run_status", "check_run_cancel"] {
+        assert!(external.contains(&tool.to_string()), "{tool}");
+        assert!(!execute.contains(&tool.to_string()), "{tool}");
+    }
+    // A run the node does not hold, whether it expired, was lost to a
+    // restart or never was, is said to be unknown, with what to do instead.
+    for tool in ["check_run_status", "check_run_cancel"] {
+        let unknown = on
+            .tools
+            .call(
+                &tracon::mcp::CallContext::external(None, "work", "n1"),
+                tool,
+                &json!({ "run_id": "check-run-gone", "wait_secs": 0 }),
+            )
+            .await
+            .unwrap_err();
+        assert!(unknown.contains("is known here"), "{tool}: {unknown}");
+        assert!(
+            unknown.contains("Call check_run again"),
+            "{tool}: {unknown}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -10871,4 +10896,186 @@ async fn decided_reviews_are_listed_for_the_history_screen() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     let (status, body) = f.call("GET", "/api/reviews?before=nope", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
+
+/// The submission of a review that publishes after `after`, at a new commit
+/// of its own: a second submission at the dependency's commit would be its
+/// resubmission instead.
+async fn submit_after(f: &Fixture, after: &[&str]) -> Value {
+    sh(
+        std::path::Path::new(&f.worktree),
+        "echo more >> a.txt && git commit -qam more",
+    );
+    let mut args = f.submit_args();
+    args["after"] = json!(after);
+    f.tool("s1", "submit_review", args).await
+}
+
+/// `submit_review`'s `after`: both reviews name each other on their pages,
+/// the dependent's row and status carry it, and approval waits until the
+/// dependency is approved, published and merged.
+#[tokio::test]
+async fn a_review_submitted_after_another_waits_for_its_merge_and_names_it_both_ways() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let first = f.submit().await;
+    let v = submit_after(&f, &[&first]).await;
+    let second = review_id(&v);
+    assert_ne!(first, second);
+
+    let (_, page) = f.call("GET", &format!("/api/reviews/{second}"), None).await;
+    let after = &page["dependencies"]["after"];
+    assert_eq!(after.as_array().unwrap().len(), 1, "{page}");
+    assert_eq!(after[0]["review_id"], first.as_str());
+    assert_eq!(after[0]["title"], "feat: the thing");
+    assert_eq!(after[0]["says"], "waiting on review");
+    assert_eq!(after[0]["satisfied"], false);
+    let (_, page) = f.call("GET", &format!("/api/reviews/{first}"), None).await;
+    assert_eq!(
+        page["dependencies"]["before"][0]["review_id"],
+        second.as_str(),
+        "{page}"
+    );
+    let (_, queue) = f.call("GET", "/api/queue", None).await;
+    let row = queue["reviews"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == second.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(row["after"], json!([first]), "{row}");
+    let status = f.status_tool(&second).await;
+    assert_eq!(status["after"][0]["review_id"], first.as_str(), "{status}");
+    assert_eq!(status["after"][0]["says"], "waiting on review");
+
+    // Not before the first is decided.
+    let (code, body) = f.approve(&second).await;
+    assert_eq!(code, StatusCode::CONFLICT, "{body}");
+    let said = body["error"]["message"].as_str().unwrap();
+    assert!(
+        said.contains("waits on feat: the thing") && said.contains("waiting on review"),
+        "{said}"
+    );
+    assert_ne!(
+        f.store.get_review(&second).unwrap().unwrap().state,
+        "approved"
+    );
+
+    // Approved and published, it waits on the merge. The first is approved
+    // from its own commit, as its worktree would be then.
+    let worktree = std::path::Path::new(&f.worktree);
+    let head = sh_out(worktree, "git rev-parse HEAD");
+    sh(worktree, "git reset -q --hard HEAD~1");
+    let (code, body) = f.approve(&first).await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let (code, body) = f.approve(&second).await;
+    assert_eq!(code, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("waiting on merge"),
+        "{body}"
+    );
+
+    // Merged, it is satisfied, and the approval goes through.
+    sh(worktree, &format!("git reset -q --hard {head}"));
+    f.store
+        .append_event(&tracon::store::NewEvent {
+            session_id: "s1".into(),
+            work_item_id: None,
+            kind: "forge_follow".into(),
+            ref_id: Some(f.publication_id(&first)),
+            payload: json!({
+                "review_id": first,
+                "changes": ["merged"],
+                "snapshot": { "state": "merged", "draft": false, "checks": {}, "comments": 0 },
+            }),
+            at_ms: now_ms(),
+            mono_ms: 0,
+        })
+        .unwrap();
+    let (_, page) = f.call("GET", &format!("/api/reviews/{second}"), None).await;
+    assert_eq!(page["dependencies"]["after"][0]["says"], "merged", "{page}");
+    assert_eq!(page["dependencies"]["after"][0]["satisfied"], true);
+    let (code, body) = f.approve(&second).await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let approved = f.store.get_review(&second).unwrap().unwrap();
+    assert_eq!(approved.state, "approved");
+    assert_eq!(approved.verdict_reason, None);
+}
+
+/// Approving a review before what it publishes after is the operator's
+/// call, made by saying why: the reason is kept as the verdict's.
+#[tokio::test]
+async fn a_review_approved_before_its_dependency_keeps_why_as_its_reason() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let first = f.submit().await;
+    let second = review_id(&submit_after(&f, &[&first]).await);
+    let (code, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{second}/verdict"),
+            Some(json!({ "verdict": "approve", "reason": "Approved anyway: the fix cannot wait" })),
+        )
+        .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let approved = f.store.get_review(&second).unwrap().unwrap();
+    assert_eq!(approved.state, "approved");
+    assert_eq!(
+        approved.verdict_reason.as_deref(),
+        Some("Approved anyway: the fix cannot wait")
+    );
+    assert_eq!(f.store.get_review(&first).unwrap().unwrap().state, "new");
+}
+
+/// `after` names only reviews on the channel that may still land, and
+/// never closes a cycle; each refusal comes before anything is captured.
+#[tokio::test]
+async fn after_refuses_an_unknown_review_a_rejected_one_and_a_cycle() {
+    state::isolate();
+    let f = fixture(test_name!(), WITH_GH).await;
+    let first = f.submit().await;
+    let second = review_id(&submit_after(&f, &[&first]).await);
+
+    // The first resubmitted to publish after the second: a cycle.
+    let mut args = f.submit_args();
+    args["review_id"] = json!(first);
+    args["after"] = json!([second]);
+    let v = f.tool("s1", "submit_review", args).await;
+    let err = v["error"].as_str().unwrap_or_default();
+    assert!(err.contains("cycle"), "{v}");
+    assert!(f.store.review_dependencies(&first).unwrap().is_empty());
+
+    let v = submit_after(&f, &["no-such-review"]).await;
+    let err = v["error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("no-such-review, which is no review on channel work"),
+        "{v}"
+    );
+
+    let (code, body) = f
+        .call(
+            "POST",
+            &format!("/api/reviews/{first}/verdict"),
+            Some(json!({ "verdict": "reject", "reason": "superseded by the other" })),
+        )
+        .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let v = submit_after(&f, &[&first]).await;
+    let err = v["error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("was rejected (\"superseded by the other\")"),
+        "{v}"
+    );
+
+    // A resubmission replaces the list; an empty one clears it.
+    let mut args = f.submit_args();
+    args["review_id"] = json!(second);
+    args["after"] = json!([]);
+    let v = f.tool("s1", "submit_review", args).await;
+    assert!(v.get("error").is_none(), "{v}");
+    assert!(f.store.review_dependencies(&second).unwrap().is_empty());
 }

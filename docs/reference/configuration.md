@@ -603,7 +603,9 @@ enabled = false
 repo_roots = ["~/src"]              # a worktree put up for review must belong to a repository under one of these
 check_run = false                   # true: offer the check_run tool, which runs the repository's checks or one
                                     # command in its image on the node's own copy of the commit and hands back
-                                    # their output, attached to nothing; needs a [[repo]] entry. Nothing else
+                                    # their output, attached to nothing; needs a [[repo]] entry. A run longer than
+                                    # the call's wait returns a run_id, fetched with check_run_status (or stopped
+                                    # with check_run_cancel). Nothing else
 check_submissions = false           # true: run the required checks behind each submission, as evidence for the
                                     # reviewer (a failed one shows on the card and never refuses the submission),
                                     # and make `auto` the external review trigger where a channel sets none.

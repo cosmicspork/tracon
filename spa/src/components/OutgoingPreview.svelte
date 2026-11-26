@@ -6,6 +6,12 @@
   // under `[review] generated_details`) is in it; it is asked again as the
   // fields above are edited. A review another node holds is composed here by
   // the same rules, since this screen cannot ask its owner.
+  //
+  // Three tabs: Preview, as the forge renders it; Source, where the page's
+  // `editor` edits the text and the exact source composed from it shows
+  // beneath; and Changes, the page's word diff of what was edited.
+  import type { Snippet } from 'svelte'
+
   import { api } from '../lib/api'
   import { codeSpans, renderForge } from '../lib/markdown'
   import { localOutgoing, sameOutgoing, type LocalInputs, type Outgoing, type OutgoingAsked } from '../lib/outgoing'
@@ -16,6 +22,10 @@
     local,
     remote,
     noun,
+    view = $bindable('preview'),
+    editor,
+    changes,
+    actions,
   }: {
     id: string
     /** The approval as the screen would send it now. */
@@ -25,12 +35,19 @@
     /** The review is another node's: compose it here. */
     remote: boolean
     noun: string
+    /** The tab showing. */
+    view?: 'preview' | 'source' | 'changes'
+    /** The fields that edit the text, at the top of Source. */
+    editor?: Snippet
+    /** What the edits changed: the Changes tab, offered only with it. */
+    changes?: Snippet
+    /** Beside the tabs: whether the text is edited, and the control that clears it. */
+    actions?: Snippet
   } = $props()
 
   /** How long typing rests before the node is asked again. */
   const SETTLE_MS = 250
 
-  let view = $state<'preview' | 'source'>('preview')
   let fromNode = $state<Outgoing | null>(null)
   /** The node could not answer for it (an older node, a fixture), so it is composed here. */
   let unanswered = $state(false)
@@ -65,55 +82,71 @@
 
   const how = $derived(
     remote
-      ? 'composed here as its node will · edit above'
+      ? 'composed here as its node will'
       : unanswered
         ? 'composed here · the node did not answer'
         : asking
           ? 'composing…'
-          : 'as the node will send it · edit above',
+          : 'as the node will send it',
   )
 </script>
 
 <div class="out">
   <div class="head">
     <span class="h5">What the {noun} gets <b>{how}</b></span>
-    <div class="tabs" role="tablist" aria-label="Show the outgoing text">
-      <button role="tab" class:on={view === 'preview'} aria-selected={view === 'preview'} onclick={() => (view = 'preview')}
-        >Preview</button
-      >
-      <button role="tab" class:on={view === 'source'} aria-selected={view === 'source'} onclick={() => (view = 'source')}
-        >Source</button
-      >
-    </div>
-  </div>
-  {#if shown.refusal}
-    <div class="note" role="status">Approving is refused as written: {shown.refusal}</div>
-  {:else if shown.description}
-    {#if view === 'preview'}
-      <div class="card">
-        <div class="title">{@html codeSpans(shown.description.title)}</div>
-        {#if shown.description.body.trim()}
-          <!-- Sanitized as the agent's other words are: nothing fetched, links open beside. -->
-          <div class="md">{@html renderForge(shown.description.body)}</div>
-        {:else}
-          <div class="dim">No description.</div>
+    <div class="side">
+      {@render actions?.()}
+      <div class="tabs" role="tablist" aria-label="Show the outgoing text">
+        <button role="tab" class:on={view === 'preview'} aria-selected={view === 'preview'} onclick={() => (view = 'preview')}
+          >Preview</button
+        >
+        <button role="tab" class:on={view === 'source'} aria-selected={view === 'source'} onclick={() => (view = 'source')}
+          >Source</button
+        >
+        {#if changes}
+          <button role="tab" class:on={view === 'changes'} aria-selected={view === 'changes'} onclick={() => (view = 'changes')}
+            >Changes</button
+          >
         {/if}
       </div>
-    {:else}
-      <div class="label">title</div>
-      <pre data-testid="outgoing-title">{shown.description.title}</pre>
-      <div class="label">body</div>
-      <pre data-testid="outgoing-body">{shown.description.body}</pre>
-    {/if}
+    </div>
+  </div>
+  {#if view === 'changes' && changes}
+    {@render changes()}
   {:else}
-    <div class="dim">No title or description is sent.</div>
-  {/if}
-  {#if shown.comment}
-    <div class="label">comment</div>
-    {#if view === 'preview'}
-      <div class="card"><div class="md">{@html renderForge(shown.comment)}</div></div>
+    {#if view === 'source' && editor}
+      {@render editor()}
+      <div class="label exact">exactly as sent</div>
+    {/if}
+    {#if shown.refusal}
+      <div class="note" role="status">Approving is refused as written: {shown.refusal}</div>
+    {:else if shown.description}
+      {#if view === 'preview'}
+        <div class="card">
+          <div class="title">{@html codeSpans(shown.description.title)}</div>
+          {#if shown.description.body.trim()}
+            <!-- Sanitized as the agent's other words are: nothing fetched, links open beside. -->
+            <div class="md">{@html renderForge(shown.description.body)}</div>
+          {:else}
+            <div class="dim">No description.</div>
+          {/if}
+        </div>
+      {:else}
+        <div class="label">title</div>
+        <pre data-testid="outgoing-title">{shown.description.title}</pre>
+        <div class="label">body</div>
+        <pre data-testid="outgoing-body">{shown.description.body}</pre>
+      {/if}
     {:else}
-      <pre>{shown.comment}</pre>
+      <div class="dim">No title or description is sent.</div>
+    {/if}
+    {#if shown.comment}
+      <div class="label">comment</div>
+      {#if view === 'preview'}
+        <div class="card"><div class="md">{@html renderForge(shown.comment)}</div></div>
+      {:else}
+        <pre>{shown.comment}</pre>
+      {/if}
     {/if}
   {/if}
 </div>
@@ -139,6 +172,12 @@
   .h5 b {
     font-weight: 400;
     color: var(--dim);
+  }
+  .side {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
   }
   .tabs {
     display: flex;
@@ -180,6 +219,11 @@
     font: 11.5px var(--mono);
     color: var(--dim);
     margin-top: 4px;
+  }
+  .label.exact {
+    margin-top: 10px;
+    padding-top: 6px;
+    border-top: 1px solid var(--rule);
   }
   pre {
     white-space: pre-wrap;

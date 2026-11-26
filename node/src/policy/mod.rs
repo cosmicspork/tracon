@@ -935,8 +935,8 @@ mod tests {
         assert_eq!(
             (policy().version, sha.as_str()),
             (
-                28,
-                "945d60fd6e395cfa9213afb1c690b3f77ef7d4ec27b24e4eed425e49e309f328"
+                29,
+                "3a8be28cbc74ca06760da73e0c775905d2a98c4a23c6f313c445130388a7d4e1"
             ),
             "working-agreements.toml changed: raise its version and pin the new hash"
         );
@@ -944,7 +944,8 @@ mod tests {
 
     /// `check_run` is offered only where the operator turned on `[external]
     /// check_run`, so the switch is the asking; a command that names
-    /// publishing is still refused, as anywhere.
+    /// publishing is still refused, as anywhere. Its status and cancel
+    /// tools are allowed with it.
     #[test]
     fn a_check_run_is_allowed_but_not_a_way_to_publish() {
         let p = policy();
@@ -954,6 +955,12 @@ mod tests {
         let args = serde_json::json!({ "worktree": "/src/app", "command": "git push origin main" });
         let d = p.decide(&tool("check_run", &args, "check_run git push origin main"));
         assert_eq!(d.verdict, Verdict::Deny, "{:?}", d.rule_id);
+        // Waiting on the run, or withdrawing it, is part of the same asking.
+        let args = serde_json::json!({ "run_id": "check-run-1" });
+        for name in ["check_run_status", "check_run_cancel"] {
+            let d = p.decide(&tool(name, &args, name));
+            assert_eq!(d.verdict, Verdict::Allow, "{name}: {:?}", d.rule_id);
+        }
     }
 
     #[test]

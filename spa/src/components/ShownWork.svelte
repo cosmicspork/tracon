@@ -8,9 +8,10 @@
   import { api } from '../lib/api'
   import { clock } from '../lib/clock.svelte'
   import { formatAge } from '../lib/format'
+  import Help from './Help.svelte'
   import { renderWithoutFetching } from '../lib/markdown'
   import { router } from '../lib/router.svelte'
-  import { formatTag, splitShown } from '../lib/shown'
+  import { formatTag, orderForReview, splitShown } from '../lib/shown'
   import type { ShownWork } from '../lib/types'
 
   let {
@@ -25,7 +26,7 @@
     reviewer?: string | null
   } = $props()
 
-  const split = $derived(splitShown(items))
+  const split = $derived(splitShown(onReview ? orderForReview(items) : items))
 
   /** Preview URLs for the pages opened in place, by shown-work id. */
   let opened = $state<Record<string, string>>({})
@@ -48,8 +49,9 @@
   }
 
   /**
-   * A stale item on a review is folded to its header, so what applies to the
-   * candidate is read first. A link to the item itself still lands open.
+   * A stale item on a review is folded to one line and read after the current
+   * ones, so what applies to the candidate takes the space. A link to the item
+   * itself still lands open.
    */
   function folded(item: ShownWork): boolean {
     return onReview && item.stale
@@ -60,25 +62,36 @@
   }
 </script>
 
+{#snippet tags(item: ShownWork)}
+  {#if reviewer && item.session_id === reviewer}
+    <span class="tag" title="shown by the review session, at the candidate it exercised">reviewer</span>
+  {/if}
+  {#if item.proposal}
+    <span class="tag proposal" title="layouts or flows proposed for you to choose from, not an account of work done">proposal</span>
+  {/if}
+  <span class="tag">{formatTag(item)}</span>
+{/snippet}
+
 {#snippet head(item: ShownWork)}
   <header>
     <b>{item.title}</b>
-    {#if reviewer && item.session_id === reviewer}
-      <span class="tag" title="shown by the review session, at the candidate it exercised">reviewer</span>
-    {/if}
-    {#if item.proposal}
-      <span class="tag proposal" title="layouts or flows proposed for you to choose from, not an account of work done">proposal</span>
-    {/if}
-    <span class="tag">{formatTag(item)}</span>
+    {@render tags(item)}
     <span class="mono" title={item.head_sha}>at {item.head_sha.slice(0, 12)}</span>
-    {#if onReview && item.stale}
-      <span class="chip warn" title={item.stale_reason ?? ''}>stale</span>
-    {/if}
     <span class="mono dim">{formatAge(item.created_ms, clock.now)}</span>
   </header>
-  {#if onReview && item.stale && item.stale_reason}
-    <p class="dim">{item.stale_reason} · ask for it to be shown again if it matters</p>
-  {/if}
+{/snippet}
+
+{#snippet checks(item: ShownWork)}
+  <p class="checks">
+    {#if item.checks.length}
+      checks the node ran at this commit:
+      {#each item.checks as check, i (i)}
+        <span class:ok={passed(check)} class:bad={!passed(check) && check.outcome !== 'running'}>{passed(check) ? '✓' : check.outcome === 'running' ? '…' : '✗'} {check.command ?? 'command not recorded'}</span>
+      {/each}
+    {:else}
+      no required checks ran at this commit
+    {/if}
+  </p>
 {/snippet}
 
 {#snippet body(item: ShownWork)}
@@ -107,31 +120,39 @@
       </ul>
     </details>
   {/if}
-  <p class="checks">
-    {#if item.checks.length}
-      checks the node ran at this commit:
-      {#each item.checks as check, i (i)}
-        <span class:ok={passed(check)} class:bad={!passed(check) && check.outcome !== 'running'}>{passed(check) ? '✓' : check.outcome === 'running' ? '…' : '✗'} {check.command ?? 'command not recorded'}</span>
-      {/each}
-    {:else}
-      no required checks ran at this commit
-    {/if}
-  </p>
 {/snippet}
 
 {#snippet list(shown: ShownWork[])}
   {#each shown as item (item.id)}
     {#if folded(item)}
-      <article id="shown-{item.id}" class="stale" class:proposal={item.proposal}>
+      <!-- One line until opened: the title, where it was shown and that it is
+           stale. Why it is stale, and the rest, read once it is opened. -->
+      <article id="shown-{item.id}" class="stale">
         <details class="fold" open={router.hash === `#shown-${item.id}`}>
-          <summary>{@render head(item)}</summary>
-          <div class="body">{@render body(item)}</div>
+          <summary>
+            <b>{item.title}</b>
+            <span class="sep">·</span>
+            <span class="mono" title={item.head_sha}>at {item.head_sha.slice(0, 8)}</span>
+            <span class="sep">·</span>
+            <span class="chip warn">stale</span>
+          </summary>
+          <div class="body">
+            {@render body(item)}
+            <footer>
+              <p class="tags">{@render tags(item)} <span class="mono dim">{formatAge(item.created_ms, clock.now)}</span></p>
+              {#if item.stale_reason}
+                <p class="dim">{item.stale_reason} · ask for it to be shown again if it matters</p>
+              {/if}
+              {@render checks(item)}
+            </footer>
+          </div>
         </details>
       </article>
     {:else}
       <article id="shown-{item.id}" class:proposal={item.proposal}>
         {@render head(item)}
         {@render body(item)}
+        {@render checks(item)}
       </article>
     {/if}
   {/each}
@@ -141,7 +162,9 @@
   <section class="shown">
     <div class="h4">
       Shown work
-      <b>· the agent's account, to help you decide · not verification · it does not go to the forge</b>
+      <Help label="About shown work"
+        >The agent's account, to help you decide. It is not verification, and it does not go to the forge.</Help
+      >
     </div>
     {@render list(split.work)}
   </section>
@@ -173,7 +196,7 @@
     gap: 6px;
   }
   article.stale {
-    border-left: 3px solid var(--wait);
+    padding: 6px 10px;
   }
   article.proposal:not(.stale) {
     border-left: 3px dashed var(--ink2);
@@ -241,24 +264,42 @@
     cursor: pointer;
     list-style: none;
     display: flex;
-    flex-direction: column;
+    align-items: baseline;
     gap: 6px;
+    min-width: 0;
+    flex-wrap: wrap;
   }
   .fold > summary::-webkit-details-marker {
     display: none;
   }
-  .fold > summary header::before {
+  .fold > summary::before {
     content: '▸';
     color: var(--dim);
   }
-  .fold[open] > summary header::before {
+  .fold[open] > summary::before {
     content: '▾';
+  }
+  .sep {
+    color: var(--dim);
   }
   .fold > .body {
     margin-top: 6px;
     display: flex;
     flex-direction: column;
     gap: 6px;
+  }
+  footer {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding-top: 6px;
+    border-top: 1px solid var(--rule);
+  }
+  .tags {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    flex-wrap: wrap;
   }
   .files summary {
     cursor: pointer;

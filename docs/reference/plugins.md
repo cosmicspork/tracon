@@ -99,7 +99,7 @@ Top level:
 | `exec` | array of strings | required | The program and its arguments. The first is a plain relative path under `bin/`, and must be a regular, executable file in the archive. No argument may be empty or hold a NUL, or be `--socket`, `--data` or `--node-socket` (or `--socket=…`), which the node appends. |
 | `egress` | array of strings | `[]` | `host` or `host:port`: a DNS name or IPv4 address, port 1-65535, or `*.domain` (optionally with a port) for every host under a domain of at least two labels, such as `*.atlassian.net:443`. Shown on cards, never enforced. Nodes before 0.56 refuse a wildcard. |
 | `formats` | array of strings | `[]` | Document formats this plugin owns: 1-32 lowercase letters, digits or `_`, each listed once. `markdown` and `source` are the node's own. |
-| `node_methods` | array of strings | `[]` | The node methods the plugin calls back (see [Calling the node back](#calling-the-node-back)): `approval/request`, `approval/status`, `notify`, `tools/call`, each listed once. Naming any adds `--node-socket` to the start. |
+| `node_methods` | array of strings | `[]` | The node methods the plugin calls back (see [Calling the node back](#calling-the-node-back)): `approval/request`, `approval/status`, `approval/withdraw`, `notify`, `tools/call`, each listed once. Naming any adds `--node-socket` to the start. |
 
 `[[credential]]`, one per broker credential the plugin may be lent (see
 [Credentials](#credentials-lent-per-call)):
@@ -937,14 +937,14 @@ jira-review's `transition` is the first consequential plugin tool.
 
 ## Calling the node back
 
-A plugin can call the node to raise an approval card and wait on it, push a notification to the operator, or call another plugin's tool. It always does this as itself.
+A plugin can call the node to raise an approval card, wait on it and withdraw it, push a notification to the operator, or call another plugin's tool. It always does this as itself.
 
 ### Declare the methods
 
 Name the methods your plugin calls in `tracon-plugin.toml`. The install card lists them under **Calls the node**, and an update's card shows any that are added or removed.
 
 ```toml
-node_methods = ["approval/request", "approval/status", "notify", "tools/call"]
+node_methods = ["approval/request", "approval/status", "approval/withdraw", "notify", "tools/call"]
 ```
 
 Name only the methods you use. The node answers no others.
@@ -1051,10 +1051,30 @@ It only covers cards your plugin raised on this channel. It waits up to `wait_se
 - `rejected`
 - `changes_requested` (the operator's `notes` say what to change)
 - `expired`
+- `withdrawn` (your plugin took it back with [`approval/withdraw`](#approvalwithdraw); `reason` is yours)
+
+`finished_ms` is when it expired or was withdrawn, or when an allowed or refused card was settled.
 
 With `approval_ids`, it returns `{ approvals: [...], still_waiting }` and comes back as soon as any card is decided.
 
 Keep the ids of the cards you are waiting on in your data directory, so you can ask again after a restart.
+
+### `approval/withdraw`
+
+```json
+{ "approval_id": "…", "reason": "Accepted in hoja's page." }
+```
+
+Takes back a card your plugin raised on this channel while it is still waiting, once it is moot. The usual case: the person decided the same request in your plugin's own page.
+
+**Params**
+
+- `approval_id`: a card your plugin raised on this channel. Any other id, including a card another plugin or channel raised, is refused with `-32602`.
+- `reason`: why it is moot, 1–1,000 characters. The operator's history shows it.
+
+The card leaves the operator's queue at once and ends in the `withdrawn` state. Nobody decided it: the card's page and the session's audit say your plugin withdrew it, with your reason, never that the operator decided it or that it expired. A session the card was raised for (`on_behalf`) is told it was withdrawn, not approved.
+
+**Returns** what [`approval/status`](#approvalstatus) returns for the card, plus `withdrew`: `true` when this call withdrew it. A card already decided, expired or withdrawn is left as it is: you get its current state and `withdrew: false`. So a retry is safe, and you can read an operator's decision that came first from the answer.
 
 ### `notify`
 

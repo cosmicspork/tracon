@@ -2902,6 +2902,7 @@ fn published_review(id: &str, session: &str) -> tracon::store::ReviewRow {
         revision_patch: None,
         lane: None,
         publication_failed: None,
+        after: Vec::new(),
     }
 }
 
@@ -4354,6 +4355,7 @@ async fn a_session_held_on_its_review_is_given_the_verdict() {
             revision_patch: None,
             lane: None,
             publication_failed: None,
+            after: Vec::new(),
         })
         .unwrap();
 

@@ -1969,6 +1969,20 @@ const MIGRATIONS: &[&str] = &[
     r#"
     DROP TABLE IF EXISTS repo_image_statement;
     "#,
+    // 95: the reviews a review publishes after (`store::review_dependency`):
+    // `after_id` is a review on the same channel, which may be a peer's
+    // mirrored here or not yet arrived, so it references nothing. Set by the
+    // submitter on the node that owns `review_id`, mirrored with the review
+    // row (`mesh::review_events::ReviewMeta::after`), changed only there.
+    r#"
+    CREATE TABLE review_dependency (
+        review_id  TEXT NOT NULL REFERENCES review(id),
+        after_id   TEXT NOT NULL,
+        created_ms INTEGER NOT NULL,
+        PRIMARY KEY (review_id, after_id)
+    );
+    CREATE INDEX review_dependency_after ON review_dependency(after_id);
+    "#,
 ];
 
 /// Migrations that SQL alone cannot express, run right after the numbered

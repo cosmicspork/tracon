@@ -619,6 +619,25 @@ export interface Review {
   revision_patch?: string | null
   /** Why the latest approval failed to publish. Absent unless it did. */
   publication_failed?: string | null
+  /** The reviews it publishes after, by id. Absent when it names none. */
+  after?: string[]
+}
+
+/** One review a review publishes after, as the node reads where it stands. */
+export interface ReviewDependency {
+  review_id: string
+  /** Its title as it publishes; null when the node holds no such review. */
+  title: string | null
+  state: string
+  /** `merged`, `published`, `waiting on merge`, `waiting on review`, `rejected`… */
+  says: string
+  satisfied: boolean
+}
+
+export interface ReviewDependencies {
+  after: ReviewDependency[]
+  /** The reviews that publish after this one. */
+  before: { review_id: string; title: string | null; state: string | null }[]
 }
 
 export interface ReviewContext {
@@ -803,6 +822,11 @@ export interface ReviewDetails {
    * Absent from a node that predates them.
    */
   threads?: ReviewThread[]
+  /**
+   * What it publishes after, each with where it stands, and what publishes
+   * after it (`submit_review`'s `after`). Absent from a node that predates it.
+   */
+  dependencies?: ReviewDependencies | null
   /**
    * Who the commits are by, against the forge account approval publishes as.
    * Null when that account's identity could not be resolved, or for a
@@ -1280,6 +1304,8 @@ export type AuditDecision =
   | 'rejected'
   | 'changes_requested'
   | 'expired'
+  /** A plugin's card, taken back by that plugin before anyone decided it. */
+  | 'withdrawn'
 
 /** One call a session made to the node's tools, from its audit. */
 export interface AuditCall {
@@ -1291,7 +1317,8 @@ export interface AuditCall {
   decision: AuditDecision
   /**
    * `policy`, `grant` or `node`; for a held call, the operator and where they
-   * answered from, `nobody` when it expired, or null while it waits.
+   * answered from, `nobody` when it expired, `plugin:<name>` when that plugin
+   * withdrew its card, or null while it waits.
    */
   decided_by: string | null
   rule?: string | null

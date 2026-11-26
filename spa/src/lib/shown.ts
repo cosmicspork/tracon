@@ -20,6 +20,16 @@ export function splitShown(items: ShownWork[]): { work: ShownWork[]; proposals: 
   }
 }
 
+/**
+ * A review's items as they are read: what applies to the candidate first,
+ * then what was shown at an earlier one, each newest first. A stale item is
+ * folded to a line, so the current account takes the space.
+ */
+export function orderForReview(items: ShownWork[]): ShownWork[] {
+  const newest = (a: ShownWork, b: ShownWork) => b.created_ms - a.created_ms
+  return [...items.filter((item) => !item.stale).sort(newest), ...items.filter((item) => item.stale).sort(newest)]
+}
+
 /** The session log's line for a `work_shown` event. */
 export function shownEventLine(p: Record<string, unknown>): string {
   const files = typeof p.files === 'number' && p.files > 0 ? p.files : 0

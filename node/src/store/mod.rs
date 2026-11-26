@@ -46,6 +46,7 @@ pub mod queued_prompt;
 pub mod recipe_offers;
 pub mod repo_image;
 pub mod reports;
+pub mod review_dependency;
 pub mod review_draft;
 pub mod review_session;
 pub mod review_thread;
@@ -2314,6 +2315,17 @@ impl Store {
                 r.verdict_reason,
             ],
         )?;
+        if changed == 1 {
+            // The owner's list, as it listed it: kept with the copy.
+            conn.execute("DELETE FROM review_dependency WHERE review_id=?1", [&r.id])?;
+            for after in &r.after {
+                conn.execute(
+                    "INSERT OR IGNORE INTO review_dependency (review_id, after_id, created_ms)
+                     VALUES (?1,?2,?3)",
+                    rusqlite::params![r.id, after, now_ms()],
+                )?;
+            }
+        }
         Ok(changed == 1)
     }
 
@@ -3407,6 +3419,11 @@ mod records {
         /// peer's owner listed for its own.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub publication_failed: Option<String>,
+        /// The reviews this one publishes after (`store::review_dependency`),
+        /// by id. Read by the queries that list it (`AFTER_IDS`); empty from
+        /// any other.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub after: Vec<String>,
     }
 
     /// One row of the review history (`Store::decided_reviews`).
@@ -3498,6 +3515,13 @@ mod records {
                 revision_patch: r.get("revision_patch")?,
                 lane: r.get("lane")?,
                 publication_failed: r.get("publication_failed")?,
+                // Only a query that selects `AFTER_IDS` has the column.
+                after: r
+                    .get::<_, Option<String>>("after_ids")
+                    .ok()
+                    .flatten()
+                    .map(|ids| super::review_dependency::split_ids(&ids))
+                    .unwrap_or_default(),
             })
         }
     }
@@ -4138,7 +4162,10 @@ impl Store {
     pub fn get_review(&self, id: &str) -> Result<Option<ReviewRow>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT * FROM review WHERE id=?1",
+            &format!(
+                "SELECT *, {} FROM review WHERE id=?1",
+                review_dependency::AFTER_IDS
+            ),
             [id],
             ReviewRow::from_row,
         )
@@ -4177,10 +4204,12 @@ impl Store {
             let conn = self.conn.lock().unwrap();
             // An interrupted publish remains visible for operator
             // reconciliation; it is never silently reset and retried.
-            let mut stmt = conn.prepare(
-                "SELECT * FROM review WHERE state IN ('new','claimed','revising','publishing') \
-                 ORDER BY created_ms ASC",
-            )?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT *, {} FROM review
+                     WHERE state IN ('new','claimed','revising','publishing')
+                     ORDER BY created_ms ASC",
+                review_dependency::AFTER_IDS
+            ))?;
             let rows = stmt
                 .query_map([], ReviewRow::from_row)?
                 .collect::<std::result::Result<_, _>>()?;
@@ -4213,12 +4242,13 @@ impl Store {
     pub fn mirrored_reviews(&self) -> Result<Vec<ReviewRow>> {
         let mut rows: Vec<ReviewRow> = {
             let conn = self.conn.lock().unwrap();
-            let mut stmt = conn.prepare(
-                "SELECT * FROM review
+            let mut stmt = conn.prepare(&format!(
+                "SELECT *, {} FROM review
                  WHERE state IN ('new','claimed','revising','publishing')
                     OR (kind=?1 AND state=?2)
                  ORDER BY created_ms ASC",
-            )?;
+                review_dependency::AFTER_IDS
+            ))?;
             let rows = stmt
                 .query_map(
                     rusqlite::params![reports::KIND, reports::ACKNOWLEDGED],
@@ -4692,6 +4722,7 @@ mod tests {
                     revision_patch: None,
                     lane: session.is_none().then(|| "laptop".to_string()),
                     publication_failed: None,
+                    after: Vec::new(),
                 })
                 .unwrap();
         };
@@ -4820,6 +4851,7 @@ mod tests {
                     revision_patch: None,
                     lane: None,
                     publication_failed: None,
+                    after: Vec::new(),
                 })
                 .unwrap();
         };
@@ -4929,6 +4961,7 @@ mod tests {
             revision_patch: None,
             lane: None,
             publication_failed: None,
+            after: Vec::new(),
         };
         store.insert_review(&report).unwrap();
 
@@ -4987,6 +5020,7 @@ mod tests {
             revision_patch: None,
             lane: Some("tracon:main".into()),
             publication_failed: None,
+            after: Vec::new(),
         };
         assert!(store.upsert_review_mirror(&review).unwrap());
         review.title = "retitled".into();
@@ -5098,6 +5132,7 @@ mod tests {
             revision_patch: None,
             lane: None,
             publication_failed: None,
+            after: Vec::new(),
         };
         store.insert_review(&review).unwrap();
         review.id = "rv2".into();
@@ -5171,6 +5206,7 @@ mod tests {
             revision_patch: None,
             lane: None,
             publication_failed: None,
+            after: Vec::new(),
         };
         for (id, state) in [
             ("new", "new"),
@@ -5235,6 +5271,7 @@ mod tests {
             revision_patch: None,
             lane: None,
             publication_failed: None,
+            after: Vec::new(),
         };
         let revision_a = crate::store::ReviewRevisionRow {
             id: "revA".into(),
@@ -5347,6 +5384,7 @@ mod tests {
             revision_patch: None,
             lane: None,
             publication_failed: None,
+            after: Vec::new(),
         };
         store.insert_review(&review).unwrap();
         // Run on sha1, which the review was resubmitted away from.

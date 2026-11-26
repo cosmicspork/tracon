@@ -599,8 +599,13 @@ impl Tools {
     /// A verdict is a review session's account of someone else's change, and
     /// closing the item is not the session's call: the item stays open
     /// through CI and review until its change merges or the operator closes it.
-    pub const NOT_EXECUTE: &'static [&'static str] =
-        &[review::VERDICT, work::WORK_CLOSE, check_run::CHECK_RUN];
+    pub const NOT_EXECUTE: &'static [&'static str] = &[
+        review::VERDICT,
+        work::WORK_CLOSE,
+        check_run::CHECK_RUN,
+        check_run::STATUS,
+        check_run::CANCEL,
+    ];
 
     /// The tools a review session gets: what it needs to read, what it needs
     /// to exercise the candidate and show what it saw, and its verdict.
@@ -2727,12 +2732,12 @@ impl Tools {
                     .ok_or("review tools are not available on this node")?;
                 review::call(&access.store, &access.manager, ctx, name, args).await
             }
-            check_run::CHECK_RUN => {
+            check_run::CHECK_RUN | check_run::STATUS | check_run::CANCEL => {
                 let access = self
                     .session
                     .get()
                     .ok_or("check_run is not available on this node")?;
-                check_run::call(&access.store, &access.manager, ctx, args).await
+                check_run::call(&access.store, &access.manager, ctx, name, args).await
             }
             memory::RECALL | memory::RETAIN => {
                 let access = self
@@ -3005,6 +3010,19 @@ impl Tools {
             decision.verdict = Verdict::Ask;
             decision.reason =
                 Some("a push that rewrites a change's history always goes to the operator".into());
+        }
+        // Nor does a review that publishes after others still waiting: only
+        // the operator takes it out of order.
+        if decision.verdict == Verdict::Allow {
+            let unmet = crate::review::dependencies::unmet(access.store.as_ref(), &review)
+                .map_err(|e| e.to_string())?;
+            if !unmet.is_empty() {
+                decision.verdict = Verdict::Ask;
+                decision.reason = Some(format!(
+                    "it {}, so it goes to the operator",
+                    crate::review::dependencies::waits_on(&unmet)
+                ));
+            }
         }
         if decision.verdict != Verdict::Allow {
             let mut submitted = submitted;

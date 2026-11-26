@@ -46,6 +46,17 @@ describe('review drafts', () => {
     expect(n.held()?.version).toBe(1)
   })
 
+  test('an edit undone before it is saved is not saved', async () => {
+    const n = node()
+    const sync = new ReviewDraftSync('r1', 'v1', () => {}, n.save, 5)
+    sync.loaded(null, {})
+    sync.edit({ title: 'edited' })
+    // Cleared back to what the node holds before the pause ends.
+    sync.edit({})
+    await new Promise((r) => setTimeout(r, 20))
+    expect(n.held()).toBeNull()
+  })
+
   test('two devices writing at once are told, not overwritten', async () => {
     const n = node()
     const a = new ReviewDraftSync('r1', 'v1', () => {}, n.save, 0)

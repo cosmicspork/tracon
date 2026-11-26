@@ -9,6 +9,7 @@
 
 pub mod checks;
 pub mod context;
+pub mod dependencies;
 pub mod forked;
 pub mod output;
 pub mod prose;
@@ -214,6 +215,16 @@ pub(crate) async fn resolve(dir: &str, revision: &str) -> Result<String, ReviewE
         &["rev-parse", "--verify", "--quiet", revision],
     )
     .await
+}
+
+/// [`resolve`], with Git's own error when it does not resolve.
+pub(crate) async fn verify(dir: &str, revision: &str) -> Result<String, ReviewError> {
+    git(dir, "rev-parse", &["rev-parse", "--verify", revision]).await
+}
+
+/// The ref the symbolic ref `name` points at, in full (`refs/remotes/origin/main`).
+pub(crate) async fn symbolic_ref(dir: &str, name: &str) -> Result<String, ReviewError> {
+    git(dir, "symbolic-ref", &["symbolic-ref", name]).await
 }
 
 /// A blob's bytes, addressed by hash or by `<commit>:<path>`.

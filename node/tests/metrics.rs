@@ -112,6 +112,7 @@ fn review(id: &str, session: &str, sha: &str, state: &str, reviewer: Option<&str
         revision_patch: None,
         lane: None,
         publication_failed: None,
+        after: Vec::new(),
     }
 }
 

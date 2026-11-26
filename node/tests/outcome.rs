@@ -50,6 +50,7 @@ fn a_review(id: &str, kind: &str, head: &str, body: &str) -> ReviewRow {
         revision_patch: None,
         lane: None,
         publication_failed: None,
+        after: Vec::new(),
     }
 }
 

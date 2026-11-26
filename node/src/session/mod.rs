@@ -4616,7 +4616,8 @@ impl Manager {
 
     /// [`Self::approval_decided`], naming who answered it. The answer's record
     /// carries what the audit shows: who, and whether what runs is the
-    /// operator's edit rather than the call as asked.
+    /// operator's edit rather than the call as asked. For a card its plugin
+    /// withdrew, `by` is that plugin (`plugin:<name>`), never the operator.
     pub async fn approval_answered(
         &self,
         approval: &crate::store::approvals::ApprovalRow,
@@ -4634,6 +4635,10 @@ impl Manager {
             "tool": approval.tool, "state": state, "reason": approval.reason,
             "option_id": approval.answer_option_id, "notes": approval.operator_note,
         });
+        if state == a::WITHDRAWN {
+            // Nobody decided it: the plugin that raised it took it back.
+            payload["withdrawn_by"] = json!(by);
+        }
         if kind == ek::PERMISSION_ANSWER {
             payload["decided_by"] = json!(by.unwrap_or("operator"));
             payload["arguments_hash"] = json!(approval.arguments_hash());

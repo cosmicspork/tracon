@@ -274,7 +274,12 @@ fails leaves the last image that worked in place and is not retried until you as
 `tracon repo ls` shows each repository's image and any command it has no tool for.
 `tracon repo build host/owner/name` on a repository no session has cloned yet clones it
 first, with the node's forge credential or anonymously, so `repo set` then `repo build`
-works on a fresh node.
+works on a fresh node. A repository's snapshot does the same: an entry for a managed
+clone not on disk yet has it cloned before its default branch is read (one that cannot
+be cloned is said once in the log and not tried again for ten minutes), and a warm-up
+fetches the clone first. Each of those fetches repairs a missing, dangling or plain
+`origin/HEAD` with `git remote set-head origin --auto`; one still unreadable is
+refused with the clone's path, which of those it is, and what Git said.
 
 ### Repository recipes on the stock base
 
@@ -664,10 +669,18 @@ already has (`change`, named at first submit). The review's title and body are t
 agent's summary for you; what reaches the forge is separate and editable before
 you approve: a description (a new change's, or a replacement for an existing
 one's), a comment, both, or — for an update — nothing but the push. They are
-edited as Markdown source, and below them the review page shows what the forge
-gets, rendered (sanitized, nothing fetched) or as the exact source: the node
-composes it with the same function approval publishes with, so it includes
-anything the node adds, such as the opener and fold of `[review] generated_details`. Submit checks
+edited in one place, under *On the forge*: its **Preview** tab shows what the forge
+gets, rendered (sanitized, nothing fetched); **Source** edits the title and body as
+Markdown, above the exact source the node composes with the same function approval
+publishes with, so it includes anything the node adds, such as the opener and fold
+of `[review] generated_details`; and **Changes** diffs each field you edited, word
+by word, against the agent's text. An *edited* chip marks the text as yours, and
+**Clear edits** puts every forge field back as the agent wrote it (commit messages
+and the branch are left alone). Your edits are kept as a draft on the node, so they
+come back on a reload, on another device and over a resubmission; a draft from an
+earlier revision says so above the tabs, with the fields it overrides. When the
+review's title and body are only the agent's summary for you, they show read-only
+above *Shown work*. Submit checks
 the forge first: a branch with an open change must name it, and an update must be
 an open change of that repository into that base. An update is pushed to the
 change's own branch, whatever the worktree's is called. A review that opened a
@@ -797,7 +810,10 @@ that a peer has none.
 ### Review threads
 
 Feedback on a review can be a set of threads instead of one note. Under the diff,
-open a thread on the whole change, on a file, or on a line or range: pick a line
+Threads is one line until it is used: **+ Thread** opens the composer on the whole
+change, and with threads the line counts the open and resolved ones. It starts open
+while a thread is unresolved or addressed, and folded when every thread is resolved
+or outdated. Open a thread on the whole change, on a file, or on a line or range: pick a line
 number in the full diff's gutter, side by side or unified, to start one there, and
 another to make it a range. Lines that carry a thread read bold in the gutter. The
 since-last-verdict diff offers no line numbers to pick. Each
@@ -819,6 +835,27 @@ is **outdated** there: it is never moved onto other code, and still shows the li
 it was written on. Reply to a thread, resolve it, or reopen one that is addressed
 or resolved. A peer's review's threads are held by the node that owns the review:
 they are read from it and changed through it, and wait while it is unreachable.
+
+### Reviews that publish in order
+
+When one change must merge before another, the agent says so: `submit_review` takes
+`after`, a list of `review_id`s on the same channel. A resubmission with the same
+`review_id` replaces the list (an empty one clears it); left out, the list stays. The
+node refuses an id that is no review on the channel, a rejected review (quoting your
+reason), and a list that would make a cycle, before anything is captured or checked.
+`review_status` returns `after`, each dependency with its `state`, what it `says` and
+whether it is `satisfied`.
+
+A dependency is satisfied once it was approved and its publication landed and, when it
+opened or updated a change, that change merged on the forge, as following it last saw.
+Published but not merged reads **waiting on merge**. The review page's header shows
+**after** each dependency with where it stands, linked to it, and the dependency's page
+shows **before** the reviews that wait on it; the home row says **after** too.
+**Approve** is held with *waits on …* until each one is satisfied. **Approve anyway**
+lets you publish it first: the approval then says why (`Approved anyway: waits on …`),
+and that is kept as its verdict's reason. An authority grant never publishes such a
+review unattended while it waits. The list travels with the review to every peer that
+mirrors it, and only the owner changes it.
 
 ## Databases a session can start
 
@@ -906,8 +943,12 @@ Under `auto`, each submission from that source, and each resubmission, starts a
 reviewer. Under `manual`, none starts on its own and the review says so; start one
 with **Start reviewer** on the review page. The trigger can be set with no model
 bound, but then neither starts a reviewer, and the settings row and the review page
-say so. The review page names the model under *Reviewed by*, and whether it started
-on submission or by you.
+say so. The review page's status line, under its title, shows the checks, the
+reviewer's verdict or the control that starts one, the task and who submitted it,
+each only when it has something to say and each opening to its detail; the verdict
+card below it names the model, and whether it started on submission or by you. The
+header names the review and its short id (the first 8 hex digits, as agents write it
+in notes); clicking either shows the full id with a Copy button.
 
 The submitting agent is told too: submit_review's message says whether a reviewer
 is reading the change, under which trigger, and `review_session` carries its

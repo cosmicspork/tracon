@@ -322,6 +322,7 @@ test('each 0.29.0 kind reads as a sentence, not its name', () => {
     ['exhaustion_wake', { outcome: 'held', note: 'The node did not carry on: no model.' }, 'held for you · The node did not carry on: no model.'],
     ['approval_settled', { tool: 'pr_merge', state: 'succeeded', reason: 'x' }, 'approved call succeeded · pr_merge'],
     ['approval_settled', { tool: 'pr_merge', state: 'failed', reason: 'not mergeable' }, 'approved call failed · pr_merge · not mergeable'],
+    ['approval_settled', { tool: 'plugin_card', state: 'withdrawn', withdrawn_by: 'plugin:hoja', reason: 'decided in its page' }, 'card withdrawn · by plugin hoja · decided in its page'],
     ['candidate_verified', { candidate_id: 'c', head_sha: '8c4be91f03a2d6e7b5c1', reused: true }, 'checks passed · at 8c4be91f03a2 · evidence reused'],
     ['review_decision', { source: 'operator', review_id: 'r', decision: 'approved', waiting_ms: 720_000 }, 'review approved · by the operator · after 12m waiting'],
     ['review_decision', { decision: 'revise', waiting_ms: 5000 }, 'review sent back with notes · by the operator · after 5s waiting'],

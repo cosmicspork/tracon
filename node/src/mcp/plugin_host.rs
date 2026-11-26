@@ -16,6 +16,12 @@
 //!   this channel, at most 45 seconds a call, as an agent's status call
 //!   does. Allowing a card runs nothing on the node: the plugin does what
 //!   it asked to once it reads `approved`.
+//! - `approval/withdraw` takes back a card this plugin raised on this
+//!   channel while it still waits, once it is moot (the person decided the
+//!   same thing in the plugin's own page): it leaves the queue as
+//!   `withdrawn`, with the plugin's reason and the plugin as who did it,
+//!   never the operator. A card no longer waiting is left as it is and its
+//!   state returned, so a retry is safe.
 //! - `notify` pushes to the operator's devices as `notify_operator` does,
 //!   its title led by the plugin's name.
 //! - `tools/call` calls another plugin's tool as the plugin itself (caller
@@ -31,7 +37,7 @@ use super::{wait::MAX_WAIT_SECS, CallContext, OperatorCallError, SessionAccess, 
 use crate::plugin::host::{self, Error, From, FAILED, INVALID_PARAMS, REFUSED};
 use crate::store::approvals::{
     ApprovalRow, CHANGES_REQUESTED, EXPIRED, PENDING, PLUGIN_CARD_TOOL, REJECTED, RUNNING,
-    SUCCEEDED,
+    SUCCEEDED, WITHDRAWN,
 };
 
 /// The formats a card's content is written in, each rendered by the node.
@@ -49,6 +55,8 @@ const MAX_CONTENT: usize = 512 * 1024;
 const MAX_REQUEST_KEY: usize = 128;
 /// The shortest a plugin may ask its card to wait, in seconds.
 const MIN_EXPIRY_SECS: u64 = 60;
+/// The longest reason a plugin gives for withdrawing a card, in characters.
+const MAX_WITHDRAW_REASON: usize = 1_000;
 /// How old a caller context may be to say whom a card is for: a card is
 /// raised while the call it came from is served, not long after.
 const ON_BEHALF_WITHIN_MS: i64 = 10 * 60_000;
@@ -63,6 +71,7 @@ impl host::Host for Tools {
         match method {
             "approval/request" => request(self, access, from, &params).await,
             "approval/status" => status(access, from, &params).await,
+            "approval/withdraw" => withdraw(access, from, &params).await,
             "notify" => notify(self, access, from, &params).await,
             "tools/call" => call_tool(self, access, from, &params).await,
             other => Err(Error::new(
@@ -379,6 +388,7 @@ pub fn view(row: &ApprovalRow) -> Value {
         REJECTED => "rejected",
         CHANGES_REQUESTED => "changes_requested",
         EXPIRED => "expired",
+        WITHDRAWN => "withdrawn",
         other => other,
     };
     json!({
@@ -387,7 +397,59 @@ pub fn view(row: &ApprovalRow) -> Value {
         "reason": row.reason,
         "notes": row.operator_note,
         "decided_ms": row.decided_ms,
+        "finished_ms": row.finished_ms,
     })
+}
+
+/// The card `id`, if `from`'s plugin raised it on its channel.
+fn own_card(access: &SessionAccess, from: &From, id: &str) -> Result<ApprovalRow, Error> {
+    access
+        .store
+        .get_approval(id)
+        .map_err(|e| Error::failed(e.to_string()))?
+        .filter(|row| raised_by(row, from))
+        .ok_or_else(|| {
+            Error::params(format!(
+                "no card {id} raised by plugin {} on {}",
+                from.plugin, from.channel
+            ))
+        })
+}
+
+/// Take back a card this plugin raised, while it waits: it settles as
+/// `withdrawn`, by the plugin. A card already decided, expired or withdrawn
+/// is returned as it stands, unchanged.
+async fn withdraw(access: &SessionAccess, from: &From, params: &Value) -> Result<Value, Error> {
+    const WHAT: &str = "approval/withdraw";
+    let map = object(params, WHAT)?;
+    only(map, &["approval_id", "reason"], WHAT)?;
+    let id = string(map, "approval_id", WHAT, true)?.unwrap_or_default();
+    let reason = string(map, "reason", WHAT, true)?
+        .unwrap_or_default()
+        .trim();
+    if reason.is_empty() || reason.chars().count() > MAX_WITHDRAW_REASON {
+        return Err(Error::params(format!(
+            "reason is 1 to {MAX_WITHDRAW_REASON} characters"
+        )));
+    }
+    // A card past its time expires first: that is what became of it.
+    access.manager.expire_approvals().await;
+    own_card(access, from, id)?;
+    let withdrew = access
+        .store
+        .withdraw_approval(id, reason)
+        .map_err(|e| Error::failed(e.to_string()))?;
+    let row = own_card(access, from, id)?;
+    if withdrew {
+        let by = format!("plugin:{}", from.plugin);
+        access
+            .manager
+            .approval_answered(&row, WITHDRAWN, Some(&by))
+            .await;
+    }
+    let mut out = view(&row);
+    out["withdrew"] = json!(withdrew);
+    Ok(out)
 }
 
 async fn status(access: &SessionAccess, from: &From, params: &Value) -> Result<Value, Error> {
@@ -423,18 +485,7 @@ async fn status(access: &SessionAccess, from: &From, params: &Value) -> Result<V
         access.manager.expire_approvals().await;
         let mut rows = Vec::with_capacity(ids.len());
         for id in &ids {
-            let row = access
-                .store
-                .get_approval(id)
-                .map_err(|e| Error::failed(e.to_string()))?
-                .filter(|row| raised_by(row, from))
-                .ok_or_else(|| {
-                    Error::params(format!(
-                        "no card {id} raised by plugin {} on {}",
-                        from.plugin, from.channel
-                    ))
-                })?;
-            rows.push(row);
+            rows.push(own_card(access, from, id)?);
         }
         let decided = rows
             .iter()
@@ -621,6 +672,7 @@ mod tests {
             (REJECTED, "rejected"),
             (CHANGES_REQUESTED, "changes_requested"),
             (EXPIRED, "expired"),
+            (WITHDRAWN, "withdrawn"),
         ] {
             row.state = state.into();
             assert_eq!(view(&row)["state"], says);
