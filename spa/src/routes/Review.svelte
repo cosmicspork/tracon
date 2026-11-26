@@ -6,6 +6,8 @@
   import Diff from '../components/Diff.svelte'
   import ReviewDiff from '../components/ReviewDiff.svelte'
   import ReviewThreads from '../components/ReviewThreads.svelte'
+  import ReviewDependencyLinks from '../components/ReviewDependencies.svelte'
+  import { anywayReason, waitsOnLine } from '../lib/reviewDependencies'
   import { anchorAt, threadsOn, threadsBlockedReason, unresolvedCount, type Anchor, type Numbered, type ReviewThread } from '../lib/reviewThreads'
   import { splitDiff } from '../lib/diff'
   import { ViewedFiles } from '../lib/viewedFiles.svelte'
@@ -56,7 +58,7 @@
   import { leaveAfterVerdict } from '../lib/verdict-nav'
   import { draftedMessage, draftForRevision, ReviewDraftSync, type DraftState } from '../lib/reviewDraft'
   import { proposedMessage as proposedCommitMessage, shipping, shippedMessage } from '../lib/shipping'
-  import type { ReviewCommit, ReviewDraftFields } from '../lib/types'
+  import type { ReviewCommit, ReviewDependencies, ReviewDraftFields } from '../lib/types'
   import {
     CLOSED_STATES,
     GENERATED_DETAILS,
@@ -107,6 +109,11 @@
   let requirements = $state<PinnedRequirements | null>(null)
   /** The operator's review threads, as the node holding the review reads them. */
   let threads = $state<ReviewThread[]>([])
+  /** What it publishes after and what publishes after it (`submit_review`'s `after`). */
+  let dependencies = $state<ReviewDependencies | null>(null)
+  /** The operator chose Approve anyway: the approval goes before what it waits on, saying so. */
+  let approveAnyway = $state(false)
+  const waitsOn = $derived(waitsOnLine(dependencies))
   /** Where the next thread goes: the composer's, or a line picked in the diff. */
   let threadAnchor = $state<Anchor>({ kind: 'general' })
   /** The thread composer is open: from `+ Thread`, or a line picked in the diff. */
@@ -237,6 +244,8 @@
         reviewerView = d.reviewer ?? null
         requirements = d.requirements
         threads = d.threads ?? []
+        dependencies = d.dependencies ?? null
+        approveAnyway = false
         threadAnchor = { kind: 'general' }
         threadComposing = false
         sinceReviewed = d.since_reviewed ?? null
@@ -545,6 +554,7 @@
     reason,
     readiness,
     openThreads: unresolvedCount(threads),
+    waitsOn: approveAnyway ? null : waitsOn,
     opener: opening
       ? {
           required: true,
@@ -841,7 +851,9 @@
       const res = await api.decideReview(id, {
         verdict,
         // Sent on from the AI review, it stays marked as such.
-        reason: verdict === 'approve' ? undefined : sentReason(reason),
+        // An approval before what it waits on says so; the node keeps it as
+        // the verdict's reason.
+        reason: verdict === 'approve' ? (approveAnyway ? anywayReason(dependencies) : undefined) : sentReason(reason),
         title: verdict === 'approve' ? title : undefined,
         body: verdict === 'approve' ? body : undefined,
         // A mirrored review's outputs are the owner's revision's own; this
@@ -900,6 +912,7 @@
       reviewerStarting = d.review_session_starting ?? false
       reviewerView = d.reviewer ?? null
       threads = d.threads ?? threads
+      dependencies = d.dependencies ?? dependencies
       return true
     } catch {
       /* the error already shown is the one that matters */
@@ -1080,6 +1093,7 @@
       <a class="pr" href={landed.url} target="_blank" rel="noreferrer">{publishedLabel(review.provider, landed, forgeState)}</a>
     {/if}
   </div>
+  <ReviewDependencyLinks {dependencies} />
 
   <!-- Who checked this, in one line under the title: checks, reviewer, task,
        model and who submitted it, each only when it has something to say.
@@ -1830,6 +1844,9 @@
       {#if approveBlocked}
         <p class="why">
           Approve: {approveBlocked}.
+          {#if waitsOn && approveBlocked === waitsOn}
+            <button class="lnk" onclick={() => (approveAnyway = true)}>Approve anyway</button>
+          {/if}
           {#if readiness && !readiness.ready && !busy && !publishing && stale.length === 0}
             <a class="lnk" href={readiness.settings}>Bind a token in Settings</a>
           {/if}

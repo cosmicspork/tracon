@@ -3581,9 +3581,19 @@ async fn review_detail(s: &AppState, r: &crate::store::ReviewRow) -> ApiResult<s
         Some(_) => Vec::new(),
         None => crate::review::threads::of_review(s.store(), &id, false)?,
     };
+    // What it publishes after, each with where it stands, and what publishes
+    // after it. The owner's account wins over a mirror's (`OWNER_FIELDS`):
+    // it is the one that follows the dependencies' changes.
+    let after = crate::review::dependencies::after(s.store(), r)?;
+    let after = match remote_owner {
+        Some(_) => after,
+        None => crate::review::dependencies::looked(&s.tools, s.store(), &s.node_id, after).await,
+    };
+    let dependencies = crate::review::dependencies::view(s.store(), r, &after)?;
     Ok(json!({
         "review": r,
         "threads": threads,
+        "dependencies": dependencies,
         "review_session_reason": review_session_reason,
         "review_session_starting": review_session_starting,
         "reviewer": reviewer,
@@ -3643,6 +3653,7 @@ const OWNER_FIELDS: &[&str] = &[
     "protection",
     "generated_details",
     "threads",
+    "dependencies",
 ];
 
 /// The review row's own fields the owner's reviewer writes, taken from the
@@ -4951,6 +4962,28 @@ async fn decide_review_here(
             Ok(json!({ "state": "rejected" }))
         }
         "approve" => {
+            // A review that publishes after others waits for them, unless the
+            // operator says why it goes first: that is kept as its reason.
+            let unmet: Vec<_> = crate::review::dependencies::looked(
+                &s.tools,
+                s.store(),
+                &s.node_id,
+                crate::review::dependencies::unmet(s.store(), &r)?,
+            )
+            .await
+            .into_iter()
+            .filter(|d| !d.satisfied)
+            .collect();
+            let anyway = b.reason.as_deref().map(str::trim).filter(|x| !x.is_empty());
+            if !unmet.is_empty() && anyway.is_none() {
+                return Err(ApiError(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "this review {}; approve it anyway with a reason to publish it first",
+                        crate::review::dependencies::waits_on(&unmet)
+                    ),
+                ));
+            }
             // Before anything is claimed or pushed. The review screen's
             // preview of the outgoing text is read from the same function.
             let (title, body, edited_outputs) = approval_text(
@@ -4993,6 +5026,10 @@ async fn decide_review_here(
                     url: published,
                     outputs,
                 }) => {
+                    if let Some(reason) = anyway.filter(|_| !unmet.is_empty()) {
+                        s.store().record_approved_anyway(&id, reason)?;
+                        s.manager.publish_queue().await;
+                    }
                     let waiting_ms = record_evidence_decision(
                         s.store(),
                         revision.as_ref(),

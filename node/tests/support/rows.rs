@@ -114,5 +114,6 @@ pub fn review_row(id: &str, session: &str, state: &str) -> ReviewRow {
         revision_patch: None,
         lane: None,
         publication_failed: None,
+        after: Vec::new(),
     }
 }

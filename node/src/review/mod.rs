@@ -9,6 +9,7 @@
 
 pub mod checks;
 pub mod context;
+pub mod dependencies;
 pub mod forked;
 pub mod output;
 pub mod prose;

@@ -831,6 +831,27 @@ it was written on. Reply to a thread, resolve it, or reopen one that is addresse
 or resolved. A peer's review's threads are held by the node that owns the review:
 they are read from it and changed through it, and wait while it is unreachable.
 
+### Reviews that publish in order
+
+When one change must merge before another, the agent says so: `submit_review` takes
+`after`, a list of `review_id`s on the same channel. A resubmission with the same
+`review_id` replaces the list (an empty one clears it); left out, the list stays. The
+node refuses an id that is no review on the channel, a rejected review (quoting your
+reason), and a list that would make a cycle, before anything is captured or checked.
+`review_status` returns `after`, each dependency with its `state`, what it `says` and
+whether it is `satisfied`.
+
+A dependency is satisfied once it was approved and its publication landed and, when it
+opened or updated a change, that change merged on the forge, as following it last saw.
+Published but not merged reads **waiting on merge**. The review page's header shows
+**after** each dependency with where it stands, linked to it, and the dependency's page
+shows **before** the reviews that wait on it; the home row says **after** too.
+**Approve** is held with *waits on …* until each one is satisfied. **Approve anyway**
+lets you publish it first: the approval then says why (`Approved anyway: waits on …`),
+and that is kept as its verdict's reason. An authority grant never publishes such a
+review unattended while it waits. The list travels with the review to every peer that
+mirrors it, and only the owner changes it.
+
 ## Databases a session can start
 
 A session starts what the node's `[[service]]` catalogue offers with

@@ -3006,6 +3006,19 @@ impl Tools {
             decision.reason =
                 Some("a push that rewrites a change's history always goes to the operator".into());
         }
+        // Nor does a review that publishes after others still waiting: only
+        // the operator takes it out of order.
+        if decision.verdict == Verdict::Allow {
+            let unmet = crate::review::dependencies::unmet(access.store.as_ref(), &review)
+                .map_err(|e| e.to_string())?;
+            if !unmet.is_empty() {
+                decision.verdict = Verdict::Ask;
+                decision.reason = Some(format!(
+                    "it {}, so it goes to the operator",
+                    crate::review::dependencies::waits_on(&unmet)
+                ));
+            }
+        }
         if decision.verdict != Verdict::Allow {
             let mut submitted = submitted;
             if let Some(object) = submitted.as_object_mut() {

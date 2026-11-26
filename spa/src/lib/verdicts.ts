@@ -26,6 +26,12 @@ export interface VerdictConditions {
   opener?: { required: boolean; text: string; where?: string | null } | null
   /** Review threads the agent has still to answer; they say what to change on their own. */
   openThreads?: number
+  /**
+   * What the review publishes after and is still waiting on, in words
+   * (`waits on <name> · <state>`); null once each is satisfied, or once the
+   * operator chose to approve it anyway.
+   */
+  waitsOn?: string | null
 }
 
 /** Why `action` cannot be sent, or null when it can. */
@@ -39,6 +45,7 @@ export function unavailable(action: VerdictAction, c: VerdictConditions): string
       const files = c.stale.length === 1 ? c.stale[0] : `${c.stale.length} files`
       return `${files} changed since submit; ask the agent to resubmit, then approve what it sends`
     }
+    if (c.waitsOn) return c.waitsOn
     if (c.readiness && !c.readiness.ready) {
       return `cannot publish from this node yet: ${c.readiness.problem ?? 'its forge token is not ready'}`
     }

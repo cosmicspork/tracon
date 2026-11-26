@@ -241,6 +241,31 @@ pub fn number_of(url: &str) -> Option<u64> {
     url.trim_end_matches('/').rsplit('/').next()?.parse().ok()
 }
 
+/// Where `review`'s opened request stands on the forge now, asked of it
+/// once: for a review no session submitted, which following never reads
+/// (its looks hang on the session). `None` when there is no such request or
+/// the forge did not say within a few seconds.
+pub async fn look_now(
+    tools: &Tools,
+    store: &crate::store::Store,
+    review: &crate::store::ReviewRow,
+) -> Option<String> {
+    let publication = store
+        .publications_for_review(&review.id)
+        .ok()?
+        .into_iter()
+        .find(|row| row.state == "opened")?;
+    let looked = tokio::time::timeout(Duration::from_secs(10), look(tools, &publication)).await;
+    match looked {
+        Ok(Ok(snapshot)) => Some(snapshot.state),
+        Ok(Err(error)) => {
+            tracing::debug!(review = %review.id, %error, "request not read");
+            None
+        }
+        Err(_) => None,
+    }
+}
+
 /// One look at one request, through the brokered credential.
 async fn look(tools: &Tools, publication: &PublicationRow) -> Result<Snapshot, String> {
     let url = publication
