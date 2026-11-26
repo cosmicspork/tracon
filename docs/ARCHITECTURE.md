@@ -1309,6 +1309,11 @@ session's way back out of `waiting_on_check`. Past that the call returns `checki
 the id the review will have, `review_status` carries the wait and then reports the
 review or the same refusal the call would have given, and a retry of the same candidate
 against the same check definitions attaches to the run instead of starting another.
+An external harness's `check_run` is held to the same wait: past it the call returns
+`running` with a `run_id`, the run carries on detached, and `check_run_status` waits on
+it or `check_run_cancel` withdraws it. Its runs are an in-memory table on the node
+(`mcp::check_run::Runs`), scoped to the caller's channel: one nobody asks after for ten
+minutes is withdrawn, a finished one's answer is kept thirty, and a restart forgets them.
 Checks the machine had no room for (a pod the scheduler could not place, the kubelet
 refused, or evicted under memory pressure; `review::checks::no_room`) are no verdict
 and refuse nothing: the submission joins a line (`queued`, the session

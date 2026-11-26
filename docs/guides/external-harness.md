@@ -74,6 +74,15 @@ the dependency cache read-only and no network. They wait for room and are placed
 like a review's checks, DigitalOcean included where placement allows. The
 outcome, exit status and end of each one's output go back to the agent and are
 attached to nothing: no review, no candidate, nothing a later submission reuses.
+A call blocks only as long as a status call may (45 s, or longer when the harness
+declares its client's timeout with `X-Tracon-Wait-Budget`), so checks that take
+longer than its MCP client waits still finish: past that wait it returns
+`running` and a `run_id`, the checks keep running, and
+`check_run_status(run_id, wait_secs?)` waits for them and returns the same answer
+`check_run` would have. `check_run_cancel(run_id)` stops them. A run the agent
+stops asking after for 10 minutes is withdrawn, a finished run's answer is kept
+for 30 minutes, and a node restart forgets every run; `check_run_status` on such
+an id says it is unknown, and the agent calls `check_run` again.
 A repository with no `[[repo]]` entry is refused; draft one with
 `repo_setup_draft` from a session on it, or add it to `node.toml`. Without
 `check_run` the tool is not offered. It changes nothing about submissions:
