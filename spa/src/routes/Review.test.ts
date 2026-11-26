@@ -6,45 +6,70 @@ import { readFileSync } from 'node:fs'
 const review = readFileSync(new URL('./Review.svelte', import.meta.url), 'utf8')
 const markup = review.slice(review.indexOf('</script>'))
 
-test('shown work, the submitter note among it, comes before the evidence grid and the files', () => {
+test('shown work, the submitter note among it, comes before the files, and the evidence grid and provenance are gone', () => {
   const shown = markup.indexOf('<ShownWork ')
   expect(shown).toBeGreaterThan(-1)
   expect(markup.indexOf('<ShownWork ', shown + 1)).toBe(-1)
-  const evidence = markup.indexOf('<section class="evidence">')
   const files = markup.indexOf('Files <b>')
-  expect(evidence).toBeGreaterThan(-1)
   expect(files).toBeGreaterThan(-1)
-  expect(shown).toBeLessThan(evidence)
   expect(shown).toBeLessThan(files)
+  // The status line says what they said, in one line under the title.
+  expect(markup).not.toContain('<section class="evidence">')
+  expect(markup).not.toContain('Candidate evidence')
+  expect(markup).not.toContain('<dl class="prov">')
+  expect(markup).not.toContain('<div class="recover">\n      {#if control')
+  // A review from before capture still says so, as a banner.
+  expect(markup).toContain('verification evidence missing')
 })
 
-test("the reviewer's verdict and its controls come before shown work, so a phone reaches it first", () => {
+test('the header names the review with its id chip, and drops the claimed jargon', () => {
+  const head = markup.slice(markup.indexOf('<div\n    class="head"'), markup.indexOf('<div class="status"'))
+  expect(head).toContain("<ReviewId kind={review.kind === 'report' ? 'report' : 'review'} id={review.id} />")
+  expect(head).not.toContain('claimed')
+})
+
+test('one status line sits under the title, before the publish line and the verdict card', () => {
+  const head = markup.indexOf('class="head"')
+  const status = markup.indexOf('<div class="status"')
   const verdict = markup.indexOf('<div class="verdict"')
-  const control = markup.indexOf("{#if control?.kind === 'running'}")
   const shown = markup.indexOf('<ShownWork ')
-  expect(verdict).toBeGreaterThan(-1)
-  expect(control).toBeGreaterThan(-1)
-  expect(verdict).toBeLessThan(shown)
-  expect(control).toBeLessThan(shown)
-  // It follows the header's publish line, which says what is being decided.
+  expect(status).toBeGreaterThan(head)
+  expect(status).toBeLessThan(markup.indexOf('<dl class="kv">'))
   expect(markup.indexOf('<dl class="kv">')).toBeLessThan(verdict)
-  // The provenance line keeps who reviewed it.
-  expect(markup.indexOf('<dl class="prov">')).toBeGreaterThan(shown)
+  expect(verdict).toBeLessThan(shown)
+  const line = markup.slice(status, markup.indexOf('</div>', markup.indexOf('{/if}\n  </div>', status)))
+  // Checks, reviewer, task, docs, model and who submitted it, each on the line.
+  for (const item of ['checkStatus.label', 'reviewerItem.kind', '{#if taskId}', 'docs {evidence.demonstrations.length}', '{session.model} · {session.phase}', 'submitted by', 'kind="session"']) {
+    expect(line).toContain(item)
+  }
+  // The Publishes line no longer repeats the session.
+  const kv = markup.slice(markup.indexOf('<dl class="kv">'), markup.indexOf('</dl>'))
+  expect(kv).not.toContain('Submitted by')
 })
 
-test("a peer's reviewer control says when its owner is away, and shows the owner's refusal beside each start", () => {
-  const control = markup.indexOf("{#if control?.kind === 'running'}")
-  const shown = markup.indexOf('<ShownWork ')
-  const chain = markup.slice(control, shown)
-  // svelte-check does not flag a derived the markup stopped reading.
-  expect(chain).toContain('{:else if reviewerAway}')
-  expect(chain).toContain("ownerDetail?.state !== 'fetched' && review.review_session_id")
-  for (const kind of ['start', 'retry', 'stale', 'again']) {
-    const at = chain.indexOf(`{:else if control?.kind === '${kind}'}`)
-    expect(at).toBeGreaterThan(-1)
-    const next = chain.indexOf('{:else if', at + 1)
-    expect(chain.slice(at, next === -1 ? undefined : next)).toContain('{#if reviewerRefusal}')
+test("the reviewer item offers each control the old row did, and the owner's refusal beside them", () => {
+  const status = markup.slice(markup.indexOf('<div class="status"'))
+  const line = status.slice(0, status.indexOf('{#if expanded ==='))
+  for (const label of ['Start reviewer', 'Retry reviewer', 'Review this revision', 'Review again…', 'Settings → Channels', 'reviewing…']) {
+    expect(line).toContain(label)
   }
+  expect(line).toContain('{#if reviewerRefusal}')
+  expect(review).toContain('away: reviewerAway')
+  expect(review).toContain("ownerDetail?.state !== 'fetched' && review.review_session_id !== null")
+})
+
+test('each status item expands to the detail it replaced', () => {
+  const at = markup.indexOf("{#if expanded === 'checks'}")
+  expect(at).toBeGreaterThan(markup.indexOf('<div class="status"'))
+  const detail = markup.slice(at, markup.indexOf('{/if}\n\n', at))
+  expect(detail).toContain('{#each authoritativeChecks as run (run.id)}')
+  expect(detail).toContain('onclick={() => (openRun = run)}')
+  expect(detail).toContain('onclick={() => fold(run.id)}')
+  expect(detail).toContain("{:else if expanded === 'task' && requirements}")
+  expect(detail).toContain('renderMessage(requirements.body)')
+  expect(detail).toContain("{:else if expanded === 'docs'")
+  expect(detail).toContain('{#each evidence.demonstrations as demo (demo.id)}')
+  expect(detail).toContain('{#each checks as c, index (index)}')
 })
 
 test('under generated details the opener sits above the agent text, which is collapsed and still editable', () => {

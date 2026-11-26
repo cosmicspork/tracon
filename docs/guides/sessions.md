@@ -906,8 +906,12 @@ Under `auto`, each submission from that source, and each resubmission, starts a
 reviewer. Under `manual`, none starts on its own and the review says so; start one
 with **Start reviewer** on the review page. The trigger can be set with no model
 bound, but then neither starts a reviewer, and the settings row and the review page
-say so. The review page names the model under *Reviewed by*, and whether it started
-on submission or by you.
+say so. The review page's status line, under its title, shows the checks, the
+reviewer's verdict or the control that starts one, the task and who submitted it,
+each only when it has something to say and each opening to its detail; the verdict
+card below it names the model, and whether it started on submission or by you. The
+header names the review and its short id (the first 8 hex digits, as agents write it
+in notes); clicking either shows the full id with a Copy button.
 
 The submitting agent is told too: submit_review's message says whether a reviewer
 is reading the change, under which trigger, and `review_session` carries its
