@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 
-import { formatTag, shownEventLine, splitShown } from './shown'
+import { formatTag, orderForReview, shownEventLine, splitShown } from './shown'
 import type { ShownWork } from './types'
 
 function item(id: string, proposal?: boolean): ShownWork {
@@ -49,4 +49,10 @@ test("the log says a proposal was shown, not work", () => {
   expect(shownEventLine({ title: 'Done', head_sha: 'abcdef0123456789', files: 0 })).toBe(
     'work shown · Done · at abcdef012345 · in tracon only',
   )
+})
+
+test('on a review, current items come first and stale ones after, each newest first', () => {
+  const at = (id: string, created_ms: number, stale: boolean): ShownWork => ({ ...item(id), created_ms, stale })
+  const ordered = orderForReview([at('old-stale', 1, true), at('cur-1', 2, false), at('new-stale', 3, true), at('cur-2', 4, false)])
+  expect(ordered.map((i) => i.id)).toEqual(['cur-2', 'cur-1', 'new-stale', 'old-stale'])
 })

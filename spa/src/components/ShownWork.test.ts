@@ -143,6 +143,42 @@ test.skipIf(!browser)('a stale item on a review shows only its header and the cu
   await page.close()
 })
 
+test.skipIf(!browser)('a stale item folds to one line, after the current one, and says why only once opened', async () => {
+  const page = await open()
+  // The current note leads, though it was handed in after the stale one.
+  expect(await page.locator('article').evaluateAll((els) => els.map((e) => e.id))).toEqual(['shown-new', 'shown-old'])
+  const stale = page.locator('#shown-old')
+  const summary = stale.locator('summary')
+  expect(await summary.innerText()).toMatch(/^Note from the submitter\s*·\s*at aaaaaaaa\s*·\s*stale$/)
+  // Everything on the line sits on one row, at a phone's width too.
+  const tops = await summary.evaluate((e) => [...e.children].map((c) => c.getBoundingClientRect().top))
+  expect(Math.max(...tops) - Math.min(...tops)).toBeLessThan(10)
+  // No border marks it: the chip is enough.
+  expect(await stale.evaluate((e) => getComputedStyle(e).borderLeftWidth)).toBe('0px')
+  expect(await stale.getByText('shown at an earlier candidate').isVisible()).toBe(false)
+  expect(await stale.getByText('no required checks ran at this commit').isVisible()).toBe(false)
+  await summary.click()
+  expect(await stale.locator('footer').getByText('shown at an earlier candidate · ask for it to be shown again if it matters').isVisible()).toBe(true)
+  expect(await stale.locator('footer').getByText('no required checks ran at this commit').isVisible()).toBe(true)
+  await page.close()
+})
+
+test.skipIf(!browser)('stale items are read newest first, under the current ones', async () => {
+  const at = (id: string, stale: boolean, created_ms: number): ShownWork => ({ ...item(id, stale, id), created_ms })
+  const page = await open('', true, [at('s1', true, 1), at('c1', false, 2), at('s2', true, 3), at('c2', false, 4)])
+  expect(await page.locator('article').evaluateAll((els) => els.map((e) => e.id))).toEqual(['shown-c2', 'shown-c1', 'shown-s2', 'shown-s1'])
+  await page.close()
+})
+
+test.skipIf(!browser)('what shown work is sits behind the heading\'s help, not under it', async () => {
+  const page = await open()
+  const heading = page.locator('.h4', { hasText: 'Shown work' })
+  expect(await heading.getByText('not verification').isVisible()).toBe(false)
+  await heading.getByRole('button', { name: 'About shown work' }).click()
+  expect(await heading.getByText('It is not verification, and it does not go to the forge.', { exact: false }).isVisible()).toBe(true)
+  await page.close()
+})
+
 test.skipIf(!browser)('a stale item the address names lands open', async () => {
   const page = await open('#shown-old')
   expect(await page.locator('#shown-old').getByText('the earlier note').isVisible()).toBe(true)
