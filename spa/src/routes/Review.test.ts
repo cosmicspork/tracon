@@ -6,16 +6,20 @@ import { readFileSync } from 'node:fs'
 const review = readFileSync(new URL('./Review.svelte', import.meta.url), 'utf8')
 const markup = review.slice(review.indexOf('</script>'))
 
-test('shown work, the submitter note among it, comes before the evidence grid and the files', () => {
+test('shown work, the submitter note among it, comes before the files, and the evidence grid and provenance are gone', () => {
   const shown = markup.indexOf('<ShownWork ')
   expect(shown).toBeGreaterThan(-1)
   expect(markup.indexOf('<ShownWork ', shown + 1)).toBe(-1)
-  const evidence = markup.indexOf('<section class="evidence">')
   const files = markup.indexOf('<ReviewDiff')
-  expect(evidence).toBeGreaterThan(-1)
   expect(files).toBeGreaterThan(-1)
-  expect(shown).toBeLessThan(evidence)
   expect(shown).toBeLessThan(files)
+  // The status line says what they said, in one line under the title.
+  expect(markup).not.toContain('<section class="evidence">')
+  expect(markup).not.toContain('Candidate evidence')
+  expect(markup).not.toContain('<dl class="prov">')
+  expect(markup).not.toContain('<div class="recover">\n      {#if control')
+  // A review from before capture still says so, as a banner.
+  expect(markup).toContain('verification evidence missing')
 })
 
 test('the diff is the only file list, folded from the start on every screen, with the stale files marked', () => {
@@ -38,33 +42,54 @@ test('Edit the diff lists its files in the same frame as the diff, edited ones o
   expect(edit).not.toContain('filehead')
 })
 
-test("the reviewer's verdict and its controls come before shown work, so a phone reaches it first", () => {
-  const verdict = markup.indexOf('<div class="verdict"')
-  const control = markup.indexOf("{#if control?.kind === 'running'}")
-  const shown = markup.indexOf('<ShownWork ')
-  expect(verdict).toBeGreaterThan(-1)
-  expect(control).toBeGreaterThan(-1)
-  expect(verdict).toBeLessThan(shown)
-  expect(control).toBeLessThan(shown)
-  // It follows the header's publish line, which says what is being decided.
-  expect(markup.indexOf('<dl class="kv">')).toBeLessThan(verdict)
-  // The provenance line keeps who reviewed it.
-  expect(markup.indexOf('<dl class="prov">')).toBeGreaterThan(shown)
+test('the header names the review with its id chip, and drops the claimed jargon', () => {
+  const head = markup.slice(markup.indexOf('<div\n    class="head"'), markup.indexOf('<div class="status"'))
+  expect(head).toContain("<ReviewId kind={review.kind === 'report' ? 'report' : 'review'} id={review.id} />")
+  expect(head).not.toContain('claimed')
 })
 
-test("a peer's reviewer control says when its owner is away, and shows the owner's refusal beside each start", () => {
-  const control = markup.indexOf("{#if control?.kind === 'running'}")
+test('one status line sits under the title, before the publish line and the verdict card', () => {
+  const head = markup.indexOf('class="head"')
+  const status = markup.indexOf('<div class="status"')
+  const verdict = markup.indexOf('<div class="verdict"')
   const shown = markup.indexOf('<ShownWork ')
-  const chain = markup.slice(control, shown)
-  // svelte-check does not flag a derived the markup stopped reading.
-  expect(chain).toContain('{:else if reviewerAway}')
-  expect(chain).toContain("ownerDetail?.state !== 'fetched' && review.review_session_id")
-  for (const kind of ['start', 'retry', 'stale', 'again']) {
-    const at = chain.indexOf(`{:else if control?.kind === '${kind}'}`)
-    expect(at).toBeGreaterThan(-1)
-    const next = chain.indexOf('{:else if', at + 1)
-    expect(chain.slice(at, next === -1 ? undefined : next)).toContain('{#if reviewerRefusal}')
+  expect(status).toBeGreaterThan(head)
+  expect(status).toBeLessThan(markup.indexOf('<dl class="kv">'))
+  expect(markup.indexOf('<dl class="kv">')).toBeLessThan(verdict)
+  expect(verdict).toBeLessThan(shown)
+  const line = markup.slice(status, markup.indexOf('</div>', markup.indexOf('{/if}\n  </div>', status)))
+  // Checks, reviewer, task, docs, model and who submitted it, each on the line.
+  for (const item of ['checkStatus.label', 'reviewerItem.kind', '{#if taskId}', 'docs {evidence.demonstrations.length}', '{session.model} · {session.phase}', 'submitted by', 'kind="session"']) {
+    expect(line).toContain(item)
   }
+  // The Publishes line no longer repeats the session.
+  const kv = markup.slice(markup.indexOf('<dl class="kv">'), markup.indexOf('</dl>'))
+  expect(kv).not.toContain('Submitted by')
+})
+
+test("the reviewer item offers each control the old row did, and the owner's refusal beside them", () => {
+  const status = markup.slice(markup.indexOf('<div class="status"'))
+  const line = status.slice(0, status.indexOf('{#if expanded ==='))
+  for (const label of ['Start reviewer', 'Retry reviewer', 'Review this revision', 'Review again…', 'Settings → Channels', 'reviewing…']) {
+    expect(line).toContain(label)
+  }
+  expect(line).toContain('{#if reviewerRefusal}')
+  expect(review).toContain('away: reviewerAway')
+  expect(review).toContain("ownerDetail?.state !== 'fetched' && review.review_session_id !== null")
+})
+
+test('each status item expands to the detail it replaced', () => {
+  const at = markup.indexOf("{#if expanded === 'checks'}")
+  expect(at).toBeGreaterThan(markup.indexOf('<div class="status"'))
+  const detail = markup.slice(at, markup.indexOf('{/if}\n\n', at))
+  expect(detail).toContain('{#each authoritativeChecks as run (run.id)}')
+  expect(detail).toContain('onclick={() => (openRun = run)}')
+  expect(detail).toContain('onclick={() => fold(run.id)}')
+  expect(detail).toContain("{:else if expanded === 'task' && requirements}")
+  expect(detail).toContain('renderMessage(requirements.body)')
+  expect(detail).toContain("{:else if expanded === 'docs'")
+  expect(detail).toContain('{#each evidence.demonstrations as demo (demo.id)}')
+  expect(detail).toContain('{#each checks as c, index (index)}')
 })
 
 test('under generated details the opener sits above the agent text, which is collapsed and still editable', () => {
@@ -85,30 +110,93 @@ test('under generated details the opener sits above the agent text, which is col
   expect(snippet).not.toContain('<OutgoingPreview')
 })
 
-test('the outgoing title and body are previewed below their source, as approval sends them', () => {
+test('the forge text is edited in one place: the Source tab of On the forge, beside what it composes', () => {
   const at = markup.indexOf('<OutgoingPreview')
   expect(at).toBeGreaterThan(-1)
   expect(markup.indexOf('<OutgoingPreview', at + 1)).toBe(-1)
-  // After every editor of the text it shows.
-  expect(at).toBeGreaterThan(markup.indexOf('bind:value={title}'))
-  expect(at).toBeGreaterThan(markup.indexOf('bind:value={descBody}'))
-  expect(at).toBeGreaterThan(markup.indexOf('bind:value={comment}'))
+  const end = markup.indexOf('</OutgoingPreview>', at)
+  const inside = markup.slice(at, end)
+  // The Title and body section is gone; its editors are the Source tab's.
+  expect(markup).not.toContain('Title and body')
+  const editor = inside.slice(inside.indexOf('{#snippet editor()}'), inside.indexOf('{/snippet}', inside.indexOf('{#snippet editor()}')))
+  expect(editor).toContain('bind:value={title}')
+  expect(editor).toContain('bind:value={body}')
+  expect(editor).toContain('bind:value={descTitle}')
+  expect(editor).toContain('bind:value={descBody}')
+  expect(markup.split('bind:value={title}').length - 1).toBe(1)
+  expect(markup.split('bind:value={descTitle}').length - 1).toBe(1)
+  // Read-only on a phone and for a review another node holds.
+  expect(editor).toContain('{@const locked = busy || publishing || surface.phone || remoteOwner !== null}')
+  // The comment stays under its checkbox, before the tabs.
+  expect(markup.indexOf('bind:value={comment}')).toBeLessThan(at)
+  expect(markup.indexOf('bind:value={comment}')).toBeGreaterThan(markup.indexOf('bind:checked={commenting}'))
+  // The tab follows the page, so the banner's Show changes can open Changes.
+  expect(inside.slice(0, inside.indexOf('>\n'))).toContain('bind:view={forgeView}')
   // The node is asked with what approve would send it.
-  const preview = markup.slice(at, markup.indexOf('/>', at))
-  expect(preview).toContain('outputs: remoteOwner ? undefined : outputs')
-  expect(preview).toContain('opener: opening ? opener : undefined')
-  expect(preview).toContain('revision_id: revision?.id')
+  expect(inside).toContain('outputs: remoteOwner ? undefined : outputs')
+  expect(inside).toContain('opener: opening ? opener : undefined')
+  expect(inside).toContain('revision_id: revision?.id')
   const decide = review.slice(review.indexOf('async function decide('))
   const call = decide.slice(0, decide.indexOf('})\n'))
   expect(call).toContain("outputs: verdict === 'approve' && !remoteOwner ? outputs : undefined")
   expect(call).toContain("opener: verdict === 'approve' && opening ? opener : undefined")
 })
 
+test('no section shows the body twice: the summary sits above shown work only when it is not the forge text', () => {
+  const summary = markup.indexOf('{#if summaryOnly}')
+  expect(summary).toBeGreaterThan(-1)
+  expect(markup.split('{#if summaryOnly}').length - 1).toBe(1)
+  expect(markup.indexOf('<ShownWork ')).toBeGreaterThan(summary)
+  expect(markup.slice(summary, markup.indexOf('<ShownWork '))).toContain('renderMessage(review.body)')
+  // Decided, the title and body show once, as they went, and only when they were the forge text.
+  expect(markup).toContain('{:else if !summaryOnly}\n    <!-- Decided: the title and body as they went. -->')
+})
+
+test('an edited chip and Clear edits sit beside the tabs; Changes diffs each edited field by word', () => {
+  const at = markup.indexOf('<OutgoingPreview')
+  const inside = markup.slice(at, markup.indexOf('</OutgoingPreview>', at))
+  const actions = inside.slice(inside.indexOf('{#snippet actions()}'), inside.indexOf('{/snippet}', inside.indexOf('{#snippet actions()}')))
+  expect(actions).toContain('{#if forgeChanged.length}')
+  expect(actions).toContain('>edited</span>')
+  expect(actions).toContain('onclick={clearEdits}>Clear edits</button>')
+  const changes = inside.slice(inside.indexOf('{#snippet changes()}'))
+  expect(changes).toContain('No edits')
+  expect(changes).toContain('<WordDiff before={e.before} after={e.after} />')
+  // The old note is replaced by the chip.
+  expect(markup).not.toContain('Edited · approving publishes this version')
+})
+
+test('Clear edits restores every forge field and toggle, and leaves commit messages and the branch', () => {
+  const clear = review.slice(review.indexOf('function clearEdits()'))
+  const fn = clear.slice(0, clear.indexOf('\n  }\n'))
+  for (const f of ['title', 'body', 'describe', 'descTitle', 'descBody', 'commenting', 'comment']) {
+    expect(fn).toContain(`${f} = agentText.${f}`)
+  }
+  expect(fn).not.toContain('message')
+  expect(fn).not.toContain('branchName')
+  // The draft sync saves it like any edit, so it reaches other devices.
+  expect(review).toContain('if (loaded) draftSync?.edit(fields)')
+})
+
+test('a draft from an earlier revision says what it overrides, with Show changes and Clear edits', () => {
+  const at = markup.indexOf('{#if !closed && draftFromEarlier && forgeChanged.length}')
+  expect(at).toBeGreaterThan(-1)
+  const banner = markup.slice(at, markup.indexOf('{/if}\n  {#if !closed}', at))
+  expect(banner).toContain('your edits are from {draftRevisionLabel} <b>· the agent changed {fieldList(forgeChanged)} since</b>')
+  expect(banner).toContain("onclick={() => (forgeView = 'changes')}>Show changes</button>")
+  expect(banner).toContain('onclick={clearEdits}>Clear edits</button>')
+  // Inside On the forge, before the tabs.
+  expect(at).toBeGreaterThan(markup.indexOf('<div class="h4">On the forge'))
+  expect(at).toBeLessThan(markup.indexOf('<OutgoingPreview'))
+  // The footer keeps only saving, saved and the conflict.
+  expect(review).not.toContain("' · written against an earlier revision'")
+})
+
 test('the opener shows only where approval sends a description, and only with the setting on', () => {
   expect(review).toContain('openerFor(generatedDetails && !closed, { change: change !== null, initial, describe })')
   // A new change's body, or the description replacing a change's; otherwise the plain editor.
-  expect(markup).toContain("{#if opening === 'body'}\n      {@render generated('body')}\n    {:else}")
-  expect(markup).toContain("{#if opening === 'description'}\n      {@render generated('description')}\n    {:else}")
+  expect(markup).toContain("{#if opening === 'body'}\n            {@render generated('body')}\n          {:else}")
+  expect(markup).toContain("{#if opening === 'description'}\n            {@render generated('description')}\n          {:else}")
   // Nothing else renders it: "Comment on the …" never gets one.
   expect(markup.split("{@render generated(").length - 1).toBe(2)
 })
@@ -143,6 +231,10 @@ test('review threads sit after the diff and before the verdict bar, and start fr
   // since-last-verdict diff is not, and offers no picks.
   expect(markup.slice(diff, threads)).toContain('onpick={threadsBlocked ? undefined : pickLine}')
   expect(markup.slice(diff, threads)).toContain('marks={threadMarks}')
+  // A pick opens the composer, folded or not, before it is scrolled to.
+  const pick = review.slice(review.indexOf('async function pickLine('))
+  expect(pick.slice(0, pick.indexOf('\n  }\n'))).toContain('threadComposing = true')
+  expect(markup.slice(threads)).toContain('bind:composing={threadComposing}')
   const since = markup.slice(markup.indexOf('diff={sinceReviewed.diff}'))
   expect(since.slice(0, since.indexOf('/>'))).not.toContain('onpick')
 })

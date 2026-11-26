@@ -48,6 +48,8 @@ test('a node reads by its own name when known and by its generated one when not'
 // scope: git commit SHAs (and the build's commit), content hashes through
 // `shortHash`, and slices that are not ids at all. Each is allowed by the
 // expression it cuts, so a new id prefix fails here whatever file it is in.
+// The one id prefix shown is the review header's chip (`shortId`), always
+// beside the review's name.
 test('no id prefix is rendered outside the out-of-scope rows', () => {
   const root = new URL('..', import.meta.url).pathname
   const files: string[] = []
@@ -68,6 +70,7 @@ test('no id prefix is rendered outside the out-of-scope rows', () => {
     /^(?:String|str)\((?:e\.payload|p)\.head_sha[^()]*\)$/, // a git commit, coerced
     /^from$/, // DirectPush: the commit a fast-forward starts from
     /^hash$/, // shortHash itself
+    /^idHex$/, // the review header's id chip, beside its name, as agents write it in notes
     /\.toISOString\(\)$/, // a datetime-local value
     /^store\.queue\.ended$/, // a list
     /\.split\('\\n'\)$/, // the end of a log

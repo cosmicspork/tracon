@@ -166,6 +166,11 @@ pub(crate) fn view(a: &ApprovalRow) -> Value {
              it. Its own tools say what came of it.",
             plugin()
         )),
+        crate::store::approvals::WITHDRAWN => Some(format!(
+            "Plugin {} withdrew this card before anyone decided it, and nothing was approved. \
+             Its own tools say what came of what it asked.",
+            plugin()
+        )),
         CHANGES_REQUESTED => Some(format!(
             "The operator requested changes and nothing ran. Revise the call as their notes \
              say and call {} again; that asks the operator anew, with a new approval_id.",

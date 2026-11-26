@@ -82,8 +82,11 @@ export class ReviewDraftSync {
   edit(fields: ReviewDraftFields) {
     if (this.stopped || this.state === 'conflict') return
     const key = JSON.stringify(fields)
-    if (key === this.sent) return
     if (this.timer) clearTimeout(this.timer)
+    this.timer = null
+    // Back to what the node holds (Clear edits, say): an edit still waiting
+    // to be saved is dropped rather than saved over it.
+    if (key === this.sent) return
     this.timer = setTimeout(() => void this.flush(fields), this.delayMs)
   }
 

@@ -164,6 +164,18 @@ its `message`. It used to fail only after the capture, with an error saying
 the review was being published, which sent the agent to wait on a verdict
 already given (#999).
 
+**Merge order lived only in prose.** A harness splitting work into changes that must
+land in order wrote "merge after review …" in the body, and nothing stopped the
+operator approving the later one first. `submit_review` now takes `after`, the
+`review_id`s on the channel that must land first (replaced on resubmission, kept when
+left out). Unknown ids, rejected reviews and cycles are refused at submit, and
+`review_status` returns `after` with each dependency's state. Approval waits until each
+is approved, published and, when it opened or updated a change, merged; the operator
+can approve anyway, which records why as the verdict's reason. A harness's own review
+is not followed on the forge (there is no session to hang the looks on), so the node
+asks the forge once whether such a dependency's change merged when the dependent's
+page is read or approved.
+
 **Marking a draft ready was the operator's to do by hand.** A harness asked to
 review draft changes and mark the good ones ready had no tool for the last step,
 and `gh pr ready` from the host is the unbrokered write the working agreement

@@ -235,7 +235,8 @@ pub fn is_poll(tool: &str, args: Option<&Value>) -> bool {
         | super::approvals::STATUS
         | super::egress::REQUEST
         | super::github::RUN_WAIT
-        | super::gitlab::PIPELINE_WAIT => true,
+        | super::gitlab::PIPELINE_WAIT
+        | super::check_run::STATUS => true,
         super::setup::TRY => args.is_some_and(|a| a.get("trial_id").is_some()),
         _ => false,
     }
@@ -334,6 +335,7 @@ mod tests {
             "request_egress",
             "run_wait",
             "pipeline_wait",
+            "check_run_status",
         ] {
             assert!(is_poll(tool, None), "{tool}");
         }
@@ -349,6 +351,8 @@ mod tests {
             "run_status",
             "service_status",
             "doc_read",
+            "check_run",
+            "check_run_cancel",
         ] {
             assert!(!is_poll(tool, None), "{tool}");
         }

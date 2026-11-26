@@ -1226,7 +1226,11 @@ for the plugin to act on. A card raised `on_behalf` of the agent call being serv
 that session's once the node has verified the context is its own signature for this
 instance and channel, so the session's wait covers it: the plugin can attribute only a
 call it was actually sent. `approval/status` waits as an agent's status call does, on the
-plugin's own cards only. `tools/call` runs through the node's unheld path
+plugin's own cards only. `approval/withdraw` moves one of them still pending to the terminal
+`withdrawn` state with the plugin's reason (`Store::withdraw_approval`, guarded on
+`state='pending'`, so a decision or expiry that came first stands and is returned) and
+settles it through the manager with the plugin as `withdrawn_by`, so the queue, the
+session's wait and its audit read it as the plugin's, not the operator's. `tools/call` runs through the node's unheld path
 (`Tools::call_for_operator`) with a `Caller::Plugin`, so the signed policy and the
 callee's entry decide it, the channel's external log records it, and an ask is a refusal.
 
@@ -1305,6 +1309,11 @@ session's way back out of `waiting_on_check`. Past that the call returns `checki
 the id the review will have, `review_status` carries the wait and then reports the
 review or the same refusal the call would have given, and a retry of the same candidate
 against the same check definitions attaches to the run instead of starting another.
+An external harness's `check_run` is held to the same wait: past it the call returns
+`running` with a `run_id`, the run carries on detached, and `check_run_status` waits on
+it or `check_run_cancel` withdraws it. Its runs are an in-memory table on the node
+(`mcp::check_run::Runs`), scoped to the caller's channel: one nobody asks after for ten
+minutes is withdrawn, a finished one's answer is kept thirty, and a restart forgets them.
 Checks the machine had no room for (a pod the scheduler could not place, the kubelet
 refused, or evicted under memory pressure; `review::checks::no_room`) are no verdict
 and refuse nothing: the submission joins a line (`queued`, the session
