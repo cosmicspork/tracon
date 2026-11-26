@@ -164,6 +164,13 @@ pub fn checks_key(entry: &Entry) -> String {
     format!("checks:{}:{}", entry.handle, entry.started_ms)
 }
 
+/// The node's checks on an external submission's commit have been shown
+/// settled to its caller, with their output: told once per commit
+/// (`review_status`'s `checks`).
+pub fn submission_checks_key(review_id: &str, head_sha: &str) -> String {
+    format!("submission-checks:{review_id}:{head_sha}")
+}
+
 /// Checks the node has stopped trying for want of room: told once each time
 /// they are held, while the checks themselves stay an open wait.
 pub fn held_key(entry: &Entry) -> Option<String> {

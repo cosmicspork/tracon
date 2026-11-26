@@ -916,7 +916,9 @@ is reading the change, under which trigger, and `review_session` carries its
 reviewer has given a verdict on the latest revision, its `verdict`, `summary` and
 `findings`. The verdict ends a review_status wait early and is brought back to a
 session that ended its turn waiting, so the agent can start on the findings before
-you decide; your decision still governs.
+you decide; your decision still governs. A harness you run yourself also gets
+`checks` beside `reviewer`: the node's checks on its latest commit, whose settling
+ends the wait too ([external harness](external-harness.md)).
 
 When the reviewer requests changes, **Request these changes…** on its verdict opens
 the Request changes composer with its summary and findings filled in, one finding a

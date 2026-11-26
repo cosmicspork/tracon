@@ -2887,6 +2887,131 @@ async fn a_resubmission_of_the_commit_being_checked_runs_its_checks_once() {
     assert_eq!(f.store.review_sessions_of(&id).unwrap().len(), 1);
 }
 
+/// A check that fails once the agent has had time to ask: a second's sleep,
+/// then the failure, said on stderr.
+const FAILING_CHECK: &str = "sleep 1 && echo boom >&2 && exit 3";
+
+/// With `[external] check_submissions` on and no reviewer to start, the
+/// harness that submitted learns of the node's checks from `review_status`
+/// itself (#1200): running while they run, then failed with the failing
+/// check's output, which ends the wait early and is sent once.
+#[tokio::test]
+async fn an_external_caller_is_shown_the_nodes_checks_and_their_failure_once() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.external.repo_roots = vec![Config::state_dir()];
+        c.external.check_submissions = true;
+        c.supervision.checks = vec![FAILING_CHECK.into()];
+    })
+    .await;
+    let v = submit_externally(&f, json!({})).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    let head = f.store.get_review(&id).unwrap().unwrap().head_sha;
+    let external = tracon::mcp::CallContext::external(None, "work", "n1");
+    let s = external_status(&f, &external, &id, 0).await;
+    assert_eq!(s["checks"]["state"], "running", "{s}");
+    assert_eq!(s["checks"]["head_sha"], head.as_str(), "{s}");
+
+    // The failure ends the wait, well short of its cap.
+    let s = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        external_status(&f, &external, &id, 30),
+    )
+    .await
+    .expect("the checks settling end the wait");
+    assert_eq!(s["still_waiting"], true, "{s}");
+    assert_eq!(s["checks"]["state"], "failed", "{s}");
+    let result = &s["checks"]["results"][0];
+    assert_eq!(result["command"], FAILING_CHECK, "{s}");
+    assert_eq!(result["outcome"], "failed", "{s}");
+    assert_eq!(result["exit"], 3, "{s}");
+    assert!(result["tail"].as_str().unwrap().contains("boom"), "{s}");
+    let message = s["message"].as_str().unwrap();
+    assert!(
+        message.starts_with(&format!(
+            "The node's required check `{FAILING_CHECK}` failed"
+        )),
+        "{message}"
+    );
+    assert!(message.contains("still stands"), "{message}");
+
+    // Told once: the next poll is compact, unless it asks for them again.
+    let s = external_status(&f, &external, &id, 0).await;
+    assert_eq!(s["checks"]["state"], "failed", "{s}");
+    assert_eq!(s["checks"]["results"][0]["outcome"], "failed", "{s}");
+    assert!(s["checks"]["results"][0]["tail"].is_null(), "{s}");
+    let again = tracon::mcp::review::call(
+        &f.store,
+        &f.manager,
+        &external,
+        "review_status",
+        &json!({ "review_id": id, "wait_secs": 0, "include_findings": true }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        again["checks"]["results"][0]["tail"]
+            .as_str()
+            .unwrap()
+            .contains("boom"),
+        "{again}"
+    );
+
+    // A resubmission on a new commit shows its own checks, never the last
+    // commit's failure.
+    sh(
+        std::path::Path::new(&f.worktree),
+        "echo more >> a.txt && git add -A && git commit -qm more",
+    );
+    let v = submit_externally(&f, json!({ "review_id": id })).await;
+    assert_eq!(v["review_id"], id.as_str(), "{v}");
+    let second = f.store.get_review(&id).unwrap().unwrap().head_sha;
+    assert_ne!(second, head);
+    let s = external_status(&f, &external, &id, 0).await;
+    assert_eq!(s["checks"]["head_sha"], second.as_str(), "{s}");
+    assert_eq!(s["checks"]["state"], "running", "{s}");
+    assert_eq!(s["checks"]["results"], json!([]), "{s}");
+    assert!(!s["message"].as_str().unwrap().contains("failed"), "{s}");
+    checks_ran(&f, &id).await;
+}
+
+/// With `check_submissions` off the node runs nothing behind a submission,
+/// and `review_status` says so rather than leaving the agent to wonder; a
+/// session's own `review_status` carries no `checks`, its gating path
+/// being its own.
+#[tokio::test]
+async fn review_status_says_why_there_are_no_checks_and_tells_a_session_nothing_new() {
+    state::isolate();
+    let f = fixture_with(test_name!(), WITH_GH, |c| {
+        c.external.repo_roots = vec![Config::state_dir()];
+    })
+    .await;
+    let v = submit_externally(&f, json!({})).await;
+    let id = v["review_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    let external = tracon::mcp::CallContext::external(None, "work", "n1");
+    let s = external_status(&f, &external, &id, 0).await;
+    assert_eq!(s["checks"]["state"], "none", "{s}");
+    assert!(
+        s["checks"]["why"]
+            .as_str()
+            .unwrap()
+            .contains("check_submissions is off"),
+        "{s}"
+    );
+    drop(f);
+
+    let f = fixture(&format!("{}-session", test_name!()), WITH_GH).await;
+    let id = f.submit().await;
+    let s = f.status_tool(&id).await;
+    assert!(s.get("checks").is_none(), "{s}");
+}
+
 /// Files the node could not keep are checks it could not run, said where
 /// the card and the reviewer read them, not left saying they are running.
 #[tokio::test]

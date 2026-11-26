@@ -159,7 +159,14 @@ pub fn definitions() -> Vec<Value> {
                  and, once it has given one, its `verdict`, `summary` and `findings`; a \
                  verdict arriving ends the wait early. Its summary and findings are sent \
                  once: later calls carry only `findings_count`, unless you pass \
-                 `include_findings: true` to have them again. That verdict is advisory: only the \
+                 `include_findings: true` to have them again. For a harness outside the node, \
+                 every answer also carries `checks`: the node's checks on the latest revision's \
+                 commit (`head_sha`), with `state` running, passed, failed, could_not_run or \
+                 none (with `why`) and each check's `command`, `outcome`, `exit` and `ms`; their \
+                 settling ends the wait early, and the `tail` of a check that did not pass is \
+                 sent once per commit, again with `include_findings: true`. A failed check \
+                 refuses nothing: fix it and resubmit with the same review_id. That verdict is \
+                 advisory: only the \
                  operator's decision publishes. On approval the node publishes the approved \
                  text itself and returns where it landed; that approval, like a verdict of \
                  approve with no findings, is not brought back to the session as a prompt, \
@@ -176,7 +183,7 @@ pub fn definitions() -> Vec<Value> {
                     "wait_secs": wait_secs_arg.clone(),
                     "include_findings": {
                         "type": "boolean",
-                        "description": "Return the AI reviewer's summary and findings even when this caller has already been sent them.",
+                        "description": "Return the AI reviewer's summary and findings, and the end of the output of each node check that did not pass, even when this caller has already been sent them.",
                     },
                 },
                 "required": ["review_id"],
@@ -5295,6 +5302,10 @@ async fn status(
         Some(session_id) => session_id.to_string(),
         None => external_caller(&id),
     };
+    // A harness outside the node is shown the node's checks on its latest
+    // revision; a session has its own gating path, above.
+    let external = ctx.session_id().is_none();
+    let include = args["include_findings"].as_bool() == Some(true);
     // The verdict and any failed publication as of the review's last change,
     // read again only when it changes rather than on every poll.
     let mut read: Option<(i64, Option<Value>, Option<crate::store::PublicationRow>)> = None;
@@ -5311,7 +5322,15 @@ async fn status(
                 "that id is a standalone narrative report; call report_status instead".into(),
             );
         }
-        if let Some(view) = decided_review_view(store, &r) {
+        let checks = external.then(|| SubmissionChecks::read(store, manager, &r));
+        let checks_key = |checks: &SubmissionChecks| {
+            crate::session::waits::submission_checks_key(&r.id, &checks.head_sha)
+        };
+        if let Some(mut view) = decided_review_view(store, &r) {
+            if let Some(checks) = &checks {
+                let full = include || !manager.waits().was_told(&caller, &checks_key(checks));
+                view["checks"] = checks.view(full);
+            }
             told_review(manager, ctx, &r);
             review_decided(manager, &r.id);
             return Ok(view);
@@ -5344,8 +5363,23 @@ async fn status(
                 .waits()
                 .was_told(&caller, &crate::session::waits::publication_key(row))
         });
+        // Checks settling on the latest revision end the wait as a verdict
+        // does, once per commit.
+        let untold_checks = checks.as_ref().is_some_and(|checks| {
+            checks.settled() && !manager.waits().was_told(&caller, &checks_key(checks))
+        });
         let now = tokio::time::Instant::now();
-        if untold || untold_failure || now >= deadline {
+        if untold || untold_failure || untold_checks || now >= deadline {
+            // Their output goes out once per commit, as findings do.
+            let checks = checks.as_ref().map(|checks| {
+                let key = checks_key(checks);
+                let full = include || !manager.waits().was_told(&caller, &key);
+                if checks.settled() {
+                    manager.waits().tell(&caller, &key);
+                }
+                (checks.view(full), checks.says())
+            });
+            let checks_says = checks.as_ref().map_or("", |(_, says)| says.as_str());
             // A verdict already sent comes back compact on later polls, so
             // its findings are not repeated into the caller's context each time.
             let full = args["include_findings"].as_bool() == Some(true)
@@ -5393,14 +5427,17 @@ async fn status(
                 let mut view = publish_failed_view(
                     &r,
                     failed,
-                    &says,
+                    &format!("{checks_says}{says}"),
                     &crate::session::waits::brought_back_review(ctx.session_id().is_some()),
                 );
                 view["waited_secs"] = json!(waited);
                 view["reviewer"] = reviewer();
+                if let Some((checks, _)) = checks {
+                    view["checks"] = checks;
+                }
                 return Ok(view);
             }
-            return Ok(json!({
+            let mut view = json!({
                 "review_id": r.id,
                 "state": r.state,
                 "still_waiting": true,
@@ -5408,13 +5445,17 @@ async fn status(
                 "waited_secs": waited,
                 "reviewer": reviewer(),
                 "message": format!(
-                    "{says}Still waiting on a human; the review is {}. {} Call review_status \
-                     again with the same review_id to keep waiting.{}",
+                    "{checks_says}{says}Still waiting on a human; the review is {}. {} Call \
+                     review_status again with the same review_id to keep waiting.{}",
                     r.state,
                     super::wait::capped(ctx),
                     crate::session::waits::brought_back_review(ctx.session_id().is_some())
                 ),
-            }));
+            });
+            if let Some((checks, _)) = checks {
+                view["checks"] = checks;
+            }
+            return Ok(view);
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
@@ -5496,6 +5537,128 @@ fn findings_arg(args: &Value) -> (Value, Vec<String>) {
 /// no session, and only the review's submitter may ask about it.
 fn external_caller(review_id: &str) -> String {
     format!("external:{review_id}")
+}
+
+/// The node's checks of an external submission's latest revision, as
+/// `review_status` shows them to the harness that submitted it (#1200).
+/// Read from the review's checks record, which a resubmission clears and
+/// which is written only onto the commit the checks ran on
+/// (`Store::set_checks_at`), so it never holds another commit's results.
+struct SubmissionChecks {
+    head_sha: String,
+    /// `running`, `passed`, `failed`, `could_not_run` or `none`.
+    state: &'static str,
+    results: Vec<review::checks::CheckResult>,
+    /// Why there are none, for `none`.
+    why: Option<String>,
+}
+
+impl SubmissionChecks {
+    fn read(store: &Store, manager: &Manager, r: &ReviewRow) -> Self {
+        let results: Vec<review::checks::CheckResult> = r
+            .checks_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str(json).ok())
+            .unwrap_or_default();
+        let running = || {
+            store
+                .latest_review_revision(&r.id)
+                .ok()
+                .flatten()
+                .filter(|revision| revision.head_sha == r.head_sha)
+                .is_some_and(|revision| {
+                    manager
+                        .external_checks()
+                        .running(&r.id, &revision.candidate_id)
+                })
+        };
+        let (state, results, why) = match results.as_slice() {
+            [only] if only.outcome == CHECKS_RUNNING => ("running", Vec::new(), None),
+            _ if running() => ("running", Vec::new(), None),
+            [] => {
+                let why = if manager.cfg().external.check_submissions {
+                    "no checks are recorded for this revision yet: the node runs them once its                      files are kept, and none when the repository has no [[repo]] entry"
+                } else {
+                    "[external] check_submissions is off on this node, so it runs no checks                      behind a submission; a reviewer started on it runs them first"
+                };
+                ("none", Vec::new(), Some(why.to_string()))
+            }
+            all if all.iter().all(|result| result.ok) => ("passed", results, None),
+            all if all
+                .iter()
+                .any(|result| matches!(result.outcome.as_str(), "failed" | "prepare_failed")) =>
+            {
+                ("failed", results, None)
+            }
+            _ => ("could_not_run", results, None),
+        };
+        Self {
+            head_sha: r.head_sha.clone(),
+            state,
+            results,
+            why,
+        }
+    }
+
+    /// Whether they have settled: passed, failed or could not run.
+    fn settled(&self) -> bool {
+        matches!(self.state, "passed" | "failed" | "could_not_run")
+    }
+
+    /// What `review_status` carries. With `full`, each check that did not
+    /// pass has the end of its output; otherwise only outcomes, so a poll
+    /// after the caller was told stays cheap.
+    fn view(&self, full: bool) -> Value {
+        let results: Vec<Value> = self
+            .results
+            .iter()
+            .map(|result| {
+                let mut out = json!({
+                    "command": result.command,
+                    "outcome": result.outcome,
+                    "exit": result.exit,
+                    "ms": result.ms,
+                    "reused_from": result.reused_from,
+                });
+                if full && !result.ok {
+                    out["tail"] = json!(result.tail);
+                    if !result.failures.is_empty() {
+                        out["failures"] = json!(result.failures);
+                    }
+                }
+                out
+            })
+            .collect();
+        let mut out = json!({
+            "head_sha": self.head_sha,
+            "state": self.state,
+            "results": results,
+        });
+        if let Some(why) = &self.why {
+            out["why"] = json!(why);
+        }
+        out
+    }
+
+    /// The line a message starts with when they failed: which, and that the
+    /// submission still stands.
+    fn says(&self) -> String {
+        if self.state != "failed" {
+            return String::new();
+        }
+        let failed: Vec<String> = self
+            .results
+            .iter()
+            .filter(|result| matches!(result.outcome.as_str(), "failed" | "prepare_failed"))
+            .map(|result| format!("`{}`", result.command))
+            .collect();
+        format!(
+            "The node's required check{} {} failed on {}; the submission still stands. Fix              it, commit, and call submit_review again with this review_id. ",
+            if failed.len() == 1 { "" } else { "s" },
+            failed.join(", "),
+            &self.head_sha[..self.head_sha.len().min(12)]
+        )
+    }
 }
 
 /// A review was decided: what the node kept for its reviewer's start and
