@@ -3363,7 +3363,10 @@ async fn check_run_is_offered_only_where_the_operator_turns_it_on() {
         c.external.repo_roots = vec![Config::state_dir()];
     })
     .await;
-    assert!(!names(&off, tracon::mcp::Audience::External).contains(&"check_run".to_string()));
+    let offered = names(&off, tracon::mcp::Audience::External);
+    for tool in ["check_run", "check_run_status", "check_run_cancel"] {
+        assert!(!offered.contains(&tool.to_string()), "{tool}");
+    }
     let refused = check_run(&off, json!({ "command": "true" }))
         .await
         .unwrap_err();
@@ -3376,12 +3379,33 @@ async fn check_run_is_offered_only_where_the_operator_turns_it_on() {
         c.external.check_run = true;
     })
     .await;
-    assert!(names(&on, tracon::mcp::Audience::External).contains(&"check_run".to_string()));
-    assert!(!names(
+    let external = names(&on, tracon::mcp::Audience::External);
+    let execute = names(
         &on,
-        tracon::mcp::Audience::Session(tracon::session::Phase::Execute)
-    )
-    .contains(&"check_run".to_string()));
+        tracon::mcp::Audience::Session(tracon::session::Phase::Execute),
+    );
+    for tool in ["check_run", "check_run_status", "check_run_cancel"] {
+        assert!(external.contains(&tool.to_string()), "{tool}");
+        assert!(!execute.contains(&tool.to_string()), "{tool}");
+    }
+    // A run the node does not hold, whether it expired, was lost to a
+    // restart or never was, is said to be unknown, with what to do instead.
+    for tool in ["check_run_status", "check_run_cancel"] {
+        let unknown = on
+            .tools
+            .call(
+                &tracon::mcp::CallContext::external(None, "work", "n1"),
+                tool,
+                &json!({ "run_id": "check-run-gone", "wait_secs": 0 }),
+            )
+            .await
+            .unwrap_err();
+        assert!(unknown.contains("is known here"), "{tool}: {unknown}");
+        assert!(
+            unknown.contains("Call check_run again"),
+            "{tool}: {unknown}"
+        );
+    }
 }
 
 #[tokio::test]

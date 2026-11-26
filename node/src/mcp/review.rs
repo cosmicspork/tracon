@@ -2095,9 +2095,18 @@ fn say_checks_running(store: &Store, review_id: &str, head_sha: &str) {
 /// checks are running does not run them again beside the first. Counted in
 /// what a restart would interrupt (`restart::busy`).
 #[derive(Default)]
-pub struct ExternalChecks(std::sync::Mutex<std::collections::HashSet<(String, String)>>);
+pub struct ExternalChecks(
+    std::sync::Mutex<std::collections::HashSet<(String, String)>>,
+    super::check_run::Runs,
+);
 
 impl ExternalChecks {
+    /// `check_run`'s runs, by run id, for `check_run_status` and
+    /// `check_run_cancel` to find.
+    pub fn asked_runs(&self) -> &super::check_run::Runs {
+        &self.1
+    }
+
     /// Begin checking a review's candidate, or `None` when a run of it is
     /// under way: that run's results are this submission's too, and the
     /// review says they are running again, which its resubmission cleared.
