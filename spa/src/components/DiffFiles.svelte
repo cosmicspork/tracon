@@ -25,6 +25,7 @@
   import { tick, untrack } from 'svelte'
 
   import { scrollParent } from '../lib/diffview'
+  import Help from './Help.svelte'
   import type { ViewedFiles } from '../lib/viewedFiles.svelte'
 
   let {
@@ -252,8 +253,9 @@
     </div>
     {#if viewed}
       {@const p = viewed.progress}
-      <span class="progress" title="Viewed marks are your own reading progress. They approve nothing.">
-        {p.viewed}/{p.of} viewed <span class="not">· not approval</span>
+      <span class="progress">
+        {p.viewed}/{p.of} viewed
+        <Help label="About viewed">Viewed marks are your own reading progress. They approve nothing.</Help>
       </span>
     {/if}
     <div class="steps">
@@ -349,10 +351,6 @@
     font: 12px var(--mono);
     color: var(--dim);
     white-space: nowrap;
-  }
-  .progress .not {
-    color: var(--dim);
-    font-style: italic;
   }
   .steps {
     display: inline-flex;

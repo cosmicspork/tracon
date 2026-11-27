@@ -173,7 +173,9 @@
   <section class="shown proposals">
     <div class="h4">
       Proposals
-      <b>· layouts or flows the agent proposes for you to choose from · not an account of work done · it does not go to the forge</b>
+      <Help label="About proposals"
+        >Layouts or flows the agent proposes for you to choose from. They describe options rather than work done, and they do not go to the forge.</Help
+      >
     </div>
     {@render list(split.proposals)}
   </section>
