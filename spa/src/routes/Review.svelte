@@ -14,6 +14,7 @@
   import { ViewedFiles } from '../lib/viewedFiles.svelte'
   import CommitMessage from '../components/CommitMessage.svelte'
   import OutgoingPreview from '../components/OutgoingPreview.svelte'
+  import Help from '../components/Help.svelte'
   import { WordDiff } from '@tracon/ui/svelte'
   import { agentForge, fieldList, forgeEdits } from '../lib/forgeEdits'
   import ShownWork from '../components/ShownWork.svelte'
@@ -1133,9 +1134,8 @@
     {#if reviewerItem}
       <span class="item reviewer">
         {#if reviewerItem.kind === 'reviewing'}
-          <span class="dim" title="a fresh session is reading this review · its verdict lands here; yours decides"
-            >reviewing…{reviewerItem.since ? ` ${formatAge(reviewerItem.since, clock.now)}` : ''}</span
-          >
+          <span class="dim">reviewing…{reviewerItem.since ? ` ${formatAge(reviewerItem.since, clock.now)}` : ''}</span>
+          <Help label="About the reviewer">A fresh session is reading this review. Its verdict lands here; yours decides.</Help>
         {:else if reviewerItem.kind === 'away'}
           <span class="dim">{reviewerItem.note}</span>
         {:else if reviewerItem.kind === 'no_model'}
@@ -1311,13 +1311,13 @@
   </dl>
   {#if remoteOwner && ownerDetail?.state === 'fetched'}
     <div class="banner dim">
-      held by {nodeLabel(store.nodes, remoteOwner)}
-      <b>· read from it just now; it checks the branch for changes again when you decide</b>
+      held by {nodeLabel(store.nodes, remoteOwner)} <b>· read from it just now</b>
+      <Help label="About held by {nodeLabel(store.nodes, remoteOwner)}">It checks the branch for changes again when you decide.</Help>
     </div>
   {:else if remoteOwner}
     <div class="banner crit">
-      held by {nodeLabel(store.nodes, remoteOwner)}
-      <b>· {ownerDetail?.reason ?? 'its checks and evidence stay on that node'}; decide there, or reload once it can be read</b>
+      held by {nodeLabel(store.nodes, remoteOwner)} <b>· decide there, or reload once it can be read</b>
+      <Help label="About held by {nodeLabel(store.nodes, remoteOwner)}">{ownerDetail?.reason ?? 'Its checks and evidence stay on that node.'}</Help>
     </div>
   {/if}
   <!-- The reviewer's verdict first: it is what the decision is made on, and on a
@@ -1375,7 +1375,7 @@
        its account of what it verified and what it did not is read first. -->
   {#if summaryOnly}
     <!-- The agent's summary, when it is not the forge text: read first, with what it showed. -->
-    <div class="h4">Summary <b>for you · not sent to the forge</b></div>
+    <div class="h4">Summary <Help label="About Summary">The agent's summary, for you. It does not go to the forge.</Help></div>
     <div class="summary">
       <b>{review.title}</b>
       <!-- The agent's Markdown, rendered as its session messages are: nothing fetched, links open beside. -->
@@ -1443,13 +1443,10 @@
     {@const locked = busy || publishing || surface.phone || remoteOwner !== null}
     <label class="opener">
       <span class="h5"
-        >Opener <b
-          >{remoteOwner
-            ? `written on ${nodeLabel(store.nodes, remoteOwner)}`
-            : surface.phone
-              ? 'written on the desktop'
-              : 'yours, in your words · leads the description'}</b
-        ></span
+        >Opener {#if remoteOwner}<b>written on {nodeLabel(store.nodes, remoteOwner)}</b>{:else if surface.phone}<b
+            >written on the desktop</b
+          >{/if}
+        <Help label="About Opener">Yours, in your own words. It leads the description, with the agent's text folded beneath it.</Help></span
       >
       <textarea
         class="edit body grow"
@@ -1485,7 +1482,13 @@
     </div>
   {/if}
 
-  <div class="h4">On the forge <b>{closed ? 'as decided' : remoteOwner ? `as the agent asked · edited on ${nodeLabel(store.nodes, remoteOwner)}` : surface.phone ? 'edited on the desktop' : 'what approval sends besides the commits · edit in Source'}</b></div>
+  <div class="h4">
+    On the forge
+    {#if closed}<b>as decided</b>{:else if remoteOwner}<b>as the agent asked · edited on {nodeLabel(store.nodes, remoteOwner)}</b>{:else if surface.phone}<b
+        >edited on the desktop</b
+      >{/if}
+    <Help label="About On the forge">What approval sends with the commits: the text, the branch and the commits themselves. Edit the text in Source.</Help>
+  </div>
   {#if remoteOwner}
     <div class="note dim">Publishes as the agent wrote it. Edit on the node that holds it.</div>
   {:else}
@@ -1730,7 +1733,7 @@
     <div class="editbar">
       {#if !editing}
         <button class="btn" disabled={busy || publishing} onclick={startEditing}>Edit the diff</button>
-        <span class="note">Edits go back as a request for changes; the agent applies them.</span>
+        <Help label="About Edit the diff">Edits go back as a request for changes; the agent applies them.</Help>
       {:else}
         <button class="btn" disabled={busy || publishing} onclick={discardEdits}>Discard edits</button>
         <span class="note"

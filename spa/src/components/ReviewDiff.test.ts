@@ -574,15 +574,18 @@ test.skipIf(!browser)('past the last open change, n opens the next unviewed file
   await page.close()
 })
 
-test.skipIf(!browser)('a viewed file folds, counts toward progress that says it is not approval, and survives a reload', async () => {
+test.skipIf(!browser)('a viewed file folds, counts toward progress whose help says it is not approval, and survives a reload', async () => {
   const page = await open({ revision: 'r1' })
   await ready(page, 'README.md')
-  expect(await page.locator('.bar .progress').textContent()).toBe('0/3 viewed · not approval')
-  expect(await page.locator('.bar .progress').getAttribute('title')).toContain('approve nothing')
+  expect((await page.locator('.bar .progress').textContent())?.trim()).toBe('0/3 viewed')
+  // What viewed means sits behind its help (#1198).
+  await page.locator('.bar .progress').getByRole('button', { name: 'About viewed' }).click()
+  expect(await page.locator('.bar .progress').innerText()).toContain('They approve nothing.')
+  await page.keyboard.press('Escape')
   expect(await page.locator('details[data-path="README.md"] .seen').getAttribute('title')).toContain('does not approve')
   await page.locator('details[data-path="README.md"] .seen input').check()
   expect(await page.locator('details[data-path="README.md"]').getAttribute('open')).toBeNull()
-  expect(await page.locator('.bar .progress').textContent()).toBe('1/3 viewed · not approval')
+  expect((await page.locator('.bar .progress').textContent())?.trim()).toBe('1/3 viewed')
 
   // Reloaded on the same revision, it is still viewed, and starts folded.
   await open({ revision: 'r1' }, page)
@@ -599,7 +602,7 @@ test.skipIf(!browser)('a viewed file folds, counts toward progress that says it 
   expect(await page.locator('details[data-path="README.md"] .seen input').isChecked()).toBe(false)
   expect(await page.locator('details[data-path="README.md"] .changed').textContent()).toBe('changed since you viewed it')
   expect(await page.locator('details[data-path="src/new.rs"] .seen input').isChecked()).toBe(true)
-  expect(await page.locator('.bar .progress').textContent()).toBe('1/3 viewed · not approval')
+  expect((await page.locator('.bar .progress').textContent())?.trim()).toBe('1/3 viewed')
   await page.close()
 })
 

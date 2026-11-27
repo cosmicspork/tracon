@@ -196,7 +196,7 @@ test('edited commit messages and a changed branch show the edited chip and list 
 })
 
 test('the branch and commits sit inside On the forge, after the text it sends and before the files, with one plain ship line', () => {
-  const forge = markup.indexOf('<div class="h4">On the forge')
+  const forge = markup.indexOf('<div class="h4">\n    On the forge')
   const preview = markup.indexOf('</OutgoingPreview>')
   const block = markup.indexOf('<div class="forge-commits">')
   const branch = markup.indexOf('<label class="branch">')
@@ -227,7 +227,7 @@ test('a draft from an earlier revision says what it overrides, with Show changes
   expect(banner).toContain("onclick={() => (forgeView = 'changes')}>Show changes</button>")
   expect(banner).toContain('onclick={clearEdits}>Clear edits</button>')
   // Inside On the forge, before the tabs.
-  expect(at).toBeGreaterThan(markup.indexOf('<div class="h4">On the forge'))
+  expect(at).toBeGreaterThan(markup.indexOf('<div class="h4">\n    On the forge'))
   expect(at).toBeLessThan(markup.indexOf('<OutgoingPreview'))
   // The footer keeps only saving, saved and the conflict.
   expect(review).not.toContain("' · written against an earlier revision'")
@@ -285,4 +285,46 @@ test('unresolved threads let a request for changes go without a note', () => {
   expect(conditions.slice(0, conditions.indexOf('})\n'))).toContain('openThreads: unresolvedCount(threads)')
   // Read with the rest of the review, and again with it.
   expect(review.split('threads = d.threads ??').length - 1).toBe(2)
+})
+
+// #1198: the page's headings and banners are short labels; what they mean is
+// one click away in a Help, as Settings does it.
+const outgoing = readFileSync(new URL('../components/OutgoingPreview.svelte', import.meta.url), 'utf8')
+const diffFiles = readFileSync(new URL('../components/DiffFiles.svelte', import.meta.url), 'utf8')
+const shown = readFileSync(new URL('../components/ShownWork.svelte', import.meta.url), 'utf8')
+
+test('explanations sit behind Help popovers, each labelled About <heading>, and none stay inline', () => {
+  const sources = [markup, outgoing, diffFiles, shown].join('\n')
+  for (const moved of [
+    'what approval sends besides the commits',
+    "'as the node will send it'",
+    '· not approval',
+    '<span class="note">Edits go back as a request for changes',
+    'title="a fresh session is reading this review',
+    '<b>· read from it just now; it checks the branch',
+    "; decide there, or reload once it can be read</b>",
+    'Summary <b>for you · not sent to the forge</b>',
+    "'yours, in your words · leads the description'",
+    '· not an account of work done ·',
+  ]) {
+    expect(sources).not.toContain(moved)
+  }
+  for (const label of [
+    'About On the forge',
+    'About Edit the diff',
+    'About the reviewer',
+    'About held by {nodeLabel(store.nodes, remoteOwner)}',
+    'About Summary',
+    'About Opener',
+  ]) {
+    expect(markup).toContain(`<Help label="${label}">`)
+  }
+  expect(outgoing).toContain('<Help label="About what the {noun} gets">As the node will send it.')
+  expect(diffFiles).toContain('<Help label="About viewed">')
+  expect(shown).toContain('<Help label="About proposals"')
+  // State words stay visible.
+  expect(markup).toContain('{#if closed}<b>as decided</b>')
+  expect(markup).toContain('reviewing…{reviewerItem.since')
+  expect(markup.split('held by {nodeLabel(store.nodes, remoteOwner)} <b>').length - 1).toBe(2)
+  expect(outgoing).toContain("'composing…'")
 })

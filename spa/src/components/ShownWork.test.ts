@@ -202,7 +202,10 @@ test.skipIf(!browser)('a proposal is shown under a heading of its own and tagged
   expect(await work.locator('.h4').innerText()).toContain('Shown work')
   expect(await work.locator('#shown-p').count()).toBe(0)
   expect(await proposals.locator('.h4').innerText()).toContain('Proposals')
-  expect(await proposals.locator('.h4').innerText()).toContain('not an account of work done')
+  // What a proposal is sits behind the heading's help (#1198).
+  expect(await proposals.locator('.h4').innerText()).not.toContain('rather than work done')
+  await proposals.getByRole('button', { name: 'About proposals' }).click()
+  expect(await proposals.locator('.h4').innerText()).toContain('rather than work done')
   expect(await proposals.locator('#shown-p .tag.proposal').innerText()).toBe('proposal')
   expect(await proposals.getByText('layout A or layout B').isVisible()).toBe(true)
   expect(await work.locator('.tag.proposal').count()).toBe(0)

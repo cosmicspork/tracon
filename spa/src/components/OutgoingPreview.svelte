@@ -13,6 +13,7 @@
   import type { Snippet } from 'svelte'
 
   import { api } from '../lib/api'
+  import Help from './Help.svelte'
   import { codeSpans, renderForge } from '../lib/markdown'
   import { localOutgoing, sameOutgoing, type LocalInputs, type Outgoing, type OutgoingAsked } from '../lib/outgoing'
 
@@ -87,13 +88,16 @@
         ? 'composed here · the node did not answer'
         : asking
           ? 'composing…'
-          : 'as the node will send it',
+          : null,
   )
 </script>
 
 <div class="out">
   <div class="head">
-    <span class="h5">What the {noun} gets <b>{how}</b></span>
+    <span class="h5"
+      >What the {noun} gets{#if how}{' '}<b>{how}</b>{/if}
+      <Help label="About what the {noun} gets">As the node will send it. Edit it in Source.</Help></span
+    >
     <div class="side">
       {@render actions?.()}
       <div class="tabs" role="tablist" aria-label="Show the outgoing text">
