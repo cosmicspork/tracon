@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.64.0](https://github.com/cosmicspork/tracon/compare/v0.63.0...v0.64.0) (2026-11-27)
+
+
+### Features
+
+* **spa:** Branch and Commits inside On the forge, one plain line on what ships ([#1212](https://github.com/cosmicspork/tracon/issues/1212)) ([519a481](https://github.com/cosmicspork/tracon/commit/519a48133b2929028de47cba34ee25fddc6ad844))
+* **spa:** review page explanations behind Help popovers ([#1214](https://github.com/cosmicspork/tracon/issues/1214)) ([efe4af1](https://github.com/cosmicspork/tracon/commit/efe4af120548241369733991c81195550dbd6aab))
+
 ## [0.63.0](https://github.com/cosmicspork/tracon/compare/v0.62.0...v0.63.0) (2026-11-26)
 
 
