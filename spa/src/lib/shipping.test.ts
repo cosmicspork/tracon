@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { proposedMessage, shipping, shippedMessage } from './shipping'
+import { droppedNote, proposedMessage, shipLine, shipping, shippedMessage } from './shipping'
 import type { ReviewIntent } from './types'
 
 const one: ReviewIntent = {
@@ -66,4 +66,52 @@ test("the squash message is the one written, else the agent's own, never the des
   expect(proposedMessage(own)).toBe('fix: own')
   expect(proposedMessage({ ...own, forge: { description, commit: 'fix: agent' } })).toBe('fix: agent')
   expect(proposedMessage({ forge: { description }, squash_onto: 'base' })).toBe('')
+})
+
+// The plain line On the forge says about what ships (#1194), one per case.
+const kept: ReviewIntent = {
+  forge: {},
+  commits: [
+    { sha: 'f227bdd2aaaa', subject: 'one' },
+    { sha: 'c5f35af5bbbb', subject: 'two' },
+  ],
+}
+const line = (intent: ReviewIntent, edited: Record<string, string> = {}) =>
+  shipLine(intent, shipping(intent, shippedMessage({}, intent), edited), edited)
+
+test('two kept commits say two commits ship, not only the head', () => {
+  expect(line(kept)).toBe('pushes 2 commits as written')
+  expect(line({ ...kept, signed: ['f227bdd2aaaa', 'c5f35af5bbbb'] })).toBe('pushes 2 commits as written · signatures kept')
+  expect(line({ ...kept, commits: kept.commits?.slice(1), signed: ['c5f35af5bbbb'] })).toBe(
+    'pushes 1 commit as written · signature kept',
+  )
+})
+
+test('when only some kept commits are signed, the line names whose signature is kept', () => {
+  expect(line({ ...kept, signed: ['c5f35af5bbbb'] })).toBe('pushes 2 commits as written · signature on c5f35af5 kept')
+})
+
+test('reworded commits count the messages edited here and say they lose their signatures', () => {
+  const signed = { ...kept, signed: ['c5f35af5bbbb'] }
+  expect(line(signed, { f227bdd2aaaa: 'one, said again' })).toBe(
+    'pushes 2 commits · 1 message edited here · reworded commits lose their signatures',
+  )
+  expect(line(kept, { f227bdd2aaaa: 'a', c5f35af5bbbb: 'b' })).toBe('pushes 2 commits · 2 messages edited here')
+})
+
+test('a squash pushes one commit of the reviewed tree, the head itself when the message is its own', () => {
+  expect(shipLine(one, shipping(one, 'something else', {}), {})).toBe('pushes one commit of the reviewed tree')
+  expect(shipLine(one, shipping(one, 'work', {}), {})).toBe(
+    "pushes one commit of the reviewed tree · the agent's own aaaa1111, signature kept",
+  )
+})
+
+test('dropped signatures are listed apart, and only when a new commit drops them', () => {
+  expect(droppedNote({ own: true, dropped: [] })).toBe('')
+  expect(droppedNote({ own: false, dropped: ['aaaa1111'] })).toBe(
+    'The signature on aaaa1111 is dropped: a commit the node makes is never signed.',
+  )
+  expect(droppedNote({ own: false, dropped: ['aaaa1111', 'bbbb2222'] })).toBe(
+    'The signatures on aaaa1111 and bbbb2222 are dropped: a commit the node makes is never signed.',
+  )
 })

@@ -58,7 +58,7 @@
   import { isNarrativeReport } from '../lib/reports'
   import { leaveAfterVerdict } from '../lib/verdict-nav'
   import { draftedMessage, draftForRevision, ReviewDraftSync, type DraftState } from '../lib/reviewDraft'
-  import { proposedMessage as proposedCommitMessage, shipping, shippedMessage } from '../lib/shipping'
+  import { droppedNote, proposedMessage as proposedCommitMessage, shipLine, shipping, shippedMessage } from '../lib/shipping'
   import type { ReviewCommit, ReviewDependencies, ReviewDraftFields } from '../lib/types'
   import {
     CLOSED_STATES,
@@ -751,6 +751,25 @@
   const forgeChanged = $derived(
     agentText ? forgeEdits({ title, body, describe, descTitle, descBody, commenting, comment }, agentText) : [],
   )
+  /**
+   * The commit messages and branch you changed, each with its before and
+   * after: they go to the forge with the text, so they count toward edited
+   * and Clear edits too (#1194).
+   */
+  const commitChanged = $derived.by(() => {
+    const edits: { field: string; before: string; after: string }[] = []
+    for (const c of intent.commits ?? []) {
+      const now = reworded[c.sha]
+      if (now !== undefined) edits.push({ field: `message of ${c.sha.slice(0, 8)}`, before: writtenMessage(c), after: now })
+    }
+    if (squashing && !remoteOwner && message.trim() !== proposedMessage) {
+      edits.push({ field: 'commit message', before: proposedMessage, after: message.trim() })
+    }
+    if (outputs.branch !== undefined) edits.push({ field: 'branch', before: target?.branch ?? '', after: outputs.branch })
+    return edits
+  })
+  /** Anything approval sends that you changed from what the agent asked. */
+  const anyEdited = $derived(forgeChanged.length > 0 || commitChanged.length > 0)
   /** The revision an earlier draft was written on, by number where a thread names it. */
   const draftRevisionLabel = $derived.by(() => {
     const n = threads.find((t) => t.revision_id === draftRevision)?.revision
@@ -760,7 +779,8 @@
   /**
    * Put every forge field and its toggle back to the agent's text. The draft
    * sync saves that like any edit, so the other devices and a reload see it
-   * cleared. Commit messages and the branch are left as they are.
+   * cleared. Edited commit messages and the branch go back too, since they
+   * count toward edited (#1194).
    */
   function clearEdits() {
     if (!agentText) return
@@ -771,6 +791,9 @@
     descBody = agentText.descBody
     commenting = agentText.commenting
     comment = agentText.comment
+    commitMessages = {}
+    message = proposedMessage
+    branchName = target?.branch ?? ''
   }
   const authoritativeChecks = $derived(evidence?.checks ?? [])
   /** The run whose detail is open, if one is. */
@@ -1516,7 +1539,7 @@
       }}
     >
       {#snippet actions()}
-        {#if forgeChanged.length}
+        {#if anyEdited}
           <span class="chip warn" title="approving publishes your version">edited</span>
           {#if !(busy || publishing || surface.phone || remoteOwner)}
             <button class="lnk" onclick={clearEdits}>Clear edits</button>
@@ -1544,7 +1567,7 @@
         {/if}
       {/snippet}
       {#snippet changes()}
-        {#if forgeChanged.length === 0}
+        {#if !anyEdited}
           <div class="note dim">No edits</div>
         {:else}
           {#each forgeChanged as e (e.field)}
@@ -1554,6 +1577,10 @@
             {:else}
               <WordDiff before={e.before} after={e.after} />
             {/if}
+          {/each}
+          {#each commitChanged as e (e.field)}
+            <div class="edit-field">{e.field}</div>
+            <WordDiff before={e.before} after={e.after} />
           {/each}
         {/if}
       {/snippet}
@@ -1567,65 +1594,54 @@
   {/if}
 
   {#if intent.commits?.length || squashing}
-    <div class="h4">
-      Commits
-      <b
-        >{squashing
-          ? 'ships as one commit of the reviewed tree'
-          : Object.keys(reworded).length
-            ? `pushed with ${Object.keys(reworded).length === 1 ? 'one message' : `${Object.keys(reworded).length} messages`} edited here`
-            : 'pushed as the agent wrote them'}</b
-      >
-    </div>
-    {#if review && intent.commits?.length}
-      {#if ships.own}
-        <div class="note dim">
-          Ships the agent's own commit <code>{review.head_sha.slice(0, 8)}</code
-          >{(intent.signed ?? []).includes(review.head_sha) ? ', signature kept' : ''}.
-        </div>
-      {:else}
-        <div class="note">
-          Ships a new commit replacing <code>{review.head_sha.slice(0, 8)}</code>{ships.dropped.length
-            ? `. ${ships.dropped.length > 1 ? 'The signatures on' : 'The signature on'} ${ships.dropped.map((sha) => sha.slice(0, 8)).join(', ')} ${ships.dropped.length > 1 ? 'are' : 'is'} dropped: a commit the node makes is never signed`
-            : ''}.{squashing && intent.as_written !== undefined ? " The agent's own message would ship its commit as written." : ''}
-        </div>
+    <!-- Inside On the forge, below the text it sends: the branch and the
+         commits are part of what goes (#1194). -->
+    <div class="forge-commits">
+      {#if change === null && !initial && !direct && !remoteOwner}
+        <label class="branch">
+          Branch
+          <input class="edit mono" bind:value={branchName} disabled={busy || publishing || closed || surface.phone} />
+        </label>
       {/if}
-    {/if}
-    {#if intent.commits?.length}
-      <ul class="commits">
-        {#each intent.commits as c (c.sha)}
-          <li class:squashed={squashing}>
-            <div class="line">
-              <span class="subject" title={c.subject}><code>{c.sha.slice(0, 8)}</code> {c.subject}</span>
-              {#if reworded[c.sha] !== undefined}<span class="chip warn">edited</span>{/if}
-              {#if rewordable && commitMessages[c.sha] === undefined}
-                <button class="lnk" disabled={busy || publishing} onclick={() => editCommit(c)}>Edit message</button>
-              {:else if rewordable}
-                <button class="lnk" disabled={busy || publishing} onclick={() => revertCommit(c.sha)}
-                  >{reworded[c.sha] !== undefined ? 'Undo' : 'Close'}</button
-                >
+      <div class="sub">Commits</div>
+      {#if review}
+        <div class="note dim ship-line">{shipLine(intent, ships, reworded)}</div>
+        {#if droppedNote(ships)}
+          <div class="note">
+            {droppedNote(ships)}{squashing && intent.as_written !== undefined ? " The agent's own message would ship its commit as written." : ''}
+          </div>
+        {/if}
+      {/if}
+      {#if intent.commits?.length}
+        <ul class="commits">
+          {#each intent.commits as c (c.sha)}
+            <li class:squashed={squashing}>
+              <div class="line">
+                <span class="subject" title={c.subject}><code>{c.sha.slice(0, 8)}</code> {c.subject}</span>
+                {#if reworded[c.sha] !== undefined}<span class="chip warn">edited</span>{/if}
+                {#if rewordable && commitMessages[c.sha] === undefined}
+                  <button class="lnk" disabled={busy || publishing} onclick={() => editCommit(c)}>Edit message</button>
+                {:else if rewordable}
+                  <button class="lnk" disabled={busy || publishing} onclick={() => revertCommit(c.sha)}
+                    >{reworded[c.sha] !== undefined ? 'Undo' : 'Close'}</button
+                  >
+                {/if}
+              </div>
+              {#if !squashing && commitMessages[c.sha] !== undefined}
+                <CommitMessage
+                  label={`message of ${c.sha.slice(0, 8)}`}
+                  bind:value={commitMessages[c.sha]}
+                  disabled={busy || publishing || !rewordable}
+                />
               {/if}
-            </div>
-            {#if !squashing && commitMessages[c.sha] !== undefined}
-              <CommitMessage
-                label={`message of ${c.sha.slice(0, 8)}`}
-                bind:value={commitMessages[c.sha]}
-                disabled={busy || publishing || !rewordable}
-              />
-            {/if}
-          </li>
-        {/each}
-      </ul>
-    {/if}
-    {#if squashing && !remoteOwner}
-      <CommitMessage label="commit message" bind:value={message} disabled={busy || publishing || closed || surface.phone} />
-    {/if}
-    {#if change === null && !initial && !direct && !remoteOwner}
-      <label class="branch">
-        Branch
-        <input class="edit mono" bind:value={branchName} disabled={busy || publishing || closed || surface.phone} />
-      </label>
-    {/if}
+            </li>
+          {/each}
+        </ul>
+      {/if}
+      {#if squashing && !remoteOwner}
+        <CommitMessage label="commit message" bind:value={message} disabled={busy || publishing || closed || surface.phone} />
+      {/if}
+    </div>
   {/if}
 
   <!-- The diff is the file list: every file folds under a header with its
@@ -2382,6 +2398,17 @@
   .commits code {
     color: var(--dim);
     margin-right: 6px;
+  }
+  .forge-commits {
+    margin-top: 10px;
+  }
+  .forge-commits .sub {
+    font-size: 12.5px;
+    color: var(--dim);
+    margin-bottom: 2px;
+  }
+  .ship-line {
+    margin-bottom: 4px;
   }
   .branch {
     display: flex;
