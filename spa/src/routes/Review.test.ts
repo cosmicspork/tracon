@@ -156,26 +156,67 @@ test('an edited chip and Clear edits sit beside the tabs; Changes diffs each edi
   const at = markup.indexOf('<OutgoingPreview')
   const inside = markup.slice(at, markup.indexOf('</OutgoingPreview>', at))
   const actions = inside.slice(inside.indexOf('{#snippet actions()}'), inside.indexOf('{/snippet}', inside.indexOf('{#snippet actions()}')))
-  expect(actions).toContain('{#if forgeChanged.length}')
+  expect(actions).toContain('{#if anyEdited}')
   expect(actions).toContain('>edited</span>')
   expect(actions).toContain('onclick={clearEdits}>Clear edits</button>')
   const changes = inside.slice(inside.indexOf('{#snippet changes()}'))
-  expect(changes).toContain('No edits')
+  expect(changes).toContain('{#if !anyEdited}\n          <div class="note dim">No edits</div>')
   expect(changes).toContain('<WordDiff before={e.before} after={e.after} />')
   // The old note is replaced by the chip.
   expect(markup).not.toContain('Edited · approving publishes this version')
 })
 
-test('Clear edits restores every forge field and toggle, and leaves commit messages and the branch', () => {
+test('Clear edits restores every forge field and toggle, and the commit messages and branch with them', () => {
   const clear = review.slice(review.indexOf('function clearEdits()'))
   const fn = clear.slice(0, clear.indexOf('\n  }\n'))
   for (const f of ['title', 'body', 'describe', 'descTitle', 'descBody', 'commenting', 'comment']) {
     expect(fn).toContain(`${f} = agentText.${f}`)
   }
-  expect(fn).not.toContain('message')
-  expect(fn).not.toContain('branchName')
+  // Commit messages and the branch count toward edited, so they clear too (#1194).
+  expect(fn).toContain('commitMessages = {}')
+  expect(fn).toContain('message = proposedMessage')
+  expect(fn).toContain("branchName = target?.branch ?? ''")
   // The draft sync saves it like any edit, so it reaches other devices.
   expect(review).toContain('if (loaded) draftSync?.edit(fields)')
+})
+
+test('edited commit messages and a changed branch show the edited chip and list under Changes', () => {
+  const changed = review.slice(review.indexOf('const commitChanged = $derived.by('))
+  const fn = changed.slice(0, changed.indexOf('\n  })\n'))
+  expect(fn).toContain('reworded[c.sha]')
+  expect(fn).toContain("field: 'commit message'")
+  expect(fn).toContain("field: 'branch'")
+  expect(review).toContain('const anyEdited = $derived(forgeChanged.length > 0 || commitChanged.length > 0)')
+  const at = markup.indexOf('<OutgoingPreview')
+  const inside = markup.slice(at, markup.indexOf('</OutgoingPreview>', at))
+  expect(inside).toContain('{#if anyEdited}\n          <span class="chip warn"')
+  expect(inside).toContain('{#each commitChanged as e (e.field)}')
+  // Each commit keeps its own Undo as well.
+  expect(markup).toContain("{reworded[c.sha] !== undefined ? 'Undo' : 'Close'}")
+})
+
+test('the branch and commits sit inside On the forge, after the text it sends and before the files, with one plain ship line', () => {
+  const forge = markup.indexOf('<div class="h4">On the forge')
+  const preview = markup.indexOf('</OutgoingPreview>')
+  const block = markup.indexOf('<div class="forge-commits">')
+  const branch = markup.indexOf('<label class="branch">')
+  const commits = markup.indexOf('<ul class="commits">')
+  const files = markup.indexOf('<ReviewDiff')
+  expect(forge).toBeGreaterThan(-1)
+  expect(block).toBeGreaterThan(preview)
+  // No heading of its own between On the forge and the commits.
+  expect(markup.slice(forge + 1, commits)).not.toContain('<div class="h4">')
+  // Branch first, then the commit list, then the files.
+  expect(branch).toBeGreaterThan(block)
+  expect(commits).toBeGreaterThan(branch)
+  expect(files).toBeGreaterThan(commits)
+  expect(markup).toContain('{shipLine(intent, ships, reworded)}')
+  // The note that named only the head is gone.
+  expect(markup).not.toContain("Ships the agent's own commit")
+  expect(markup).not.toContain('Ships a new commit replacing')
+  // Phone and a remote owner stay read-only.
+  expect(markup).toContain('{#if change === null && !initial && !direct && !remoteOwner}\n        <label class="branch">')
+  expect(review).toContain('const rewordable = $derived(!squashing && !remoteOwner && !closed && !surface.phone)')
 })
 
 test('a draft from an earlier revision says what it overrides, with Show changes and Clear edits', () => {
