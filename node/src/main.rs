@@ -965,10 +965,35 @@ async fn main() -> Result<()> {
         }
         Command::Setup { rebuild } => {
             let cfg = boundary_config()?;
-            let backend = boundary::backend_for(&cfg).await;
-            // Never beside the node's own setup of the same boundary.
-            boundary::reconcile::exclusive(backend.setup(&cfg, rebuild)).await??;
-            println!("{} boundary is in place", backend.kind());
+            match running_node().await? {
+                // The node's own process is where the sandbox base is
+                // pinned: a setup run here would leave the files right and
+                // the running node still unpinned.
+                Some(url) => {
+                    eprintln!("asking the node running here ({url}) to set up its boundary");
+                    let checked = node_call(
+                        reqwest::Method::POST,
+                        "/api/boundary/setup",
+                        Some(serde_json::json!({ "rebuild": rebuild })),
+                        None,
+                    )
+                    .await?;
+                    let (lines, failed) = boundary_lines(&checked);
+                    println!("the node set up its boundary");
+                    for line in lines {
+                        println!("{line}");
+                    }
+                    if let Some(id) = failed {
+                        eprintln!("the boundary is set up, but check {id} has not passed yet");
+                    }
+                }
+                None => {
+                    let backend = boundary::backend_for(&cfg).await;
+                    // Never beside the node's own setup of the same boundary.
+                    boundary::reconcile::exclusive(backend.setup(&cfg, rebuild)).await??;
+                    println!("{} boundary is in place", backend.kind());
+                }
+            }
             // A credential with no client left is a credential nobody is
             // watching. Retired by name, and said out loud rather than
             // quietly: the broker is untouched.

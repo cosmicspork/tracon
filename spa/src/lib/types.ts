@@ -36,6 +36,11 @@ export interface NodeInfo {
    */
   reconciling?: boolean
   /**
+   * The node's own boundary setup when its last attempt failed; null when it
+   * did not. Only on the serving node's row, and absent from older builds.
+   */
+  setup?: SetupFailure | null
+  /**
    * Why the node's last model probe failed, and when; null once one answers.
    * Only on the serving node's row, and absent from older builds.
    */
@@ -64,6 +69,16 @@ export interface NodeInfo {
 }
 
 /** A model probe that failed: why, and when. */
+export interface SetupFailure {
+  error: string
+  /** Setups in a row that failed. */
+  failures: number
+  /** When the node tries again by itself; null when it will not. */
+  retry_at_ms: number | null
+  /** The node has failed as often as it retries, and stopped. */
+  stopped: boolean
+}
+
 export interface ProbeFailure {
   error: string
   at_ms: number

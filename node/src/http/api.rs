@@ -305,6 +305,7 @@ pub async fn list_nodes(
             if r.is_self == 1 {
                 v["loopback"] = json!(local);
                 v["reconciling"] = json!(crate::boundary::reconcile::running());
+                v["setup"] = setup_json();
                 v["default_channel"] = json!(s.cfg.live().session.default_channel);
                 v["work"] = work_json(&s);
                 build_facts(&mut v);
@@ -607,6 +608,25 @@ fn work_json(s: &AppState) -> serde_json::Value {
     })
 }
 
+/// The node's own setup when its last attempt failed: why, when it tries
+/// again, and whether it has stopped. `null` otherwise. Settings offers to set
+/// up again from it.
+fn setup_json() -> serde_json::Value {
+    use crate::boundary::reconcile;
+    match reconcile::status() {
+        reconcile::Status::Failed(error) => {
+            let retry = reconcile::retry();
+            json!({
+                "error": error,
+                "failures": retry.failures,
+                "retry_at_ms": retry.next_ms,
+                "stopped": retry.stopped(),
+            })
+        }
+        _ => serde_json::Value::Null,
+    }
+}
+
 pub(crate) fn node_json(s: &AppState) -> Result<serde_json::Value, ApiError> {
     let row = s.store().get_node(&s.node_id)?;
     let Some(n) = row else {
@@ -617,6 +637,7 @@ pub(crate) fn node_json(s: &AppState) -> Result<serde_json::Value, ApiError> {
     };
     let mut v = node_row_json(&n);
     v["reconciling"] = json!(crate::boundary::reconcile::running());
+    v["setup"] = setup_json();
     v["providers"] = json!(providers_json(s));
     // The last model probe, when it failed: Settings says why and offers to
     // ask again. Only this node's own row carries it.
@@ -9434,7 +9455,12 @@ pub(crate) async fn recheck_boundary_with(
     deep: bool,
 ) -> ApiResult<Json<serde_json::Value>> {
     let backend = s.manager.backend().clone();
-    let report = backend.check_all(&s.cfg, deep).await;
+    let mut report = backend.check_all(&s.cfg, deep).await;
+    crate::boundary::reconcile::hold_unpinned(
+        &mut report,
+        super::self_reconciles(&s.cfg, backend.as_ref()),
+        &s.cfg,
+    );
     let row = reverify(&s)
         .await
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -9498,9 +9524,11 @@ pub struct SetupBody {
 }
 
 /// Build the network, gateway and images this node's boundary needs, then
-/// re-check: `tracon setup` through the node. A node sets its boundary up by
-/// itself as it starts; this stays for a desktop app that asks after an
-/// update, and for a node with `[boundary] auto_reconcile` off. Blocking:
+/// re-check: `tracon setup` through the node, which is how the CLI sets up a
+/// node that is running (a setup in its own process would leave this one's
+/// sandbox base unpinned). A node sets its boundary up by itself as it
+/// starts and retries a failed setup for a while; this is the operator's
+/// way to try again at once, from the CLI or Settings › System. Blocking:
 /// image builds are minutes, not seconds, and there is nothing useful to
 /// show mid-flight that the verdict does not say better. One the node is
 /// already running is waited for, inside the same ten minutes.
@@ -9512,7 +9540,7 @@ pub async fn run_setup(
     let backend = s.manager.backend().clone();
     tokio::time::timeout(
         std::time::Duration::from_secs(600),
-        crate::boundary::reconcile::exclusive(backend.setup(&s.cfg, rebuild)),
+        crate::boundary::reconcile::operator_setup(backend.as_ref(), &s.cfg, rebuild),
     )
     .await
     .map_err(|_| {
@@ -9521,7 +9549,6 @@ pub async fn run_setup(
             "setup is still running after ten minutes; check the node's log".into(),
         )
     })?
-    .and_then(|r| r)
     .map_err(|e| ApiError(StatusCode::CONFLICT, e.to_string()))?;
     recheck_boundary_with(s, false).await
 }

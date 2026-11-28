@@ -149,6 +149,8 @@ export const admin = {
     }),
   maintenance: () => call<Maintenance>('GET', '/api/admin/maintenance'),
   boundaryCheck: () => call<BoundaryResult>('POST', '/api/admin/maintenance/boundary-check'),
+  /** Set the boundary up again in the node's own process, which pins its sandbox base. */
+  boundarySetup: () => call<BoundaryResult>('POST', '/api/boundary/setup', {}),
   install: () =>
     call<{ scheduled: true; operation: 'install'; target: string; effect: string }>('POST', '/api/admin/maintenance/install', {
       confirm: true,

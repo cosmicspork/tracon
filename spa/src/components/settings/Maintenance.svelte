@@ -53,6 +53,15 @@
     })
   }
 
+  function setUpAgain() {
+    void act('setup', async () => {
+      onchecked?.(await admin.boundarySetup())
+      await store.refetch()
+      await load()
+      return data?.boundary.state === 'ready' ? 'Boundary set up; isolation checks passed.' : 'Boundary set up; isolation checks have not passed yet.'
+    })
+  }
+
   function requestInstall() {
     if (!confirmInstall) {
       confirmInstall = true
@@ -84,6 +93,7 @@
 
 
   const local = $derived(data?.local ?? false)
+  const setupFailed = $derived(store.node?.setup ?? null)
   const install = $derived(data?.service.install)
   const uninstall = $derived(data?.service.uninstall)
 
@@ -98,6 +108,12 @@
     <div class="recheck">
       <p>Isolation checks: {data.boundary.state === 'ready' ? 'passed' : data.boundary.state}.</p>
       <button class="btn" onclick={recheckBoundary} disabled={busy !== '' || !local}>{busy === 'boundary' ? 'Checking boundary…' : 'Recheck runtime boundary'}</button>
+      {#if setupFailed}
+        <p class="setup-failed" role="status">
+          {setupFailed.stopped ? `The node stopped setting up its boundary after ${setupFailed.failures} failed attempts` : 'The node’s last boundary setup failed'}: {setupFailed.error}. A recheck does not repair it; set it up again.
+        </p>
+        <button class="btn" onclick={setUpAgain} disabled={busy !== '' || !local}>{busy === 'setup' ? 'Setting up boundary…' : 'Set up again'}</button>
+      {/if}
       {#if data.boundary && typeof data.boundary === 'object'}
         <p class="source">This node only · <a href="/settings#mesh">compare the mesh</a></p>
       {:else}
@@ -175,6 +191,7 @@
 <style>
   .recheck { display: grid; gap: 8px; justify-items: start; padding-top: 12px; border-top: 1px solid var(--rule); }
   .recheck p { margin: 0; color: var(--ink2); }
+  .recheck p.setup-failed { color: var(--crit); }
   dl { margin: 0; display: grid; gap: 5px; }
   dl div { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 12px; align-items: baseline; }
   dt { color: var(--dim); font: 12px var(--mono); }
