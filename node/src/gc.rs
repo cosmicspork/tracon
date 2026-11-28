@@ -30,7 +30,9 @@
 //!
 //! Where sandboxes run from the bundle: a harness bundle under
 //! `bundles/` belongs to the node's version, and one of any other version is
-//! never mounted again. On Kubernetes the node serves each bundle as a tar
+//! never mounted again. A download's `.incoming-*` directory a day old was
+//! left by a fetch that never finished; a younger one may still be written,
+//! by this process or another. On Kubernetes the node serves each bundle as a tar
 //! beside them (`served-<key>.tar`, keyed by the bundle directory's path):
 //! one of a bundle it serves now stays, any other is another version's, and
 //! a `.partial` a day old was left by a pack that never finished. A
@@ -572,8 +574,18 @@ pub fn classify_directory(
             version if version == owners.version => {
                 verdict(false, "the harness bundle this node mounts")
             }
+            // By age, not by `crate::bundle::fetching`: the download may
+            // be another process's (`tracon setup`, or the node while
+            // `tracon gc --apply` sweeps).
             incoming if incoming.starts_with(".incoming-") => {
-                verdict(true, "an interrupted download of a harness bundle")
+                if created_ms.is_none_or(|created| owners.now_ms - created < WORKSPACE_GRACE_MS) {
+                    verdict(
+                        false,
+                        "made in the last day; a download may still be writing it",
+                    )
+                } else {
+                    verdict(true, "an interrupted download of a harness bundle")
+                }
             }
             _ => verdict(
                 true,
@@ -1047,10 +1059,133 @@ mod tests {
                 .unwrap()
                 .0
         );
+    }
+
+    /// A download's `.incoming-*` stays while it may still be written, as a
+    /// pack's `.partial` does, and goes once it is a day old.
+    #[test]
+    fn a_bundle_download_stays_for_a_day() {
+        let o = owners();
+        let made_now = Some(o.now_ms - 1000);
+        let made_long_ago = Some(o.now_ms - WORKSPACE_GRACE_MS - 1);
+        let (remove, reason) = classify_directory("bundles", ".incoming-x", made_now, &o).unwrap();
+        assert!(!remove);
+        assert_eq!(
+            reason,
+            "made in the last day; a download may still be writing it"
+        );
         assert!(
-            classify_directory("bundles", ".incoming-x", None, &o)
+            !classify_directory("bundles", ".incoming-x", None, &o)
                 .unwrap()
                 .0
+        );
+        let (remove, reason) =
+            classify_directory("bundles", ".incoming-x", made_long_ago, &o).unwrap();
+        assert!(remove);
+        assert_eq!(reason, "an interrupted download of a harness bundle");
+    }
+
+    /// A sweep that runs while the node's bundle is downloading, as the
+    /// first scheduled one does on a freshly upgraded node, leaves the
+    /// download be, and the bundle installs.
+    #[tokio::test]
+    async fn a_sweep_during_a_bundle_download_leaves_it_to_finish() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let release = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let (tar, sums) = crate::bundle::tests::tarball(
+            release.path(),
+            "8.1.0",
+            "amd64",
+            crate::bundle::tests::FILES,
+        );
+        let (tar, sums) = (std::fs::read(tar).unwrap(), std::fs::read(sums).unwrap());
+        // The .sha256 whole; the tarball half, then the rest once the sweep
+        // is done.
+        let (swept_tx, swept_rx) = tokio::sync::oneshot::channel::<()>();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let mut swept = Some(swept_rx);
+            loop {
+                let (mut conn, _) = listener.accept().await.unwrap();
+                let mut request = vec![0u8; 4096];
+                let n = conn.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..n]).to_string();
+                let body = if request.contains(".sha256 ") {
+                    &sums
+                } else {
+                    &tar
+                };
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                conn.write_all(head.as_bytes()).await.unwrap();
+                if body == &tar {
+                    let half = tar.len() / 2;
+                    conn.write_all(&tar[..half]).await.unwrap();
+                    conn.flush().await.unwrap();
+                    if let Some(swept) = swept.take() {
+                        let _ = swept.await;
+                    }
+                    conn.write_all(&tar[half..]).await.unwrap();
+                } else {
+                    conn.write_all(body).await.unwrap();
+                }
+            }
+        });
+        let state_dir = state.path().to_path_buf();
+        let fetch = tokio::spawn(async move {
+            crate::bundle::ensure_at(&reqwest::Client::new(), &url, &state_dir, "8.1.0", "amd64")
+                .await
+        });
+
+        // Once the tarball is being written into its `.incoming-*`, sweep.
+        let bundles = state.path().join(crate::bundle::DIR);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let incoming = loop {
+            let writing = std::fs::read_dir(&bundles).ok().and_then(|entries| {
+                entries.flatten().map(|e| e.path()).find(|path| {
+                    path.file_name()
+                        .is_some_and(|n| n.to_string_lossy().starts_with(".incoming-"))
+                        && path.join("tracon-bundle-8.1.0-amd64.tar.gz").is_file()
+                })
+            });
+            if let Some(path) = writing {
+                break path;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the download never started"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+        let o = Owners {
+            version: "8.1.0".into(),
+            now_ms: crate::store::now_ms(),
+            ..Default::default()
+        };
+        let items = directory_items(state.path(), &o);
+        let name = format!(
+            "bundles/{}",
+            incoming.file_name().unwrap().to_string_lossy()
+        );
+        let (item, _) = items.iter().find(|(item, _)| item.name == name).unwrap();
+        assert!(!item.remove, "{}", item.reason);
+        // What `sweep --apply` does with the rest.
+        for (item, path) in &items {
+            if item.remove {
+                std::fs::remove_dir_all(path).unwrap();
+            }
+        }
+        swept_tx.send(()).unwrap();
+
+        let installed = fetch.await.unwrap().unwrap();
+        assert!(matches!(installed, crate::bundle::Ensured::Fetched(_)));
+        assert_eq!(
+            std::fs::read(installed.path().join("bin/tracon-sandbox")).unwrap(),
+            b"sandbox"
         );
     }
 
