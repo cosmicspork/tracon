@@ -749,6 +749,14 @@ pub fn superseded(state_dir: &Path, keep_version: &str) -> Vec<PathBuf> {
         .flatten()
         .filter(|entry| entry.file_name().to_string_lossy() != keep_version)
         .filter(|entry| entry.file_name() != crate::service_bundle::DIR)
+        // A download, maybe another process's still under way: the sweep
+        // removes one once it is a day old (`crate::gc`).
+        .filter(|entry| {
+            !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".incoming-")
+        })
         .filter(|entry| entry.path().is_dir())
         .map(|entry| entry.path())
         .collect()
@@ -938,6 +946,8 @@ pub(crate) mod tests {
             .lock()
             .unwrap()
             .contains(&"v1.1.0/tracon-bundle-1.1.0-amd64.tar.gz".to_string()));
+        // A download under way, maybe another process's, is not one.
+        std::fs::create_dir_all(state.path().join(DIR).join(".incoming-other")).unwrap();
         assert_eq!(
             superseded(state.path(), "1.1.0"),
             vec![state.path().join(DIR).join("1.0.0")]
