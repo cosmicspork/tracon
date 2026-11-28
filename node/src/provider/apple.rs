@@ -124,9 +124,7 @@ impl ContainerCli for SystemCli {
         if out.status.success() {
             Ok(String::from_utf8_lossy(&out.stdout).into_owned())
         } else {
-            Err(CliError::Failed(
-                String::from_utf8_lossy(&out.stderr).trim().to_string(),
-            ))
+            Err(CliError::Failed(super::failure_text(&out)))
         }
     }
 }

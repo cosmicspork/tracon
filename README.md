@@ -134,8 +134,12 @@ starts (after an upgrade), and when what it fetches changes under it, it fetches
 harness bundle for its own release and pulls and pins the stock base, then checks the
 boundary again. The interface says nothing unless a check still fails, and the check
 refuses sessions until both are there; a session that starts while the node is setting
-up waits for it. `tracon setup` does the same by hand, and is the only way with
-`auto_reconcile = false` under `[boundary]`.
+up waits for it. A setup that fails is tried again a minute later, then twice as long
+each time (at most half an hour apart), and given up after eight attempts; the check
+says when the next one is. `tracon setup` does the same by hand, and is the only way with
+`auto_reconcile = false` under `[boundary]`. With the node running it asks the node to
+run it (so the node pins the base it runs), as **Set up again** under Settings › System
+does; with none running it sets up in its own process.
 
 Each sandbox has no network of its own: its one route is a socket to the node, which
 serves the gateway, the allowlist proxy and the egress proxy itself over it, so there is

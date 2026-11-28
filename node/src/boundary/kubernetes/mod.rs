@@ -481,23 +481,12 @@ impl Backend for KubeBackend {
         true
     }
 
-    /// The release, the base and the bundle; and, while the base is not
-    /// pinned (its registry did not answer), something new at every look,
-    /// so the node's upkeep tries again each time it looks rather than
-    /// staying unpinned until a restart.
+    /// The release, the base and the bundle. A base that could not be
+    /// pinned (its registry did not answer) fails the converge, which the
+    /// node's upkeep tries again with backoff.
     fn definitions(&self, cfg: &Config) -> Option<String> {
-        let unpinned = match crate::sandbox_images::active_base() {
-            Some(_) => String::new(),
-            None => format!(
-                "\u{1f}unpinned {}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or_default()
-            ),
-        };
         Some(format!(
-            "{}\u{1f}{}\u{1f}{:?}{unpinned}",
+            "{}\u{1f}{}\u{1f}{:?}",
             env!("CARGO_PKG_VERSION"),
             cfg.sandbox.base_image_ref(),
             cfg.sandbox.bundle

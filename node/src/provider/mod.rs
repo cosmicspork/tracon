@@ -601,3 +601,49 @@ mod tests {
         );
     }
 }
+
+/// Why a runtime's command failed, from what it printed: its stderr, else
+/// its stdout, else how it exited, so a command that fails silently is not
+/// reported as nothing at all.
+pub(crate) fn failure_text(out: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return stdout;
+    }
+    match out.status.code() {
+        Some(code) => format!("exited with status {code} and printed nothing"),
+        None => format!("{} and printed nothing", out.status),
+    }
+}
+
+#[cfg(test)]
+mod failure_text_tests {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    fn output(code: i32, stdout: &str, stderr: &str) -> std::process::Output {
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    /// `container system status` failing with nothing printed once read as
+    /// "services are not running ()".
+    #[test]
+    fn a_silent_failure_says_how_it_exited() {
+        assert_eq!(super::failure_text(&output(1, "", " boom\n")), "boom");
+        assert_eq!(
+            super::failure_text(&output(1, "not running\n", "")),
+            "not running"
+        );
+        assert_eq!(
+            super::failure_text(&output(1, "", "")),
+            "exited with status 1 and printed nothing"
+        );
+    }
+}

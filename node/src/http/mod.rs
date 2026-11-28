@@ -803,7 +803,7 @@ pub async fn serve(listen: SocketAddr) -> Result<()> {
             Err(error) => tracing::warn!(%error, "could not sweep leftover staging copies"),
         }
     }
-    let self_reconciles = cfg.boundary.auto_reconcile && backend.converges();
+    let self_reconciles = self_reconciles(&cfg, backend.as_ref());
     // The node serves first and converges after (`boundary_upkeep`, once the
     // listeners are bound): marked pending, the startup check below waits on
     // what that converge fetches (a release's bundles are minutes on a slow
@@ -1487,6 +1487,12 @@ async fn harness_states(
     out
 }
 
+/// Whether this node sets its boundary up itself, and so pins the sandbox
+/// base in its own process.
+pub(crate) fn self_reconciles(cfg: &Config, backend: &dyn boundary::Backend) -> bool {
+    cfg.boundary.auto_reconcile && backend.converges()
+}
+
 /// One verification at a time. A re-check that began while the node was
 /// setting up its boundary must not land after the check that followed the
 /// setup, and record a verdict on images that have since been rebuilt.
@@ -1511,7 +1517,8 @@ pub(crate) async fn verify_node(
 ) -> Result<NodeRow> {
     let _one = VERIFY.lock().await;
     backend.recover(cfg).await;
-    let report = backend.check_all(cfg, false).await;
+    let mut report = backend.check_all(cfg, false).await;
+    boundary::reconcile::hold_unpinned(&mut report, self_reconciles(cfg, backend), cfg);
     let mut failed = report.first_failure().cloned();
     if let (Some(f), Some(note)) = (failed.as_mut(), boundary::reconcile::note()) {
         f.detail = format!("{}; {note}", f.detail);
@@ -1584,22 +1591,17 @@ const DEFINITIONS_POLL: std::time::Duration = std::time::Duration::from_secs(300
 
 /// Keep the boundary in step with this binary without an operator: converge
 /// once now, then again whenever what the images are built from changes
-/// (`Backend::definitions`). A converge that changed something, or that
-/// leaves the node still refused, is followed by the checks, which are what
-/// anyone sees.
+/// (`Backend::definitions`), and with backoff after one fails
+/// (`reconcile::upkeep`). A converge that changed something, or that leaves
+/// the node still refused, is followed by the checks, which are what anyone
+/// sees.
 async fn boundary_upkeep(s: AppState, backend: Arc<dyn boundary::Backend>) {
-    let mut seen = backend.definitions(&s.cfg);
-    converge_and_check(&s, backend.as_ref()).await;
-    loop {
-        tokio::time::sleep(DEFINITIONS_POLL).await;
-        let now = backend.definitions(&s.cfg);
-        if now == seen {
-            continue;
-        }
-        tracing::info!("the boundary's definitions changed; setting it up again");
-        seen = now;
-        converge_and_check(&s, backend.as_ref()).await;
-    }
+    boundary::reconcile::upkeep(
+        DEFINITIONS_POLL,
+        || backend.definitions(&s.cfg),
+        || converge_and_check(&s, backend.as_ref()),
+    )
+    .await
 }
 
 async fn converge_and_check(s: &AppState, backend: &dyn boundary::Backend) {
